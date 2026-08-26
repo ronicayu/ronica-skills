@@ -1,0 +1,6 @@
+{
+  "name": "writing-editor",
+  "version": "1.0.0",
+  "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
+  "skills": ["skills"]
+}

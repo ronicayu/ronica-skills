@@ -1,0 +1,15 @@
+{
+  "name": "plugin-name",
+  "description": "One or two sentences on what this plugin does.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yu Rong",
+    "url": "https://github.com/ronicayu"
+  },
+  "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/plugin-name",
+  "repository": "https://github.com/ronicayu/ronica-skills",
+  "license": "MIT",
+  "keywords": [
+    "keyword"
+  ]
+}

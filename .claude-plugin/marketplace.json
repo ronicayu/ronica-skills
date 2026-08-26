@@ -1,0 +1,45 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "ronica-skills",
+  "description": "Writing and documentation skills for Claude Code and OpenClaw.",
+  "version": "1.0.0",
+  "owner": {
+    "name": "Yu Rong",
+    "url": "https://github.com/ronicayu"
+  },
+  "metadata": {
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "write-doc",
+      "source": "write-doc",
+      "description": "Author a document through four gated stages — purpose and audience, sources, a stress-tested Minto pyramid outline, then content. Body prose is never written before the outline is signed off.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/write-doc",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": ["writing", "authoring", "outline", "pyramid-principle", "mece", "documentation"],
+      "category": "documentation"
+    },
+    {
+      "name": "writing-editor",
+      "source": "writing-editor",
+      "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/writing-editor",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": ["writing", "editing", "review", "pyramid-principle", "prose", "documentation"],
+      "category": "documentation"
+    }
+  ]
+}

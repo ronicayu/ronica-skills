@@ -1,0 +1,20 @@
+{
+  "name": "writing-editor",
+  "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Yu Rong",
+    "url": "https://github.com/ronicayu"
+  },
+  "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/writing-editor",
+  "repository": "https://github.com/ronicayu/ronica-skills",
+  "license": "MIT",
+  "keywords": [
+    "writing",
+    "editing",
+    "review",
+    "pyramid-principle",
+    "prose",
+    "documentation"
+  ]
+}
