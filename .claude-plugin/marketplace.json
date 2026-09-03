@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "ronica-skills",
-  "description": "Writing and documentation skills for Claude Code and OpenClaw.",
+  "description": "Writing, documentation, and notification skills for Claude Code and OpenClaw.",
   "version": "1.0.0",
   "owner": {
     "name": "Yu Rong",
@@ -23,7 +23,14 @@
       "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/write-doc",
       "repository": "https://github.com/ronicayu/ronica-skills",
       "license": "MIT",
-      "keywords": ["writing", "authoring", "outline", "pyramid-principle", "mece", "documentation"],
+      "keywords": [
+        "writing",
+        "authoring",
+        "outline",
+        "pyramid-principle",
+        "mece",
+        "documentation"
+      ],
       "category": "documentation"
     },
     {
@@ -38,8 +45,37 @@
       "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/writing-editor",
       "repository": "https://github.com/ronicayu/ronica-skills",
       "license": "MIT",
-      "keywords": ["writing", "editing", "review", "pyramid-principle", "prose", "documentation"],
+      "keywords": [
+        "writing",
+        "editing",
+        "review",
+        "pyramid-principle",
+        "prose",
+        "documentation"
+      ],
       "category": "documentation"
+    },
+    {
+      "name": "telegram-send",
+      "source": "telegram-send",
+      "description": "Send a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/telegram-send",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "telegram",
+        "notifications",
+        "messaging",
+        "bot-api",
+        "curl",
+        "alerts"
+      ],
+      "category": "productivity"
     }
   ]
 }

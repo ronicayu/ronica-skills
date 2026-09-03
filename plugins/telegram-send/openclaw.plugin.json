@@ -1,0 +1,8 @@
+{
+  "name": "telegram-send",
+  "version": "1.0.0",
+  "description": "Send a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean.",
+  "skills": [
+    "skills"
+  ]
+}
