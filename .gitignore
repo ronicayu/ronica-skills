@@ -1,4 +1,5 @@
 .DS_Store
 .claude/.cc-writes/
+.worktrees/
 node_modules/
 __pycache__/
