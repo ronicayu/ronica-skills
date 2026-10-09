@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "ronica-skills",
-  "description": "Writing, documentation, and notification skills for Claude Code and OpenClaw.",
+  "description": "Writing, documentation, notification, and planning skills for Claude Code and OpenClaw.",
   "version": "1.0.0",
   "owner": {
     "name": "Yu Rong",
@@ -74,6 +74,28 @@
         "bot-api",
         "curl",
         "alerts"
+      ],
+      "category": "productivity"
+    },
+    {
+      "name": "taskgraph",
+      "source": "taskgraph",
+      "description": "Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, add or update tasks and dependencies, or see the plan as a picture — \"work backwards from shipping v1\", \"what's next\", \"what's blocking X\", \"下一步做什么\", \"任务依赖\", \"看图\". Agents operate the CLI; humans view the graph.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/taskgraph",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "tasks",
+        "planning",
+        "dag",
+        "dependencies",
+        "project-management",
+        "sqlite"
       ],
       "category": "productivity"
     }

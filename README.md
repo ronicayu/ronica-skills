@@ -9,6 +9,7 @@ each ecosystem reads its own thin manifest.
 | --- | --- |
 | [`write-doc`](plugins/write-doc) | Authors a document through four gated stages — purpose and audience, sources, a stress-tested Minto pyramid outline, then content. Body prose is never written before the outline is signed off. |
 | [`writing-editor`](plugins/writing-editor) | Edits and reviews prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text. |
+| [`taskgraph`](plugins/taskgraph) | Tracks project tasks and dependencies in a SQLite DAG. Plan backwards from a goal, `ready` shows what can start now, and `graph` opens an interactive view with hover path highlighting and task details. |
 | [`telegram-send`](plugins/telegram-send) | Sends a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that reads credentials from a mode-600 file, keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean. |
 
 ## Install
@@ -20,10 +21,11 @@ each ecosystem reads its own thin manifest.
 /plugin install write-doc@ronica-skills
 /plugin install writing-editor@ronica-skills
 /plugin install telegram-send@ronica-skills
+/plugin install taskgraph@ronica-skills
 ```
 
 Skills then trigger on their own descriptions, or explicitly via `/write-doc`,
-`/writing-editor`, and `/telegram-send`.
+`/writing-editor`, `/telegram-send`, and `/taskgraph`.
 
 `telegram-send` reads its bot token and chat id from
 `~/.config/telegram-send/credentials` (mode 600); its `references/setup.md`

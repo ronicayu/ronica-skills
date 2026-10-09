@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>taskgraph</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#toolbar { position: fixed; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; }
+#toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 10px; font: inherit; }
+#toolbar button { cursor: pointer; }
+#toolbar button:hover { background: #2d333d; }
+#toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; }
+#toolbar .spacer { flex: 1; }
+#toolbar .stamp { color: #6b7280; font-size: 12px; }
+#cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
+#legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 12px; z-index: 2; }
+#legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+#legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+#panel { position: fixed; top: 48px; right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel h2 { margin: 0 0 6px; font-size: 17px; line-height: 1.3; }
+#panel .sub { color: #9ca3af; margin-bottom: 12px; }
+#panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
+#panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; color: #0b0f14; font-weight: 600; font-size: 12px; }
+#panel .notes { white-space: pre-wrap; background: #1e232b; border-radius: 6px; padding: 8px 10px; }
+#panel table { width: 100%; border-collapse: collapse; }
+#panel td { padding: 3px 6px; border-bottom: 1px solid #2a2f38; vertical-align: top; word-break: break-word; }
+#panel td:first-child { color: #9ca3af; width: 35%; }
+#panel ul { list-style: none; margin: 0; padding: 0; }
+#panel li { padding: 5px 8px; border-radius: 6px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+#panel li:hover { background: #232830; }
+#panel li.off { opacity: .45; cursor: default; }
+#panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#panel .none { color: #6b7280; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <select id="project"></select>
+  <label><input type="checkbox" id="hideDone"> Hide done</label>
+  <input type="text" id="search" placeholder="Search titles" size="22">
+  <button id="relayout">Re-layout</button>
+  <button id="fit">Fit</button>
+  <span class="spacer"></span>
+  <span class="stamp" id="stamp"></span>
+</div>
+<div id="cy"></div>
+<div id="legend"></div>
+<div id="panel"></div>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<script>
+const DATA = __DATA__;
+const COLORS = { done: '#9ca3af', ready: '#22c55e', in_progress: '#eab308', blocked: '#ef4444' };
+const LABELS = { done: 'Done', ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked' };
+const byId = new Map(DATA.nodes.map(n => [n.id, n]));
+const $ = id => document.getElementById(id);
+let pinned = null;
+
+function el(tag, props, ...children) {
+  const e = Object.assign(document.createElement(tag), props || {});
+  e.append(...children.filter(c => c != null));
+  return e;
+}
+
+const cy = cytoscape({
+  container: $('cy'),
+  minZoom: 0.1,
+  maxZoom: 3,
+  wheelSensitivity: 0.3,
+  style: [
+    { selector: 'node', style: {
+      'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
+      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': 160,
+      'text-valign': 'center', 'text-halign': 'center', 'font-size': 12,
+      'font-family': 'system-ui, sans-serif', 'color': '#0b0f14',
+      'background-color': ele => COLORS[ele.data('derived_status')] || '#6b7280',
+      'border-width': 2, 'border-color': '#111418', 'transition-property': 'opacity', 'transition-duration': '120ms'
+    } },
+    { selector: 'edge', style: {
+      'curve-style': 'bezier', 'width': 1.5, 'line-color': '#5b6472',
+      'target-arrow-shape': 'triangle', 'target-arrow-color': '#5b6472', 'arrow-scale': 1.2
+    } },
+    { selector: 'node.hl', style: { 'border-width': 4, 'border-color': '#f9fafb' } },
+    { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
+    { selector: '.faded', style: { 'opacity': 0.15 } },
+    { selector: '.dim', style: { 'opacity': 0.15 } }
+  ]
+});
+
+function visibleData() {
+  const project = $('project').value;
+  const hideDone = $('hideDone').checked;
+  const nodes = DATA.nodes.filter(n => (!project || n.project === project) && !(hideDone && n.derived_status === 'done'));
+  const ids = new Set(nodes.map(n => n.id));
+  const edges = DATA.edges.filter(e => ids.has(e.source) && ids.has(e.target));
+  return { nodes, edges };
+}
+
+function layout() {
+  cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit: true, padding: 40 }).run();
+}
+
+function rebuild() {
+  const { nodes, edges } = visibleData();
+  cy.elements().remove();
+  cy.add(nodes.map(n => ({ group: 'nodes', data: { id: String(n.id), derived_status: n.derived_status, title: n.title, label: '#' + n.id + ' ' + n.title } })));
+  cy.add(edges.map(e => ({ group: 'edges', data: { id: e.source + '-' + e.target, source: String(e.source), target: String(e.target) } })));
+  if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
+  layout();
+  applySearch();
+  refocus();
+}
+
+function focusOn(n) {
+  const keep = n.union(n.predecessors()).union(n.successors());
+  cy.elements().addClass('faded');
+  keep.removeClass('faded').addClass('hl');
+}
+
+function refocus() {
+  cy.elements().removeClass('faded hl');
+  if (pinned) focusOn(cy.getElementById(String(pinned)));
+}
+
+function applySearch() {
+  const q = $('search').value.trim().toLowerCase();
+  cy.nodes().forEach(n => {
+    const hit = !q || n.data('title').toLowerCase().includes(q) || ('#' + n.id()).includes(q);
+    n.toggleClass('dim', !hit);
+  });
+}
+
+function badge(status) {
+  return el('span', { className: 'badge', textContent: LABELS[status] || status, style: 'background:' + (COLORS[status] || '#6b7280') });
+}
+
+function fmt(iso) {
+  return iso ? new Date(iso).toLocaleString() : '-';
+}
+
+function refList(ids) {
+  if (!ids.length) return el('div', { className: 'none', textContent: 'None' });
+  return el('ul', null, ...ids.map(id => {
+    const n = byId.get(id);
+    const on = cy.getElementById(String(id)).nonempty();
+    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + COLORS[n.derived_status] }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
+    if (on) li.onclick = () => select(id, true);
+    return li;
+  }));
+}
+
+function openPanel(n) {
+  const panel = $('panel');
+  panel.replaceChildren(
+    el('h2', { textContent: n.title }),
+    el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status)),
+    el('table', null,
+      el('tr', null, el('td', { textContent: 'Project' }), el('td', { textContent: n.project })),
+      el('tr', null, el('td', { textContent: 'Created' }), el('td', { textContent: fmt(n.created_at) })),
+      el('tr', null, el('td', { textContent: 'Done' }), el('td', { textContent: fmt(n.done_at) }))),
+    el('h3', { textContent: 'Notes' }),
+    n.notes ? el('div', { className: 'notes', textContent: n.notes }) : el('div', { className: 'none', textContent: 'None' }),
+    el('h3', { textContent: 'Meta' }),
+    Object.keys(n.meta).length
+      ? el('table', null, ...Object.entries(n.meta).map(([k, v]) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: typeof v === 'string' ? v : JSON.stringify(v) }))))
+      : el('div', { className: 'none', textContent: 'None' }),
+    el('h3', { textContent: 'Blocked by' }),
+    refList(n.depends_on),
+    el('h3', { textContent: 'Blocks' }),
+    refList(n.blocks)
+  );
+  const wasHidden = panel.style.display !== 'block';
+  panel.style.display = 'block';
+  $('cy').style.right = '340px';
+  cy.resize();
+  if (wasHidden) cy.fit(undefined, 40);
+}
+
+function closePanel() {
+  pinned = null;
+  $('panel').style.display = 'none';
+  $('cy').style.right = '0';
+  cy.resize();
+  refocus();
+}
+
+function select(id, center) {
+  const node = cy.getElementById(String(id));
+  if (node.empty()) return;
+  pinned = id;
+  openPanel(byId.get(id));
+  refocus();
+  if (center) cy.animate({ center: { eles: node } }, { duration: 250 });
+}
+
+cy.on('mouseover', 'node', e => {
+  cy.elements().removeClass('faded hl');
+  focusOn(e.target);
+});
+cy.on('mouseout', 'node', refocus);
+cy.on('tap', 'node', e => select(Number(e.target.id()), false));
+cy.on('tap', e => { if (e.target === cy) closePanel(); });
+
+const projectSelect = $('project');
+projectSelect.append(el('option', { value: '', textContent: 'All projects' }));
+DATA.projects.forEach(p => projectSelect.append(el('option', { value: p, textContent: p })));
+if (DATA.projects.length === 1) projectSelect.value = DATA.projects[0];
+projectSelect.onchange = rebuild;
+$('hideDone').onchange = rebuild;
+$('search').oninput = applySearch;
+$('relayout').onclick = layout;
+$('fit').onclick = () => cy.fit(undefined, 40);
+$('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
+$('legend').append(...Object.keys(COLORS).map(s => el('div', null, el('i', { style: 'background:' + COLORS[s] }), LABELS[s])));
+
+rebuild();
+</script>
+</body>
+</html>
