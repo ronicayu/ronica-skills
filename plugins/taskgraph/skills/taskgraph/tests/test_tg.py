@@ -1,7 +1,11 @@
 import json
 import os
+import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -217,6 +221,7 @@ def test_graph_writes_html(tg, tmp_path):
     assert "Unique <\\/script> title" in html
     assert "__DATA__" not in html
     assert "cytoscape" in html
+    assert '"live": false' in html
 
 
 def test_projects_counts(raw, tg):
@@ -267,3 +272,96 @@ def test_human_output(raw):
 def test_global_flags_after_subcommand(raw):
     p = raw("add", "A", "--project", "demo", "--json")
     assert json.loads(p.stdout)["project"] == "demo"
+
+
+def free_port():
+    with closing(socket.socket()) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def fetch(port, path):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+        return r.read().decode()
+
+
+@pytest.fixture
+def serve(db):
+    procs = []
+
+    def start(port, *extra):
+        p = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", "serve", "--no-open", "--port", str(port), *extra],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        procs.append(p)
+        return p
+
+    yield start
+    for p in procs:
+        p.terminate()
+        p.communicate(timeout=5)
+
+
+def test_serve_live_updates(serve, tg):
+    a = tg("add", "Write the spec")["id"]
+    b = tg("add", "Review the spec", "--depends", str(a))["id"]
+    port = free_port()
+    p = serve(port)
+    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/"
+    page = fetch(port, "/")
+    assert "Write the spec" in page and '"live": true' in page and "__DATA__" not in page
+    v1 = json.loads(fetch(port, "/version"))
+    assert v1["app"] == "taskgraph"
+    nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
+    assert nodes[a]["derived_status"] == "ready" and nodes[b]["derived_status"] == "blocked"
+    tg("done", str(a))
+    v2 = json.loads(fetch(port, "/version"))
+    assert v2["version"] != v1["version"]
+    data = json.loads(fetch(port, "/data.json"))
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes[a]["derived_status"] == "done" and nodes[b]["derived_status"] == "ready"
+    assert data["live"] is True and data["version"] == v2["version"]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        fetch(port, "/nope")
+    assert e.value.code == 404
+
+
+def test_serve_already_running(serve, raw):
+    port = free_port()
+    p = serve(port)
+    p.stdout.readline()
+    second = raw("--project", "demo", "serve", "--no-open", "--port", str(port))
+    assert second.returncode == 0
+    assert f"already running at http://127.0.0.1:{port}/" in second.stdout
+    as_json = json.loads(raw("--project", "demo", "--json", "serve", "--no-open", "--port", str(port)).stdout)
+    assert as_json == {"url": f"http://127.0.0.1:{port}/", "already_running": True}
+
+
+def test_serve_port_taken_by_other_project(serve, raw):
+    port = free_port()
+    p = serve(port)
+    p.stdout.readline()
+    other = raw("--project", "elsewhere", "serve", "--no-open", "--port", str(port))
+    assert other.returncode == 1
+    assert "pass --port" in other.stderr
+
+
+def test_serve_ignores_query_string(serve):
+    port = free_port()
+    p = serve(port)
+    p.stdout.readline()
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/version?t=1", timeout=5) as r:
+        assert json.load(r)["scope"] == "demo"
+
+
+def test_serve_port_taken_by_other_service(raw):
+    with closing(socket.socket()) as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        p = raw("--project", "demo", "serve", "--no-open", "--port", str(port))
+    assert p.returncode == 1
+    assert f"port {port} in use" in p.stderr

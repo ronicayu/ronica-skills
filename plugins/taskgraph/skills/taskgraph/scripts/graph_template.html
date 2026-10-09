@@ -14,6 +14,9 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; }
 #toolbar .spacer { flex: 1; }
 #toolbar .stamp { color: #6b7280; font-size: 12px; }
+#toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+#toolbar .dot.on { background: #34d399; }
+#toolbar .dot.off { background: #ef4444; }
 #cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
 #legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 12px; z-index: 2; }
 #legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
@@ -52,7 +55,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 <script>
-const DATA = __DATA__;
+let DATA = __DATA__;
 const COLORS = {
   ready: { bg: '#e5e7eb', fg: '#0b0f14', bd: '#e5e7eb' },
   in_progress: { bg: '#34d399', fg: '#052e16', bd: '#34d399' },
@@ -62,7 +65,7 @@ const COLORS = {
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
 const GOAL = '#fbbf24';
 const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
-const byId = new Map(DATA.nodes.map(n => [n.id, n]));
+let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 
@@ -91,6 +94,7 @@ const cy = cytoscape({
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
       'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
     } },
+    { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
     { selector: '.faded', style: { 'opacity': 0.15 } },
@@ -107,18 +111,60 @@ function visibleData() {
   return { nodes, edges };
 }
 
-function layout() {
-  cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit: true, padding: 40 }).run();
+const nodeData = n => ({ id: String(n.id), derived_status: n.derived_status, title: n.title, label: '#' + n.id + ' ' + n.title });
+const edgeId = e => e.source + '-' + e.target;
+
+function layout(fit = true) {
+  cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit, padding: 40 }).run();
 }
 
-function rebuild() {
+function fitIfOutside() {
+  const ext = cy.extent();
+  const outside = cy.nodes().some(n => {
+    const b = n.boundingBox();
+    return b.x1 < ext.x1 || b.x2 > ext.x2 || b.y1 < ext.y1 || b.y2 > ext.y2;
+  });
+  if (outside) cy.animate({ fit: { eles: cy.elements(), padding: 40 } }, { duration: 300 });
+}
+
+function rebuild(keepView) {
   const { nodes, edges } = visibleData();
+  const before = new Set(cy.nodes().map(n => n.id()));
   cy.elements().remove();
   const blocked = new Set(edges.map(e => e.source));
-  cy.add(nodes.map(n => ({ group: 'nodes', classes: blocked.has(n.id) ? '' : 'goal', data: { id: String(n.id), derived_status: n.derived_status, title: n.title, label: '#' + n.id + ' ' + n.title } })));
-  cy.add(edges.map(e => ({ group: 'edges', data: { id: e.source + '-' + e.target, source: String(e.source), target: String(e.target) } })));
+  cy.add(nodes.map(n => ({ group: 'nodes', classes: blocked.has(n.id) ? '' : 'goal', data: nodeData(n) })));
+  cy.add(edges.map(e => ({ group: 'edges', data: { id: edgeId(e), source: String(e.source), target: String(e.target) } })));
   if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
-  layout();
+  layout(!keepView);
+  if (keepView) {
+    fitIfOutside();
+    const added = cy.nodes().filter(n => !before.has(n.id()));
+    added.addClass('new');
+    setTimeout(() => added.removeClass('new'), 1500);
+  }
+  applySearch();
+  refocus();
+}
+
+function sameShape(nodes, edges) {
+  return cy.nodes().length === nodes.length && cy.edges().length === edges.length
+    && nodes.every(n => cy.getElementById(String(n.id)).nonempty())
+    && edges.every(e => cy.getElementById(edgeId(e)).nonempty());
+}
+
+function addProjects() {
+  const have = new Set(Array.from(projectSelect.options, o => o.value));
+  DATA.projects.filter(p => !have.has(p)).forEach(p => projectSelect.append(el('option', { value: p, textContent: p })));
+}
+
+function applyData(next) {
+  DATA = next;
+  byId = new Map(DATA.nodes.map(n => [n.id, n]));
+  addProjects();
+  const { nodes, edges } = visibleData();
+  if (sameShape(nodes, edges)) nodes.forEach(n => cy.getElementById(String(n.id)).data(nodeData(n)));
+  else rebuild(true);
+  if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
 }
@@ -164,6 +210,7 @@ function refList(ids) {
 
 function openPanel(n) {
   const panel = $('panel');
+  const top = panel.scrollTop;
   panel.replaceChildren(
     el('h2', { textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status)),
@@ -182,6 +229,7 @@ function openPanel(n) {
     el('h3', { textContent: 'Blocks' }),
     refList(n.blocks)
   );
+  panel.scrollTop = top;
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
   $('cy').style.right = '340px';
@@ -216,17 +264,53 @@ cy.on('tap', e => { if (e.target === cy) closePanel(); });
 
 const projectSelect = $('project');
 projectSelect.append(el('option', { value: '', textContent: 'All projects' }));
-DATA.projects.forEach(p => projectSelect.append(el('option', { value: p, textContent: p })));
+addProjects();
 if (DATA.projects.length === 1) projectSelect.value = DATA.projects[0];
-projectSelect.onchange = rebuild;
-$('hideDone').onchange = rebuild;
+projectSelect.onchange = () => rebuild();
+$('hideDone').onchange = () => rebuild();
 $('search').oninput = applySearch;
-$('relayout').onclick = layout;
+$('relayout').onclick = () => layout();
 $('fit').onclick = () => cy.fit(undefined, 40);
-$('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
 $('legend').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'));
 
 rebuild();
+
+if (DATA.live) {
+  let lastVersion = DATA.version;
+  let connected = true;
+  let busy = false;
+  const setStatus = ok => {
+    connected = ok;
+    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), ok ? 'Live' : 'Disconnected');
+  };
+  const getJson = async path => {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) throw new Error(path + ' ' + r.status);
+    return r.json();
+  };
+  const poll = async () => {
+    if (document.hidden || busy) return;
+    busy = true;
+    let next = null;
+    try {
+      const { version } = await getJson('/version');
+      if (!connected || version !== lastVersion) next = await getJson('/data.json');
+      setStatus(true);
+    } catch (e) {
+      setStatus(false);
+    }
+    busy = false;
+    if (next) {
+      lastVersion = next.version;
+      applyData(next);
+    }
+  };
+  setStatus(true);
+  setInterval(poll, 2000);
+  document.addEventListener('visibilitychange', poll);
+} else {
+  $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
+}
 </script>
 </body>
 </html>

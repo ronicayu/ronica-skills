@@ -5,9 +5,12 @@ import os
 import sqlite3
 import subprocess
 import sys
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -301,7 +304,7 @@ def cmd_tree(conn, args):
     emit(args, nodes, "\n".join(l for n in nodes for l in render(n)))
 
 
-def cmd_graph(conn, args):
+def graph_payload(conn, args):
     tasks = scoped(load(conn), args)
     ids = {t["id"] for t in tasks}
     nodes = []
@@ -311,15 +314,100 @@ def cmd_graph(conn, args):
         node["blocks"] = [i for i in t["blocks"] if i in ids]
         nodes.append(node)
     edges = [{"source": d, "target": n["id"]} for n in nodes for d in n["depends_on"]]
-    payload = {"nodes": nodes, "edges": edges, "projects": sorted({t["project"] for t in tasks}), "generated_at": now()}
+    return {"nodes": nodes, "edges": edges, "projects": sorted({t["project"] for t in tasks}), "generated_at": now(), "live": False}
+
+
+def render_page(payload):
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     template = (Path(__file__).parent / "graph_template.html").read_text(encoding="utf-8")
+    return template.replace("__DATA__", data, 1)
+
+
+def cmd_graph(conn, args):
+    payload = graph_payload(conn, args)
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(template.replace("__DATA__", data, 1), encoding="utf-8")
+    out.write_text(render_page(payload), encoding="utf-8")
     if not args.no_open:
         webbrowser.open(out.resolve().as_uri())
-    emit(args, {"path": str(out), "nodes": len(nodes), "edges": len(edges)}, str(out))
+    emit(args, {"path": str(out), "nodes": len(payload["nodes"]), "edges": len(payload["edges"])}, str(out))
+
+
+def data_version(conn):
+    return conn.execute("PRAGMA data_version").fetchone()[0]
+
+
+def serve_identity(conn, args):
+    db = conn.execute("PRAGMA database_list").fetchone()[2]
+    return {"app": "taskgraph", "db": db, "scope": "*" if args.all_projects else args.project}
+
+
+def make_handler(conn, args):
+    identity = serve_identity(conn, args)
+
+    class Handler(BaseHTTPRequestHandler):
+        def send(self, body, content_type):
+            raw = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def live_payload(self):
+            return dict(graph_payload(conn, args), live=True, version=data_version(conn))
+
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            if path == "/":
+                self.send(render_page(self.live_payload()), "text/html; charset=utf-8")
+            elif path == "/version":
+                self.send(json.dumps(dict(identity, version=data_version(conn))), "application/json")
+            elif path == "/data.json":
+                self.send(json.dumps(self.live_payload(), ensure_ascii=False), "application/json; charset=utf-8")
+            else:
+                self.send_error(404)
+
+        def log_message(self, *a):
+            pass
+
+    return Handler
+
+
+def probe(url):
+    try:
+        with urllib.request.urlopen(url + "version", timeout=1) as r:
+            return json.load(r)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_serve(conn, args):
+    url = f"http://127.0.0.1:{args.port}/"
+    try:
+        server = HTTPServer(("127.0.0.1", args.port), make_handler(conn, args))
+    except OSError:
+        other = probe(url)
+        if other.get("app") != "taskgraph":
+            raise Fail(f"port {args.port} in use")
+        mine = serve_identity(conn, args)
+        if (other.get("db"), other.get("scope")) != (mine["db"], mine["scope"]):
+            raise Fail(f"port {args.port} is serving taskgraph for {other.get('scope')} ({other.get('db')}); pass --port to serve {mine['scope']}")
+        if not args.no_open:
+            webbrowser.open(url)
+        emit(args, {"url": url, "already_running": True}, f"already running at {url}")
+        return
+    emit(args, {"url": url}, url)
+    sys.stdout.flush()
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 def cmd_projects(conn, args):
@@ -349,6 +437,7 @@ COMMANDS = {
     "why": cmd_why,
     "tree": cmd_tree,
     "graph": cmd_graph,
+    "serve": cmd_serve,
     "projects": cmd_projects,
 }
 
@@ -401,6 +490,11 @@ def build_parser():
 
     p = command("graph")
     p.add_argument("--out", default=str(DEFAULT_GRAPH))
+    p.add_argument("--all-projects", action="store_true")
+    p.add_argument("--no-open", action="store_true")
+
+    p = command("serve")
+    p.add_argument("--port", type=int, default=7777)
     p.add_argument("--all-projects", action="store_true")
     p.add_argument("--no-open", action="store_true")
 
