@@ -45,6 +45,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <input type="text" id="search" placeholder="Search titles" size="22">
   <button id="relayout">Re-layout</button>
   <button id="fit">Fit</button>
+  <button id="refresh" hidden>Refresh</button>
   <span class="spacer"></span>
   <span class="stamp" id="stamp"></span>
 </div>
@@ -281,20 +282,21 @@ if (DATA.live) {
   let busy = false;
   const setStatus = ok => {
     connected = ok;
-    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), ok ? 'Live' : 'Disconnected');
+    const when = new Date().toLocaleTimeString();
+    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), (ok ? 'Live · checked ' : 'Disconnected · tried ') + when);
   };
   const getJson = async path => {
     const r = await fetch(path, { cache: 'no-store' });
     if (!r.ok) throw new Error(path + ' ' + r.status);
     return r.json();
   };
-  const poll = async () => {
-    if (document.hidden || busy) return;
+  const poll = async force => {
+    if (busy || (document.hidden && !force)) return;
     busy = true;
     let next = null;
     try {
       const { version } = await getJson('/version');
-      if (!connected || version !== lastVersion) next = await getJson('/data.json');
+      if (force || !connected || version !== lastVersion) next = await getJson('/data.json');
       setStatus(true);
     } catch (e) {
       setStatus(false);
@@ -306,8 +308,10 @@ if (DATA.live) {
     }
   };
   setStatus(true);
-  setInterval(poll, 2000);
-  document.addEventListener('visibilitychange', poll);
+  setInterval(poll, 30000);
+  document.addEventListener('visibilitychange', () => poll());
+  $('refresh').hidden = false;
+  $('refresh').onclick = () => poll(true);
 } else {
   $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
 }

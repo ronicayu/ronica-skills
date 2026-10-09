@@ -55,7 +55,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`. Project defaults
 | `why ID` | Chains from a task up to the goals it serves |
 | `tree [ID]` | Goals with their dependencies indented below |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
-| `serve [--port N] [--all-projects] [--no-open]` | Serve a live graph that updates as the DB changes |
+| `serve [--port N] [--all-projects] [--no-open]` | Serve a live graph: checks the DB every 30 s, Refresh button pulls immediately |
 | `projects` | Projects with total, done, ready, blocked counts |
 
 Statuses are `open`, `in_progress`, `done`. `blocked` and `ready` are derived: an open task is blocked while any dependency is not done, otherwise ready. Exit code 1 with a message on stderr signals an error.
