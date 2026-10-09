@@ -10,7 +10,7 @@ import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -337,13 +337,13 @@ def data_version(conn):
     return conn.execute("PRAGMA data_version").fetchone()[0]
 
 
-def serve_identity(conn, args):
-    db = conn.execute("PRAGMA database_list").fetchone()[2]
-    return {"app": "taskgraph", "db": db, "scope": "*" if args.all_projects else args.project}
+def db_path(conn):
+    return conn.execute("PRAGMA database_list").fetchone()[2]
 
 
 def make_handler(conn, args):
-    identity = serve_identity(conn, args)
+    identity = {"app": "taskgraph", "db": db_path(conn)}
+    everything = argparse.Namespace(**{**vars(args), "all_projects": True})
 
     class Handler(BaseHTTPRequestHandler):
         def send(self, body, content_type):
@@ -356,7 +356,7 @@ def make_handler(conn, args):
             self.wfile.write(raw)
 
         def live_payload(self):
-            return dict(graph_payload(conn, args), live=True, version=data_version(conn))
+            return dict(graph_payload(conn, everything), live=True, version=data_version(conn))
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -384,16 +384,16 @@ def probe(url):
 
 
 def cmd_serve(conn, args):
-    url = f"http://127.0.0.1:{args.port}/"
+    base = f"http://127.0.0.1:{args.port}/"
+    url = base if args.all_projects else f"{base}?project={quote(args.project, safe='')}"
     try:
         server = HTTPServer(("127.0.0.1", args.port), make_handler(conn, args))
     except OSError:
-        other = probe(url)
+        other = probe(base)
         if other.get("app") != "taskgraph":
             raise Fail(f"port {args.port} in use")
-        mine = serve_identity(conn, args)
-        if (other.get("db"), other.get("scope")) != (mine["db"], mine["scope"]):
-            raise Fail(f"port {args.port} is serving taskgraph for {other.get('scope')} ({other.get('db')}); pass --port to serve {mine['scope']}")
+        if other.get("db") != db_path(conn):
+            raise Fail(f"port {args.port} is serving taskgraph for {other.get('db')}; pass --port to serve {db_path(conn)}")
         if not args.no_open:
             webbrowser.open(url)
         emit(args, {"url": url, "already_running": True}, f"already running at {url}")

@@ -18,7 +18,7 @@ Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图
 2. Ask "what must be true before this is done?" and `add --blocks GOAL` for each prerequisite. Recurse on each prerequisite until tasks are half a day or less and concrete.
 3. `ready` shows what can be done now. `start` before working, `done` when finished.
 4. Run `graph` for a one-off snapshot file when the user wants to see the picture.
-5. When the user wants to watch the plan as it changes, start `serve` as a background process (it blocks), give them the URL, and leave it running.
+5. When the user wants to watch the plan as it changes, start `serve` as a background process (it blocks), give them the URL, and leave it running. One server per DB serves every project; the URL's `?project=` picks the view.
 
 ## Rules
 
@@ -28,7 +28,7 @@ Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图
 - Use meta keys consistently: `estimate` (hours, number), `owner`, `tags` (array), `link`.
 - Never mark a blocked task done without telling the user which dependencies are unfinished.
 - After bulk changes, offer to run `graph` or `serve`.
-- `serve` keeps one live page per port. Running it again while it is up just reopens the page, so it is safe to call whenever the user asks to see the graph.
+- `serve` runs one server per DB for all projects. Running it again, even from another project, reuses the server and opens that project's view, so it is safe to call whenever the user asks to see the graph.
 - `--depends X` means the new task depends on X; `--blocks Y` means Y depends on the new task.
 
 ## Usage
@@ -55,7 +55,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`. Project defaults
 | `why ID` | Chains from a task up to the goals it serves |
 | `tree [ID]` | Goals with their dependencies indented below |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
-| `serve [--port N] [--all-projects] [--no-open]` | Serve a live graph: checks the DB every 30 s, Refresh button pulls immediately |
+| `serve [--port N] [--all-projects] [--no-open]` | Serve every project of the DB live and open `/?project=NAME` (`/` with `--all-projects`); checks the DB every 30 s, Refresh button pulls immediately |
 | `projects` | Projects with total, done, ready, blocked counts |
 
 Statuses are `open`, `in_progress`, `done`. `blocked` and `ready` are derived: an open task is blocked while any dependency is not done, otherwise ready. Exit code 1 with a message on stderr signals an error.

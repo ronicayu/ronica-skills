@@ -289,9 +289,9 @@ def fetch(port, path):
 def serve(db):
     procs = []
 
-    def start(port, *extra):
+    def start(port, *extra, other_db=None, project="demo"):
         p = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", "serve", "--no-open", "--port", str(port), *extra],
+            [sys.executable, str(SCRIPT), "--db", str(other_db or db), "--project", project, "serve", "--no-open", "--port", str(port), *extra],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -310,7 +310,7 @@ def test_serve_live_updates(serve, tg):
     b = tg("add", "Review the spec", "--depends", str(a))["id"]
     port = free_port()
     p = serve(port)
-    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/"
+    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/?project=demo"
     page = fetch(port, "/")
     assert "Write the spec" in page and '"live": true' in page and "__DATA__" not in page
     v1 = json.loads(fetch(port, "/version"))
@@ -335,26 +335,53 @@ def test_serve_already_running(serve, raw):
     p.stdout.readline()
     second = raw("--project", "demo", "serve", "--no-open", "--port", str(port))
     assert second.returncode == 0
-    assert f"already running at http://127.0.0.1:{port}/" in second.stdout
+    assert f"already running at http://127.0.0.1:{port}/?project=demo" in second.stdout
     as_json = json.loads(raw("--project", "demo", "--json", "serve", "--no-open", "--port", str(port)).stdout)
-    assert as_json == {"url": f"http://127.0.0.1:{port}/", "already_running": True}
+    assert as_json == {"url": f"http://127.0.0.1:{port}/?project=demo", "already_running": True}
 
 
-def test_serve_port_taken_by_other_project(serve, raw):
+def test_serve_other_project_reuses_server(serve, raw):
     port = free_port()
     p = serve(port)
     p.stdout.readline()
     other = raw("--project", "elsewhere", "serve", "--no-open", "--port", str(port))
+    assert other.returncode == 0
+    assert f"already running at http://127.0.0.1:{port}/?project=elsewhere" in other.stdout
+
+
+def test_serve_port_taken_by_other_db(serve, raw, tmp_path):
+    port = free_port()
+    p = serve(port, other_db=tmp_path / "other.db")
+    p.stdout.readline()
+    other = raw("--project", "demo", "serve", "--no-open", "--port", str(port))
     assert other.returncode == 1
     assert "pass --port" in other.stderr
 
 
-def test_serve_ignores_query_string(serve):
+def test_serve_ignores_query_string(serve, db):
     port = free_port()
     p = serve(port)
     p.stdout.readline()
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/version?t=1", timeout=5) as r:
-        assert json.load(r)["scope"] == "demo"
+        info = json.load(r)
+    assert info["app"] == "taskgraph" and info["db"] == str(db) and "scope" not in info
+
+
+def test_serve_serves_all_projects_and_url_picks_view(serve, raw, tg):
+    demo = tg("add", "Demo task")["id"]
+    other = json.loads(raw("--project", "other", "--json", "add", "Other task").stdout)["id"]
+    port = free_port()
+    p = serve(port)
+    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/?project=demo"
+    data = json.loads(fetch(port, "/data.json"))
+    assert {n["id"] for n in data["nodes"]} == {demo, other}
+    assert data["projects"] == ["demo", "other"]
+    port = free_port()
+    p = serve(port, "--all-projects")
+    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/"
+    port = free_port()
+    p = serve(port, project="my proj/x")
+    assert p.stdout.readline().strip() == f"http://127.0.0.1:{port}/?project=my%20proj%2Fx"
 
 
 def test_serve_port_taken_by_other_service(raw):

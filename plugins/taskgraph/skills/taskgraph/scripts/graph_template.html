@@ -266,8 +266,18 @@ cy.on('tap', e => { if (e.target === cy) closePanel(); });
 const projectSelect = $('project');
 projectSelect.append(el('option', { value: '', textContent: 'All projects' }));
 addProjects();
-if (DATA.projects.length === 1) projectSelect.value = DATA.projects[0];
-projectSelect.onchange = () => rebuild();
+const wanted = new URLSearchParams(location.search).get('project');
+if (wanted) {
+  if (!Array.from(projectSelect.options).some(o => o.value === wanted)) projectSelect.append(el('option', { value: wanted, textContent: wanted }));
+  projectSelect.value = wanted;
+} else if (DATA.projects.length === 1) projectSelect.value = DATA.projects[0];
+const setTitle = () => { document.title = 'taskgraph · ' + (projectSelect.value || 'all projects'); };
+setTitle();
+projectSelect.onchange = () => {
+  setTitle();
+  if (DATA.live) history.replaceState(null, '', projectSelect.value ? '?project=' + encodeURIComponent(projectSelect.value) : location.pathname);
+  rebuild();
+};
 $('hideDone').onchange = () => rebuild();
 $('search').oninput = applySearch;
 $('relayout').onclick = () => layout();
