@@ -12,6 +12,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar button { cursor: pointer; }
 #toolbar button:hover { background: #2d333d; }
 #toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; }
+#toolbar [hidden] { display: none; }
+#toolbar .seg { display: flex; }
+#toolbar .seg button { border-radius: 0; }
+#toolbar .seg button:first-child { border-radius: 6px 0 0 6px; }
+#toolbar .seg button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+#toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .spacer { flex: 1; }
 #toolbar .stamp { color: #6b7280; font-size: 12px; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
@@ -41,6 +47,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 <body>
 <div id="toolbar">
   <select id="project"></select>
+  <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button></span>
+  <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
   <input type="text" id="search" placeholder="Search titles" size="22">
   <button id="relayout">Re-layout</button>
@@ -69,6 +77,21 @@ const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
 let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
+const UNASSIGNED = 'Unassigned';
+const GUTTER = 140, COL_W = 240, ROW_H = 72, NODE_W = 180, NODE_H = 52;
+const LANE_KEYS = {
+  lane: n => n.meta.lane,
+  owner: n => n.meta.owner,
+  tag: n => Array.isArray(n.meta.tags) ? n.meta.tags[0] : n.meta.tags,
+  project: n => n.project
+};
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const query = new URLSearchParams(location.search);
+let view = (query.get('view') || store.get('taskgraph.view')) === 'lanes' ? 'lanes' : 'graph';
+let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
 
 function el(tag, props, ...children) {
   const e = Object.assign(document.createElement(tag), props || {});
@@ -90,11 +113,19 @@ const cy = cytoscape({
       'background-color': ele => color(ele).bg, 'border-width': 2, 'border-color': ele => color(ele).bd,
       'opacity': ele => color(ele).op || 1, 'transition-property': 'opacity', 'transition-duration': '120ms'
     } },
+    { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0, 'text-max-width': NODE_W - 24 } },
+    { selector: 'node.lane-bg', style: {
+      'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-color': 'data(shade)',
+      'border-width': 1, 'border-color': '#262c36', 'opacity': 1, 'events': 'no',
+      'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': GUTTER - 28, 'text-halign': 'right', 'text-valign': 'center',
+      'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': -1
+    } },
     { selector: 'node.goal', style: { 'border-width': 3, 'border-color': GOAL, 'font-weight': 'bold' } },
     { selector: 'edge', style: {
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
       'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
     } },
+    { selector: 'edge.lanes', style: { 'curve-style': 'taxi', 'taxi-direction': 'rightward' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
@@ -114,14 +145,62 @@ function visibleData() {
 
 const nodeData = n => ({ id: String(n.id), derived_status: n.derived_status, title: n.title, label: '#' + n.id + ' ' + n.title });
 const edgeId = e => e.source + '-' + e.target;
+const tasks = () => cy.nodes().not('.lane-bg');
+const laneOf = n => {
+  const v = LANE_KEYS[laneKey](n);
+  return v == null || String(v).trim() === '' ? UNASSIGNED : String(v).trim();
+};
+
+function layoutLanes(fit) {
+  const { nodes, edges } = visibleData();
+  const next = new Map(nodes.map(n => [n.id, []]));
+  edges.forEach(e => next.get(e.source).push(e.target));
+  const up = new Map();
+  const depth = id => {
+    if (!up.has(id)) up.set(id, Math.max(-1, ...next.get(id).map(depth)) + 1);
+    return up.get(id);
+  };
+  const maxUp = Math.max(0, ...nodes.map(n => depth(n.id)));
+  const groups = new Map();
+  nodes.forEach(n => {
+    const name = laneOf(n);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(n);
+  });
+  const names = [...groups.keys()].sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
+  const width = GUTTER + (maxUp + 1) * COL_W;
+  let top = 0;
+  const bands = names.map((name, i) => {
+    const rows = new Map();
+    groups.get(name).sort((a, b) => a.id - b.id).forEach(n => {
+      const col = maxUp - up.get(n.id);
+      const row = rows.get(col) || 0;
+      rows.set(col, row + 1);
+      cy.getElementById(String(n.id)).position({ x: GUTTER + col * COL_W + COL_W / 2, y: top + row * ROW_H + ROW_H / 2 });
+    });
+    const height = Math.max(...rows.values()) * ROW_H;
+    const band = {
+      group: 'nodes', classes: 'lane-bg', locked: true, selectable: false, grabbable: false,
+      data: { id: 'lane:' + i, name, w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
+      position: { x: width / 2, y: top + height / 2 }
+    };
+    top += height;
+    return band;
+  });
+  cy.add(bands);
+  if (fit) cy.fit(undefined, 40);
+}
 
 function layout(fit = true) {
-  cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit, padding: 40 }).run();
+  cy.nodes('.lane-bg').remove();
+  cy.elements().toggleClass('lanes', view === 'lanes');
+  if (view === 'lanes') layoutLanes(fit);
+  else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit, padding: 40 }).run();
 }
 
 function fitIfOutside() {
   const ext = cy.extent();
-  const outside = cy.nodes().some(n => {
+  const outside = tasks().some(n => {
     const b = n.boundingBox();
     return b.x1 < ext.x1 || b.x2 > ext.x2 || b.y1 < ext.y1 || b.y2 > ext.y2;
   });
@@ -130,7 +209,7 @@ function fitIfOutside() {
 
 function rebuild(keepView) {
   const { nodes, edges } = visibleData();
-  const before = new Set(cy.nodes().map(n => n.id()));
+  const before = new Set(tasks().map(n => n.id()));
   cy.elements().remove();
   const blocked = new Set(edges.map(e => e.source));
   cy.add(nodes.map(n => ({ group: 'nodes', classes: blocked.has(n.id) ? '' : 'goal', data: nodeData(n) })));
@@ -139,7 +218,7 @@ function rebuild(keepView) {
   layout(!keepView);
   if (keepView) {
     fitIfOutside();
-    const added = cy.nodes().filter(n => !before.has(n.id()));
+    const added = tasks().filter(n => !before.has(n.id()));
     added.addClass('new');
     setTimeout(() => added.removeClass('new'), 1500);
   }
@@ -148,7 +227,7 @@ function rebuild(keepView) {
 }
 
 function sameShape(nodes, edges) {
-  return cy.nodes().length === nodes.length && cy.edges().length === edges.length
+  return tasks().length === nodes.length && cy.edges().length === edges.length
     && nodes.every(n => cy.getElementById(String(n.id)).nonempty())
     && edges.every(e => cy.getElementById(edgeId(e)).nonempty());
 }
@@ -163,8 +242,13 @@ function applyData(next) {
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
   const { nodes, edges } = visibleData();
-  if (sameShape(nodes, edges)) nodes.forEach(n => cy.getElementById(String(n.id)).data(nodeData(n)));
-  else rebuild(true);
+  if (sameShape(nodes, edges)) {
+    nodes.forEach(n => cy.getElementById(String(n.id)).data(nodeData(n)));
+    if (view === 'lanes') {
+      layout(false);
+      fitIfOutside();
+    }
+  } else rebuild(true);
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
@@ -172,7 +256,7 @@ function applyData(next) {
 
 function focusOn(n) {
   const keep = n.union(n.predecessors()).union(n.successors());
-  cy.elements().addClass('faded');
+  cy.elements().not('.lane-bg').addClass('faded');
   keep.removeClass('faded').addClass('hl');
 }
 
@@ -183,7 +267,7 @@ function refocus() {
 
 function applySearch() {
   const q = $('search').value.trim().toLowerCase();
-  cy.nodes().forEach(n => {
+  tasks().forEach(n => {
     const hit = !q || n.data('title').toLowerCase().includes(q) || ('#' + n.id()).includes(q);
     n.toggleClass('dim', !hit);
   });
@@ -266,18 +350,49 @@ cy.on('tap', e => { if (e.target === cy) closePanel(); });
 const projectSelect = $('project');
 projectSelect.append(el('option', { value: '', textContent: 'All projects' }));
 addProjects();
-const wanted = new URLSearchParams(location.search).get('project');
+const wanted = query.get('project');
 if (wanted) {
   if (!Array.from(projectSelect.options).some(o => o.value === wanted)) projectSelect.append(el('option', { value: wanted, textContent: wanted }));
   projectSelect.value = wanted;
 } else if (DATA.projects.length === 1) projectSelect.value = DATA.projects[0];
+const params = () => {
+  const q = new URLSearchParams();
+  if (projectSelect.value) q.set('project', projectSelect.value);
+  if (view === 'lanes') q.set('view', 'lanes');
+  if (laneKey !== 'lane') q.set('lanes', laneKey);
+  return q.toString();
+};
+const syncUrl = () => history.replaceState(null, '', params() ? '?' + params() : location.pathname);
+const syncControls = () => {
+  $('viewGraph').classList.toggle('on', view === 'graph');
+  $('viewLanes').classList.toggle('on', view === 'lanes');
+  $('lanesBy').hidden = view !== 'lanes';
+  $('laneKey').value = laneKey;
+};
+const setView = v => {
+  if (v === view) return;
+  view = v;
+  store.set('taskgraph.view', v);
+  syncControls();
+  syncUrl();
+  rebuild();
+};
 const setTitle = () => { document.title = 'taskgraph · ' + (projectSelect.value || 'all projects'); };
 setTitle();
 projectSelect.onchange = () => {
   setTitle();
-  if (DATA.live) history.replaceState(null, '', projectSelect.value ? '?project=' + encodeURIComponent(projectSelect.value) : location.pathname);
+  if (DATA.live) syncUrl();
   rebuild();
 };
+$('viewGraph').onclick = () => setView('graph');
+$('viewLanes').onclick = () => setView('lanes');
+$('laneKey').onchange = e => {
+  laneKey = e.target.value;
+  store.set('taskgraph.lanes', laneKey);
+  syncUrl();
+  if (view === 'lanes') rebuild();
+};
+syncControls();
 $('hideDone').onchange = () => rebuild();
 $('search').oninput = applySearch;
 $('relayout').onclick = () => layout();

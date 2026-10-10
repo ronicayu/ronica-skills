@@ -15,17 +15,17 @@ Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图
 ## Work-backwards workflow
 
 1. `add` the goal.
-2. Ask "what must be true before this is done?" and `add --blocks GOAL` for each prerequisite. Recurse on each prerequisite until tasks are half a day or less and concrete.
+2. Ask "what must be true before this is done?" and `add --blocks GOAL` for each prerequisite. Recurse on each prerequisite until tasks are half a day or less and concrete. Set `--meta lane=<workstream>` on each task when decomposing.
 3. `ready` shows what can be done now. `start` before working, `done` when finished.
 4. Run `graph` for a one-off snapshot file when the user wants to see the picture.
-5. When the user wants to watch the plan as it changes, start `serve` as a background process (it blocks), give them the URL, and leave it running. One server per DB serves every project; the URL's `?project=` picks the view.
+5. When the user wants to watch the plan as it changes, start `serve` as a background process (it blocks), give them the URL, and leave it running. The page has a Graph | Swimlane toggle; Swimlane groups tasks into rows by `lane`, or by owner, tag or project. One server per DB serves every project; the URL's `?project=` picks the view.
 
 ## Rules
 
 - Always pass `--json` when parsing output.
 - Titles are imperative verbs, at most 60 characters.
 - Put the why and acceptance criteria in `--notes`.
-- Use meta keys consistently: `estimate` (hours, number), `owner`, `tags` (array), `link`.
+- Use meta keys consistently: `estimate` (hours, number), `owner`, `tags` (array), `link`, `lane` (workstream name, groups rows in the Swimlane view).
 - Never mark a blocked task done without telling the user which dependencies are unfinished.
 - After bulk changes, offer to run `graph` or `serve`.
 - `serve` runs one server per DB for all projects. Running it again, even from another project, reuses the server and opens that project's view, so it is safe to call whenever the user asks to see the graph.
