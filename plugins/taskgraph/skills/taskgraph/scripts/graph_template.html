@@ -154,20 +154,77 @@ const laneOf = n => {
 const gapAfter = c => GUTTER + (c + 1) * COL_W;
 const colOf = x => Math.round((x - GUTTER - COL_W / 2) / COL_W);
 
-function routeEdge(edge) {
-  const s = edge.source().position(), t = edge.target().position();
-  const cs = colOf(s.x), ct = colOf(t.x);
-  const a = gapAfter(cs), b = gapAfter(ct - 1);
-  const channel = s.y <= t.y ? t.y - ROW_H / 2 : t.y + ROW_H / 2;
-  const points = ct === cs + 1 ? (s.y === t.y ? [] : [[a, s.y], [a, t.y]]) : [[a, s.y], [a, channel], [b, channel], [b, t.y]];
-  const style = { 'source-endpoint': NODE_W / 2 + 'px 0px', 'target-endpoint': -NODE_W / 2 + 'px 0px' };
-  if (!points.length) style['curve-style'] = 'straight';
-  else {
-    const vx = t.x - s.x, vy = t.y - s.y, len2 = vx * vx + vy * vy;
-    style['segment-weights'] = points.map(([x, y]) => ((x - s.x) * vx + (y - s.y) * vy) / len2).join(' ');
-    style['segment-distances'] = points.map(([x, y]) => ((y - s.y) * vx - (x - s.x) * vy) / Math.sqrt(len2)).join(' ');
-  }
-  edge.style(style);
+const groupBy = (items, key) => {
+  const m = new Map();
+  items.forEach(i => {
+    const k = key(i);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(i);
+  });
+  return [...m.values()];
+};
+const trackUnit = j => (j % 2 ? -(j + 1) / 2 : j / 2);
+const portOffset = (k, i) => (i - (k - 1) / 2) * (k > 1 ? Math.min(8, (NODE_H - 16) / (k - 1)) : 0);
+
+function assignTracks(items) {
+  const ends = [];
+  items.sort((p, q) => p.lo - q.lo);
+  items.forEach(it => {
+    let j = 0;
+    while (ends[j] !== undefined && it.lo - ends[j] <= 4) j++;
+    ends[j] = it.hi;
+    it.slot = j;
+  });
+  return ends.length;
+}
+
+function routeEdges() {
+  const rs = cy.edges().map(edge => {
+    const s = edge.source().position(), t = edge.target().position();
+    const cs = colOf(s.x), ct = colOf(t.x);
+    return { edge, s, t, sid: edge.source().id(), tid: edge.target().id(), a: gapAfter(cs), b: gapAfter(ct - 1), long: ct > cs + 1, base: s.y <= t.y ? t.y - ROW_H / 2 : t.y + ROW_H / 2 };
+  });
+  groupBy(rs, r => r.sid).forEach(g => {
+    g.sort((p, q) => p.t.y - q.t.y || p.tid - q.tid);
+    g.forEach((r, i) => { r.sy = r.s.y + portOffset(g.length, i); });
+  });
+  groupBy(rs, r => r.tid).forEach(g => {
+    g.sort((p, q) => p.s.y - q.s.y || p.sid - q.sid);
+    g.forEach((r, i) => { r.ty = r.t.y + portOffset(g.length, i); });
+  });
+  const bends = r => r.long || r.sy !== r.ty;
+  rs.filter(bends).forEach(q => {
+    if (rs.some(p => p !== q && bends(p) && p.a === q.b && Math.abs(p.sy - q.ty) < 1)) q.ty += 2;
+  });
+  groupBy(rs.filter(r => r.long), r => r.base).forEach(g => {
+    const items = g.map(r => ({ r, lo: r.a, hi: r.b }));
+    const step = Math.min(6, 24 / assignTracks(items));
+    items.forEach(it => { it.r.y = it.r.base + trackUnit(it.slot) * step; });
+  });
+  const verts = rs.flatMap(r => {
+    const span = (y1, y2) => ({ r, lo: Math.min(y1, y2), hi: Math.max(y1, y2) });
+    if (r.long) {
+      r.va = { ...span(r.sy, r.y), gap: r.a };
+      r.vb = { ...span(r.y, r.ty), gap: r.b };
+    } else if (r.sy !== r.ty) r.va = r.vb = { ...span(r.sy, r.ty), gap: r.a };
+    return r.va === r.vb ? (r.va ? [r.va] : []) : [r.va, r.vb];
+  });
+  groupBy(verts, v => v.gap).forEach(g => {
+    const step = Math.min(8, 48 / assignTracks(g));
+    g.forEach(v => { v.x = v.gap + trackUnit(v.slot) * step; });
+  });
+  rs.forEach(r => {
+    const { s, t, edge } = r;
+    const style = { 'source-endpoint': `${NODE_W / 2}px ${r.sy - s.y}px`, 'target-endpoint': `${-NODE_W / 2}px ${r.ty - t.y}px` };
+    if (!r.va) style['curve-style'] = 'straight';
+    else {
+      const points = r.long ? [[r.va.x, r.sy], [r.va.x, r.y], [r.vb.x, r.y], [r.vb.x, r.ty]] : [[r.va.x, r.sy], [r.va.x, r.ty]];
+      const vx = t.x - s.x, vy = t.y - s.y, len2 = vx * vx + vy * vy;
+      style['segment-weights'] = points.map(([x, y]) => ((x - s.x) * vx + (y - s.y) * vy) / len2).join(' ');
+      style['segment-distances'] = points.map(([x, y]) => ((y - s.y) * vx - (x - s.x) * vy) / Math.sqrt(len2)).join(' ');
+    }
+    edge.style(style);
+  });
 }
 
 function layoutLanes(fit) {
@@ -207,7 +264,7 @@ function layoutLanes(fit) {
     return band;
   });
   cy.add(bands);
-  cy.edges().forEach(routeEdge);
+  routeEdges();
   if (fit) cy.fit(undefined, 40);
 }
 
