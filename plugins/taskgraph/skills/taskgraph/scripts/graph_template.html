@@ -78,7 +78,7 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned';
-const GUTTER = 140, COL_W = 240, ROW_H = 72, NODE_W = 180, NODE_H = 52;
+const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
 const LANE_KEYS = {
   lane: n => n.meta.lane,
   owner: n => n.meta.owner,
@@ -125,7 +125,7 @@ const cy = cytoscape({
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
       'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
     } },
-    { selector: 'edge.lanes', style: { 'curve-style': 'taxi', 'taxi-direction': 'rightward' } },
+    { selector: 'edge.lanes', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
@@ -150,6 +150,25 @@ const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
   return v == null || String(v).trim() === '' ? UNASSIGNED : String(v).trim();
 };
+
+const gapAfter = c => GUTTER + (c + 1) * COL_W;
+const colOf = x => Math.round((x - GUTTER - COL_W / 2) / COL_W);
+
+function routeEdge(edge) {
+  const s = edge.source().position(), t = edge.target().position();
+  const cs = colOf(s.x), ct = colOf(t.x);
+  const a = gapAfter(cs), b = gapAfter(ct - 1);
+  const channel = s.y <= t.y ? t.y - ROW_H / 2 : t.y + ROW_H / 2;
+  const points = ct === cs + 1 ? (s.y === t.y ? [] : [[a, s.y], [a, t.y]]) : [[a, s.y], [a, channel], [b, channel], [b, t.y]];
+  const style = { 'source-endpoint': NODE_W / 2 + 'px 0px', 'target-endpoint': -NODE_W / 2 + 'px 0px' };
+  if (!points.length) style['curve-style'] = 'straight';
+  else {
+    const vx = t.x - s.x, vy = t.y - s.y, len2 = vx * vx + vy * vy;
+    style['segment-weights'] = points.map(([x, y]) => ((x - s.x) * vx + (y - s.y) * vy) / len2).join(' ');
+    style['segment-distances'] = points.map(([x, y]) => ((y - s.y) * vx - (x - s.x) * vy) / Math.sqrt(len2)).join(' ');
+  }
+  edge.style(style);
+}
 
 function layoutLanes(fit) {
   const { nodes, edges } = visibleData();
@@ -188,11 +207,13 @@ function layoutLanes(fit) {
     return band;
   });
   cy.add(bands);
+  cy.edges().forEach(routeEdge);
   if (fit) cy.fit(undefined, 40);
 }
 
 function layout(fit = true) {
   cy.nodes('.lane-bg').remove();
+  cy.edges().removeStyle();
   cy.elements().toggleClass('lanes', view === 'lanes');
   if (view === 'lanes') layoutLanes(fit);
   else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit, padding: 40 }).run();
