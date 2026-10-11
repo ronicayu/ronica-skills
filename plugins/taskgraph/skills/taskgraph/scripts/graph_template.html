@@ -79,6 +79,7 @@ const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned';
 const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28;
 const LANE_KEYS = {
   lane: n => n.meta.lane,
   owner: n => n.meta.owner,
@@ -99,6 +100,41 @@ function el(tag, props, ...children) {
   return e;
 }
 
+// Cytoscape wraps only at spaces, so CJK and URLs never break and long titles spill out of
+// fixed Swimlane boxes. Wrap here instead, breaking anywhere when a line has no space, and
+// end the last allowed line with an ellipsis. Measured bold so goal labels fit as well.
+const ctx = document.createElement('canvas').getContext('2d');
+ctx.font = 'bold 12px ' + FONT;
+const clamped = new Map();
+function clampLabel(text, width, maxLines) {
+  const key = width + ':' + maxLines + ':' + text;
+  if (clamped.has(key)) return clamped.get(key);
+  const fits = s => ctx.measureText(s).width <= width;
+  const wide = c => /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/.test(c);
+  let rest = Array.from(text.trim().replace(/\s+/g, ' '));
+  const lines = [];
+  while (rest.length && lines.length < maxLines) {
+    let n = rest.length;
+    if (!fits(rest.join(''))) {
+      n = 1;
+      while (n < rest.length && fits(rest.slice(0, n + 1).join(''))) n++;
+      const sp = rest.lastIndexOf(' ', n);
+      if (rest[n] !== ' ' && !wide(rest[n - 1]) && !wide(rest[n]) && sp > 0) n = sp;
+    }
+    lines.push(rest.slice(0, n).join('').trim());
+    rest = rest.slice(n);
+    while (rest[0] === ' ') rest.shift();
+  }
+  if (rest.length) {
+    let last = Array.from(lines.pop());
+    while (last.length && !fits(last.join('').trimEnd() + '…')) last.pop();
+    lines.push(last.join('').trimEnd() + '…');
+  }
+  const label = lines.join('\n');
+  clamped.set(key, label);
+  return label;
+}
+
 const cy = cytoscape({
   container: $('cy'),
   minZoom: 0.1,
@@ -107,17 +143,17 @@ const cy = cytoscape({
   style: [
     { selector: 'node', style: {
       'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
-      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': 160,
+      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': LABEL_W + 8,
       'text-valign': 'center', 'text-halign': 'center', 'font-size': 12,
-      'font-family': 'system-ui, sans-serif', 'color': ele => color(ele).fg,
+      'font-family': FONT, 'color': ele => color(ele).fg,
       'background-color': ele => color(ele).bg, 'border-width': 2, 'border-color': ele => color(ele).bd,
       'opacity': ele => color(ele).op || 1, 'transition-property': 'opacity', 'transition-duration': '120ms'
     } },
-    { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0, 'text-max-width': NODE_W - 24 } },
+    { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lane-bg', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-color': 'data(shade)',
       'border-width': 1, 'border-color': '#262c36', 'opacity': 1, 'events': 'no',
-      'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': GUTTER - 28, 'text-halign': 'right', 'text-valign': 'center',
+      'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': LANE_W + 8, 'text-halign': 'right', 'text-valign': 'center',
       'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': -1
     } },
     { selector: 'node.goal', style: { 'border-width': 3, 'border-color': GOAL, 'font-weight': 'bold' } },
@@ -143,7 +179,7 @@ function visibleData() {
   return { nodes, edges };
 }
 
-const nodeData = n => ({ id: String(n.id), derived_status: n.derived_status, title: n.title, label: '#' + n.id + ' ' + n.title });
+const nodeData = n => ({ id: String(n.id), derived_status: n.derived_status, title: n.title, label: clampLabel('#' + n.id + ' ' + n.title, LABEL_W, LABEL_LINES) });
 const edgeId = e => e.source + '-' + e.target;
 const tasks = () => cy.nodes().not('.lane-bg');
 const laneOf = n => {
@@ -257,7 +293,7 @@ function layoutLanes(fit) {
     const height = Math.max(...rows.values()) * ROW_H;
     const band = {
       group: 'nodes', classes: 'lane-bg', locked: true, selectable: false, grabbable: false,
-      data: { id: 'lane:' + i, name, w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
+      data: { id: 'lane:' + i, name: clampLabel(name, LANE_W, LABEL_LINES), w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
       position: { x: width / 2, y: top + height / 2 }
     };
     top += height;
@@ -420,8 +456,12 @@ function select(id, center) {
 cy.on('mouseover', 'node', e => {
   cy.elements().removeClass('faded hl');
   focusOn(e.target);
+  $('cy').title = '#' + e.target.id() + ' ' + e.target.data('title');
 });
-cy.on('mouseout', 'node', refocus);
+cy.on('mouseout', 'node', () => {
+  $('cy').title = '';
+  refocus();
+});
 cy.on('tap', 'node', e => select(Number(e.target.id()), false));
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
 
