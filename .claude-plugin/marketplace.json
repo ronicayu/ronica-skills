@@ -81,7 +81,7 @@
       "name": "taskgraph",
       "source": "taskgraph",
       "description": "Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, add or update tasks and dependencies, or see the plan as a picture — \"work backwards from shipping v1\", \"what's next\", \"what's blocking X\", \"下一步做什么\", \"任务依赖\", \"看图\". Agents operate the CLI; humans view the graph.",
-      "version": "1.3.2",
+      "version": "1.3.3",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
