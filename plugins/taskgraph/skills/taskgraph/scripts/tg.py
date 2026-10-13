@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS events (
   new TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
+CREATE TABLE IF NOT EXISTS baselines (
+  project TEXT NOT NULL,
+  label TEXT NOT NULL,
+  at TEXT NOT NULL,
+  task_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  type TEXT NOT NULL,
+  start TEXT,
+  due TEXT,
+  PRIMARY KEY (project, label, task_id)
+);
 """
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
@@ -471,6 +482,11 @@ def place(conn, task_id, kind, parent_id):
     check_deadlock(conn)
 
 
+def next_id(conn):
+    sql = "SELECT MAX(i) FROM (SELECT MAX(id) AS i FROM tasks UNION ALL SELECT MAX(task_id) FROM events UNION ALL SELECT MAX(task_id) FROM baselines)"
+    return (conn.execute(sql).fetchone()[0] or 0) + 1
+
+
 def cmd_add(conn, args):
     meta = parse_meta(args.meta)
     if args.type is not None:
@@ -489,11 +505,11 @@ def cmd_add(conn, args):
     check_span(meta)
     ts = now()
     with conn, journal(conn):
-        cur = conn.execute(
-            "INSERT INTO tasks (project, title, notes, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (args.project, args.title, args.notes, json.dumps(meta), ts, ts),
+        task_id = next_id(conn)
+        conn.execute(
+            "INSERT INTO tasks (id, project, title, notes, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, args.project, args.title, args.notes, json.dumps(meta), ts, ts),
         )
-        task_id = cur.lastrowid
         if args.parent is not None:
             place(conn, task_id, meta.get("type", "task"), args.parent)
         for dep in args.depends:
@@ -569,7 +585,8 @@ def cmd_show(conn, args):
     def ref(i):
         return {k: tasks[i][k] for k in ("id", "title", "status", "derived_status")}
 
-    data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]])
+    base = latest_baselines(conn, [task["project"]]).get(task["id"])
+    data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]], baseline=base)
     if args.brief:
         data = dict(brief_task(task), depends_on=task["depends_on"], blocks=task["blocks"])
     out = [
@@ -592,6 +609,9 @@ def cmd_show(conn, args):
         out.append(f"due:     {task['due']}")
     if task["meta"].get("promised") and task["type"] == "external":
         out.append(f"promised: {task['meta']['promised']}")
+    if base and (base["due"] or task["due"]) and base["due"] != task["due"]:
+        delta = days_between(base["due"], task["due"])
+        out.append(f"baseline: due {base['due'] or '-'} ({base['label']})" + (f", now {delta:+d}d" if delta is not None else ""))
     if task["late_days"]:
         out.append(f"late:    {task['late_days']}d")
     if task["chase_due"]:
@@ -882,6 +902,109 @@ def cmd_changes(conn, args):
     emit(args, {"since": since, **found}, "\n".join(out) if len(out) > 1 else f"no changes since {since}")
 
 
+def baseline_labels(conn, project):
+    sql = "SELECT label, MIN(at) AS at, COUNT(*) AS tasks FROM baselines WHERE project=? GROUP BY label ORDER BY at, label"
+    return [dict(r) for r in conn.execute(sql, (project,))]
+
+
+def baseline_rows(conn, project, label=None):
+    labels = baseline_labels(conn, project)
+    if label is None:
+        if not labels:
+            return None, {}
+        label = labels[-1]["label"]
+    elif label not in {l["label"] for l in labels}:
+        raise Fail(f"no baseline {label!r} in project {project}")
+    rows = conn.execute("SELECT * FROM baselines WHERE project=? AND label=?", (project, label))
+    return label, {r["task_id"]: dict(r) for r in rows}
+
+
+def latest_baselines(conn, projects):
+    found = {}
+    for project in projects:
+        label, rows = baseline_rows(conn, project)
+        found.update({i: {"label": label, "start": r["start"], "due": r["due"]} for i, r in rows.items()})
+    return found
+
+
+def days_between(old, new):
+    return (date.fromisoformat(new) - date.fromisoformat(old)).days if old and new else None
+
+
+def cmd_baseline_set(conn, args):
+    label = args.label or today().isoformat()
+    tasks = [t for t in load(conn).values() if t["project"] == args.project]
+    if not tasks:
+        raise Fail(f"project {args.project} has no tasks to baseline")
+    with conn:
+        if any(l["label"] == label for l in baseline_labels(conn, args.project)):
+            if not args.replace:
+                raise Fail(f"baseline {label!r} exists; pass --replace or choose another --label")
+            conn.execute("DELETE FROM baselines WHERE project=? AND label=?", (args.project, label))
+        ts = now()
+        conn.executemany(
+            "INSERT INTO baselines (project, label, at, task_id, title, type, start, due) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(args.project, label, ts, t["id"], t["title"], t["type"], t["start"], t["due"]) for t in tasks],
+        )
+    emit(args, {"label": label, "at": ts, "tasks": len(tasks)}, f"baseline {label!r}: {len(tasks)} tasks")
+
+
+def cmd_baseline_ls(conn, args):
+    labels = baseline_labels(conn, args.project)
+    emit(args, labels, "\n".join(f"{l['label']:<24} {l['at'][:10]}  {l['tasks']} tasks" for l in labels) or "no baselines")
+
+
+def cmd_baseline_rm(conn, args):
+    with conn:
+        cur = conn.execute("DELETE FROM baselines WHERE project=? AND label=?", (args.project, args.label))
+    if cur.rowcount == 0:
+        raise Fail(f"no baseline {args.label!r} in project {args.project}")
+    emit(args, {"removed": args.label}, f"removed baseline {args.label!r}")
+
+
+def cmd_baseline_diff(conn, args):
+    label, base = baseline_rows(conn, args.project, args.label)
+    if label is None:
+        raise Fail(f"project {args.project} has no baseline; run baseline set first")
+    at = next(l["at"] for l in baseline_labels(conn, args.project) if l["label"] == label)
+    tasks = {i: t for i, t in load(conn).items() if t["project"] == args.project}
+    moved, lanes = [], {}
+    for i, t in tasks.items():
+        if i not in base:
+            continue
+        for field in ("due", "start"):
+            old, new = base[i][field], t[field]
+            if old == new:
+                continue
+            days = days_between(old, new)
+            moved.append(dict(brief_task(t), field=field, baseline=old, now=new, days=days))
+            if field == "due" and days:
+                lane = lanes.setdefault(t["lane"] or "Unassigned", {"lane": t["lane"] or "Unassigned", "later": 0, "earlier": 0, "max_days": 0})
+                lane["later" if days > 0 else "earlier"] += 1
+                lane["max_days"] = max(lane["max_days"], days)
+    moved.sort(key=lambda m: (m["type"] != "milestone", m["field"] != "due", -(m["days"] or 0), m["id"]))
+    added = [brief_task(t) for i, t in tasks.items() if i not in base]
+    removed = [{"id": i, "title": r["title"], "type": r["type"]} for i, r in sorted(base.items()) if i not in tasks]
+    lane_rows = sorted(lanes.values(), key=lambda l: (l["lane"] == "Unassigned", l["lane"].lower()))
+
+    def shift(m):
+        delta = f" ({m['days']:+d}d)" if m["days"] is not None else ""
+        return f"#{m['id']} {'[milestone] ' if m['type'] == 'milestone' else ''}{m['title']} — {m['field']} {m['baseline'] or '-'} → {m['now'] or '-'}{delta}"
+
+    out = [f"Baseline {label!r} (set {at[:10]}) vs now"]
+    if moved:
+        out += ["", "Moved", *(f"  {shift(m)}" for m in moved)]
+    if added:
+        out += ["", "Added since baseline", *(f"  #{t['id']} {t['title']}" for t in added)]
+    if removed:
+        out += ["", "Removed since baseline", *(f"  #{t['id']} {t['title']}" for t in removed)]
+    if lane_rows:
+        out += ["", "By lane", *(f"  {l['lane']}: {l['later']} later (max {l['max_days']:+d}d), {l['earlier']} earlier" for l in lane_rows)]
+    if len(out) == 1:
+        out.append("no changes")
+    emit(args, {"label": label, "at": at, "moved": moved, "added": added, "removed": removed, "lanes": lane_rows}, "\n".join(out))
+
+
 def cmd_export(conn, args):
     keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
     tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
@@ -898,9 +1021,11 @@ def cmd_export(conn, args):
 def graph_payload(conn, args):
     tasks = scoped(load(conn), args)
     ids = {t["id"] for t in tasks}
+    base = latest_baselines(conn, {t["project"] for t in tasks})
     nodes = []
     for t in tasks:
         node = {k: t[k] for k in NODE_FIELDS}
+        node["baseline"] = base.get(t["id"])
         node["depends_on"] = [i for i in t["depends_on"] if i in ids]
         node["blocks"] = [i for i in t["blocks"] if i in ids]
         node["parent"] = t["parent"] if t["parent"] in ids else None
@@ -1029,6 +1154,10 @@ COMMANDS = {
     "add": cmd_add,
     "dep add": cmd_dep_add,
     "dep rm": cmd_dep_rm,
+    "baseline set": cmd_baseline_set,
+    "baseline ls": cmd_baseline_ls,
+    "baseline diff": cmd_baseline_diff,
+    "baseline rm": cmd_baseline_rm,
     "ls": cmd_ls,
     "ready": cmd_ready,
     "show": cmd_show,
@@ -1080,6 +1209,17 @@ def build_parser():
         p = command(name, dep_sub)
         p.add_argument("task", type=int)
         p.add_argument("depends_on", type=int)
+
+    base = command("baseline")
+    base_sub = base.add_subparsers(dest="baseline_command", required=True)
+    p = command("set", base_sub)
+    p.add_argument("--label")
+    p.add_argument("--replace", action="store_true")
+    command("ls", base_sub)
+    p = command("diff", base_sub)
+    p.add_argument("--label")
+    p = command("rm", base_sub)
+    p.add_argument("label")
 
     p = command("ls")
     p.add_argument("--status", choices=FILTERS, nargs="+", action="extend")
@@ -1166,7 +1306,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False))
     args.json = args.json or args.brief
     args.project = args.project or default_project()
-    key = f"dep {args.dep_command}" if args.command == "dep" else args.command
+    key = f"{args.command} {getattr(args, args.command + '_command')}" if args.command in ("dep", "baseline") else args.command
     try:
         COMMANDS[key](connect(args.db), args)
     except (Fail, sqlite3.Error) as e:

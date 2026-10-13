@@ -77,6 +77,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
     <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#262c36" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#262c36" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
+    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
   </div>
   <div class="col" id="legendStatus"></div>
 </div>
@@ -273,6 +274,10 @@ const cy = cytoscape({
       'shape': 'rectangle', 'width': 1, 'height': 1, 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'top', 'text-margin-x': 4, 'text-margin-y': 20,
       'color': '#fbbf24', 'font-size': 11, 'font-weight': 'bold', 'z-index-compare': 'manual', 'z-index': 1
+    } },
+    { selector: 'node.tl-base', style: {
+      'shape': 'rectangle', 'width': 2, 'height': 'data(h)', 'padding': 0, 'background-color': '#9ca3af', 'background-opacity': 0.8, 'border-width': 0,
+      'events': 'no', 'label': '', 'z-index-compare': 'manual', 'z-index': 3
     } },
     { selector: 'edge.tl-today', style: { 'curve-style': 'straight', 'line-style': 'dashed', 'line-color': '#fbbf24', 'width': 1.5, 'target-arrow-shape': 'none', 'events': 'no', 'z-index-compare': 'manual', 'z-index': 1 } },
     { selector: 'edge.tl-off', style: { 'display': 'none' } },
@@ -645,7 +650,8 @@ function layoutTimeline(fit) {
     spans.push([from, rows.length]);
   });
   const today = DATA.today || new Date().toLocaleDateString('sv');
-  const days = [today, ...rows.flatMap(r => r.n ? datesOf(r.n) || [] : [])].map(dnum);
+  const baseDue = n => n.baseline && n.baseline.due && n.baseline.due !== n.due && datesOf(n) ? n.baseline.due : null;
+  const days = [today, ...rows.flatMap(r => r.n ? [...(datesOf(r.n) || []), baseDue(r.n)].filter(Boolean) : [])].map(dnum);
   const lo = Math.min(...days) - 7, hi = Math.max(...days) + 14;
   const left = TL.names + 16;
   const xOf = d => left + (dnum(d) - lo) * TL.px;
@@ -666,6 +672,7 @@ function layoutTimeline(fit) {
     const x = mark === 'mk-none' ? TL.names / 2 : mark === 'mk-pt' ? x1 : x1 + w / 2;
     const pct = n.rollup && n.rollup.total ? Math.round(100 * n.rollup.done / n.rollup.total) : 0;
     ele.removeClass('mk-none mk-pt mk-bar mk-sum').addClass(mark).data({ w, h, pct }).position({ x, y });
+    if (baseDue(n)) els.push(bg('tl-base', 'tl:base:' + n.id, { h: TL.bar + 8 }, xOf(baseDue(n)), y));
     if (d) marks.set(String(n.id), { id: String(n.id), x, y, h, x1: x - w / 2, x2: x + w / 2, pt: mark === 'mk-pt', from: mark === 'mk-sum' ? x + w / 2 : x - w / 2 - 4, end: x + w / 2 + 6 + ctx.measureText(ele.data('label')).width });
     const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + '#' + n.id + ' ' + n.title;
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
@@ -843,6 +850,12 @@ function refList(ids) {
   }));
 }
 
+function baselineText(n) {
+  const b = n.baseline;
+  const delta = b.due && n.due ? Math.round(dnum(n.due) - dnum(b.due)) : null;
+  return (b.due ? day(b.due) : 'none') + (delta ? ` (${delta > 0 ? '+' : ''}${delta}d)` : '') + ' · ' + b.label;
+}
+
 function conflictList(list) {
   return el('ul', null, ...list.map(c => {
     const on = byId.has(c.with) && passes(byId.get(c.with));
@@ -868,6 +881,7 @@ function openPanel(n) {
       row('Project', n.project),
       n.start ? row('Start', day(n.start)) : null,
       n.type === 'task' && n.due ? row('Due', day(n.due)) : null,
+      n.baseline && n.baseline.due !== n.due ? row('Baseline due', baselineText(n)) : null,
       ...fields.filter(([k]) => n.meta[k] != null && n.meta[k] !== '').map(([k, label]) => row(label, show(k, n.meta[k]))),
       n.rollup && n.rollup.total ? row('Progress', `${n.rollup.done}/${n.rollup.total} done`) : null,
       row('Created', fmt(n.created_at)),

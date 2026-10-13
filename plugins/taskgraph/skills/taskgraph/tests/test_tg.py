@@ -723,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "baseline"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -1293,3 +1293,62 @@ def test_changes_net_out_round_trips(tg, db):
     tg("date", str(a), "--due", "2026-11-01")
     data = tg("changes")
     assert data["slipped"] == [] and data["pulled_in"] == [] and data["rescoped"] == []
+
+
+def test_baseline_set_ls_diff_rm(tg, fail, raw):
+    fail("baseline", "set")
+    m = add(tg, "Pilot", "--type", "milestone", "--due", "2026-12-15")
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    a = add(tg, "VPC", "--parent", str(ws), "--start", "2026-10-01", "--due", "2026-10-10")
+    b = add(tg, "Runbook", "--due", "2026-11-01")
+    gone = add(tg, "Gone")
+    assert tg("baseline", "set", "--label", "SteerCo")["tasks"] == 5
+    fail("baseline", "set", "--label", "SteerCo")
+    tg("date", str(m), "--due", "2027-01-08")
+    tg("date", str(a), "--due", "2026-10-24")
+    tg("date", str(b), "--due", "2026-10-25")
+    tg("rm", str(gone))
+    new = add(tg, "New")
+    diff = tg("baseline", "diff")
+    assert diff["label"] == "SteerCo"
+    assert [(r["id"], r["field"], r["baseline"], r["now"], r["days"]) for r in diff["moved"]] == [
+        (m, "due", "2026-12-15", "2027-01-08", 24),
+        (a, "due", "2026-10-10", "2026-10-24", 14),
+        (b, "due", "2026-11-01", "2026-10-25", -7),
+    ]
+    assert ids(diff["added"]) == [new]
+    assert diff["removed"] == [{"id": gone, "title": "Gone", "type": "task"}]
+    assert diff["lanes"] == [{"lane": "Infra", "later": 1, "earlier": 0, "max_days": 14}, {"lane": "Unassigned", "later": 1, "earlier": 1, "max_days": 24}]
+    out = raw("--project", "demo", "baseline", "diff").stdout
+    assert f"#{m} [milestone] Pilot — due 2026-12-15 → 2027-01-08 (+24d)" in out
+    shown = raw("--project", "demo", "show", str(a)).stdout
+    assert "baseline: due 2026-10-10 (SteerCo), now +14d" in shown
+    assert tg("show", str(a))["baseline"] == {"label": "SteerCo", "start": "2026-10-01", "due": "2026-10-10"}
+    tg("baseline", "set", "--label", "later")
+    assert [l["label"] for l in tg("baseline", "ls")] == ["SteerCo", "later"]
+    assert tg("baseline", "diff")["moved"] == []
+    assert tg("baseline", "diff", "--label", "SteerCo")["moved"]
+    tg("baseline", "set", "--label", "later", "--replace")
+    tg("baseline", "rm", "later")
+    fail("baseline", "rm", "later")
+    fail("baseline", "diff", "--label", "nope")
+
+
+def test_baseline_is_per_project_and_in_graph_payload(tg, raw, tmp_path):
+    a = add(tg, "A", "--due", "2026-11-01")
+    tg("baseline", "set")
+    raw("--project", "other", "add", "B")
+    assert json.loads(raw("--project", "other", "--json", "baseline", "ls").stdout) == []
+    tg("date", str(a), "--due", "2026-11-05")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    assert '"baseline": {"label": "2026-10-13", "start": null, "due": "2026-11-01"}' in out.read_text()
+
+
+def test_ids_are_never_reused(tg):
+    a = add(tg, "A")
+    b = add(tg, "B")
+    tg("rm", str(b))
+    assert add(tg, "C") == b + 1
+    tg("rm", str(a))
+    assert add(tg, "D") == b + 2

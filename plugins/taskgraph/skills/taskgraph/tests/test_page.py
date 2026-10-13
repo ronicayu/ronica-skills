@@ -28,6 +28,8 @@ def page_file(tmp_path_factory):
     tg("add", "Undated chore", "--meta", "lane=docs")
     tg("dep", "add", "2", "3")
     tg("dep", "add", "3", "5")
+    tg("baseline", "set", "--label", "plan")
+    tg("date", "3", "--due", "2026-11-25")
     out = tmp / "graph.html"
     tg("graph", "--no-open", "--out", str(out))
     return out
@@ -66,4 +68,13 @@ def test_page_renders_and_opens_panel(browser, page_file, view):
     page.wait_for_function("document.getElementById('panel').style.display === 'block'")
     assert "Vendor key" in page.inner_text("#panel")
     assert problems == []
+    page.close()
+
+
+def test_timeline_marks_baseline_and_today(browser, page_file):
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    page.goto(f"{page_file.as_uri()}?view=timeline")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("cy.nodes('.tl-base').map(n => n.id())") == ["tl:base:3"]
+    assert page.evaluate("cy.getElementById('tl:today').data('name')") == "Today 10/13"
     page.close()

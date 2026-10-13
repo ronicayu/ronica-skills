@@ -56,6 +56,10 @@ tg.py date ID --promised 2027-02-01
 
 Every command that changes data records what changed (title, status, type, parent, dates, dependencies, notes, meta) in an `events` table, in the same transaction. `changes [--since 7d|2w|DATE]` reads it back as New, Started, Completed, Reopened, Slipped, Pulled in, Re-scoped (title, type, parent, dependencies, person, lane, team, a date set or cleared) and Removed. Changes are netted per task over the window, so a date moved and moved back shows nothing. History starts when this version first touches the DB; earlier changes were not recorded.
 
+## Baselines
+
+When the plan is agreed (a steering committee, a funding gate), run `baseline set --label "SteerCo 2026-10-13"`. It snapshots every task's start and due in the project; `--label` defaults to today and an existing label needs `--replace`. `baseline diff [--label L]` (latest by default) lists dates moved since then, milestones first and largest slip first, plus tasks added and removed since and a per-lane count of later and earlier dues. `show` prints the baseline due beside the current one, and the Timeline draws a grey tick where a bar was due at baseline. Task ids are never reused, so a baseline always refers to the same task.
+
 ## Weekly steering prep
 
 1. `changes` for what moved since last week.
@@ -124,6 +128,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
 | `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
 | `changes [--since 7d\|DATE] [--all-projects]` | What changed since a date: new, started, completed, reopened, slipped, pulled in, re-scoped, removed |
+| `baseline set [--label L] [--replace]` / `baseline ls` / `baseline diff [--label L]` / `baseline rm LABEL` | Snapshot dates, list snapshots, compare now against one, delete one |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
 | `projects` | Projects with total, done, ready, blocked counts |
 
