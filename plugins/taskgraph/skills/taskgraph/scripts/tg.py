@@ -73,6 +73,8 @@ INHERITED = ("lane", "team")
 SORTS = ("id", "due", "late")
 DATE_FIELDS = ("due", "start", "promised")
 SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
+RAG = ("green", "amber", "red")
+LEVELS = {"low": 1, "medium": 2, "high": 3}
 CHANGE_BUCKETS = {
     "new": "New", "started": "Started", "completed": "Completed", "reopened": "Reopened",
     "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "removed": "Removed",
@@ -311,6 +313,10 @@ def driving(tasks, root, hops):
     return worst(root)[1]
 
 
+def plural(n, one, many=None):
+    return f"{n} {one if n == 1 else many or one + 's'}"
+
+
 def outlook_text(o):
     if o["verdict"] == "on_track":
         return "on track" + (f" — min slack {o['min_slack']:+d}d" if o["min_slack"] is not None else "")
@@ -320,11 +326,11 @@ def outlook_text(o):
     if o["late_upstream"]:
         parts.append(f"{len(o['late_upstream'])} late upstream ({', '.join(f'#{i}' for i in o['late_upstream'])})")
     if o["negative_slack"]:
-        parts.append(f"{o['negative_slack']} hops with negative slack")
+        parts.append(plural(o["negative_slack"], "hop", "hops") + " with negative slack")
     if o["min_slack"] is not None:
         parts.append(f"min slack {o['min_slack']:+d}d")
     if o["open_risks"]:
-        parts.append(f"{len(o['open_risks'])} open risks")
+        parts.append(plural(len(o["open_risks"]), "open risk"))
     return "at risk — " + (", ".join(parts) or "itself late")
 
 
@@ -1037,7 +1043,15 @@ def describe(field, old, new):
 
 def cmd_changes(conn, args):
     since = resolve_since(args.since)
-    tasks = load(conn)
+    found, text = collect_changes(conn, load(conn), args, since)
+    out = [f"Changes since {since}"]
+    for name, heading in CHANGE_BUCKETS.items():
+        if text[name]:
+            out += ["", heading, *(f"  {t}" for t in text[name])]
+    emit(args, {"since": since, **found}, "\n".join(out) if len(out) > 1 else f"no changes since {since}")
+
+
+def collect_changes(conn, tasks, args, since):
     rows = [r for r in conn.execute("SELECT * FROM events WHERE at >= ? ORDER BY id", (since + "T00:00:00Z",)) if args.all_projects or r["project"] == args.project]
     by_task = {}
     for r in rows:
@@ -1087,11 +1101,7 @@ def cmd_changes(conn, args):
         if task["derived_status"] == "done" and task["done_at"] and task["done_at"] >= since + "T00:00:00Z":
             found["completed"].append(dict(brief_task(task), done_at=task["done_at"]))
             text["completed"].append(f"#{task['id']} {marker(task)}{task['title']} — done {task['done_at'][:10]}")
-    out = [f"Changes since {since}"]
-    for name, heading in CHANGE_BUCKETS.items():
-        if text[name]:
-            out += ["", heading, *(f"  {t}" for t in text[name])]
-    emit(args, {"since": since, **found}, "\n".join(out) if len(out) > 1 else f"no changes since {since}")
+    return found, text
 
 
 def baseline_labels(conn, project):
@@ -1195,6 +1205,204 @@ def cmd_baseline_diff(conn, args):
     if len(out) == 1:
         out.append("no changes")
     emit(args, {"label": label, "at": at, "moved": moved, "added": added, "removed": removed, "lanes": lane_rows}, "\n".join(out))
+
+
+def level(value):
+    if isinstance(value, (int, float)):
+        return value
+    return LEVELS.get(str(value).strip().lower(), 0) if value is not None else 0
+
+
+def risk_score(task):
+    return level(task["meta"].get("likelihood")) * level(task["meta"].get("impact"))
+
+
+def worst(rags):
+    return max(rags, key=RAG.index, default="green")
+
+
+def group_name(task, by):
+    value = person(task) if by == "owner" else task["project"] if by == "project" else task[by]
+    return str(value) if value else "Unassigned"
+
+
+def group_status(tasks, items, day, limit):
+    red, amber = [], []
+    for t in items:
+        if t["derived_status"] == "done":
+            continue
+        ref = f"#{t['id']} {t['title']}"
+        if t["late_days"]:
+            red.append(f"{ref} late {t['late_days']}d")
+        if t["outlook"] and t["outlook"]["verdict"] == "at_risk":
+            red.append(f"{ref} at risk")
+        if t["type"] == "issue" and level(t["meta"].get("severity")) >= 3:
+            red.append(f"{ref} high-severity issue open")
+        if t["conflicts"]:
+            amber.append(f"{ref} date conflict")
+        if t["due"] and day <= t["due"] <= limit and t["derived_status"] == "blocked":
+            amber.append(f"{ref} due {t['due']} and still blocked")
+        if t["status"] == "open" and not computed(t) and t["start"] and t["start"] < day:
+            amber.append(f"{ref} should have started {t['start']}")
+        if t["chase_due"]:
+            amber.append(f"{ref} chase due")
+        if t["type"] == "risk" and (risk_score(t) >= 9 or (t["due"] and t["due"] <= day)):
+            amber.append(f"{ref} " + ("high/high risk open" if risk_score(t) >= 9 else "risk review due"))
+        if t["type"] == "issue" and level(t["meta"].get("severity")) < 3:
+            amber.append(f"{ref} issue open")
+    return ("red" if red else "amber" if amber else "green"), red + amber
+
+
+def asks_for(tasks, day, limit):
+    asks = []
+    for t in tasks:
+        if t["derived_status"] == "done":
+            continue
+        who_ = person(t)
+        tag = f" ({who_})" if who_ else ""
+        if t["type"] == "decision" and (not t["due"] or t["late_days"] or t["due"] <= limit):
+            when = f"by {t['due']}" + (f", {t['late_days']}d late" if t["late_days"] else "") if t["due"] else "no decide-by date"
+            asks.append({"kind": "decide", "id": t["id"], "text": f"Decide #{t['id']} {t['title']}{tag}: {when}"})
+        if t["type"] == "external":
+            promised = normal(t["meta"].get("promised"))
+            why = [f"late {t['late_days']}d" if t["late_days"] else None, "chase due" if t["chase_due"] else None,
+                   f"promised {promised} after needed {t['due']}" if promised and t["due"] and promised > t["due"] else None]
+            if any(why):
+                asks.append({"kind": "chase", "id": t["id"], "text": f"Chase #{t['id']} {t['title']}{tag}: " + ", ".join(w for w in why if w)})
+        if t["type"] == "issue":
+            sev = t["meta"].get("severity")
+            asks.append({"kind": "resolve", "id": t["id"], "text": f"Resolve #{t['id']} {t['title']}{tag}" + (f": severity {sev}" if sev else "") + (f", due {t['due']}" if t["due"] else "")})
+    return asks
+
+
+def cmd_report(conn, args):
+    day = today().isoformat()
+    limit = (today() + timedelta(days=args.within)).isoformat()
+    since = resolve_since(args.since)
+    tasks = load(conn)
+    scope = scoped(tasks, args)
+    base = latest_baselines(conn, {t["project"] for t in scope})
+    found, _ = collect_changes(conn, tasks, args, since)
+    counts = {name: len(found[name]) for name in CHANGE_BUCKETS}
+    slips = [c["days"] for c in found["slipped"] if c["field"] == "due"]
+
+    milestones = []
+    for t in sorted((t for t in scope if t["type"] == "milestone" and t["derived_status"] != "done"), key=lambda t: (t["due"] or "9999-12-31", t["id"])):
+        o = t["outlook"]
+        rag = "red" if o["verdict"] == "at_risk" else "amber" if o["verdict"] == "unknown" or not t["due"] else "green"
+        b = base.get(t["id"])
+        drift = days_between(b["due"], t["due"]) if b else None
+        milestones.append(dict(brief_task(t), rag=rag, outlook=o, baseline_days=drift))
+
+    groups = {}
+    for t in scope:
+        if not is_summary(t):
+            groups.setdefault(group_name(t, args.by), []).append(t)
+    rows = []
+    for name, items in groups.items():
+        rag, reasons = group_status(tasks, items, day, limit)
+        leaves = [t for t in items if t["type"] not in ("milestone", "risk")]
+        upcoming = sorted((t for t in items if t["derived_status"] != "done" and t["due"] and t["type"] != "risk"),
+                          key=lambda t: (t["type"] != "milestone", t["due"], t["id"]))
+        nxt = upcoming[0] if upcoming else None
+        rows.append({
+            "name": name, "rag": rag, "reasons": reasons,
+            "rollup": {"done": sum(t["derived_status"] == "done" for t in leaves), "total": len(leaves)},
+            "late": sum(bool(t["late_days"]) for t in items if t["derived_status"] != "done"),
+            "conflicts": sum(bool(t["conflicts"]) for t in items if t["derived_status"] != "done"),
+            "next": {"id": nxt["id"], "title": nxt["title"], "type": nxt["type"], "due": nxt["due"]} if nxt else None,
+        })
+    rows.sort(key=lambda r: (-RAG.index(r["rag"]), r["name"] == "Unassigned", r["name"].lower()))
+
+    open_ = [t for t in scope if t["derived_status"] != "done"]
+    by_due = lambda t: (t["due"] or "9999-12-31", t["id"])
+    decisions = [dict(brief_task(t), decider=t["meta"].get("decider")) for t in sorted((t for t in open_ if t["type"] == "decision"), key=by_due)]
+    externals = [dict(brief_task(t), party=t["meta"].get("party"), promised=normal(t["meta"].get("promised")), chase=t["meta"].get("chase"), chase_due=t["chase_due"])
+                 for t in sorted((t for t in open_ if t["type"] == "external"), key=by_due)]
+    risks = [dict(brief_task(t), owner=t["meta"].get("owner"), likelihood=t["meta"].get("likelihood"), impact=t["meta"].get("impact"),
+                  mitigation=t["meta"].get("mitigation"), score=risk_score(t))
+             for t in sorted((t for t in open_ if t["type"] == "risk"), key=lambda t: (-risk_score(t), t["due"] or "9999-12-31", t["id"]))][:args.risks]
+    issues = [dict(brief_task(t), owner=t["meta"].get("owner"), severity=t["meta"].get("severity"))
+              for t in sorted((t for t in open_ if t["type"] == "issue"), key=lambda t: (-level(t["meta"].get("severity")), *by_due(t)))]
+    asks = asks_for(sorted(open_, key=by_due), day, limit)
+    overall = worst([m["rag"] for m in milestones] + [r["rag"] for r in rows])
+    title = "all projects" if args.all_projects else args.project
+    data = {"scope": title, "date": day, "overall": overall, "since": since, "changes": counts, "max_slip": max(slips, default=None),
+            "milestones": milestones, "by": args.by, "groups": rows, "decisions": decisions, "externals": externals,
+            "risks": risks, "issues": issues, "asks": asks}
+    emit(args, data, report_md(data) if args.md else report_text(data))
+
+
+def change_line(data):
+    c = data["changes"]
+    slip = f" (max +{data['max_slip']}d)" if data["max_slip"] else ""
+    return (f"Since {data['since']}: {c['new']} new · {c['completed']} completed · {c['slipped']} slipped{slip} · "
+            f"{c['pulled_in']} pulled in · {c['rescoped']} re-scoped · {c['removed']} removed")
+
+
+def milestone_note(m):
+    drift = f" · baseline {m['baseline_days']:+d}d" if m["baseline_days"] else ""
+    return outlook_text(m["outlook"]) + drift
+
+
+def next_text(n):
+    return f"next #{n['id']} {n['title']} {n['due']}" if n else "nothing dated ahead"
+
+
+def report_text(d):
+    out = [f"Status: {d['scope']} — {d['date']} — overall {d['overall'].upper()}", change_line(d)]
+    if d["milestones"]:
+        out += ["", "Milestones", *(f"  {m['rag'].upper():<6} #{m['id']} {m['title']} — {m['due'] or 'no date'} — {milestone_note(m)}" for m in d["milestones"])]
+    out += ["", {"lane": "Workstreams", "team": "Teams", "owner": "Owners", "project": "Projects"}[d["by"]]]
+    for r in d["groups"]:
+        progress = f"{r['rollup']['done']}/{r['rollup']['total']} done · " if r["rollup"]["total"] else ""
+        out.append(f"  {r['rag'].upper():<6} {r['name']} — {progress}{r['late']} late · {plural(r['conflicts'], 'conflict')} · {next_text(r['next'])}")
+        out += [f"           {why}" for why in r["reasons"]]
+    sections = [
+        ("Decisions pending", d["decisions"], lambda t: f"#{t['id']} {t['title']} — {t['decider'] or 'no decider'} — " + (f"by {t['due']}" if t["due"] else "no date")),
+        ("Externals", d["externals"], lambda t: f"#{t['id']} {t['title']} — {t['party'] or 'no party'} — " + " · ".join(x for x in (
+            t["due"] and f"needed {t['due']}", t["promised"] and f"promised {t['promised']}", t["chase"] and f"chase {t['chase']}") if x)),
+        ("Top risks", d["risks"], lambda t: f"#{t['id']} {t['title']} — {t['likelihood'] or '?'}/{t['impact'] or '?'} — {t['owner'] or 'no owner'} — "
+            + (f"review {t['due']}" if t["due"] else "no review date") + (f" — {t['mitigation']}" if t["mitigation"] else "")),
+        ("Open issues", d["issues"], lambda t: f"#{t['id']} {t['title']} — {t['severity'] or '?'} — {t['owner'] or 'no owner'}" + (f" — due {t['due']}" if t["due"] else "")),
+    ]
+    for heading, items, fmt in sections:
+        if items:
+            out += ["", heading, *(f"  {fmt(t)}" for t in items)]
+    out += ["", "Asks", *(f"  - {a['text']}" for a in d["asks"])] if d["asks"] else ["", "Asks", "  none"]
+    return "\n".join(out)
+
+
+def cell(value):
+    return str(value if value not in (None, "") else "-").replace("|", "\\|").replace("\n", " ")
+
+
+def table(head, rows):
+    return ["| " + " | ".join(head) + " |", "|" + "---|" * len(head), *("| " + " | ".join(cell(c) for c in r) + " |" for r in rows)]
+
+
+def report_md(d):
+    rag = lambda r: r.capitalize()
+    out = [f"# Status: {d['scope']}, {d['date']}", "", f"**Overall: {rag(d['overall'])}**", "", change_line(d)]
+    if d["milestones"]:
+        out += ["", "## Milestones", "", *table(["RAG", "Milestone", "Date", "Outlook"],
+                [(rag(m["rag"]), f"#{m['id']} {m['title']}", m["due"], milestone_note(m)) for m in d["milestones"]])]
+    heading = {"lane": "Workstreams", "team": "Teams", "owner": "Owners", "project": "Projects"}[d["by"]]
+    out += ["", f"## {heading}", "", *table(["RAG", heading[:-1], "Progress", "Late", "Conflicts", "Next", "Why"],
+            [(rag(r["rag"]), r["name"], f"{r['rollup']['done']}/{r['rollup']['total']}" if r["rollup"]["total"] else None, r["late"], r["conflicts"],
+              f"#{r['next']['id']} {r['next']['title']} {r['next']['due']}" if r["next"] else None, "; ".join(r["reasons"])) for r in d["groups"]])]
+    if d["decisions"]:
+        out += ["", "## Decisions pending", "", *table(["#", "Decision", "Decider", "By"], [(t["id"], t["title"], t["decider"], t["due"]) for t in d["decisions"]])]
+    if d["externals"]:
+        out += ["", "## Externals", "", *table(["#", "External", "Party", "Needed", "Promised", "Chase"],
+                [(t["id"], t["title"], t["party"], t["due"], t["promised"], t["chase"]) for t in d["externals"]])]
+    if d["risks"]:
+        out += ["", "## Top risks", "", *table(["#", "Risk", "Likelihood", "Impact", "Owner", "Review", "Mitigation"],
+                [(t["id"], t["title"], t["likelihood"], t["impact"], t["owner"], t["due"], t["mitigation"]) for t in d["risks"]])]
+    if d["issues"]:
+        out += ["", "## Open issues", "", *table(["#", "Issue", "Severity", "Owner", "Due"], [(t["id"], t["title"], t["severity"], t["owner"], t["due"]) for t in d["issues"]])]
+    out += ["", "## Asks", "", *(f"- {a['text']}" for a in d["asks"])] if d["asks"] else ["", "## Asks", "", "None."]
+    return "\n".join(out)
 
 
 def cmd_export(conn, args):
@@ -1363,6 +1571,7 @@ COMMANDS = {
     "date": cmd_date,
     "path": cmd_path,
     "deps": cmd_deps,
+    "report": cmd_report,
     "agenda": cmd_agenda,
     "changes": cmd_changes,
     "export": cmd_export,
@@ -1463,6 +1672,14 @@ def build_parser():
     p = command("deps")
     p.add_argument("--cross", choices=("lane", "team", "owner"))
     p.add_argument("--open", action="store_true")
+    p.add_argument("--all-projects", action="store_true")
+
+    p = command("report")
+    p.add_argument("--by", choices=("lane", "team", "owner", "project"), default="lane")
+    p.add_argument("--within", type=int, default=14)
+    p.add_argument("--since", default="7d")
+    p.add_argument("--risks", type=int, default=5)
+    p.add_argument("--md", action="store_true")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("changes")

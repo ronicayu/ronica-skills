@@ -69,6 +69,18 @@ Every command that changes data records what changed (title, status, type, paren
 
 When the plan is agreed (a steering committee, a funding gate), run `baseline set --label "SteerCo 2026-10-13"`. It snapshots every task's start and due in the project; `--label` defaults to today and an existing label needs `--replace`. `baseline diff [--label L]` (latest by default) lists dates moved since then, milestones first and largest slip first, plus tasks added and removed since and a per-lane count of later and earlier dues. `show` prints the baseline due beside the current one, and the Timeline draws a grey tick where a bar was due at baseline. Task ids are never reused, so a baseline always refers to the same task.
 
+## Status report
+
+`report [--by lane|team|owner|project] [--within 14] [--since 7d] [--risks 5] [--md]` writes the one-page status: overall RAG, a line of changes since `--since`, each open milestone with its outlook and baseline drift, a RAG row per group with the reasons, then decisions pending, externals, top risks by likelihood × impact, open issues and Asks (decisions late, undated or due within the window; externals late, chase due or promised late; open issues). `--md` prints Markdown to paste into a deck or doc.
+
+The RAG rules are fixed so they mean the same every week:
+
+- Red: anything late, a milestone or objective at risk, or a high-severity issue open.
+- Amber: a date conflict, something due within `--within` days and still blocked, an open task whose start has passed, a chase due, a high/high risk open or a risk review due, or any other issue open.
+- Green: none of these. A milestone is red when at risk, amber when its outlook is unknown or it has no date.
+
+Add the narrative yourself: what the reds mean, what is being done, and what you need from the reader. The Asks list is the starting point.
+
 ## Weekly steering prep
 
 1. `changes` for what moved since last week.
@@ -76,6 +88,7 @@ When the plan is agreed (a steering committee, a funding gate), run `baseline se
 3. `deps --cross lane --open` for hand-offs between workstreams and who owns each side.
 4. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
 5. `serve` and open the Timeline view for the picture.
+6. `report --md` for the written status; add the narrative.
 
 ## Avoiding duplicates and big plans
 
@@ -143,6 +156,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `changes [--since 7d\|DATE] [--all-projects]` | What changed since a date: new, started, completed, reopened, slipped, pulled in, re-scoped, removed |
 | `baseline set [--label L] [--replace]` / `baseline ls` / `baseline diff [--label L]` / `baseline rm LABEL` | Snapshot dates, list snapshots, compare now against one, delete one |
 | `deps [--cross lane\|team\|owner] [--open] [--all-projects]` | Dependency edges with both sides' person, lane and status and the slack between them, tightest first; `--cross` keeps hand-offs between lanes, teams or people, `--open` drops finished upstream work |
+| `report [--by lane\|team\|owner\|project] [--within DAYS] [--since 7d\|DATE] [--risks N] [--md] [--all-projects]` | One-page status with RAG per group, milestones, decisions, externals, risks, issues and asks |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
 | `projects` | Projects with total, done, ready, blocked counts |
 

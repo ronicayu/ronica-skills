@@ -1476,3 +1476,63 @@ def test_deps_cross_and_open(tg, raw):
     assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "team")] == [(a, c)]
     out = raw("--project", "demo", "deps", "--cross", "lane", "--open").stdout.strip()
     assert out == f"#{a} VPC [ready] (Priya · Infra) → #{c} Replicate [blocked] (Mei · Data) · slack -9d"
+
+
+def report_fixture(tg):
+    infra = add(tg, "Infra", "--meta", "lane=Infra")
+    late = add(tg, "VPC", "--parent", str(infra), "--due", "2026-10-10", "--meta", "owner=Priya")
+    iam = add(tg, "IAM", "--parent", str(infra), "--due", "2026-10-30", "--meta", "owner=Priya")
+    tg("done", str(iam))
+    data = add(tg, "Replicate", "--start", "2026-10-15", "--due", "2026-11-15", "--meta", "owner=Mei", "lane=Data", "--depends", str(late))
+    calm = add(tg, "Docs", "--due", "2026-12-01", "--meta", "owner=Bo", "lane=Docs")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-12-15", "--depends", str(data), "--meta", "lane=Programme")
+    gate = add(tg, "Approve | sign", "--type", "decision", "--due", "2026-10-20", "--meta", "decider=CISO", "lane=Security")
+    undecided = add(tg, "Vendor", "--type", "decision", "--meta", "decider=CTO", "lane=Security")
+    ext = add(tg, "Pen test", "--type", "external", "--due", "2026-12-05", "--promised", "2026-12-10", "--meta", "party=SecureCo", "lane=Security")
+    risk = add(tg, "Capacity", "--type", "risk", "--due", "2026-11-01", "--blocks", str(data), "--meta", "owner=Priya", "likelihood=high", "impact=high", "lane=Data", "mitigation=second region")
+    low = add(tg, "Minor", "--type", "risk", "--due", "2026-11-01", "--meta", "likelihood=low", "impact=low", "lane=Data")
+    issue = add(tg, "Runners flaky", "--type", "issue", "--due", "2026-10-18", "--meta", "owner=Raj", "severity=high", "lane=App")
+    return locals()
+
+
+def test_report_rag_groups_and_asks(tg):
+    f = report_fixture(tg)
+    r = tg("report")
+    assert r["scope"] == "demo" and r["date"] == "2026-10-13" and r["overall"] == "red"
+    assert [(m["id"], m["rag"]) for m in r["milestones"]] == [(f["m"], "red")]
+    groups = {g["name"]: g for g in r["groups"]}
+    assert [g["name"] for g in r["groups"]] == ["App", "Infra", "Programme", "Data", "Security", "Docs"]
+    assert groups["Infra"]["rag"] == "red" and groups["Infra"]["rollup"] == {"done": 1, "total": 2} and groups["Infra"]["late"] == 1
+    assert f"#{f['late']} VPC late 3d" in groups["Infra"]["reasons"]
+    assert groups["App"]["rag"] == "red" and groups["Data"]["rag"] == "amber" and groups["Docs"]["rag"] == "green"
+    assert any("high/high risk open" in why for why in groups["Data"]["reasons"])
+    assert groups["Security"]["rag"] == "amber" and groups["Programme"]["next"]["id"] == f["m"]
+    assert ids(r["decisions"]) == [f["gate"], f["undecided"]]
+    assert ids(r["externals"]) == [f["ext"]] and r["externals"][0]["promised"] == "2026-12-10"
+    assert ids(r["risks"]) == [f["risk"], f["low"]] and r["risks"][0]["score"] == 9
+    assert ids(tg("report", "--risks", "1")["risks"]) == [f["risk"]]
+    assert ids(r["issues"]) == [f["issue"]]
+    assert [(a["kind"], a["id"]) for a in r["asks"]] == [("resolve", f["issue"]), ("decide", f["gate"]), ("chase", f["ext"]), ("decide", f["undecided"])]
+    assert r["changes"]["new"] == 12 and r["changes"]["completed"] == 1
+
+
+def test_report_by_owner_and_text_and_markdown(tg, raw):
+    f = report_fixture(tg)
+    owners = {g["name"]: g["rag"] for g in tg("report", "--by", "owner")["groups"]}
+    assert owners["Priya"] == "red" and owners["Bo"] == "green" and owners["CISO"] == "green" and owners["SecureCo"] == "amber"
+    text = raw("--project", "demo", "report").stdout
+    assert text.startswith("Status: demo — 2026-10-13 — overall RED\nSince 2026-10-06: 12 new · 1 completed")
+    assert "  GREEN  Docs — 0/1 done · 0 late · 0 conflicts · next #" in text
+    assert f"  - Chase #{f['ext']} Pen test (SecureCo): promised 2026-12-10 after needed 2026-12-05" in text
+    md = raw("--project", "demo", "report", "--md").stdout
+    assert md.startswith("# Status: demo, 2026-10-13\n\n**Overall: Red**")
+    assert "## Workstreams" in md and "| RAG | Workstream | Progress | Late | Conflicts | Next | Why |" in md
+    assert f"| {f['gate']} | Approve \\| sign | CISO | 2026-10-20 |" in md
+    assert "## Asks" in md and f"- Resolve #{f['issue']} Runners flaky (Raj): severity high, due 2026-10-18" in md
+
+
+def test_report_all_green(tg, raw):
+    add(tg, "Docs", "--due", "2026-12-01", "--meta", "lane=Docs")
+    r = tg("report")
+    assert r["overall"] == "green" and r["asks"] == []
+    assert raw("--project", "demo", "report").stdout.rstrip().endswith("Asks\n  none")
