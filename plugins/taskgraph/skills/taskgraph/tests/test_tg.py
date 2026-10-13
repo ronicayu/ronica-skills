@@ -647,7 +647,7 @@ def test_milestone_late_clears_when_derived_done(tg):
 def test_human_output_type_and_late(raw):
     raw("--project", "demo", "add", "Wave 1 date", "--type", "decision", "--meta", "decide_by=2026-10-01")
     out = raw("--project", "demo", "ls").stdout.rstrip("\n")
-    assert out == "   1  ready       [decision] Wave 1 date  (late 12d)"
+    assert out == "   1  ready       [decision] Wave 1 date — due 2026-10-01  (late 12d)"
     shown = raw("--project", "demo", "show", "1").stdout
     assert "type:    decision" in shown and "late:    12d" in shown
 
@@ -1133,3 +1133,62 @@ def test_payload_conflicts_span_and_dates(tg, tmp_path):
     assert nodes[a]["span"] is None and nodes[a]["start"] is None and nodes[a]["due"] == "2026-12-10"
     assert nodes[b]["start"] == "2026-12-01" and nodes[b]["due"] is None
     assert [c["with"] for c in nodes[a]["conflicts"]] == [b] and nodes[p]["conflicts"] == []
+
+
+def test_ls_human_shows_due_person_and_inherited_lane(tg, raw):
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    add(tg, "Build VPC", "--parent", str(ws), "--due", "2026-11-01", "--meta", "owner=Priya")
+    add(tg, "Approve", "--type", "decision", "--meta", "decider=CISO")
+    out = raw("--project", "demo", "ls").stdout
+    assert "Build VPC — due 2026-11-01 · Priya · Infra" in out
+    assert "[decision] Approve — CISO" in out
+    assert tg("--brief", "ls")[1]["lane"] == "Infra"
+
+
+def test_ls_filters_and_sort(tg):
+    ws = add(tg, "Infra", "--meta", "lane=Infra", "team=Platform")
+    a = add(tg, "a", "--parent", str(ws), "--due", "2026-12-01", "--meta", "owner=Priya", "tags=[\"net\"]")
+    b = add(tg, "b", "--due", "2026-10-20", "--meta", "owner=raj", "lane=Data")
+    c = add(tg, "c", "--due", "2026-10-01")
+    d = add(tg, "d", "--type", "decision", "--meta", "decider=Priya")
+    assert ids(tg("ls", "--owner", "priya")) == [a, d]
+    assert ids(tg("ls", "--lane", "infra")) == [ws, a]
+    assert ids(tg("ls", "--team", "Platform")) == [ws, a]
+    assert ids(tg("ls", "--meta", "tags=net")) == [a]
+    assert ids(tg("ls", "--meta", "lane=Data", "owner=raj")) == [b]
+    assert ids(tg("ls", "--due-before", "2026-10-31")) == [b, c]
+    assert ids(tg("ls", "--sort", "due")) == [c, b, a, ws, d]
+    assert ids(tg("ls", "--sort", "late"))[0] == c
+    assert ids(tg("ready")) == [a, b, c, d]
+
+
+def test_add_promised(tg, fail):
+    e = tg("add", "Pen test", "--type", "external", "--due", "2026-11-01", "--promised", "+2w")
+    assert e["meta"]["promised"] == "2026-10-27"
+    fail("add", "plain", "--promised", "2026-11-01")
+
+
+def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
+    p = add(tg, "P")
+    a = add(tg, "a", "--parent", str(p))
+    b = add(tg, "b", "--parent", str(p))
+    m = add(tg, "M", "--type", "milestone", "--depends", str(p))
+    tg("done", str(a))
+    assert tg("show", str(p))["done_at"] is None
+    tg("done", str(b))
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET done_at='2026-10-01T00:00:00Z' WHERE id=?", (a,))
+        conn.execute("UPDATE tasks SET done_at='2026-10-05T00:00:00Z' WHERE id=?", (b,))
+    assert tg("show", str(p))["done_at"] == "2026-10-05T00:00:00Z"
+    assert tg("show", str(m))["done_at"] == "2026-10-05T00:00:00Z"
+
+
+def test_tree_roots_skip_isolated_leaves(tg):
+    goal = add(tg, "goal")
+    add(tg, "a", "--blocks", str(goal))
+    loose = add(tg, "loose")
+    ms = add(tg, "M", "--type", "milestone")
+    assert [n["id"] for n in tg("tree")] == [goal, ms]
+    tg("rm", str(goal), "--recursive")
+    tg("rm", str(ms))
+    assert loose in [n["id"] for n in tg("tree")]

@@ -45,7 +45,10 @@ PARENT_TYPES = ("task", "objective")
 DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised")
 DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by"}
 POINTS = ("milestone", "decision")
-DATE_FLAGS = ("--start", "--due", "--promised")
+DATE_FLAGS = ("--start", "--due", "--promised", "--due-before")
+PERSON_KEYS = {"decision": "decider", "external": "party"}
+INHERITED = ("lane", "team")
+SORTS = ("id", "due", "late")
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
 
@@ -122,6 +125,18 @@ def effective_deps(tasks, task):
     return sorted(deps)
 
 
+def inherited(tasks, task, key):
+    for t in [task, *(tasks[a] for a in ancestors(tasks, task["id"]))]:
+        value = t["meta"].get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def person(task):
+    return task["meta"].get(PERSON_KEYS.get(task["type"], "owner"))
+
+
 def is_summary(task):
     return bool(task["children"]) or task["type"] == "objective"
 
@@ -164,6 +179,9 @@ def load(conn):
     for task_id, dep in conn.execute("SELECT task_id, depends_on FROM deps ORDER BY task_id, depends_on"):
         tasks[task_id]["depends_on"].append(dep)
         tasks[dep]["blocks"].append(task_id)
+    for task in tasks.values():
+        for key in INHERITED:
+            task[key] = inherited(tasks, task, key)
     effective = {i: effective_deps(tasks, t) for i, t in tasks.items()}
     current = {i: "blocked" for i in tasks}
     for _ in range(len(tasks) + 1):
@@ -187,8 +205,29 @@ def load(conn):
         chase = parse_date(task["meta"].get("chase")) if task["type"] == "external" else None
         task["chase_due"] = bool(chase and chase <= day and unfinished)
         task["span"] = span(tasks, task) if is_summary(task) else None
+    finish_derived(tasks, effective, current)
     find_conflicts(tasks, effective, current)
     return tasks
+
+
+def finish_derived(tasks, effective, current):
+    memo = {}
+
+    def finished(i):
+        if i not in memo:
+            task = tasks[i]
+            if current[i] != "done":
+                memo[i] = None
+            elif not computed(task):
+                memo[i] = task["done_at"]
+            else:
+                below = effective[i] if task["type"] == "milestone" else task["children"] + task["depends_on"]
+                memo[i] = max(filter(None, map(finished, below)), default=None)
+        return memo[i]
+
+    for task in tasks.values():
+        if computed(task):
+            task["done_at"] = finished(task["id"])
 
 
 def normal(value):
@@ -273,8 +312,8 @@ def check_span(meta):
 
 
 def brief_task(task):
-    keys = ("id", "title", "type", "derived_status", "project", "parent", "start", "due", "late_days")
-    return {**{k: task[k] for k in keys}, "lane": task["meta"].get("lane"), "conflict_count": len(task["conflicts"])}
+    keys = ("id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days")
+    return {**{k: task[k] for k in keys}, "conflict_count": len(task["conflicts"])}
 
 
 def emit(args, data, text=None):
@@ -297,7 +336,9 @@ def line(task, with_project=False):
         suffix += "  (chase due)"
     if task["conflicts"]:
         suffix += "  (conflict)"
-    return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {marker(task)}{task['title']}{suffix}"
+    details = [f"due {task['due']}" if task["due"] else None, person(task), task["lane"]]
+    details = " — " + " · ".join(str(d) for d in details if d) if any(details) else ""
+    return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {marker(task)}{task['title']}{details}{suffix}"
 
 
 def reaches(conn, start, target):
@@ -394,6 +435,10 @@ def cmd_add(conn, args):
         meta["start"] = resolve_date(args.start)
     if args.due is not None:
         meta[DUE_KEYS[meta.get("type", "task")]] = resolve_date(args.due)
+    if args.promised is not None:
+        if meta.get("type") != "external":
+            raise Fail("--promised applies to externals only")
+        meta["promised"] = resolve_date(args.promised)
     check_span(meta)
     ts = now()
     with conn:
@@ -436,19 +481,37 @@ def cmd_ls(conn, args):
     if args.search:
         needle = args.search.lower()
         tasks = [t for t in tasks if needle in t["title"].lower() or needle in t["notes"].lower()]
+    for key, wanted in (("owner", args.owner), ("lane", args.lane), ("team", args.team)):
+        if wanted is not None:
+            tasks = [t for t in tasks if same(person(t) if key == "owner" else t[key], wanted)]
+    for key, wanted in parse_meta(args.meta).items():
+        tasks = [t for t in tasks if same(t[key] if key in INHERITED else t["meta"].get(key), wanted)]
+    if args.due_before is not None:
+        limit = resolve_date(args.due_before)
+        tasks = [t for t in tasks if t["due"] and t["due"] <= limit]
     wanted = args.status
     if wanted:
         tasks = [t for t in tasks if t["derived_status"] in wanted or (t["status"] in wanted and not computed(t))]
     else:
         tasks = [t for t in tasks if t["derived_status"] != "done"]
+    if args.sort == "due":
+        tasks.sort(key=lambda t: (t["due"] or "9999-12-31", t["id"]))
+    elif args.sort == "late":
+        tasks.sort(key=lambda t: (-(t["late_days"] or 0), t["due"] or "9999-12-31", t["id"]))
     emit(args, [brief_task(t) for t in tasks] if args.brief else tasks, "\n".join(line(t, args.all_projects) for t in tasks))
+
+
+def same(actual, wanted):
+    if isinstance(actual, list):
+        return any(same(a, wanted) for a in actual)
+    return actual is not None and str(actual).strip().lower() == str(wanted).strip().lower()
 
 
 def cmd_ready(conn, args):
     args.status = ["ready"]
-    args.parent = None
-    args.type = None
-    args.search = None
+    args.parent = args.type = args.search = args.owner = args.lane = args.team = args.due_before = None
+    args.meta = []
+    args.sort = "id"
     cmd_ls(conn, args)
 
 
@@ -622,7 +685,8 @@ def cmd_tree(conn, args):
     elif args.children:
         roots = [t["id"] for t in tasks.values() if t["project"] == args.project and (t["parent"] is None or tasks[t["parent"]]["project"] != args.project)]
     else:
-        roots = [t["id"] for t in tasks.values() if t["project"] == args.project and not any(tasks[b]["project"] == args.project for b in t["blocks"])]
+        tops = [t for t in tasks.values() if t["project"] == args.project and not any(tasks[b]["project"] == args.project for b in t["blocks"])]
+        roots = [t["id"] for t in tops if t["depends_on"] or t["type"] in ("milestone", "objective")] or [t["id"] for t in tops]
     seen = set()
     nodes = [subtree(tasks, r, kids, seen) for r in roots]
     emit(args, nodes, "\n".join(l for n in nodes for l in render(n)))
@@ -877,6 +941,7 @@ def build_parser():
     p.add_argument("--parent", type=int)
     p.add_argument("--start")
     p.add_argument("--due")
+    p.add_argument("--promised")
 
     dep = command("dep")
     dep_sub = dep.add_subparsers(dest="dep_command", required=True)
@@ -890,6 +955,12 @@ def build_parser():
     p.add_argument("--parent", type=int)
     p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
     p.add_argument("--search")
+    p.add_argument("--owner")
+    p.add_argument("--lane")
+    p.add_argument("--team")
+    p.add_argument("--meta", nargs="+", action="extend", default=[])
+    p.add_argument("--due-before")
+    p.add_argument("--sort", choices=SORTS, default="id")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("ready")

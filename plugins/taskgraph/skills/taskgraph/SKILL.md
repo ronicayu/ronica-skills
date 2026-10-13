@@ -39,10 +39,11 @@ tg.py date ID --promised 2027-02-01
 
 - `--due` writes the type's own key: milestone `date`, decision `decide_by`, external `needed_by`, task and objective `due`.
 - `--start`: when work begins (task) or when it was requested or ordered (external). Ignored for milestones and decisions.
-- `--promised`: externals only, the date the outside party committed to.
-- Values accept `today` and offsets `+3d`, `+2w`, `-1w` (`--due -1w` works). `add` takes `--start` and `--due` too. `start` after `due` is rejected.
+- `--promised`: externals only, the date the outside party committed to. `add` takes it too.
+- Values accept `today` and offsets `+3d`, `+2w`, `-1w` (`--due -1w` works). `add` takes `--start`, `--due` and `--promised` too. `start` after `due` is rejected.
 - A dependency conflicts when it is due after the date its dependent needs it (the dependent's `start`, else its `due`); a child due after its parent's due conflicts; an external promised after `needed_by` conflicts. Conflicts show as `(conflict)` in `ls` and in `show`; JSON has `conflicts` per task.
 - `late_days` is set for any unfinished node past `due` except objectives. A summary carries `span` (earliest start to latest due among its descendants). `$TASKGRAPH_TODAY=YYYY-MM-DD` overrides today.
+- A finished summary or milestone reports `done_at` as the latest finish among what it waited for.
 
 ## Keeping it current
 
@@ -54,7 +55,7 @@ tg.py date ID --promised 2027-02-01
 ## Weekly steering prep
 
 1. `agenda` groups what needs attention: Late, Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
-2. `ls --type decision` for open decisions.
+2. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
 3. `serve` and open the Timeline view for the picture.
 
 ## Avoiding duplicates and big plans
@@ -86,7 +87,7 @@ Parents:
 
 - Always pass `--json` (or `--brief`) when parsing output. With either, commands that print a stderr warning (`done` with unfinished dependencies) add `"warnings": [...]` to their object output; list outputs carry no warnings.
 - Titles are imperative verbs, at most 60 characters.
-- Use meta keys consistently: the per-type keys, plus `tags` (array), `link`, `lane` (workstream; groups rows in the Swimlane view).
+- Use meta keys consistently: the per-type keys, plus `tags` (array), `link`, `lane` (the workstream; groups rows in the Swimlane view) and `team` (the team that owns the workstream). Set `lane` and `team` on the workstream parent: children inherit both. `owner` is one person.
 - Never mark a blocked task done without telling the user which dependencies are unfinished.
 - `--depends X` means the new task depends on X; `--blocks Y` means Y depends on the new task.
 - After bulk changes, offer to run `graph` or `serve`. `serve` blocks: start it as a background process, give the user the URL and leave it running. One server per DB serves every project; the URL's `?project=` picks the view, and running it again reuses the server.
@@ -103,9 +104,9 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 
 | Command | Purpose |
 | --- | --- |
-| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--notes T] [--meta k=v ...]` | Create a task and its edges |
+| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--promised D] [--notes T] [--meta k=v ...]` | Create a task and its edges |
 | `dep add TASK DEPENDS_ON` / `dep rm TASK DEPENDS_ON` | Add (cycles rejected) or remove a dependency |
-| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--all-projects]` | List tasks, done excluded by default; repeated flags accumulate |
+| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--sort id\|due\|late] [--all-projects]` | List tasks with due date, person and lane; done excluded by default; repeated flags accumulate. `--owner` matches the owner, decider or party; `--lane` and `--team` see inherited values |
 | `ready [--all-projects]` | Leaf tasks that can be started now |
 | `show ID` | Full details, dependencies, dependents, conflicts |
 | `start ID` / `done ID` / `reopen ID` | Change status |
@@ -114,7 +115,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--meta k=v ...] [--unset-meta k ...]` | Edit fields; meta merges, values parsed as JSON when valid |
 | `rm ID [--recursive]` | Delete a task and its edges |
 | `why ID` | Chains up to the goals a task serves, through dependents and parents (`via`: `blocks` or `parent`) |
-| `tree [ID]` / `tree --children [ID]` | Dependency tree / parent hierarchy |
+| `tree [ID]` / `tree --children [ID]` | Dependency tree from goals (milestones, objectives and nodes with dependencies that block nothing) / parent hierarchy |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
 | `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |

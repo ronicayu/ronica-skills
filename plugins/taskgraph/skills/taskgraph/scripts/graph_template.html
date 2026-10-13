@@ -678,7 +678,7 @@ function layoutTimeline(fit) {
     els.push(bg('tl-grid', 'tl:grid:' + at, { name: MONTHS[month] + (month === 0 ? ' ' + m.getUTCFullYear() : ''), h: height }, left + (at - lo) * TL.px, height / 2));
   }
   const tx = xOf(today);
-  els.push(bg('tl-pin', 'tl:today', { name: '今天 ' + md(today) }, tx, TL.head - 4), bg('tl-pin', 'tl:today-end', { name: '' }, tx, height));
+  els.push(bg('tl-pin', 'tl:today', { name: 'Today ' + md(today) }, tx, TL.head - 4), bg('tl-pin', 'tl:today-end', { name: '' }, tx, height));
   els.push({ group: 'edges', classes: 'bg tl-today', data: { id: 'tl:today-line', source: 'tl:today', target: 'tl:today-end' } });
   cy.add(els);
   const hot = conflictEdges(open);
