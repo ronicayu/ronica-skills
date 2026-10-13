@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import urllib.error
@@ -11,6 +12,11 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tg.py"
+
+
+@pytest.fixture(autouse=True)
+def fixed_today(monkeypatch):
+    monkeypatch.setenv("TASKGRAPH_TODAY", "2026-10-13")
 
 
 @pytest.fixture
@@ -198,8 +204,6 @@ def test_rm_cascades_deps(tg, db):
     assert tg("rm", str(a)) == {"deleted": a}
     assert tg("show", str(b))["depends_on"] == []
     assert tg("show", str(b))["derived_status"] == "ready"
-    import sqlite3
-
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM deps").fetchone()[0] == 0
 
 
@@ -392,3 +396,403 @@ def test_serve_port_taken_by_other_service(raw):
         p = raw("--project", "demo", "serve", "--no-open", "--port", str(port))
     assert p.returncode == 1
     assert f"port {port} in use" in p.stderr
+
+
+def add(tg, title, *args):
+    return tg("add", title, *args)["id"]
+
+
+def test_type_add_edit_and_validation(tg, fail):
+    assert tg("add", "plain")["type"] == "task"
+    m = tg("add", "M", "--type", "milestone", "--meta", "date=2026-12-01")
+    assert m["type"] == "milestone" and m["meta"] == {"type": "milestone", "date": "2026-12-01"}
+    e = tg("edit", str(m["id"]), "--type", "decision")
+    assert e["type"] == "decision" and e["meta"]["type"] == "decision"
+    e = tg("edit", str(m["id"]), "--type", "task")
+    assert e["type"] == "task" and "type" not in e["meta"]
+    e = tg("edit", str(m["id"]), "--meta", "type=external")
+    assert e["type"] == "external"
+    e = tg("edit", str(m["id"]), "--meta", "type=task")
+    assert "type" not in e["meta"]
+    fail("add", "X", "--type", "epic")
+    fail("add", "X", "--meta", "type=epic")
+    fail("edit", str(m["id"]), "--type", "epic")
+    fail("edit", str(m["id"]), "--meta", "type=1")
+    assert ids(tg("ls", "--all-projects")) == [1, m["id"]]
+
+
+def test_ls_filters_by_type(tg):
+    a = add(tg, "A")
+    d = add(tg, "D", "--type", "decision")
+    e = add(tg, "E", "--type", "external")
+    assert ids(tg("ls", "--type", "decision")) == [d]
+    assert ids(tg("ls", "--type", "decision", "external")) == [d, e]
+    assert ids(tg("ls", "--type", "task")) == [a]
+
+
+def test_date_meta_validation(tg, fail):
+    for key in ("date", "decide_by", "needed_by", "chase"):
+        fail("add", "X", "--meta", f"{key}=tomorrow")
+        fail("add", "X", "--meta", f"{key}=2026-13-01")
+        fail("add", "X", "--meta", f"{key}=20261013")
+        assert tg("add", "X", "--meta", f"{key}=2026-10-13")["meta"][key] == "2026-10-13"
+    t = add(tg, "Y")
+    fail("edit", str(t), "--meta", "date=nope")
+    assert "date" not in tg("show", str(t))["meta"]
+
+
+def test_parent_add_edit_no_parent(tg, raw, fail):
+    p = add(tg, "P")
+    c = tg("add", "C", "--parent", str(p))
+    assert c["parent"] == p and c["children"] == []
+    assert tg("show", str(p))["children"] == [c["id"]]
+    other = add(tg, "Q")
+    assert tg("edit", str(c["id"]), "--parent", str(other))["parent"] == other
+    assert tg("show", str(p))["children"] == []
+    assert tg("edit", str(c["id"]), "--no-parent")["parent"] is None
+    fail("edit", str(c["id"]), "--parent", str(p), "--no-parent")
+    fail("add", "X", "--parent", "99")
+    assert ids(tg("ls", "--parent", str(p))) == []
+    tg("edit", str(c["id"]), "--parent", str(p))
+    kid2 = add(tg, "C2", "--parent", str(p))
+    assert ids(tg("ls", "--parent", str(p))) == [c["id"], kid2]
+    out = raw("--project", "demo", "tree", "--children").stdout
+    assert out.splitlines()[0].endswith("P")
+    assert "  [ready] #2 C" in out
+    tree = tg("tree", "--children")
+    assert [n["id"] for n in tree] == [p, other]
+    assert [n["id"] for n in tree[0]["children"]] == [c["id"], kid2]
+    assert tg("tree", "--children", str(c["id"]))[0]["children"] == []
+
+
+def test_parent_cycle_rejected(tg, fail):
+    a = add(tg, "A")
+    b = add(tg, "B", "--parent", str(a))
+    c = add(tg, "C", "--parent", str(b))
+    p = fail("edit", str(a), "--parent", str(c))
+    assert "cycle" in p.stderr
+    fail("edit", str(a), "--parent", str(a))
+    assert tg("show", str(a))["parent"] is None
+
+
+def test_parent_type_rules(tg, fail):
+    task = add(tg, "T")
+    obj = add(tg, "O", "--type", "objective")
+    for kind in ("milestone", "decision", "external"):
+        k = add(tg, kind, "--type", kind)
+        fail("add", "X", "--parent", str(k))
+        fail("edit", str(task), "--parent", str(k))
+    fail("edit", str(obj), "--parent", str(task))
+    fail("add", "X", "--type", "objective", "--parent", str(task))
+    sub = tg("add", "Sub", "--type", "objective", "--parent", str(obj))
+    assert sub["parent"] == obj
+    assert tg("add", "T2", "--parent", str(obj))["parent"] == obj
+    add(tg, "child", "--parent", str(task))
+    for kind in ("milestone", "decision", "external"):
+        fail("edit", str(task), "--type", kind)
+    assert tg("edit", str(task), "--type", "objective")["type"] == "objective"
+    fail("edit", str(obj), "--type", "task")
+
+
+def test_dependency_between_ancestor_and_descendant_rejected(tg, fail):
+    a = add(tg, "A")
+    b = add(tg, "B", "--parent", str(a))
+    c = add(tg, "C", "--parent", str(b))
+    sibling = add(tg, "S", "--parent", str(a))
+    other = add(tg, "O")
+    for x, y in ((a, b), (b, a), (a, c), (c, a)):
+        assert "ancestor" in fail("dep", "add", str(x), str(y)).stderr
+    fail("add", "N", "--parent", str(a), "--depends", str(a))
+    fail("add", "N", "--parent", str(a), "--blocks", str(a))
+    tg("dep", "add", str(b), str(sibling))
+    tg("dep", "add", str(other), str(a))
+    fail("edit", str(other), "--parent", str(a))
+    assert tg("show", str(other))["parent"] is None
+    fail("edit", str(sibling), "--parent", str(b))
+
+
+def test_child_inherits_parent_dependencies(tg):
+    gate = add(tg, "gate")
+    parent = add(tg, "P", "--depends", str(gate))
+    child = add(tg, "C", "--parent", str(parent))
+    grandchild = add(tg, "G", "--parent", str(child))
+    nodes = {t["id"]: t for t in tg("ls")}
+    assert nodes[grandchild]["derived_status"] == "blocked" and nodes[grandchild]["blocked_by"] == 1
+    assert ids(tg("ready")) == [gate]
+    tg("done", str(gate))
+    assert ids(tg("ready")) == [grandchild]
+    assert tg("show", str(child))["derived_status"] == "blocked"
+
+
+def test_summary_status_rollup(tg, fail):
+    p = add(tg, "P")
+    a = add(tg, "A", "--parent", str(p))
+    b = add(tg, "B", "--parent", str(p), "--depends", str(a))
+    assert tg("show", str(p))["derived_status"] == "blocked"
+    tg("start", str(a))
+    assert tg("show", str(p))["derived_status"] == "in_progress"
+    tg("done", str(a))
+    assert tg("show", str(p))["derived_status"] == "in_progress"
+    tg("done", str(b))
+    shown = tg("show", str(p))
+    assert shown["derived_status"] == "done"
+    tg("reopen", str(b))
+    assert tg("show", str(p))["derived_status"] == "in_progress"
+    for cmd in ("start", "done", "reopen"):
+        assert f"status of #{p} is derived from its children" in fail(cmd, str(p)).stderr
+    assert ids(tg("ls")) == [p, b]
+
+
+def test_nested_summary_rollup(tg):
+    top = add(tg, "top", "--type", "objective")
+    mid = add(tg, "mid", "--parent", str(top))
+    leaf = add(tg, "leaf", "--parent", str(mid))
+    assert tg("show", str(top))["derived_status"] == "blocked"
+    tg("start", str(leaf))
+    assert tg("show", str(top))["derived_status"] == "in_progress"
+    tg("done", str(leaf))
+    assert tg("show", str(mid))["derived_status"] == "done"
+    assert tg("show", str(top))["derived_status"] == "done"
+
+
+def test_dependency_on_summary_waits_for_all_children(tg):
+    p = add(tg, "P")
+    c1 = add(tg, "C1", "--parent", str(p))
+    c2 = add(tg, "C2", "--parent", str(p))
+    after = add(tg, "after", "--depends", str(p))
+    tg("done", str(c1))
+    assert tg("show", str(after))["derived_status"] == "blocked"
+    assert tg("show", str(after))["blocked_by"] == 1
+    tg("done", str(c2))
+    assert tg("show", str(after))["derived_status"] == "ready"
+
+
+def test_milestone_derived_from_dependencies(tg, fail):
+    a = add(tg, "A")
+    b = add(tg, "B")
+    m = add(tg, "M", "--type", "milestone", "--depends", str(a), str(b))
+    assert tg("show", str(m))["derived_status"] == "blocked"
+    assert tg("show", str(m))["blocked_by"] == 2
+    tg("done", str(a))
+    assert tg("show", str(m))["blocked_by"] == 1
+    assert tg("show", str(m))["derived_status"] == "blocked"
+    tg("done", str(b))
+    assert tg("show", str(m))["derived_status"] == "done"
+    for cmd in ("start", "done", "reopen"):
+        assert f"status of #{m} is derived from its dependencies" in fail(cmd, str(m)).stderr
+    lone = add(tg, "lone", "--type", "milestone")
+    assert tg("show", str(lone))["derived_status"] == "blocked"
+    after = add(tg, "after", "--depends", str(m))
+    assert tg("show", str(after))["derived_status"] == "ready"
+
+
+def test_ready_excludes_milestone_objective_and_summary(tg):
+    obj = add(tg, "O", "--type", "objective")
+    parent = add(tg, "P", "--parent", str(obj))
+    leaf = add(tg, "L", "--parent", str(parent))
+    add(tg, "M", "--type", "milestone")
+    plain = add(tg, "plain")
+    decision = add(tg, "D", "--type", "decision")
+    assert ids(tg("ready")) == [leaf, plain, decision]
+    assert leaf in ids(tg("ls", "--status", "ready"))
+    assert obj not in ids(tg("ls", "--status", "ready"))
+
+
+def test_rollup_counts(tg):
+    obj = add(tg, "O", "--type", "objective")
+    assert tg("show", str(obj))["rollup"] == {"done": 0, "total": 0}
+    p = add(tg, "P", "--parent", str(obj))
+    a = add(tg, "A", "--parent", str(p))
+    b = add(tg, "B", "--parent", str(p))
+    c = add(tg, "C", "--parent", str(obj))
+    lone = add(tg, "lone")
+    tg("done", str(a))
+    tg("done", str(c))
+    nodes = {t["id"]: t for t in tg("ls", "--all-projects", "--status", "open", "ready", "blocked", "in_progress", "done")}
+    assert nodes[obj]["rollup"] == {"done": 2, "total": 3}
+    assert nodes[p]["rollup"] == {"done": 1, "total": 2}
+    assert nodes[b]["rollup"] is None and nodes[lone]["rollup"] is None
+
+
+def test_late_and_chase_per_type(tg):
+    m = add(tg, "M", "--type", "milestone", "--meta", "date=2026-10-01")
+    mf = add(tg, "Mf", "--type", "milestone", "--meta", "date=2026-10-13")
+    d = add(tg, "D", "--type", "decision", "--meta", "decide_by=2026-10-01")
+    e = add(tg, "E", "--type", "external", "--meta", "needed_by=2026-10-10", "chase=2026-10-13")
+    ef = add(tg, "Ef", "--type", "external", "--meta", "needed_by=2026-11-10", "chase=2026-10-14")
+    t = add(tg, "T", "--meta", "date=2026-01-01", "decide_by=2026-01-01")
+    nodes = {n["id"]: n for n in tg("ls")}
+    assert nodes[m]["late_days"] == 12
+    assert nodes[mf]["late_days"] is None
+    assert nodes[d]["late_days"] == 12 and nodes[d]["chase_due"] is False
+    assert nodes[e]["late_days"] == 3 and nodes[e]["chase_due"] is True
+    assert nodes[ef]["late_days"] is None and nodes[ef]["chase_due"] is False
+    assert nodes[t]["late_days"] is None and nodes[t]["chase_due"] is False
+    tg("done", str(d))
+    tg("done", str(e))
+    done = {n["id"]: n for n in tg("ls", "--status", "done")}
+    assert done[d]["late_days"] is None
+    assert done[e]["late_days"] is None and done[e]["chase_due"] is False
+
+
+def test_milestone_late_clears_when_derived_done(tg):
+    a = add(tg, "A")
+    m = add(tg, "M", "--type", "milestone", "--meta", "date=2026-10-01", "--depends", str(a))
+    assert tg("show", str(m))["late_days"] == 12
+    tg("done", str(a))
+    assert tg("show", str(m))["late_days"] is None
+
+
+def test_human_output_type_and_late(raw):
+    raw("--project", "demo", "add", "Wave 1 date", "--type", "decision", "--meta", "decide_by=2026-10-01")
+    out = raw("--project", "demo", "ls").stdout.rstrip("\n")
+    assert out == "   1  ready       [decision] Wave 1 date  (late 12d)"
+    shown = raw("--project", "demo", "show", "1").stdout
+    assert "type:    decision" in shown and "late:    12d" in shown
+
+
+def test_show_human_parent_children_rollup(raw, tg):
+    p = add(tg, "P")
+    c = add(tg, "C", "--parent", str(p))
+    shown = raw("--project", "demo", "show", str(p)).stdout
+    assert f"children: #{c}" in shown and "rollup:  0/1" in shown
+    assert f"parent:  #{p} P" in raw("--project", "demo", "show", str(c)).stdout
+
+
+def test_rm_with_children_requires_recursive(tg, fail):
+    p = add(tg, "P")
+    c = add(tg, "C", "--parent", str(p))
+    g = add(tg, "G", "--parent", str(c))
+    keep = add(tg, "keep", "--depends", str(g))
+    assert "--recursive" in fail("rm", str(p)).stderr
+    assert ids(tg("ls", "--all-projects")) == [p, c, g, keep]
+    assert tg("rm", str(p), "--recursive") == {"deleted": p, "descendants": [c, g]}
+    assert ids(tg("ls", "--all-projects")) == [keep]
+    assert tg("show", str(keep))["depends_on"] == []
+    leaf = add(tg, "leaf")
+    assert tg("rm", str(leaf)) == {"deleted": leaf}
+
+
+def test_migration_from_old_schema(db, raw, tg):
+    old = sqlite3.connect(db)
+    old.executescript(
+        """
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY,
+          project TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','done')),
+          notes TEXT NOT NULL DEFAULT '',
+          meta TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(meta)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          done_at TEXT
+        );
+        CREATE TABLE deps (
+          task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          depends_on INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          PRIMARY KEY (task_id, depends_on),
+          CHECK (task_id <> depends_on)
+        );
+        INSERT INTO tasks (id, project, title, notes, meta, created_at, updated_at)
+          VALUES (1, 'demo', 'Legacy', 'kept', '{"owner": "x"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        """
+    )
+    old.commit()
+    old.close()
+    legacy = tg("show", "1")
+    assert legacy["title"] == "Legacy" and legacy["notes"] == "kept" and legacy["meta"] == {"owner": "x"}
+    assert legacy["parent"] is None and legacy["children"] == [] and legacy["type"] == "task"
+    child = tg("add", "New", "--parent", "1")
+    assert child["parent"] == 1
+    assert tg("show", "1")["children"] == [child["id"]]
+    cols = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(tasks)")]
+    assert cols.count("parent_id") == 1
+
+
+def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
+    p = add(tg, "P", "--type", "objective")
+    c = add(tg, "C", "--parent", str(p))
+    m = add(tg, "M", "--type", "milestone", "--meta", "date=2026-10-01", "--depends", str(c))
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    html = out.read_text()
+    assert '"rollup": {"done": 0, "total": 1}' in html and '"late_days": 12' in html
+    port = free_port()
+    proc = serve(port)
+    proc.stdout.readline()
+    nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due"}
+    assert set(nodes[p]) == expected
+    assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
+    assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
+    assert nodes[m]["late_days"] == 12 and nodes[m]["depends_on"] == [c] and nodes[p]["rollup"] == {"done": 0, "total": 1}
+    assert nodes[m]["chase_due"] is False
+
+
+def test_payload_scoped_drops_outside_parent_refs(raw, tg, tmp_path):
+    p = add(tg, "P")
+    inside = add(tg, "Inside", "--parent", str(p))
+    outside = json.loads(raw("--project", "other", "--json", "add", "Kid", "--parent", str(p)).stdout)["id"]
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    data = json.loads(out.read_text().split("let DATA = ", 1)[1].split(";\n", 1)[0])
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert set(nodes) == {p, inside}
+    assert nodes[p]["children"] == [inside]
+    assert nodes[p]["rollup"] == {"done": 0, "total": 2}
+    raw("--project", "other", "--json", "graph", "--no-open", "--out", str(out))
+    data = json.loads(out.read_text().split("let DATA = ", 1)[1].split(";\n", 1)[0])
+    assert [n["id"] for n in data["nodes"]] == [outside] and data["nodes"][0]["parent"] is None
+
+
+def test_deadlock_via_dep_add(tg, fail):
+    s = add(tg, "S")
+    l2 = add(tg, "L2", "--parent", str(s))
+    l1 = add(tg, "L1")
+    tg("dep", "add", str(l2), str(l1))
+    p = fail("dep", "add", str(l1), str(s))
+    assert p.stderr.startswith("error: deadlock: ")
+    assert f"#{l1} waits for #{s}" in p.stderr
+    assert f"#{s} waits for #{l2} (its child)" in p.stderr
+    assert f"#{l2} waits for #{l1}" in p.stderr
+    assert tg("show", str(l1))["depends_on"] == []
+
+
+def test_deadlock_via_edit_parent(tg, fail):
+    s = add(tg, "S")
+    l1 = add(tg, "L1", "--depends", str(s))
+    l2 = add(tg, "L2", "--depends", str(l1))
+    p = fail("edit", str(l2), "--parent", str(s))
+    assert "deadlock" in p.stderr and f"#{s} waits for #{l2} (its child)" in p.stderr
+    assert tg("show", str(l2))["parent"] is None
+
+
+def test_deadlock_via_add_parent(tg, fail):
+    s = add(tg, "S")
+    l1 = add(tg, "L1", "--depends", str(s))
+    assert "deadlock" in fail("add", "X", "--parent", str(s), "--depends", str(l1)).stderr
+    assert ids(tg("ls", "--all-projects")) == [s, l1]
+    gate = add(tg, "gate", "--depends", str(l1))
+    p = fail("add", "Y", "--parent", str(gate), "--blocks", str(s))
+    assert "deadlock" in p.stderr
+    assert ids(tg("ls", "--all-projects")) == [s, l1, gate]
+
+
+def test_deadlock_through_inherited_dependency(tg, fail):
+    gate = add(tg, "gate")
+    parent = add(tg, "P", "--depends", str(gate))
+    child = add(tg, "C", "--parent", str(parent))
+    p = fail("dep", "add", str(gate), str(child))
+    assert "deadlock" in p.stderr and f"(dependency of ancestor #{parent})" in p.stderr
+
+
+def test_no_deadlock_for_siblings_and_cross_subtree_deps(tg):
+    p = add(tg, "P")
+    a = add(tg, "A", "--parent", str(p))
+    b = add(tg, "B", "--parent", str(p))
+    q = add(tg, "Q")
+    c = add(tg, "C", "--parent", str(q))
+    tg("dep", "add", str(b), str(a))
+    tg("dep", "add", str(c), str(a))
+    tg("dep", "add", str(q), str(p))

@@ -7,31 +7,39 @@
 <style>
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-#toolbar { position: fixed; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; }
-#toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 10px; font: inherit; }
-#toolbar button { cursor: pointer; }
+#toolbar { position: fixed; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow-x: auto; font-size: 13px; }
+#toolbar > * { flex: none; }
+#toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
+#toolbar button { cursor: pointer; white-space: nowrap; }
 #toolbar button:hover { background: #2d333d; }
-#toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; }
+#toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; white-space: nowrap; }
 #toolbar [hidden] { display: none; }
 #toolbar .seg { display: flex; }
+#toolbar .seg button { padding: 5px 6px; }
 #toolbar .seg button { border-radius: 0; }
 #toolbar .seg button:first-child { border-radius: 6px 0 0 6px; }
-#toolbar .seg button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+#toolbar .seg button:last-child { border-radius: 0 6px 6px 0; }
+#toolbar .seg button + button { margin-left: -1px; }
 #toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
-#toolbar .spacer { flex: 1; }
-#toolbar .stamp { color: #6b7280; font-size: 12px; }
+#toolbar .spacer { flex: 1 1 0; min-width: 0; }
+#toolbar .stamp { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
 #cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
-#legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 12px; z-index: 2; }
-#legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+#legend { position: fixed; left: 14px; bottom: 14px; display: flex; gap: 22px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 12px; z-index: 2; }
+#legend .col div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
+#legend svg { flex: none; overflow: visible; }
 #panel { position: fixed; top: 48px; right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
 #panel h2 { margin: 0 0 6px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
 #panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 12px; }
+#panel .badge.late { background: #ef4444; color: #fff; border: 1px solid #ef4444; }
+#panel .badge.chase { background: #f59e0b; color: #1c1004; border: 1px solid #f59e0b; }
+#panel button { margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+#panel button:hover { background: #2d333d; }
 #panel .notes { white-space: pre-wrap; background: #1e232b; border-radius: 6px; padding: 8px 10px; }
 #panel table { width: 100%; border-collapse: collapse; }
 #panel td { padding: 3px 6px; border-bottom: 1px solid #2a2f38; vertical-align: top; word-break: break-word; }
@@ -50,7 +58,10 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button></span>
   <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
-  <input type="text" id="search" placeholder="Search titles" size="22">
+  <span class="seg" id="types"></span>
+  <input type="text" id="search" placeholder="Search" size="9">
+  <button id="expandAll">Expand all</button>
+  <button id="collapseAll">Collapse all</button>
   <button id="relayout">Re-layout</button>
   <button id="fit">Fit</button>
   <button id="refresh" hidden>Refresh</button>
@@ -58,7 +69,16 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <span class="stamp" id="stamp"></span>
 </div>
 <div id="cy"></div>
-<div id="legend"></div>
+<div id="legend">
+  <div class="col">
+    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#e5e7eb"/></svg>Task</div>
+    <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#262c36" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
+    <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#262c36" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
+    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#262c36" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
+    <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
+  </div>
+  <div class="col" id="legendStatus"></div>
+</div>
 <div id="panel"></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -73,13 +93,34 @@ const COLORS = {
 };
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
 const GOAL = '#fbbf24';
+const TYPES = ['task', 'milestone', 'decision', 'external', 'objective'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase'];
+const FIELDS = {
+  task: [['owner', 'Owner'], ['estimate', 'Estimate']],
+  milestone: [['date', 'Date']],
+  decision: [['decider', 'Decider'], ['decide_by', 'Decide by']],
+  external: [['party', 'Party'], ['contact', 'Contact'], ['needed_by', 'Needed by'], ['chase', 'Chase']],
+  objective: [['owner', 'Owner']]
+};
+const day = s => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  return m ? `${+m[3]} ${MONTHS[m[2] - 1]} ${m[1]}` : String(s);
+};
+const SUBTITLE = {
+  task: m => [m.owner, m.estimate != null && m.estimate + 'h'],
+  milestone: m => [m.date ? day(m.date) : 'no date'],
+  decision: m => [m.decider, m.decide_by && 'decide by ' + day(m.decide_by)],
+  external: m => [m.party, m.needed_by && 'needed by ' + day(m.needed_by), m.chase && 'chase ' + day(m.chase)],
+  objective: m => [m.owner]
+};
 const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
 let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned';
 const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
-const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28;
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 102, DECISION_LANE_W = 136;
 const LANE_KEYS = {
   lane: n => n.meta.lane,
   owner: n => n.meta.owner,
@@ -93,6 +134,22 @@ const store = {
 const query = new URLSearchParams(location.search);
 let view = (query.get('view') || store.get('taskgraph.view')) === 'lanes' ? 'lanes' : 'graph';
 let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
+const parseTypes = s => (s || '').split(',').filter(t => TYPES.includes(t));
+let types = new Set([query.get('types'), store.get('taskgraph.types')].map(parseTypes).find(l => l.length) || TYPES);
+const loadExpanded = () => {
+  try {
+    const v = JSON.parse(store.get('taskgraph.expanded'));
+    return Array.isArray(v) ? new Set(v) : null;
+  } catch (e) { return null; }
+};
+let expanded = loadExpanded();
+const expandedIds = () => expanded || new Set(DATA.nodes.filter(n => n.type === 'objective').map(n => n.id));
+const setExpanded = ids => {
+  expanded = ids;
+  store.set('taskgraph.expanded', JSON.stringify([...ids]));
+};
+const isSummary = n => n.children.length > 0 || n.type === 'objective';
+const descendants = n => n.children.reduce((sum, c) => sum + 1 + descendants(byId.get(c)), 0);
 
 function el(tag, props, ...children) {
   const e = Object.assign(document.createElement(tag), props || {});
@@ -149,19 +206,37 @@ const cy = cytoscape({
       'background-color': ele => color(ele).bg, 'border-width': 2, 'border-color': ele => color(ele).bd,
       'opacity': ele => color(ele).op || 1, 'transition-property': 'opacity', 'transition-duration': '120ms'
     } },
+    { selector: 'node.summary', style: { 'border-width': 3 } },
+    { selector: 'node[type="milestone"]', style: {
+      'shape': 'diamond', 'width': 46, 'height': 46, 'padding': 0, 'text-valign': 'bottom', 'text-margin-y': 6,
+      'color': '#e5e7eb', 'border-color': '#9ca3af', 'font-weight': 'bold'
+    } },
+    { selector: 'node[type="decision"]', style: { 'shape': 'hexagon', 'padding': '20px', 'border-color': '#c4b5fd', 'border-width': 2 } },
+    { selector: 'node[type="external"]', style: { 'border-style': 'dashed', 'border-color': '#9ca3af', 'border-width': 2 } },
+    { selector: 'node[type="objective"]', style: {
+      'shape': 'rectangle', 'padding': '14px', 'background-color': '#181c22', 'color': '#e5e7eb', 'font-weight': 'bold',
+      'border-style': 'double', 'border-width': 6, 'border-color': '#9ca3af'
+    } },
+    { selector: 'node.goal', style: { 'border-width': 3, 'border-color': GOAL, 'font-weight': 'bold' } },
+    { selector: 'node.late', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': '#ef4444', 'outline-opacity': 0.8 } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
+    { selector: 'node.lanes[type="milestone"]', style: {
+      'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 10, 'font-weight': 'normal', 'color': ele => color(ele).fg
+    } },
     { selector: 'node.lane-bg', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-color': 'data(shade)',
       'border-width': 1, 'border-color': '#262c36', 'opacity': 1, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': LANE_W + 8, 'text-halign': 'right', 'text-valign': 'center',
       'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': -1
     } },
-    { selector: 'node.goal', style: { 'border-width': 3, 'border-color': GOAL, 'font-weight': 'bold' } },
     { selector: 'edge', style: {
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
       'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
     } },
     { selector: 'edge.lanes', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
+    { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#4b5563', 'target-arrow-color': '#4b5563', 'target-arrow-shape': 'none' } },
+    { selector: 'edge.lifted, edge.bridged', style: { 'line-style': 'dashed' } },
+    { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': '#f87171', 'target-arrow-color': '#f87171' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
@@ -170,17 +245,98 @@ const cy = cytoscape({
   ]
 });
 
-function visibleData() {
+const keeps = n => {
   const project = $('project').value;
-  const hideDone = $('hideDone').checked;
-  const nodes = DATA.nodes.filter(n => (!project || n.project === project) && !(hideDone && n.derived_status === 'done'));
-  const ids = new Set(nodes.map(n => n.id));
-  const edges = DATA.edges.filter(e => ids.has(e.source) && ids.has(e.target));
-  return { nodes, edges };
+  return (!project || n.project === project) && !($('hideDone').checked && n.derived_status === 'done');
+};
+const passes = n => keeps(n) && types.has(n.type);
+
+function visibleData() {
+  const open = expandedIds();
+  const topOf = n => {
+    const chain = [n];
+    while (byId.has(chain[0].parent)) chain.unshift(byId.get(chain[0].parent));
+    return chain.find(a => !open.has(a.id)) || n;
+  };
+  const put = (map, s, t, f) => {
+    if (s === t) return;
+    const k = s + '-' + t, o = map.get(k);
+    f = { partof: false, lifted: false, bridged: false, ...f };
+    map.set(k, o ? { s, t, partof: o.partof && f.partof, lifted: o.lifted && f.lifted, bridged: o.bridged && f.bridged } : { s, t, ...f });
+  };
+  const level = DATA.nodes.filter(n => topOf(n) === n);
+  const mapped = new Map();
+  DATA.edges.forEach(e => {
+    const a = topOf(byId.get(e.source)).id, b = topOf(byId.get(e.target)).id;
+    put(mapped, a, b, { lifted: a !== e.source || b !== e.target });
+  });
+  level.filter(p => p.children.length && open.has(p.id)).forEach(p => p.children.forEach(c => put(mapped, c, p.id, { partof: true })));
+  const alive = new Set(level.filter(keeps).map(n => n.id));
+  const shown = new Set(level.filter(n => alive.has(n.id) && types.has(n.type)).map(n => n.id));
+  const out = new Map([...alive].map(id => [id, []]));
+  [...mapped.values()].filter(e => alive.has(e.s) && alive.has(e.t)).forEach(e => out.get(e.s).push(e));
+  const result = new Map();
+  const walk = (s, e, acc, seen) => {
+    const f = { partof: acc.partof && e.partof, lifted: acc.lifted || e.lifted, bridged: acc.bridged };
+    if (shown.has(e.t)) return put(result, s, e.t, f);
+    if (seen.has(e.t)) return;
+    seen.add(e.t);
+    out.get(e.t).forEach(next => walk(s, next, { ...f, bridged: true }, seen));
+  };
+  shown.forEach(s => out.get(s).forEach(e => walk(s, e, { partof: true, lifted: false, bridged: false }, new Set())));
+  const next = new Map(level.map(n => [n.id, []]));
+  [...result.values()].filter(e => !e.partof).forEach(e => next.get(e.s).push(e.t));
+  const under = (id, p) => {
+    for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) if (n.parent === p) return true;
+    return false;
+  };
+  const reaches = (from, p) => {
+    const seen = new Set([from]);
+    const stack = [from];
+    while (stack.length) {
+      for (const t of next.get(stack.pop())) {
+        if (under(t, p)) return true;
+        if (!seen.has(t)) {
+          seen.add(t);
+          stack.push(t);
+        }
+      }
+    }
+    return false;
+  };
+  const direct = [...result.entries()].filter(([, e]) => e.partof && !e.bridged);
+  groupBy(direct, ([, e]) => e.t).forEach(group => {
+    const redundant = group.filter(([, e]) => reaches(e.s, e.t));
+    if (redundant.length < group.length) redundant.forEach(([k]) => result.delete(k));
+  });
+  const edges = [...result.values()].map(e => ({
+    id: e.s + '-' + e.t, source: e.s, target: e.t, kind: ['partof', 'lifted', 'bridged'].filter(k => e[k]).join(' ')
+  }));
+  return { nodes: level.filter(n => shown.has(n.id)), edges, open };
 }
 
-const nodeData = n => ({ id: String(n.id), derived_status: n.derived_status, title: n.title, label: clampLabel('#' + n.id + ' ' + n.title, LABEL_W, LABEL_LINES) });
-const edgeId = e => e.source + '-' + e.target;
+function labelOf(n, open) {
+  const m = n.meta;
+  const parts = isSummary(n)
+    ? [m.owner, n.rollup && n.rollup.total ? `${n.rollup.done}/${n.rollup.total} done` : null]
+    : (SUBTITLE[n.type] || SUBTITLE.task)(m);
+  if (n.children.length && !open.has(n.id)) parts.unshift('▸ ' + descendants(n));
+  if (n.chase_due) parts.unshift('chase due');
+  if (n.late_days != null) parts.unshift(n.late_days + 'd late');
+  const sub = parts.filter(Boolean).join(' · ');
+  const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
+  const [titleLines, subLines] = view === 'lanes' ? [2, 1] : [3, 2];
+  const title = clampLabel('#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
+  return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
+}
+
+const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: labelOf(n, open) });
+const flagsOf = (n, sources) => ({
+  summary: isSummary(n),
+  late: n.late_days != null,
+  goal: !sources.has(n.id) && (n.type === 'task' || n.type === 'milestone')
+});
+const classesOf = (n, sources) => Object.entries(flagsOf(n, sources)).filter(([, on]) => on).map(([k]) => k).join(' ');
 const tasks = () => cy.nodes().not('.lane-bg');
 const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
@@ -200,7 +356,7 @@ const groupBy = (items, key) => {
   return [...m.values()];
 };
 const trackUnit = j => (j % 2 ? -(j + 1) / 2 : j / 2);
-const portOffset = (k, i) => (i - (k - 1) / 2) * (k > 1 ? Math.min(8, (NODE_H - 16) / (k - 1)) : 0);
+const portOffset = (k, i) => (i - (k - 1) / 2) * (k > 1 ? Math.min(8, (NODE_H - 6) / (k - 1)) : 0);
 
 function assignTracks(items) {
   const ends = [];
@@ -214,8 +370,25 @@ function assignTracks(items) {
   return ends.length;
 }
 
+function backEdges(nodes, edges) {
+  const out = new Map(nodes.map(n => [n.id, []]));
+  edges.forEach(e => out.get(e.source).push(e));
+  const state = new Map();
+  const back = new Set();
+  const visit = id => {
+    state.set(id, 1);
+    out.get(id).forEach(e => {
+      if (state.get(e.target) === 1) back.add(e.id);
+      else if (!state.has(e.target)) visit(e.target);
+    });
+    state.set(id, 2);
+  };
+  nodes.forEach(n => state.has(n.id) || visit(n.id));
+  return back;
+}
+
 function routeEdges() {
-  const rs = cy.edges().map(edge => {
+  const rs = cy.edges().not('.back').map(edge => {
     const s = edge.source().position(), t = edge.target().position();
     const cs = colOf(s.x), ct = colOf(t.x);
     return { edge, s, t, sid: edge.source().id(), tid: edge.target().id(), a: gapAfter(cs), b: gapAfter(ct - 1), long: ct > cs + 1, base: s.y <= t.y ? t.y - ROW_H / 2 : t.y + ROW_H / 2 };
@@ -265,8 +438,9 @@ function routeEdges() {
 
 function layoutLanes(fit) {
   const { nodes, edges } = visibleData();
+  const back = backEdges(nodes, edges);
   const next = new Map(nodes.map(n => [n.id, []]));
-  edges.forEach(e => next.get(e.source).push(e.target));
+  edges.filter(e => !back.has(e.id)).forEach(e => next.get(e.source).push(e.target));
   const up = new Map();
   const depth = id => {
     if (!up.has(id)) up.set(id, Math.max(-1, ...next.get(id).map(depth)) + 1);
@@ -300,16 +474,17 @@ function layoutLanes(fit) {
     return band;
   });
   cy.add(bands);
+  cy.edges().forEach(e => e.toggleClass('back', back.has(e.id())));
   routeEdges();
   if (fit) cy.fit(undefined, 40);
 }
 
 function layout(fit = true) {
   cy.nodes('.lane-bg').remove();
-  cy.edges().removeStyle();
+  cy.edges().removeStyle().removeClass('back');
   cy.elements().toggleClass('lanes', view === 'lanes');
   if (view === 'lanes') layoutLanes(fit);
-  else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, animate: false, fit, padding: 40 }).run();
+  else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit, padding: 40 }).run();
 }
 
 function fitIfOutside() {
@@ -321,20 +496,22 @@ function fitIfOutside() {
   if (outside) cy.animate({ fit: { eles: cy.elements(), padding: 40 } }, { duration: 300 });
 }
 
-function rebuild(keepView) {
-  const { nodes, edges } = visibleData();
+function rebuild(keepView, flash) {
+  const { nodes, edges, open } = visibleData();
   const before = new Set(tasks().map(n => n.id()));
+  const sources = new Set(edges.map(e => e.source));
   cy.elements().remove();
-  const blocked = new Set(edges.map(e => e.source));
-  cy.add(nodes.map(n => ({ group: 'nodes', classes: blocked.has(n.id) ? '' : 'goal', data: nodeData(n) })));
-  cy.add(edges.map(e => ({ group: 'edges', data: { id: edgeId(e), source: String(e.source), target: String(e.target) } })));
+  cy.add(nodes.map(n => ({ group: 'nodes', classes: classesOf(n, sources), data: nodeData(n, open) })));
+  cy.add(edges.map(e => ({ group: 'edges', classes: e.kind, data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
   if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
   layout(!keepView);
   if (keepView) {
     fitIfOutside();
-    const added = tasks().filter(n => !before.has(n.id()));
-    added.addClass('new');
-    setTimeout(() => added.removeClass('new'), 1500);
+    if (flash) {
+      const added = tasks().filter(n => !before.has(n.id()));
+      added.addClass('new');
+      setTimeout(() => added.removeClass('new'), 1500);
+    }
   }
   applySearch();
   refocus();
@@ -343,7 +520,10 @@ function rebuild(keepView) {
 function sameShape(nodes, edges) {
   return tasks().length === nodes.length && cy.edges().length === edges.length
     && nodes.every(n => cy.getElementById(String(n.id)).nonempty())
-    && edges.every(e => cy.getElementById(edgeId(e)).nonempty());
+    && edges.every(e => {
+      const ele = cy.getElementById(e.id);
+      return ele.nonempty() && ele.data('kind') === e.kind;
+    });
 }
 
 function addProjects() {
@@ -355,17 +535,41 @@ function applyData(next) {
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
-  const { nodes, edges } = visibleData();
+  const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
-    nodes.forEach(n => cy.getElementById(String(n.id)).data(nodeData(n)));
+    const sources = new Set(edges.map(e => e.source));
+    nodes.forEach(n => {
+      const ele = cy.getElementById(String(n.id));
+      ele.data(nodeData(n, open));
+      Object.entries(flagsOf(n, sources)).forEach(([k, on]) => ele.toggleClass(k, on));
+    });
     if (view === 'lanes') {
       layout(false);
       fitIfOutside();
     }
-  } else rebuild(true);
+  } else rebuild(true, true);
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
+}
+
+function toggleExpand(id) {
+  const open = new Set(expandedIds());
+  if (!open.delete(id)) open.add(id);
+  setExpanded(open);
+  rebuild(true);
+  if (pinned) openPanel(byId.get(pinned));
+}
+
+function reveal(id) {
+  const open = new Set(expandedIds());
+  const size = open.size;
+  for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent);
+  if (open.size !== size) {
+    setExpanded(open);
+    rebuild(true);
+  }
+  select(id, true);
 }
 
 function focusOn(n) {
@@ -396,13 +600,16 @@ function fmt(iso) {
   return iso ? new Date(iso).toLocaleString() : '-';
 }
 
+const show = (k, v) => DATE_KEYS.includes(k) ? day(v) : k === 'estimate' ? v + ' h' : typeof v === 'string' ? v : JSON.stringify(v);
+const row = (k, v) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: v }));
+
 function refList(ids) {
   if (!ids.length) return el('div', { className: 'none', textContent: 'None' });
   return el('ul', null, ...ids.map(id => {
     const n = byId.get(id);
-    const on = cy.getElementById(String(id)).nonempty();
+    const on = passes(n);
     const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + (COLORS[n.derived_status] || COLORS.blocked).bg }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
-    if (on) li.onclick = () => select(id, true);
+    if (on) li.onclick = () => reveal(id);
     return li;
   }));
 }
@@ -410,18 +617,31 @@ function refList(ids) {
 function openPanel(n) {
   const panel = $('panel');
   const top = panel.scrollTop;
+  const fields = FIELDS[n.type] || FIELDS.task;
+  const shown = new Set(['type', ...fields.map(([k]) => k)]);
+  const extra = Object.entries(n.meta).filter(([k]) => !shown.has(k));
   panel.replaceChildren(
     el('h2', { textContent: n.title }),
-    el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status)),
+    el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
+      n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
+      n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null),
     el('table', null,
-      el('tr', null, el('td', { textContent: 'Project' }), el('td', { textContent: n.project })),
-      el('tr', null, el('td', { textContent: 'Created' }), el('td', { textContent: fmt(n.created_at) })),
-      el('tr', null, el('td', { textContent: 'Done' }), el('td', { textContent: fmt(n.done_at) }))),
+      row('Type', n.type),
+      row('Project', n.project),
+      ...fields.filter(([k]) => n.meta[k] != null && n.meta[k] !== '').map(([k, label]) => row(label, show(k, n.meta[k]))),
+      n.rollup && n.rollup.total ? row('Progress', `${n.rollup.done}/${n.rollup.total} done`) : null,
+      row('Created', fmt(n.created_at)),
+      row('Done', fmt(n.done_at))),
+    n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+    n.parent != null && byId.has(n.parent) ? el('h3', { textContent: 'Parent' }) : null,
+    n.parent != null && byId.has(n.parent) ? refList([n.parent]) : null,
+    n.children.length ? el('h3', { textContent: 'Children' }) : null,
+    n.children.length ? refList(n.children) : null,
     el('h3', { textContent: 'Notes' }),
     n.notes ? el('div', { className: 'notes', textContent: n.notes }) : el('div', { className: 'none', textContent: 'None' }),
     el('h3', { textContent: 'Meta' }),
-    Object.keys(n.meta).length
-      ? el('table', null, ...Object.entries(n.meta).map(([k, v]) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: typeof v === 'string' ? v : JSON.stringify(v) }))))
+    extra.length
+      ? el('table', null, ...extra.map(([k, v]) => row(k, typeof v === 'string' ? v : JSON.stringify(v))))
       : el('div', { className: 'none', textContent: 'None' }),
     el('h3', { textContent: 'Blocked by' }),
     refList(n.depends_on),
@@ -462,7 +682,18 @@ cy.on('mouseout', 'node', () => {
   $('cy').title = '';
   refocus();
 });
-cy.on('tap', 'node', e => select(Number(e.target.id()), false));
+let pendingSelect;
+cy.on('tap', 'node', e => {
+  const n = byId.get(Number(e.target.id()));
+  clearTimeout(pendingSelect);
+  if (n.children.length && $('panel').style.display !== 'block') pendingSelect = setTimeout(() => select(n.id, false), 300);
+  else select(n.id, false);
+});
+cy.on('dbltap', 'node', e => {
+  const n = byId.get(Number(e.target.id()));
+  clearTimeout(pendingSelect);
+  if (n.children.length) toggleExpand(n.id);
+});
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
 
 const projectSelect = $('project');
@@ -478,7 +709,8 @@ const params = () => {
   if (projectSelect.value) q.set('project', projectSelect.value);
   if (view === 'lanes') q.set('view', 'lanes');
   if (laneKey !== 'lane') q.set('lanes', laneKey);
-  return q.toString();
+  if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
+  return q.toString().replaceAll('%2C', ',');
 };
 const syncUrl = () => history.replaceState(null, '', params() ? '?' + params() : location.pathname);
 const syncControls = () => {
@@ -486,11 +718,20 @@ const syncControls = () => {
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('lanesBy').hidden = view !== 'lanes';
   $('laneKey').value = laneKey;
+  TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
 };
 const setView = v => {
   if (v === view) return;
   view = v;
   store.set('taskgraph.view', v);
+  syncControls();
+  syncUrl();
+  rebuild();
+};
+const toggleType = t => {
+  if (types.has(t) && types.size === 1) return;
+  if (!types.delete(t)) types.add(t);
+  store.set('taskgraph.types', TYPES.filter(x => types.has(x)).join(','));
   syncControls();
   syncUrl();
   rebuild();
@@ -510,12 +751,23 @@ $('laneKey').onchange = e => {
   syncUrl();
   if (view === 'lanes') rebuild();
 };
+$('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
 syncControls();
 $('hideDone').onchange = () => rebuild();
 $('search').oninput = applySearch;
+$('expandAll').onclick = () => {
+  setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
+  rebuild(true);
+  if (pinned) openPanel(byId.get(pinned));
+};
+$('collapseAll').onclick = () => {
+  setExpanded(new Set());
+  rebuild(true);
+  if (pinned) openPanel(byId.get(pinned));
+};
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => cy.fit(undefined, 40);
-$('legend').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'));
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late'));
 
 rebuild();
 
