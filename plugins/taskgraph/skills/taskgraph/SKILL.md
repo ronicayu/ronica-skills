@@ -41,7 +41,7 @@ tg.py date ID --promised 2027-02-01
 - `--start`: when work begins (task) or when it was requested or ordered (external). Ignored for milestones and decisions.
 - `--promised`: externals only, the date the outside party committed to. `add` takes it too.
 - Values accept `today` and offsets `+3d`, `+2w`, `-1w` (`--due -1w` works). `add` takes `--start`, `--due` and `--promised` too. `start` after `due` is rejected.
-- A dependency conflicts when it is due after the date its dependent needs it (the dependent's `start`, else its `due`); a child due after its parent's due conflicts; an external promised after `needed_by` conflicts. Conflicts show as `(conflict)` in `ls` and in `show`; JSON has `conflicts` per task.
+- A dependency conflicts when it is due after the date its dependent needs it (the dependent's `start`, else its `due`); a child due after its parent's due conflicts; an external promised after `needed_by` conflicts. Conflicts show as `(conflict)` in `ls` and in `show`; JSON has `conflicts` per task, each with `kind`, `from` (the node due too late), `to` (the node that needs it; none for `promised`), `due`, `need`, `gap` (days, negative) and `message`. `agenda` prints each conflict once, worst gap first, with the person and lane on both sides; its JSON `conflicts` holds those edges, not tasks.
 - `late_days` is set for any unfinished node past `due` except objectives. A summary carries `span` (earliest start to latest due among its descendants). `$TASKGRAPH_TODAY=YYYY-MM-DD` overrides today.
 - A finished summary or milestone reports `done_at` as the latest finish among what it waited for.
 
@@ -73,8 +73,9 @@ When the plan is agreed (a steering committee, a funding gate), run `baseline se
 
 1. `changes` for what moved since last week.
 2. `agenda` groups what needs attention: Late, At risk (milestones and objectives), Should have started (open tasks whose start has passed), Conflicts, due soon (`--within DAYS`, default 14), Chase due, Risk review due, and decisions, externals, risks or issues with no date. `--type` and `--all-projects` narrow or widen it.
-3. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
-4. `serve` and open the Timeline view for the picture.
+3. `deps --cross lane --open` for hand-offs between workstreams and who owns each side.
+4. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
+5. `serve` and open the Timeline view for the picture.
 
 ## Avoiding duplicates and big plans
 
@@ -141,6 +142,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
 | `changes [--since 7d\|DATE] [--all-projects]` | What changed since a date: new, started, completed, reopened, slipped, pulled in, re-scoped, removed |
 | `baseline set [--label L] [--replace]` / `baseline ls` / `baseline diff [--label L]` / `baseline rm LABEL` | Snapshot dates, list snapshots, compare now against one, delete one |
+| `deps [--cross lane\|team\|owner] [--open] [--all-projects]` | Dependency edges with both sides' person, lane and status and the slack between them, tightest first; `--cross` keeps hand-offs between lanes, teams or people, `--open` drops finished upstream work |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
 | `projects` | Projects with total, done, ready, blocked counts |
 

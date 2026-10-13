@@ -937,8 +937,9 @@ def test_dependency_conflict(tg, raw):
     b = add(tg, "B", "--depends", str(a), "--start", "2027-01-15", "--due", "2027-03-01")
     ca, cb = tg("show", str(a))["conflicts"], tg("show", str(b))["conflicts"]
     message = f"#{a} due 2027-02-01 after #{b} needs it 2027-01-15"
-    assert ca == [{"kind": "dependency", "with": b, "message": message}]
-    assert cb == [{"kind": "dependency", "with": a, "message": message}]
+    common = {"kind": "dependency", "from": a, "to": b, "due": "2027-02-01", "need": "2027-01-15", "gap": -17, "message": message}
+    assert ca == [dict(common, **{"with": b})]
+    assert cb == [dict(common, **{"with": a})]
     out = raw("--project", "demo", "ls").stdout
     assert out.count("(conflict)") == 2
     assert message in raw("--project", "demo", "show", str(a)).stdout
@@ -1004,7 +1005,7 @@ def test_agenda_buckets(tg):
     assert ids(data["due_soon"]) == [soon]
     assert ids(data["chase_due"]) == [ext]
     assert ids(data["missing_date"]) == [nodate]
-    assert ids(data["conflicts"]) == [far, conflicted]
+    assert [(c["from"]["id"], c["to"]["id"], c["gap"]) for c in data["conflicts"]] == [(far, conflicted, -49)]
     assert set(data["late"][0]) == {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
     assert data["late"][0]["late_days"] == 42
 
@@ -1441,3 +1442,37 @@ def test_issue_type_blocks_and_can_come_from_a_risk(tg):
     assert issue["type"] == "issue" and issue["due"] == "2026-10-20"
     assert tg("show", str(work))["derived_status"] == "blocked"
     assert ids(tg("ready")) == [r]
+
+
+def test_agenda_conflicts_once_per_edge_with_both_people(tg, raw):
+    infra = add(tg, "Infra", "--meta", "lane=Infra")
+    runners = add(tg, "CI runners", "--parent", str(infra), "--due", "2026-10-25", "--meta", "owner=Raj")
+    auth = add(tg, "Auth service", "--start", "2026-10-20", "--due", "2026-11-10", "--depends", str(runners), "--meta", "owner=Tom", "lane=App")
+    pen = add(tg, "Pen test", "--type", "external", "--due", "2026-12-05", "--promised", "2026-12-10", "--meta", "party=SecureCo")
+    data = tg("agenda")["conflicts"]
+    assert [(c["kind"], c["from"]["id"], c["to"] and c["to"]["id"], c["gap"]) for c in data] == [
+        ("dependency", runners, auth, -5), ("promised", pen, None, -5)]
+    assert data[0]["from"]["person"] == "Raj" and data[0]["from"]["lane"] == "Infra" and data[0]["to"]["person"] == "Tom"
+    out = raw("--project", "demo", "agenda").stdout
+    assert f"#{runners} CI runners (Raj · Infra) → #{auth} Auth service (Tom · App): due 2026-10-25, needed 2026-10-20, gap -5d" in out
+    assert f"#{pen} [external] Pen test (SecureCo): promised 2026-12-10, needed 2026-12-05, gap -5d" in out
+    assert out.count("CI runners (Raj") == 1
+
+
+def test_deps_cross_and_open(tg, raw):
+    infra = add(tg, "Infra", "--meta", "lane=Infra", "team=Platform")
+    a = add(tg, "VPC", "--parent", str(infra), "--due", "2026-10-24", "--meta", "owner=Priya")
+    b = add(tg, "IAM", "--parent", str(infra), "--due", "2026-10-20", "--meta", "owner=Priya", "--depends", str(a))
+    c = add(tg, "Replicate", "--start", "2026-10-15", "--meta", "owner=Mei", "lane=Data", "--depends", str(a))
+    d = add(tg, "Done dep", "--meta", "owner=Mei", "lane=Data")
+    e = add(tg, "Uses done", "--meta", "owner=Priya", "lane=Infra", "--depends", str(d))
+    add(tg, "Threat", "--type", "risk", "--blocks", str(c))
+    tg("done", str(d))
+    rows = tg("deps")
+    assert [(r["from"]["id"], r["to"]["id"], r["slack"]) for r in rows] == [(a, c, -9), (a, b, -4), (d, e, None)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "lane")] == [(a, c), (d, e)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "lane", "--open")] == [(a, c)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "owner")] == [(a, c), (d, e)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "team")] == [(a, c)]
+    out = raw("--project", "demo", "deps", "--cross", "lane", "--open").stdout.strip()
+    assert out == f"#{a} VPC [ready] (Priya · Infra) → #{c} Replicate [blocked] (Mei · Data) · slack -9d"

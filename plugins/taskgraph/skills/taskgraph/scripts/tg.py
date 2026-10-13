@@ -360,23 +360,25 @@ def span(tasks, task):
 
 
 def find_conflicts(tasks, effective, current):
-    def flag(task, kind, other, message):
-        task["conflicts"].append({"kind": kind, "with": other, "message": message})
+    def flag(kind, late, needer, due, need, message):
+        found = {"kind": kind, "from": late, "to": needer, "due": due, "need": need, "gap": days_between(due, need), "message": message}
+        tasks[late]["conflicts"].append(dict(found, **{"with": needer}))
+        if needer is not None:
+            tasks[needer]["conflicts"].append(dict(found, **{"with": late}))
 
     for n in tasks.values():
         need = n["start"] or n["due"]
         for d in effective[n["id"]] if need else []:
             dep = tasks[d]
             if dep["due"] and dep["due"] > need and current[d] != "done":
-                message = f"#{d} due {dep['due']} after #{n['id']} needs it {need}"
-                flag(dep, "dependency", n["id"], message)
-                flag(n, "dependency", d, message)
+                flag("dependency", d, n["id"], dep["due"], need, f"#{d} due {dep['due']} after #{n['id']} needs it {need}")
         parent = tasks[n["parent"]] if n["parent"] is not None else None
-        if parent and parent["due"] and n["due"] and n["due"] > parent["due"]:
-            flag(n, "parent", parent["id"], f"#{n['id']} due {n['due']} after parent #{parent['id']} due {parent['due']}")
+        if parent and parent["due"] and n["due"] and n["due"] > parent["due"] and n["type"] != "risk":
+            found = {"kind": "parent", "from": n["id"], "to": parent["id"], "due": n["due"], "need": parent["due"], "gap": days_between(n["due"], parent["due"])}
+            n["conflicts"].append(dict(found, **{"with": parent["id"], "message": f"#{n['id']} due {n['due']} after parent #{parent['id']} due {parent['due']}"}))
         promised = normal(n["meta"].get("promised")) if n["type"] == "external" else None
         if promised and n["due"] and promised > n["due"]:
-            flag(n, "promised", None, f"#{n['id']} promised {promised} after needed {n['due']}")
+            flag("promised", n["id"], None, promised, n["due"], f"#{n['id']} promised {promised} after needed {n['due']}")
 
 
 def get(tasks, task_id):
@@ -890,6 +892,26 @@ def cmd_path(conn, args):
     emit(args, {"id": root["id"], "due": root["due"], "hops": hops, "driving": chain, **o}, "\n".join(out))
 
 
+def cmd_deps(conn, args):
+    tasks = load(conn)
+    rows = []
+    for t in scoped(tasks, args):
+        need = t["start"] or t["due"]
+        for d in blocking(tasks, t["depends_on"]):
+            dep = tasks[d]
+            if args.open and dep["derived_status"] == "done":
+                continue
+            if args.cross:
+                side = (lambda x: (person(x) if args.cross == "owner" else x[args.cross]) or "Unassigned")
+                if str(side(dep)).lower() == str(side(t)).lower():
+                    continue
+            rows.append((dep, t, days_between(dep["due"], need)))
+    rows.sort(key=lambda r: (r[2] if r[2] is not None else float("inf"), r[0]["id"], r[1]["id"]))
+    data = [{"from": who(d), "to": who(t), "due": d["due"], "need": t["start"] or t["due"], "slack": slack} for d, t, slack in rows]
+    text = [f"{who_text(d, True)} → {who_text(t, True)}" + (f" · slack {slack:+d}d" if slack is not None else "") for d, t, slack in rows]
+    emit(args, data, "\n".join(text) or "no dependencies")
+
+
 def cmd_date(conn, args):
     task = get(load(conn), args.id)
     meta = dict(task["meta"])
@@ -916,6 +938,35 @@ def cmd_date(conn, args):
     emit(args, data, text)
 
 
+def who(task):
+    return {"id": task["id"], "title": task["title"], "type": task["type"], "derived_status": task["derived_status"],
+            "person": person(task), "lane": task["lane"], "team": task["team"]}
+
+
+def who_text(task, status=False):
+    tags = " · ".join(str(x) for x in (person(task), task["lane"]) if x)
+    return f"#{task['id']} {marker(task)}{task['title']}" + (f" [{task['derived_status']}]" if status else "") + (f" ({tags})" if tags else "")
+
+
+def conflict_items(tasks, items):
+    shown, found = {t["id"] for t in items}, {}
+    for t in items:
+        for c in t["conflicts"]:
+            key = (c["kind"], c["from"], c["to"])
+            if key not in found and (c["from"] in shown or c["to"] in shown):
+                found[key] = c
+    rows = sorted(found.values(), key=lambda c: (c["gap"], c["from"], c["to"] or 0))
+    data = [{"kind": c["kind"], "from": who(tasks[c["from"]]), "to": who(tasks[c["to"]]) if c["to"] else None,
+             "due": c["due"], "need": c["need"], "gap": c["gap"], "message": c["message"]} for c in rows]
+    words = {"dependency": ("due", "needed"), "parent": ("due", "parent due"), "promised": ("promised", "needed")}
+    text = []
+    for c in rows:
+        left = who_text(tasks[c["from"]]) + (f" → {who_text(tasks[c['to']])}" if c["to"] else "")
+        due_word, need_word = words[c["kind"]]
+        text.append(f"{left}: {due_word} {c['due']}, {need_word} {c['need']}, gap {c['gap']:+d}d")
+    return data, text
+
+
 def agenda_line(task, note):
     person = task["meta"].get({"decision": "decider", "external": "party"}.get(task["type"], "owner"))
     parts = [f"{due_word(task)} {task['due']}" if task["due"] else f"no {due_word(task)} date"]
@@ -926,7 +977,8 @@ def agenda_line(task, note):
 def cmd_agenda(conn, args):
     day = today()
     limit = (day + timedelta(days=args.within)).isoformat()
-    items = [t for t in scoped(load(conn), args) if t["derived_status"] != "done" and (not args.type or t["type"] in args.type)]
+    tasks = load(conn)
+    items = [t for t in scoped(tasks, args) if t["derived_status"] != "done" and (not args.type or t["type"] in args.type)]
     by_due = lambda t: (t["due"] or "9999-12-31", t["id"])
     buckets = {
         "late": sorted((t for t in items if t["late_days"]), key=lambda t: (-t["late_days"], t["id"])),
@@ -942,18 +994,20 @@ def cmd_agenda(conn, args):
         "late": lambda t: f"late {t['late_days']}d",
         "at_risk": lambda t: outlook_text(t["outlook"]).removeprefix("at risk — "),
         "late_start": lambda t: f"start {t['start']}, still {t['derived_status']}",
-        "conflicts": lambda t: "; ".join(c["message"] for c in t["conflicts"]),
         "due_soon": lambda t: None,
         "chase_due": lambda t: f"chase {t['meta']['chase']}",
         "review_due": lambda t: "/".join(str(t["meta"][k]) for k in ("likelihood", "impact") if t["meta"].get(k)) or None,
         "missing_date": lambda t: None,
     }
     headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date"}
+    conflict_data, conflict_text = conflict_items(tasks, buckets["conflicts"])
     out = []
     for name, found in buckets.items():
-        if found:
-            out += [headings[name], *(f"  {agenda_line(t, notes[name](t))}" for t in found), ""]
+        lines = conflict_text if name == "conflicts" else [agenda_line(t, notes[name](t)) for t in found]
+        if lines:
+            out += [headings[name], *(f"  {l}" for l in lines), ""]
     data = {name: [dict(brief_task(t), outlook=t["outlook"]) if name == "at_risk" else brief_task(t) for t in found] for name, found in buckets.items()}
+    data["conflicts"] = conflict_data
     emit(args, data, "\n".join(out).rstrip() or "nothing needs attention")
 
 
@@ -1308,6 +1362,7 @@ COMMANDS = {
     "why": cmd_why,
     "date": cmd_date,
     "path": cmd_path,
+    "deps": cmd_deps,
     "agenda": cmd_agenda,
     "changes": cmd_changes,
     "export": cmd_export,
@@ -1403,6 +1458,11 @@ def build_parser():
     p = command("agenda")
     p.add_argument("--within", type=int, default=14)
     p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
+    p.add_argument("--all-projects", action="store_true")
+
+    p = command("deps")
+    p.add_argument("--cross", choices=("lane", "team", "owner"))
+    p.add_argument("--open", action="store_true")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("changes")
