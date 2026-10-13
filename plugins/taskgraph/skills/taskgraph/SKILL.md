@@ -50,7 +50,10 @@ tg.py date ID --promised 2027-02-01
 - A date moved: `date ID --due ...`.
 - A decision was made: `done ID`, with the outcome in `edit ID --notes`.
 - An external slipped: `date ID --promised ...` and `edit ID --meta chase=YYYY-MM-DD`.
-- A new risk or blocker: `add` a decision or external and link it with `--blocks`.
+- A new blocker: `add` a decision, external or issue and link it with `--blocks`.
+- A new risk: `add --type risk --blocks ID --due REVIEW_DATE --meta owner=... likelihood=high impact=medium mitigation="..."`. Mitigation is a key, not a separate node.
+- A risk materialised: `edit ID --type issue --meta severity=high raised=YYYY-MM-DD` and `date ID --due ...`; from then on it blocks.
+- A risk retired: `done ID`.
 
 ## Will we hit it?
 
@@ -69,7 +72,7 @@ When the plan is agreed (a steering committee, a funding gate), run `baseline se
 ## Weekly steering prep
 
 1. `changes` for what moved since last week.
-2. `agenda` groups what needs attention: Late, At risk (milestones and objectives), Should have started (open tasks whose start has passed), Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
+2. `agenda` groups what needs attention: Late, At risk (milestones and objectives), Should have started (open tasks whose start has passed), Conflicts, due soon (`--within DAYS`, default 14), Chase due, Risk review due, and decisions, externals, risks or issues with no date. `--type` and `--all-projects` narrow or widen it.
 3. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
 4. `serve` and open the Timeline view for the picture.
 
@@ -87,6 +90,8 @@ Stored as `meta.type`, absent means `task`. Unknown types are rejected; `--type 
 - `decision`: a choice someone must make. Keys `decider`.
 - `external`: something outside the team's control. Keys `party`, `contact`, `chase` (next chase date).
 - `objective`: top-level aim that groups work; never scheduled. Key `owner`.
+- `risk`: something that may happen. Keys `owner`, `likelihood`, `impact` (`low`, `medium`, `high`), `mitigation`, `review` (its date; `--due` writes it). `--blocks X` records that it threatens X, but a risk never blocks: it is left out of status, conflicts, slack, deadlock checks, its parent's rollup, status and span. Threatened nodes list it as `threats`; outlooks count `open_risks`. A risk is never late; `agenda` lists it under Risk review due once `review` has come.
+- `issue`: something that has happened and needs resolving. Keys `owner`, `severity`, `raised`, plus `due`. It blocks like a task.
 
 Parents:
 
@@ -94,7 +99,7 @@ Parents:
 - A task cannot depend on its own ancestor or descendant. Changes that would make nodes wait on each other forever fail with `deadlock: ...` naming the chain.
 - A child inherits its ancestors' dependencies and is blocked while any is unfinished.
 - A node with children, and every objective, is a summary. It is `done` only when it has children, all are done and its own dependencies are done; otherwise `in_progress` if any child started or finished, else `blocked`. Depending on a summary waits for all its children.
-- `start`, `done`, `reopen` fail on summaries and milestones. `ready` lists leaf tasks, decisions and externals only.
+- `start`, `done`, `reopen` fail on summaries and milestones. `ready` lists leaf tasks, decisions, externals and issues only, never risks.
 - `rollup` is `{done, total}` over leaf descendants. `chase_due` is true for an external whose `chase` date has come.
 - `rm ID` fails when the task has children; `--recursive` deletes the subtree.
 

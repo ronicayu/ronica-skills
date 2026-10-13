@@ -11,14 +11,19 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tg.py"
 VIEWS = ("graph", "lanes", "timeline")
 
 
-@pytest.fixture(scope="module")
-def page_file(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("page")
-    db = tmp / "t.db"
+def runner(db):
     env = {**os.environ, "TASKGRAPH_TODAY": "2026-10-13"}
 
     def tg(*args):
         subprocess.run([sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", *args], check=True, capture_output=True, env=env)
+
+    return tg
+
+
+@pytest.fixture(scope="module")
+def page_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("page")
+    tg = runner(tmp / "t.db")
 
     tg("add", "Launch", "--type", "objective", "--meta", "owner=ann")
     tg("add", "Ship v1", "--type", "milestone", "--parent", "1", "--due", "2026-12-01", "--meta", "lane=dev")
@@ -78,4 +83,30 @@ def test_timeline_marks_baseline_and_today(browser, page_file):
     assert page.evaluate("cy.nodes('.tl-base').map(n => n.id())") == ["tl:base:3"]
     assert page.evaluate("cy.getElementById('tl:today').data('name')") == "Today 10/13"
     assert page.evaluate("cy.getElementById('2').hasClass('atrisk')")
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def raid_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("raid")
+    tg = runner(tmp / "t.db")
+    tg("add", "Build", "--due", "2026-11-20", "--meta", "lane=dev")
+    tg("add", "Vendor may slip", "--type", "risk", "--blocks", "1", "--due", "2026-10-30", "--meta", "lane=dev", "likelihood=high", "impact=high")
+    tg("add", "Build server down", "--type", "issue", "--due", "2026-10-16", "--meta", "lane=dev", "severity=high")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_risk_and_issue_render(browser, raid_file, view):
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{raid_file.as_uri()}?view={view}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("cy.getElementById('2').data('type')") == "risk"
+    assert page.evaluate("cy.getElementById('3').data('type')") == "issue"
+    assert page.evaluate("cy.edges('.threat').map(e => e.id())") == ["2-1"]
+    assert problems == []
     page.close()

@@ -723,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "baseline"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "baseline"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -999,7 +999,7 @@ def test_agenda_buckets(tg):
     done = add(tg, "finished", "--due", "2026-10-01")
     tg("done", str(done))
     data = tg("agenda")
-    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "missing_date"}
+    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "review_due", "missing_date"}
     assert ids(data["late"]) == [late_big, late_small]
     assert ids(data["due_soon"]) == [soon]
     assert ids(data["chase_due"]) == [ext]
@@ -1403,3 +1403,41 @@ def test_agenda_should_have_started(tg, raw):
     add(tg, "Future", "--start", "2026-11-01")
     assert ids(tg("agenda")["late_start"]) == [late]
     assert f"#{late} Late start — due 2026-12-01 · start 2026-10-01, still ready" in raw("--project", "demo", "agenda").stdout
+
+
+def test_risk_type_threatens_without_blocking(tg, raw, fail):
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    work = add(tg, "Build", "--parent", str(ws), "--due", "2026-11-01")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-11-15", "--depends", str(ws))
+    r = tg("add", "Vendor may slip", "--type", "risk", "--parent", str(ws), "--blocks", str(work), "--due", "2026-10-10",
+           "--meta", "owner=Priya", "likelihood=high", "impact=high", "mitigation=second vendor")
+    assert r["meta"]["review"] == "2026-10-10" and r["start"] is None and r["lane"] == "Infra"
+    assert r["late_days"] is None and r["derived_status"] == "ready"
+    w = tg("show", str(work))
+    assert w["derived_status"] == "ready" and w["threats"] == [r["id"]] and w["conflicts"] == []
+    p = tg("show", str(ws))
+    assert p["rollup"] == {"done": 0, "total": 1} and p["span"] == {"start": "2026-11-01", "end": "2026-11-01"}
+    tg("done", str(work))
+    assert tg("show", str(ws))["derived_status"] == "done" and tg("show", str(m))["derived_status"] == "done"
+    tg("reopen", str(work))
+    o = tg("show", str(m))["outlook"]
+    assert o["open_risks"] == [r["id"]] and r["id"] not in {h["from"] for h in tg("path", str(m))["hops"]}
+    assert r["id"] not in ids(tg("ready"))
+    agenda = tg("agenda")
+    assert ids(agenda["review_due"]) == [r["id"]] and r["id"] not in ids(agenda["late"])
+    assert f"#{r['id']} [risk] Vendor may slip — review 2026-10-10 · Priya · high/high" in raw("--project", "demo", "agenda").stdout
+    assert "threatened by: #" in raw("--project", "demo", "show", str(work)).stdout
+    tg("add", "Unreviewed", "--type", "risk")
+    assert len(tg("agenda")["missing_date"]) == 1
+    fail("add", "child", "--parent", str(r["id"]))
+
+
+def test_issue_type_blocks_and_can_come_from_a_risk(tg):
+    r = add(tg, "Key person leaves", "--type", "risk", "--meta", "review=2026-11-01")
+    work = add(tg, "Build", "--depends", str(r))
+    assert tg("show", str(work))["derived_status"] == "ready"
+    tg("edit", str(r), "--type", "issue", "--meta", "severity=high", "raised=2026-10-12", "due=2026-10-20")
+    issue = tg("show", str(r))
+    assert issue["type"] == "issue" and issue["due"] == "2026-10-20"
+    assert tg("show", str(work))["derived_status"] == "blocked"
+    assert ids(tg("ready")) == [r]

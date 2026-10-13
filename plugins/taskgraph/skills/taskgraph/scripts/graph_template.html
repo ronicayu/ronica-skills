@@ -76,10 +76,16 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
     <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#262c36" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
     <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#262c36" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#262c36" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
+  </div>
+  <div class="col">
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
-    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+    <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#262c36" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
+    <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#262c36" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
   </div>
   <div class="col" id="legendStatus"></div>
+  <div class="col" id="legendMarks">
+    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+  </div>
 </div>
 <div id="panel"></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
@@ -95,16 +101,19 @@ const COLORS = {
 };
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
 const GOAL = '#fbbf24';
-const TYPES = ['task', 'milestone', 'decision', 'external', 'objective'];
+const TYPES = ['task', 'milestone', 'decision', 'external', 'objective', 'risk', 'issue'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase', 'promised'];
+const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase', 'promised', 'due', 'review', 'raised'];
+const ISSUE = '#f87171';
 const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#4b5563';
 const FIELDS = {
   task: [['owner', 'Owner'], ['estimate', 'Estimate']],
   milestone: [['date', 'Date']],
   decision: [['decider', 'Decider'], ['decide_by', 'Decide by']],
   external: [['party', 'Party'], ['contact', 'Contact'], ['needed_by', 'Needed by'], ['promised', 'Promised'], ['chase', 'Chase']],
-  objective: [['owner', 'Owner']]
+  objective: [['owner', 'Owner']],
+  risk: [['owner', 'Owner'], ['likelihood', 'Likelihood'], ['impact', 'Impact'], ['mitigation', 'Mitigation'], ['review', 'Review']],
+  issue: [['owner', 'Owner'], ['severity', 'Severity'], ['raised', 'Raised'], ['due', 'Due']]
 };
 const day = s => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
@@ -115,7 +124,9 @@ const SUBTITLE = {
   milestone: n => [n.due ? day(n.due) : 'no date'],
   decision: n => [n.due && 'decide by ' + day(n.due), n.meta.decider],
   external: n => [n.due && 'needed by ' + day(n.due), n.meta.party, n.meta.chase && 'chase ' + day(n.meta.chase)],
-  objective: n => [n.meta.owner]
+  objective: n => [n.meta.owner],
+  risk: n => [[n.meta.likelihood, n.meta.impact].filter(Boolean).join('/'), n.meta.owner, n.due && 'review ' + day(n.due)],
+  issue: n => [n.meta.severity, n.meta.owner, n.due && 'due ' + day(n.due)]
 };
 const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
 let byId = new Map(DATA.nodes.map(n => [n.id, n]));
@@ -219,6 +230,8 @@ const cy = cytoscape({
     } },
     { selector: 'node[type="decision"]', style: { 'shape': 'hexagon', 'padding': '20px', 'border-color': '#c4b5fd', 'border-width': 2 } },
     { selector: 'node[type="external"]', style: { 'border-style': 'dashed', 'border-color': '#9ca3af', 'border-width': 2 } },
+    { selector: 'node[type="risk"]', style: { 'shape': 'cut-rectangle', 'border-color': AMBER, 'border-width': 2 } },
+    { selector: 'node[type="issue"]', style: { 'shape': 'tag', 'padding': '16px', 'border-color': ISSUE, 'border-width': 2 } },
     { selector: 'node[type="objective"]', style: {
       'shape': 'rectangle', 'padding': '14px', 'background-color': '#181c22', 'color': '#e5e7eb', 'font-weight': 'bold',
       'border-style': 'double', 'border-width': 6, 'border-color': '#9ca3af'
@@ -243,6 +256,7 @@ const cy = cytoscape({
     { selector: 'edge.lanes, edge.tl', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
     { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#4b5563', 'target-arrow-color': '#4b5563', 'target-arrow-shape': 'none' } },
     { selector: 'edge.lifted, edge.bridged', style: { 'line-style': 'dashed' } },
+    { selector: 'edge.threat', style: { 'line-style': 'dotted', 'line-color': AMBER, 'target-arrow-color': AMBER } },
     { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': AMBER, 'target-arrow-color': AMBER } },
     { selector: 'node.tl', style: {
       'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'shape': 'round-rectangle', 'border-width': 0, 'border-style': 'solid',
@@ -257,6 +271,8 @@ const cy = cytoscape({
     } },
     { selector: 'node.tl[type="milestone"]', style: { 'shape': 'diamond', 'border-width': 1.5, 'border-color': '#9ca3af' } },
     { selector: 'node.tl[type="decision"]', style: { 'shape': 'hexagon', 'background-opacity': 0.25, 'border-width': 2, 'border-color': '#c4b5fd' } },
+    { selector: 'node.tl[type="risk"]', style: { 'shape': 'triangle', 'background-opacity': 0.25, 'border-width': 2, 'border-color': AMBER } },
+    { selector: 'node.tl[type="issue"]', style: { 'border-width': 2, 'border-color': ISSUE } },
     { selector: 'node.tl[type="external"]', style: { 'background-opacity': 0.2, 'border-width': 2, 'border-style': 'dashed', 'border-color': ele => color(ele).bg } },
     { selector: 'node.tl.mk-none', style: { 'background-opacity': 0, 'border-width': 0, 'shape': 'rectangle' } },
     { selector: 'node.tl.atrisk', style: { 'color': AMBER, 'outline-width': 1.5, 'outline-offset': 0, 'outline-opacity': 1 } },
@@ -552,7 +568,7 @@ const dnum = s => {
   return Date.UTC(y, m - 1, d) / 864e5;
 };
 const md = s => +s.slice(5, 7) + '/' + +s.slice(8, 10);
-const isPoint = n => n.type === 'milestone' || n.type === 'decision';
+const isPoint = n => n.type === 'milestone' || n.type === 'decision' || n.type === 'risk';
 
 function datesOf(n) {
   const span = isSummary(n) ? n.span : null;
@@ -680,7 +696,7 @@ function layoutTimeline(fit) {
     const n = r.n, ele = cy.getElementById(String(n.id)), d = datesOf(n);
     const mark = !d ? 'mk-none' : isSummary(n) ? 'mk-sum' : isPoint(n) || d[0] === d[1] ? 'mk-pt' : 'mk-bar';
     const x1 = d ? xOf(d[0]) : 0, x2 = d ? xOf(d[1]) : 0;
-    const size = n.type === 'decision' || n.type === 'milestone' ? 16 : 10;
+    const size = isPoint(n) ? 16 : 10;
     const w = mark === 'mk-none' ? TL.names - 8 : mark === 'mk-pt' ? size : Math.max(x2 - x1, mark === 'mk-sum' ? 4 : 6);
     const h = mark === 'mk-none' ? TL.row - 4 : mark === 'mk-pt' ? size : mark === 'mk-sum' ? 6 : TL.bar;
     const x = mark === 'mk-none' ? TL.names / 2 : mark === 'mk-pt' ? x1 : x1 + w / 2;
@@ -742,7 +758,7 @@ function rebuild(keepView, flash) {
   const sources = new Set(edges.map(e => e.source));
   cy.elements().remove();
   cy.add(nodes.map(n => ({ group: 'nodes', classes: classesOf(n, sources), data: nodeData(n, open) })));
-  cy.add(edges.map(e => ({ group: 'edges', classes: e.kind, data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
+  cy.add(edges.map(e => ({ group: 'edges', classes: e.kind + (byId.get(e.source)?.type === 'risk' ? ' threat' : ''), data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
   if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
   layout(!keepView);
   if (keepView) {
@@ -902,6 +918,8 @@ function openPanel(n) {
       row('Created', fmt(n.created_at)),
       row('Done', fmt(n.done_at))),
     n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+    (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
+    (n.threats ?? []).length ? refList(n.threats) : null,
     conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
     conflicted(n) ? conflictList(n.conflicts) : null,
     n.parent != null && byId.has(n.parent) ? el('h3', { textContent: 'Parent' }) : null,
@@ -1051,7 +1069,8 @@ $('collapseAll').onclick = () => {
 };
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => cy.fit(undefined, 40);
-$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
+$('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 
 rebuild();
 

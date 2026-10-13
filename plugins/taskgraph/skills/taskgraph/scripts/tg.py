@@ -60,13 +60,13 @@ CREATE TABLE IF NOT EXISTS baselines (
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
     "id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at",
-    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook",
+    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats",
 )
-TYPES = ("task", "milestone", "decision", "external", "objective")
+TYPES = ("task", "milestone", "decision", "external", "objective", "risk", "issue")
 PARENT_TYPES = ("task", "objective")
-DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised")
-DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by"}
-POINTS = ("milestone", "decision")
+DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised", "review", "raised")
+DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by", "risk": "review", "issue": "due"}
+POINTS = ("milestone", "decision", "risk")
 DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since")
 PERSON_KEYS = {"decision": "decider", "external": "party"}
 INHERITED = ("lane", "team")
@@ -146,11 +146,15 @@ def descendants(tasks, task_id):
     return found
 
 
-def effective_deps(tasks, task):
+def effective_deps(tasks, task, kind=None):
     deps = set(task["depends_on"])
     for a in ancestors(tasks, task["id"]):
         deps.update(tasks[a]["depends_on"])
-    return sorted(deps)
+    return sorted(d for d in deps if (tasks[d]["type"] == "risk") == (kind == "risk"))
+
+
+def blocking(tasks, ids):
+    return [d for d in ids if tasks[d]["type"] != "risk"]
 
 
 def inherited(tasks, task, key):
@@ -161,12 +165,16 @@ def inherited(tasks, task, key):
     return None
 
 
+def due_word(task):
+    return "review" if task["type"] == "risk" else "due"
+
+
 def person(task):
     return task["meta"].get(PERSON_KEYS.get(task["type"], "owner"))
 
 
 def is_summary(task):
-    return bool(task["children"]) or task["type"] == "objective"
+    return bool(task["parts"]) or task["type"] == "objective"
 
 
 def computed(task):
@@ -178,7 +186,7 @@ def node_status(task, deps, current):
     if task["type"] == "milestone":
         return "done" if deps_done and all(deps_done) else "blocked"
     if is_summary(task):
-        kids = [current[c] for c in task["children"]]
+        kids = [current[c] for c in task["parts"]]
         if kids and all(k == "done" for k in kids) and all(deps_done):
             return "done"
         return "in_progress" if any(k in ("in_progress", "done") for k in kids) else "blocked"
@@ -208,6 +216,7 @@ def load(conn):
         tasks[task_id]["depends_on"].append(dep)
         tasks[dep]["blocks"].append(task_id)
     for task in tasks.values():
+        task["parts"] = [c for c in task["children"] if tasks[c]["type"] != "risk"]
         for key in INHERITED:
             task[key] = inherited(tasks, task, key)
     effective = {i: effective_deps(tasks, t) for i, t in tasks.items()}
@@ -221,19 +230,20 @@ def load(conn):
     for task in tasks.values():
         task["derived_status"] = current[task["id"]]
         task["waits_for"] = effective[task["id"]]
-        deps = task["depends_on"] if computed(task) and task["type"] != "milestone" else effective[task["id"]]
+        deps = blocking(tasks, task["depends_on"]) if computed(task) and task["type"] != "milestone" else effective[task["id"]]
         task["blocked_by"] = sum(current[d] != "done" for d in deps)
         if is_summary(task):
-            leaves = [d for d in descendants(tasks, task["id"]) if not is_summary(tasks[d])]
+            leaves = [d for d in descendants(tasks, task["id"]) if not is_summary(tasks[d]) and tasks[d]["type"] != "risk"]
             task["rollup"] = {"done": sum(current[d] == "done" for d in leaves), "total": len(leaves)}
         else:
             task["rollup"] = None
         unfinished = current[task["id"]] != "done"
         due = parse_date(task["due"])
-        task["late_days"] = (day - due).days if due and due < day and unfinished and task["type"] != "objective" else None
+        task["late_days"] = (day - due).days if due and due < day and unfinished and task["type"] not in ("objective", "risk") else None
         chase = parse_date(task["meta"].get("chase")) if task["type"] == "external" else None
         task["chase_due"] = bool(chase and chase <= day and unfinished)
         task["span"] = span(tasks, task) if is_summary(task) else None
+        task["threats"] = [r for r in effective_deps(tasks, task, "risk") if current[r] != "done"]
     finish_derived(tasks, effective, current)
     find_conflicts(tasks, effective, current)
     for task in tasks.values():
@@ -247,7 +257,7 @@ def hops_into(tasks, task):
     for d in task["waits_for"]:
         found.append((d, need, "dependency"))
     if is_summary(task):
-        found += [(c, task["due"], "child") for c in task["children"]]
+        found += [(c, task["due"], "child") for c in task["parts"]]
     return [(d, n, k) for d, n, k in found if tasks[d]["derived_status"] != "done"]
 
 
@@ -273,13 +283,14 @@ def outlook(tasks, root, hops=None):
     late = sorted(i for i in above if tasks[i]["late_days"])
     negative = sum(s < 0 for s in slacks)
     undated = sorted(i for i in above if not tasks[i]["due"] and not is_summary(tasks[i]))
+    risks = sorted({r for i in above | {root} for r in tasks[i]["threats"]})
     if negative or late or tasks[root]["late_days"]:
         verdict = "at_risk"
     elif not slacks:
         verdict = "unknown" if hops else "on_track"
     else:
         verdict = "on_track"
-    return {"verdict": verdict, "min_slack": min(slacks, default=None), "negative_slack": negative, "late_upstream": late, "undated": undated}
+    return {"verdict": verdict, "min_slack": min(slacks, default=None), "negative_slack": negative, "late_upstream": late, "undated": undated, "open_risks": risks}
 
 
 def driving(tasks, root, hops):
@@ -312,6 +323,8 @@ def outlook_text(o):
         parts.append(f"{o['negative_slack']} hops with negative slack")
     if o["min_slack"] is not None:
         parts.append(f"min slack {o['min_slack']:+d}d")
+    if o["open_risks"]:
+        parts.append(f"{len(o['open_risks'])} open risks")
     return "at risk — " + (", ".join(parts) or "itself late")
 
 
@@ -326,7 +339,7 @@ def finish_derived(tasks, effective, current):
             elif not computed(task):
                 memo[i] = task["done_at"]
             else:
-                below = effective[i] if task["type"] == "milestone" else task["children"] + task["depends_on"]
+                below = effective[i] if task["type"] == "milestone" else task["parts"] + blocking(tasks, task["depends_on"])
                 memo[i] = max(filter(None, map(finished, below)), default=None)
         return memo[i]
 
@@ -340,7 +353,7 @@ def normal(value):
 
 
 def span(tasks, task):
-    below = [tasks[d] for d in descendants(tasks, task["id"])]
+    below = [tasks[d] for d in descendants(tasks, task["id"]) if tasks[d]["type"] != "risk"]
     starts = [t["start"] or t["due"] for t in below if t["start"] or t["due"]]
     ends = [t["due"] or t["start"] for t in below if t["start"] or t["due"]]
     return {"start": min(starts), "end": max(ends)} if starts else None
@@ -441,7 +454,7 @@ def line(task, with_project=False):
         suffix += "  (chase due)"
     if task["conflicts"]:
         suffix += "  (conflict)"
-    details = [f"due {task['due']}" if task["due"] else None, person(task), task["lane"]]
+    details = [f"{due_word(task)} {task['due']}" if task["due"] else None, person(task), task["lane"]]
     details = " — " + " · ".join(str(d) for d in details if d) if any(details) else ""
     return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {marker(task)}{task['title']}{details}{suffix}"
 
@@ -458,13 +471,13 @@ def reaches(conn, start, target):
 def wait_edges(tasks):
     edges = {}
     for task in tasks.values():
-        found = {d: "" for d in task["depends_on"]}
+        found = {d: "" for d in blocking(tasks, task["depends_on"])}
         for a in ancestors(tasks, task["id"]):
-            for d in tasks[a]["depends_on"]:
+            for d in blocking(tasks, tasks[a]["depends_on"]):
                 found.setdefault(d, f" (dependency of ancestor #{a})")
         edges[task["id"]] = [(d, found[d]) for d in sorted(found)]
         if is_summary(task):
-            edges[task["id"]] += [(c, " (its child)") for c in task["children"]]
+            edges[task["id"]] += [(c, " (its child)") for c in task["parts"]]
     return edges
 
 
@@ -649,7 +662,8 @@ def same(actual, wanted):
 
 def cmd_ready(conn, args):
     args.status = ["ready"]
-    args.parent = args.type = args.search = args.owner = args.lane = args.team = args.due_before = None
+    args.type = [t for t in TYPES if t != "risk"]
+    args.parent = args.search = args.owner = args.lane = args.team = args.due_before = None
     args.meta = []
     args.sort = "id"
     cmd_ls(conn, args)
@@ -695,6 +709,8 @@ def cmd_show(conn, args):
         out.append(f"outlook: {outlook_text(task['outlook'])} (path {task['id']} for detail)")
     if task["chase_due"]:
         out.append("chase:   due")
+    if task["threats"]:
+        out.append("threatened by: " + ", ".join(f"#{r} {tasks[r]['title']}" for r in task["threats"]))
     if task["conflicts"]:
         out.append("conflicts:")
         out.extend(f"  {c['message']}" for c in task["conflicts"])
@@ -902,7 +918,7 @@ def cmd_date(conn, args):
 
 def agenda_line(task, note):
     person = task["meta"].get({"decision": "decider", "external": "party"}.get(task["type"], "owner"))
-    parts = [f"due {task['due']}" if task["due"] else "no due date"]
+    parts = [f"{due_word(task)} {task['due']}" if task["due"] else f"no {due_word(task)} date"]
     parts += [x for x in (person, note) if x]
     return f"#{task['id']} {marker(task)}{task['title']} — " + " · ".join(parts)
 
@@ -919,7 +935,8 @@ def cmd_agenda(conn, args):
         "conflicts": sorted((t for t in items if t["conflicts"]), key=by_due),
         "due_soon": sorted((t for t in items if t["due"] and day.isoformat() <= t["due"] <= limit), key=by_due),
         "chase_due": sorted((t for t in items if t["chase_due"]), key=lambda t: (t["meta"]["chase"], t["id"])),
-        "missing_date": [t for t in items if t["type"] in ("decision", "external") and not t["due"]],
+        "review_due": sorted((t for t in items if t["type"] == "risk" and t["due"] and t["due"] <= day.isoformat()), key=by_due),
+        "missing_date": [t for t in items if t["type"] in ("decision", "external", "risk", "issue") and not t["due"]],
     }
     notes = {
         "late": lambda t: f"late {t['late_days']}d",
@@ -928,9 +945,10 @@ def cmd_agenda(conn, args):
         "conflicts": lambda t: "; ".join(c["message"] for c in t["conflicts"]),
         "due_soon": lambda t: None,
         "chase_due": lambda t: f"chase {t['meta']['chase']}",
+        "review_due": lambda t: "/".join(str(t["meta"][k]) for k in ("likelihood", "impact") if t["meta"].get(k)) or None,
         "missing_date": lambda t: None,
     }
-    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "missing_date": "Missing date"}
+    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date"}
     out = []
     for name, found in buckets.items():
         if found:
@@ -1150,6 +1168,7 @@ def graph_payload(conn, args):
         node["blocks"] = [i for i in t["blocks"] if i in ids]
         node["parent"] = t["parent"] if t["parent"] in ids else None
         node["children"] = [i for i in t["children"] if i in ids]
+        node["threats"] = [i for i in t["threats"] if i in ids]
         nodes.append(node)
     edges = [{"source": d, "target": n["id"]} for n in nodes for d in n["depends_on"]]
     return {"nodes": nodes, "edges": edges, "projects": sorted({t["project"] for t in tasks}), "generated_at": now(), "today": today().isoformat(), "live": False}
