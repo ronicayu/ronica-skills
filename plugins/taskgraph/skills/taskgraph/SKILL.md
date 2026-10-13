@@ -1,6 +1,6 @@
 ---
 name: taskgraph
-description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project or programme backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, track dates, decisions and outside dependencies, prepare a weekly steering review, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "what's late", "下一步做什么", "任务依赖", "看图". Agents operate the CLI; humans view the graph.
+description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project or programme backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, track dates, decisions and outside dependencies, prepare a weekly steering review, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "what's late". Agents operate the CLI; humans view the graph.
 ---
 
 # taskgraph
@@ -10,7 +10,6 @@ description: Track project tasks and their dependencies in a SQLite-backed DAG, 
 Use when the user wants to plan work backwards from a goal, track tasks with dependencies and dates, ask what can be done next or what is late, prepare a steering review, or see the plan as a picture. Agents drive the CLI; the user views the graph.
 
 Trigger keywords (English): task, todo, dependency, work backwards, what's next, blocked, ready, late, agenda, programme
-Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图, 排期
 
 ## Choosing the project
 
