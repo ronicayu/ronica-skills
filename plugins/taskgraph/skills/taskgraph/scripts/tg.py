@@ -8,6 +8,7 @@ import subprocess
 import sys
 import urllib.request
 import webbrowser
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -33,6 +34,16 @@ CREATE TABLE IF NOT EXISTS deps (
   CHECK (task_id <> depends_on)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project, status);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  task_id INTEGER NOT NULL,
+  project TEXT NOT NULL,
+  at TEXT NOT NULL,
+  field TEXT NOT NULL,
+  old TEXT,
+  new TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
 """
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
@@ -45,10 +56,16 @@ PARENT_TYPES = ("task", "objective")
 DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised")
 DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by"}
 POINTS = ("milestone", "decision")
-DATE_FLAGS = ("--start", "--due", "--promised", "--due-before")
+DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since")
 PERSON_KEYS = {"decision": "decider", "external": "party"}
 INHERITED = ("lane", "team")
 SORTS = ("id", "due", "late")
+DATE_FIELDS = ("due", "start", "promised")
+SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
+CHANGE_BUCKETS = {
+    "new": "New", "started": "Started", "completed": "Completed", "reopened": "Reopened",
+    "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "removed": "Removed",
+}
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
 
@@ -384,6 +401,36 @@ def check_deadlock(conn):
             visit(node, [])
 
 
+def tracked(task):
+    fields = {
+        "title": task["title"], "status": task["status"], "type": task["type"], "parent": task["parent"], "notes": task["notes"],
+        "start": task["start"], "due": task["due"], "promised": normal(task["meta"].get("promised")), "depends_on": task["depends_on"],
+    }
+    skip = {"type", "start", "promised", *DUE_KEYS.values()}
+    fields.update({f"meta.{k}": v for k, v in task["meta"].items() if k not in skip})
+    return fields
+
+
+@contextmanager
+def journal(conn):
+    before = load(conn)
+    yield
+    after = load(conn)
+    ts = now()
+    rows = []
+    for i in sorted(before.keys() | after.keys()):
+        if i not in before:
+            rows.append((i, after[i]["project"], ts, "created", None, json.dumps(after[i]["title"], ensure_ascii=False)))
+        elif i not in after:
+            rows.append((i, before[i]["project"], ts, "removed", json.dumps(before[i]["title"], ensure_ascii=False), None))
+        else:
+            old, new = tracked(before[i]), tracked(after[i])
+            for field in sorted(old.keys() | new.keys()):
+                if old.get(field) != new.get(field):
+                    rows.append((i, after[i]["project"], ts, field, *(json.dumps(v.get(field), ensure_ascii=False) for v in (old, new))))
+    conn.executemany("INSERT INTO events (task_id, project, at, field, old, new) VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+
 def add_dep(conn, task_id, dep_id):
     tasks = load(conn)
     get(tasks, task_id)
@@ -441,7 +488,7 @@ def cmd_add(conn, args):
         meta["promised"] = resolve_date(args.promised)
     check_span(meta)
     ts = now()
-    with conn:
+    with conn, journal(conn):
         cur = conn.execute(
             "INSERT INTO tasks (project, title, notes, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
             (args.project, args.title, args.notes, json.dumps(meta), ts, ts),
@@ -457,13 +504,13 @@ def cmd_add(conn, args):
 
 
 def cmd_dep_add(conn, args):
-    with conn:
+    with conn, journal(conn):
         add_dep(conn, args.task, args.depends_on)
     emit(args, {"task_id": args.task, "depends_on": args.depends_on}, f"#{args.task} depends on #{args.depends_on}")
 
 
 def cmd_dep_rm(conn, args):
-    with conn:
+    with conn, journal(conn):
         cur = conn.execute("DELETE FROM deps WHERE task_id=? AND depends_on=?", (args.task, args.depends_on))
     if cur.rowcount == 0:
         raise Fail(f"no such dependency: #{args.task} -> #{args.depends_on}")
@@ -575,7 +622,7 @@ def set_status(conn, args, status):
         warnings.append(f"#{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}")
         print(f"warning: {warnings[0]}", file=sys.stderr)
     ts = now()
-    with conn:
+    with conn, journal(conn):
         conn.execute(
             "UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?",
             (status, ts if status == "done" else None, ts, args.id),
@@ -610,7 +657,7 @@ def cmd_edit(conn, args):
     if meta.get("type") == "task":
         del meta["type"]
     parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
-    with conn:
+    with conn, journal(conn):
         conn.execute(
             "UPDATE tasks SET title=?, notes=?, meta=?, updated_at=? WHERE id=?",
             (args.title if args.title is not None else task["title"], args.notes if args.notes is not None else task["notes"], json.dumps(meta), now(), args.id),
@@ -626,7 +673,7 @@ def cmd_rm(conn, args):
     if below and not args.recursive:
         raise Fail(f"#{args.id} has {len(tasks[args.id]['children'])} children; pass --recursive to delete the whole subtree")
     doomed = [args.id, *below]
-    with conn:
+    with conn, journal(conn):
         conn.execute(f"DELETE FROM tasks WHERE id IN ({','.join('?' * len(doomed))})", doomed)
     data = {"deleted": args.id, **({"descendants": below} if below else {})}
     emit(args, data, f"deleted #{args.id}" + (f" and {len(below)} descendants" if below else ""))
@@ -709,7 +756,7 @@ def cmd_date(conn, args):
     for name in args.clear:
         meta.pop(keys[name], None)
     check_span(meta)
-    with conn:
+    with conn, journal(conn):
         conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
     data = load(conn)[args.id]
     text = f"#{args.id} start {data['start'] or '-'} due {data['due'] or '-'}"
@@ -750,6 +797,89 @@ def cmd_agenda(conn, args):
         if found:
             out += [headings[name], *(f"  {agenda_line(t, notes[name](t))}" for t in found), ""]
     emit(args, {name: [brief_task(t) for t in found] for name, found in buckets.items()}, "\n".join(out).rstrip() or "nothing needs attention")
+
+
+def resolve_since(value):
+    return resolve_date("-" + value if re.fullmatch(r"\d+[dw]", value) else value)
+
+
+def net_changes(rows):
+    first, last = {}, {}
+    for r in rows:
+        first.setdefault(r["field"], json.loads(r["old"]) if r["old"] is not None else None)
+        last[r["field"]] = json.loads(r["new"]) if r["new"] is not None else None
+    return {f: (first[f], last[f]) for f in first if first[f] != last[f]}
+
+
+def describe(field, old, new):
+    name = field.removeprefix("meta.").replace("_", " ")
+    if field == "depends_on":
+        gone, came = sorted(set(old or []) - set(new or [])), sorted(set(new or []) - set(old or []))
+        return "depends on " + " ".join([*(f"+#{i}" for i in came), *(f"-#{i}" for i in gone)])
+    if field == "parent":
+        return f"parent {f'#{old}' if old else '-'} → {f'#{new}' if new else '-'}"
+    if field == "title":
+        return f"title {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)}"
+    return f"{name} {old if old is not None else '-'} → {new if new is not None else '-'}"
+
+
+def cmd_changes(conn, args):
+    since = resolve_since(args.since)
+    tasks = load(conn)
+    rows = [r for r in conn.execute("SELECT * FROM events WHERE at >= ? ORDER BY id", (since + "T00:00:00Z",)) if args.all_projects or r["project"] == args.project]
+    by_task = {}
+    for r in rows:
+        by_task.setdefault(r["task_id"], []).append(r)
+    found = {name: [] for name in CHANGE_BUCKETS}
+    text = {name: [] for name in CHANGE_BUCKETS}
+    for task_id, events in by_task.items():
+        fields = {e["field"] for e in events}
+        if "removed" in fields:
+            if "created" not in fields:
+                title = json.loads(next(e["old"] for e in events if e["field"] == "removed"))
+                found["removed"].append({"id": task_id, "title": title, "project": events[0]["project"]})
+                text["removed"].append(f"#{task_id} {title}")
+            continue
+        task = tasks.get(task_id)
+        if task is None:
+            continue
+        if "created" in fields:
+            found["new"].append(brief_task(task))
+            text["new"].append(agenda_line(task, None))
+            continue
+        net = net_changes(e for e in events if e["field"] not in ("created", "removed"))
+        old_status, new_status = net.get("status", (None, None))
+        if new_status == "in_progress" and old_status == "open":
+            found["started"].append(brief_task(task))
+            text["started"].append(agenda_line(task, None))
+        if old_status == "done" and new_status != "done":
+            found["reopened"].append(brief_task(task))
+            text["reopened"].append(agenda_line(task, None))
+        scope = []
+        for field in DATE_FIELDS:
+            if field not in net:
+                continue
+            old, new = net[field]
+            if old and new:
+                days = (date.fromisoformat(new) - date.fromisoformat(old)).days
+                bucket = "slipped" if days > 0 else "pulled_in"
+                found[bucket].append(dict(brief_task(task), field=field, **{"from": old, "to": new, "days": days}))
+                text[bucket].append(f"#{task_id} {marker(task)}{task['title']} — {field} {old} → {new} ({days:+d}d)")
+            else:
+                scope.append({"field": field, "from": old, "to": new})
+        scope += [{"field": f, "from": net[f][0], "to": net[f][1]} for f in SCOPE_FIELDS if f in net]
+        if scope:
+            found["rescoped"].append(dict(brief_task(task), changes=scope))
+            text["rescoped"].append(f"#{task_id} {marker(task)}{task['title']} — " + "; ".join(describe(c["field"], c["from"], c["to"]) for c in scope))
+    for task in scoped(tasks, args):
+        if task["derived_status"] == "done" and task["done_at"] and task["done_at"] >= since + "T00:00:00Z":
+            found["completed"].append(dict(brief_task(task), done_at=task["done_at"]))
+            text["completed"].append(f"#{task['id']} {marker(task)}{task['title']} — done {task['done_at'][:10]}")
+    out = [f"Changes since {since}"]
+    for name, heading in CHANGE_BUCKETS.items():
+        if text[name]:
+            out += ["", heading, *(f"  {t}" for t in text[name])]
+    emit(args, {"since": since, **found}, "\n".join(out) if len(out) > 1 else f"no changes since {since}")
 
 
 def cmd_export(conn, args):
@@ -910,6 +1040,7 @@ COMMANDS = {
     "why": cmd_why,
     "date": cmd_date,
     "agenda": cmd_agenda,
+    "changes": cmd_changes,
     "export": cmd_export,
     "tree": cmd_tree,
     "graph": cmd_graph,
@@ -992,6 +1123,10 @@ def build_parser():
     p = command("agenda")
     p.add_argument("--within", type=int, default=14)
     p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
+    p.add_argument("--all-projects", action="store_true")
+
+    p = command("changes")
+    p.add_argument("--since", default="7d")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("export")

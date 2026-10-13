@@ -52,11 +52,16 @@ tg.py date ID --promised 2027-02-01
 - An external slipped: `date ID --promised ...` and `edit ID --meta chase=YYYY-MM-DD`.
 - A new risk or blocker: `add` a decision or external and link it with `--blocks`.
 
+## History
+
+Every command that changes data records what changed (title, status, type, parent, dates, dependencies, notes, meta) in an `events` table, in the same transaction. `changes [--since 7d|2w|DATE]` reads it back as New, Started, Completed, Reopened, Slipped, Pulled in, Re-scoped (title, type, parent, dependencies, person, lane, team, a date set or cleared) and Removed. Changes are netted per task over the window, so a date moved and moved back shows nothing. History starts when this version first touches the DB; earlier changes were not recorded.
+
 ## Weekly steering prep
 
-1. `agenda` groups what needs attention: Late, Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
-2. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
-3. `serve` and open the Timeline view for the picture.
+1. `changes` for what moved since last week.
+2. `agenda` groups what needs attention: Late, Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
+3. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
+4. `serve` and open the Timeline view for the picture.
 
 ## Avoiding duplicates and big plans
 
@@ -118,6 +123,7 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `tree [ID]` / `tree --children [ID]` | Dependency tree from goals (milestones, objectives and nodes with dependencies that block nothing) / parent hierarchy |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
 | `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
+| `changes [--since 7d\|DATE] [--all-projects]` | What changed since a date: new, started, completed, reopened, slipped, pulled in, re-scoped, removed |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
 | `projects` | Projects with total, done, ready, blocked counts |
 

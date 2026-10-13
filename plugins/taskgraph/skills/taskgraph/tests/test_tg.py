@@ -1192,3 +1192,104 @@ def test_tree_roots_skip_isolated_leaves(tg):
     tg("rm", str(goal), "--recursive")
     tg("rm", str(ms))
     assert loose in [n["id"] for n in tg("tree")]
+
+
+def age_events(db, at="2026-09-01T00:00:00Z"):
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE events SET at=?", (at,))
+
+
+def events(db):
+    with closing(sqlite3.connect(db)) as conn:
+        return [(t, f, json.loads(o) if o else None, json.loads(n) if n else None) for t, f, o, n in conn.execute("SELECT task_id, field, old, new FROM events ORDER BY id")]
+
+
+def test_events_record_every_mutation(tg, fail, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    b = add(tg, "B")
+    tg("date", str(a), "--due", "2026-11-10")
+    tg("edit", str(b), "--title", "B2", "--meta", "owner=ann")
+    tg("dep", "add", str(b), str(a))
+    tg("start", str(a))
+    fail("dep", "add", str(a), str(b))
+    tg("dep", "rm", str(b), str(a))
+    tg("rm", str(b))
+    assert events(db) == [
+        (a, "created", None, "A"),
+        (b, "created", None, "B"),
+        (a, "due", "2026-11-01", "2026-11-10"),
+        (b, "meta.owner", None, "ann"),
+        (b, "title", "B", "B2"),
+        (b, "depends_on", [], [a]),
+        (a, "status", "open", "in_progress"),
+        (b, "depends_on", [a], []),
+        (b, "removed", "B2", None),
+    ]
+
+
+def test_events_capture_recursive_delete(tg, db):
+    p = add(tg, "P")
+    c = add(tg, "C", "--parent", str(p))
+    tg("rm", str(p), "--recursive")
+    assert [e[:2] for e in events(db)[-2:]] == [(p, "removed"), (c, "removed")]
+
+
+def test_changes_buckets(tg, raw, db):
+    late = add(tg, "VPC", "--due", "2026-10-10", "--meta", "owner=Priya")
+    early = add(tg, "App", "--due", "2026-11-01")
+    renamed = add(tg, "Old")
+    gone = add(tg, "Gone")
+    started = add(tg, "Begin")
+    finished = add(tg, "Finish")
+    back = add(tg, "Back")
+    tg("done", str(back))
+    m = add(tg, "M", "--type", "milestone", "--depends", str(finished))
+    age_events(db)
+    tg("date", str(late), "--due", "2026-10-24")
+    tg("date", str(early), "--due", "2026-10-25")
+    tg("edit", str(renamed), "--title", "Renamed", "--meta", "owner=Mei")
+    tg("dep", "add", str(early), str(late))
+    tg("rm", str(gone))
+    tg("start", str(started))
+    tg("done", str(finished))
+    tg("reopen", str(back))
+    fresh = add(tg, "Fresh")
+    temp = add(tg, "Temp")
+    tg("rm", str(temp))
+    data = tg("changes")
+    assert data["since"] == "2026-10-06"
+    assert ids(data["new"]) == [fresh]
+    assert ids(data["started"]) == [started]
+    assert ids(data["completed"]) == [finished, m]
+    assert ids(data["reopened"]) == [back]
+    assert [(s["id"], s["field"], s["from"], s["to"], s["days"]) for s in data["slipped"]] == [(late, "due", "2026-10-10", "2026-10-24", 14)]
+    assert [(s["id"], s["days"]) for s in data["pulled_in"]] == [(early, -7)]
+    assert {r["id"]: [c["field"] for c in r["changes"]] for r in data["rescoped"]} == {early: ["depends_on"], renamed: ["title", "meta.owner"]}
+    assert data["removed"] == [{"id": gone, "title": "Gone", "project": "demo"}]
+    out = raw("--project", "demo", "changes").stdout
+    assert f"#{late} VPC — due 2026-10-10 → 2026-10-24 (+14d)" in out
+    assert f'#{renamed} Renamed — title "Old" → "Renamed"; owner - → Mei' in out
+    assert f"#{early} App — depends on +#{late}" in out
+
+
+def test_changes_since_and_scope(tg, raw, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    other = json.loads(raw("--project", "other", "--json", "add", "X", "--due", "2026-11-01").stdout)["id"]
+    age_events(db, "2026-10-01T09:00:00Z")
+    tg("date", str(a), "--due", "2026-11-02")
+    raw("--project", "other", "date", str(other), "--due", "2026-11-03")
+    assert ids(tg("changes")["slipped"]) == [a]
+    assert ids(tg("changes", "--all-projects")["slipped"]) == [a, other]
+    assert ids(tg("changes", "--since", "30d")["new"]) == [a]
+    assert ids(tg("changes", "--since", "2026-10-01")["new"]) == [a]
+    assert tg("changes", "--since", "-1w")["since"] == "2026-10-06"
+    assert raw("--project", "demo", "changes", "--since", "2027-01-01").stdout.strip() == "no changes since 2027-01-01"
+
+
+def test_changes_net_out_round_trips(tg, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    age_events(db)
+    tg("date", str(a), "--due", "2026-11-09")
+    tg("date", str(a), "--due", "2026-11-01")
+    data = tg("changes")
+    assert data["slipped"] == [] and data["pulled_in"] == [] and data["rescoped"] == []
