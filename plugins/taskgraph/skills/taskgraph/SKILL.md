@@ -1,6 +1,6 @@
 ---
 name: taskgraph
-description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project or programme backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, track dates, decisions and outside dependencies, prepare a weekly steering review, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "what's late", "下一步做什么", "任务依赖", "看图". Agents operate the CLI; humans view the graph.
+description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project or programme backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, track dates, decisions and outside dependencies, prepare a weekly steering review, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "what's late". Agents operate the CLI; humans view the graph.
 ---
 
 # taskgraph
@@ -10,7 +10,6 @@ description: Track project tasks and their dependencies in a SQLite-backed DAG, 
 Use when the user wants to plan work backwards from a goal, track tasks with dependencies and dates, ask what can be done next or what is late, prepare a steering review, or see the plan as a picture. Agents drive the CLI; the user views the graph.
 
 Trigger keywords (English): task, todo, dependency, work backwards, what's next, blocked, ready, late, agenda, programme
-Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图, 排期
 
 ## Choosing the project
 
@@ -59,7 +58,7 @@ tg.py date ID --promised 2027-02-01
 
 `path ID` walks every unfinished node upstream of a milestone (or any node): its dependencies, and the children of a summary. Each hop shows the upstream node's due, the date it is needed (the dependent's start, else its due; a child is needed by its parent's due) and the slack between them. It ends with the driving chain, the chain whose worst slack is lowest, and a verdict: `at risk` when anything upstream is late or any hop has negative slack, `unknown` when nothing upstream has a date, else `on track`.
 
-Every milestone and objective carries the same verdict as `outlook` (`verdict`, `min_slack`, `negative_slack`, `late_upstream`, `undated`). `show` prints it, `agenda` lists at-risk ones, and the graph outlines them in amber. Slack comes from the dates you entered; nothing is rescheduled.
+Every milestone and objective carries the same verdict as `outlook` (`verdict`, `min_slack`, `negative_slack`, `late_upstream`, `undated`, `open_risks`, `driving`). `show` prints it, `agenda` lists at-risk ones, and the graph outlines them in amber. Slack comes from the dates you entered; nothing is rescheduled.
 
 ## History
 
@@ -87,7 +86,7 @@ Add the narrative yourself: what the reds mean, what is being done, and what you
 2. `agenda` groups what needs attention: Late, At risk (milestones and objectives), Should have started (open tasks whose start has passed), Conflicts, due soon (`--within DAYS`, default 14), Chase due, Risk review due, and decisions, externals, risks or issues with no date. `--type` and `--all-projects` narrow or widen it.
 3. `deps --cross lane --open` for hand-offs between workstreams and who owns each side.
 4. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
-5. `serve` and open the Timeline view for the picture.
+5. `serve` and open the Timeline view for the picture. Its Dependencies control shows conflicts only (default), the critical path (each open milestone's driving chain, as in `path`) or all dependencies; `?deps=critical` in the URL opens it that way. Milestones are listed first in each lane, and each lane header carries a red, amber or green stripe from the same rules as `report`.
 6. `report --md` for the written status; add the narrative.
 
 ## Avoiding duplicates and big plans
