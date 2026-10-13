@@ -27,7 +27,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
 #cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
-#legend { position: fixed; left: 14px; bottom: 14px; display: flex; gap: 22px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 12px; z-index: 2; }
+#legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 6px 12px 8px; z-index: 2; }
+#legend #legendBody { display: flex; gap: 22px; margin-top: 4px; }
+#legend.closed { padding-bottom: 6px; }
+#legend.closed #legendBody { display: none; }
+#legendToggle { background: none; border: 0; padding: 0; color: #9ca3af; font: inherit; font-size: 12px; cursor: pointer; }
+#legendToggle:hover { color: #e5e7eb; }
 #legend .col div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
@@ -57,7 +62,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <select id="project"></select>
   <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
   <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
-  <label id="depsBy" hidden><input type="checkbox" id="showDeps"> Show dependencies</label>
+  <label id="depsBy" hidden>Dependencies <select id="depsMode"><option value="off">Conflicts only</option><option value="critical">Critical path</option><option value="all">All</option></select></label>
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
   <span class="seg" id="types"></span>
   <input type="text" id="search" placeholder="Search" size="9">
@@ -71,6 +76,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 </div>
 <div id="cy"></div>
 <div id="legend">
+  <button id="legendToggle" title="Show or hide the legend">Legend ▾</button>
+  <div id="legendBody">
   <div class="col">
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#e5e7eb"/></svg>Task</div>
     <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#262c36" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
@@ -81,10 +88,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
     <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#262c36" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
     <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#262c36" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
+    <div><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
   </div>
   <div class="col" id="legendStatus"></div>
   <div class="col" id="legendMarks">
     <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+  </div>
   </div>
 </div>
 <div id="panel"></div>
@@ -149,7 +158,8 @@ const store = {
 const query = new URLSearchParams(location.search);
 const VIEWS = ['graph', 'lanes', 'timeline'];
 let view = VIEWS.find(v => v === (query.get('view') || store.get('taskgraph.view'))) || 'graph';
-let showDeps = (query.get('deps') || store.get('taskgraph.deps')) === '1';
+const DEPS = { '0': 'off', off: 'off', critical: 'critical', '1': 'all', all: 'all' };
+let depsMode = DEPS[query.get('deps')] || DEPS[store.get('taskgraph.deps')] || 'off';
 let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
 const parseTypes = s => (s || '').split(',').filter(t => TYPES.includes(t));
 let types = new Set([query.get('types'), store.get('taskgraph.types')].map(parseTypes).find(l => l.length) || TYPES);
@@ -165,6 +175,12 @@ const setExpanded = ids => {
   expanded = ids;
   store.set('taskgraph.expanded', JSON.stringify([...ids]));
 };
+const RAG_COLORS = { red: '#ef4444', amber: '#f59e0b', green: '#34d399' };
+const ragOf = list => ['red', 'amber', 'green'].find(r => list.some(n => n.rag === r)) || 'green';
+const stripe = (id, h, x, y, list) => ({
+  group: 'nodes', classes: 'lane-rag bg', locked: true, selectable: false, grabbable: false,
+  data: { id, h, color: RAG_COLORS[ragOf(list)], rag: ragOf(list) }, position: { x, y }
+});
 const isSummary = n => n.children.length > 0 || n.type === 'objective';
 const descendants = n => n.children.reduce((sum, c) => sum + 1 + descendants(byId.get(c)), 0);
 
@@ -300,6 +316,11 @@ const cy = cytoscape({
     { selector: 'edge.tl-today', style: { 'curve-style': 'straight', 'line-style': 'dashed', 'line-color': '#fbbf24', 'width': 1.5, 'target-arrow-shape': 'none', 'events': 'no', 'z-index-compare': 'manual', 'z-index': 1 } },
     { selector: 'edge.tl-off', style: { 'display': 'none' } },
     { selector: 'edge.tl-dep', style: { 'width': 1.2, 'line-color': AXIS, 'target-arrow-color': AXIS, 'arrow-scale': 0.8, 'line-style': 'solid', 'z-index-compare': 'manual', 'z-index': 1 } },
+    { selector: 'edge.tl-critical', style: { 'width': 2.2, 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb' } },
+    { selector: 'node.lane-rag', style: {
+      'shape': 'rectangle', 'width': 4, 'height': 'data(h)', 'padding': 0, 'background-color': 'data(color)', 'border-width': 0,
+      'events': 'no', 'label': '', 'z-index-compare': 'manual', 'z-index': 0
+    } },
     { selector: 'edge.tl-conflict', style: { 'width': 1.5, 'line-color': RED, 'target-arrow-color': RED, 'line-style': 'dashed' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
@@ -540,6 +561,7 @@ function layoutLanes(fit) {
   const names = [...groups.keys()].sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
   const width = GUTTER + (maxUp + 1) * COL_W;
   let top = 0;
+  const stripes = [];
   const bands = names.map((name, i) => {
     const rows = new Map();
     groups.get(name).sort((a, b) => a.id - b.id).forEach(n => {
@@ -554,13 +576,14 @@ function layoutLanes(fit) {
       data: { id: 'lane:' + i, name: clampLabel(name, LANE_W, LABEL_LINES), w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
       position: { x: width / 2, y: top + height / 2 }
     };
+    stripes.push(stripe('lane-rag:' + i, height, 2, top + height / 2, groups.get(name)));
     top += height;
     return band;
   });
-  cy.add(bands);
+  cy.add([...bands, ...stripes]);
   cy.edges().forEach(e => e.toggleClass('back', back.has(e.id())));
   routeEdges();
-  if (fit) cy.fit(undefined, 40);
+  if (fit) fitView();
 }
 
 const dnum = s => {
@@ -585,6 +608,15 @@ function dateText(n) {
   if (isSummary(n) && n.rollup && n.rollup.total) parts.push(`${n.rollup.done} of ${n.rollup.total} done`);
   if (n.late_days != null) parts.push(n.late_days + 'd late');
   return parts.join(' · ');
+}
+
+function criticalEdges(open) {
+  const ids = new Set();
+  DATA.nodes.filter(n => n.outlook && n.derived_status !== 'done' && keeps(n)).forEach(n => {
+    const chain = (n.outlook.driving || []).filter(i => byId.has(i)).map(i => topOf(byId.get(i), open).id);
+    chain.slice(1).forEach((b, i) => { if (chain[i] !== b) ids.add(chain[i] + '-' + b); });
+  });
+  return ids;
 }
 
 function conflictEdges(open) {
@@ -658,7 +690,7 @@ function layoutTimeline(fit) {
   const { nodes, open } = visibleData();
   const shown = new Set(nodes.map(n => n.id));
   const kids = new Map(nodes.map(n => [n.id, n.children.filter(c => shown.has(c)).map(c => byId.get(c)).filter(datesOf)]));
-  const cmp = (a, b) => (datesOf(a)?.[0] ?? '~').localeCompare(datesOf(b)?.[0] ?? '~') || a.id - b.id;
+  const cmp = (a, b) => (b.type === 'milestone') - (a.type === 'milestone') || (datesOf(a)?.[0] ?? '~').localeCompare(datesOf(b)?.[0] ?? '~') || a.id - b.id;
   const groups = new Map();
   nodes.filter(n => !datesOf(n) || !shown.has(n.parent)).forEach(n => {
     const name = datesOf(n) ? laneOf(n) : null;
@@ -708,6 +740,7 @@ function layoutTimeline(fit) {
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
   });
   const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
+  spans.forEach(([from, to], i) => els.push(stripe('tl:rag:' + i, (to - from) * TL.row, 2, TL.head + (from + to) * TL.row / 2, rows.slice(from, to).filter(r => r.n).map(r => r.n))));
   spans.forEach(([from, to], i) => els.push(bg('lane-bg', 'tl:band:' + i, { name: '', w: width, h: (to - from) * TL.row, tx: 0, shade: i % 2 ? '#171b22' : '#14181e' }, width / 2, TL.head + (from + to) * TL.row / 2)));
   const begin = new Date(lo * 864e5);
   for (let m = new Date(Date.UTC(begin.getUTCFullYear(), begin.getUTCMonth() + 1, 1)); m / 864e5 <= hi; m.setUTCMonth(m.getUTCMonth() + 1)) {
@@ -719,15 +752,18 @@ function layoutTimeline(fit) {
   els.push({ group: 'edges', classes: 'bg tl-today', data: { id: 'tl:today-line', source: 'tl:today', target: 'tl:today-end' } });
   cy.add(els);
   const hot = conflictEdges(open);
+  const critical = depsMode === 'critical' ? criticalEdges(open) : new Set();
   const drawn = links().filter(e => {
-    const bad = hot.has(e.id());
-    return (bad || showDeps) && !e.data('kind').includes('partof') && marks.has(e.source().id()) && marks.has(e.target().id());
+    const wanted = hot.has(e.id()) || depsMode === 'all' || critical.has(e.id());
+    return wanted && !e.data('kind').includes('partof') && marks.has(e.source().id()) && marks.has(e.target().id());
   });
   links().not(drawn).addClass('tl-off');
-  drawn.addClass('tl-dep').filter(e => hot.has(e.id())).addClass('tl-conflict');
+  drawn.addClass('tl-dep');
+  drawn.filter(e => critical.has(e.id())).addClass('tl-critical');
+  drawn.filter(e => hot.has(e.id())).addClass('tl-conflict');
   routeDeps(drawn.toArray(), marks, width);
   if (!fit) return;
-  cy.fit(undefined, 40);
+  fitView();
   if (cy.zoom() < TL.readable) {
     const box = cy.elements().boundingBox();
     cy.viewport({ zoom: TL.readable, pan: { x: 40 - box.x1 * TL.readable, y: 40 - box.y1 * TL.readable } });
@@ -736,20 +772,45 @@ function layoutTimeline(fit) {
 
 function layout(fit = true) {
   cy.elements('.bg').remove();
-  cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-conflict');
+  cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
   cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
   if (view === 'lanes') layoutLanes(fit);
   else if (view === 'timeline') layoutTimeline(fit);
-  else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit, padding: 40 }).run();
+  else {
+    cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit: false }).run();
+    if (fit) fitView();
+  }
+}
+
+// Fit like cy.fit, but leave the bottom strip under the legend free so it never covers a node.
+function fitTarget(eles = cy.elements(), pad = 40) {
+  if (eles.empty()) return null;
+  const bb = eles.boundingBox();
+  const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
+  const reserve = Math.max(pad, box.bottom - legend.top + 12);
+  const w = box.width - 2 * pad, h = box.height - pad - reserve;
+  const zoom = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
+  return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
+}
+
+function fitView(eles) {
+  const target = fitTarget(eles);
+  if (target) cy.viewport(target);
+}
+
+function covered() {
+  const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
+  const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
+  return tasks().some(n => {
+    const b = n.renderedBoundingBox();
+    const hidden = b.x1 < 0 || b.y1 < 0 || b.x2 > box.width || b.y2 > box.height;
+    return hidden || (b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1);
+  });
 }
 
 function fitIfOutside() {
-  const ext = cy.extent();
-  const outside = tasks().some(n => {
-    const b = n.boundingBox();
-    return b.x1 < ext.x1 || b.x2 > ext.x2 || b.y1 < ext.y1 || b.y2 > ext.y2;
-  });
-  if (outside) cy.animate({ fit: { eles: cy.elements(), padding: 40 } }, { duration: 300 });
+  const target = covered() && fitTarget();
+  if (target) cy.animate(target, { duration: 300 });
 }
 
 function rebuild(keepView, flash) {
@@ -942,7 +1003,7 @@ function openPanel(n) {
   panel.style.display = 'block';
   $('cy').style.right = '340px';
   cy.resize();
-  if (wasHidden) cy.fit(undefined, 40);
+  if (wasHidden) fitView();
 }
 
 function closePanel() {
@@ -998,7 +1059,7 @@ const params = () => {
   if (projectSelect.value) q.set('project', projectSelect.value);
   if (view !== 'graph') q.set('view', view);
   if (laneKey !== 'lane') q.set('lanes', laneKey);
-  if (view === 'timeline' && showDeps) q.set('deps', '1');
+  if (view === 'timeline' && depsMode !== 'off') q.set('deps', depsMode === 'all' ? '1' : depsMode);
   if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
   return q.toString().replaceAll('%2C', ',');
 };
@@ -1009,7 +1070,7 @@ const syncControls = () => {
   $('viewTimeline').classList.toggle('on', view === 'timeline');
   $('lanesBy').hidden = view === 'graph';
   $('depsBy').hidden = view !== 'timeline';
-  $('showDeps').checked = showDeps;
+  $('depsMode').value = depsMode;
   $('laneKey').value = laneKey;
   TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
 };
@@ -1039,9 +1100,9 @@ projectSelect.onchange = () => {
 $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
-$('showDeps').onchange = e => {
-  showDeps = e.target.checked;
-  store.set('taskgraph.deps', showDeps ? '1' : '0');
+$('depsMode').onchange = e => {
+  depsMode = e.target.value;
+  store.set('taskgraph.deps', depsMode);
   syncUrl();
   layout(false);
   applySearch();
@@ -1068,7 +1129,17 @@ $('collapseAll').onclick = () => {
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
-$('fit').onclick = () => cy.fit(undefined, 40);
+$('fit').onclick = () => fitView();
+const setLegend = open => {
+  $('legend').classList.toggle('closed', !open);
+  $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
+  store.set('taskgraph.legend', open ? 'open' : 'closed');
+};
+setLegend(store.get('taskgraph.legend') !== 'closed');
+$('legendToggle').onclick = () => {
+  setLegend($('legend').classList.contains('closed'));
+  fitIfOutside();
+};
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 

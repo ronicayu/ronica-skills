@@ -723,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "baseline"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "baseline", "rag"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None

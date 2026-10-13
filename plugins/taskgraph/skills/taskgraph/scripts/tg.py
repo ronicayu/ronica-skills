@@ -292,7 +292,8 @@ def outlook(tasks, root, hops=None):
         verdict = "unknown" if hops else "on_track"
     else:
         verdict = "on_track"
-    return {"verdict": verdict, "min_slack": min(slacks, default=None), "negative_slack": negative, "late_upstream": late, "undated": undated, "open_risks": risks}
+    return {"verdict": verdict, "min_slack": min(slacks, default=None), "negative_slack": negative, "late_upstream": late, "undated": undated,
+            "open_risks": risks, "driving": driving(tasks, root, hops)}
 
 
 def driving(tasks, root, hops):
@@ -869,7 +870,7 @@ def cmd_path(conn, args):
     root = get(tasks, args.id)
     hops = upstream(tasks, root["id"])
     o = outlook(tasks, root["id"], hops)
-    chain = driving(tasks, root["id"], hops)
+    chain = o["driving"]
     into = {}
     for h in hops:
         into.setdefault(h["to"], []).append(h)
@@ -1255,6 +1256,13 @@ def group_status(tasks, items, day, limit):
     return ("red" if red else "amber" if amber else "green"), red + amber
 
 
+def node_rag(tasks, task, day, limit):
+    if not is_summary(task):
+        return group_status(tasks, [task], day, limit)[0]
+    below = [tasks[d] for d in descendants(tasks, task["id"]) if not is_summary(tasks[d])]
+    return group_status(tasks, below + ([task] if task["outlook"] else []), day, limit)[0]
+
+
 def asks_for(tasks, day, limit):
     asks = []
     for t in tasks:
@@ -1421,13 +1429,16 @@ def cmd_export(conn, args):
 
 
 def graph_payload(conn, args):
-    tasks = scoped(load(conn), args)
+    everything = load(conn)
+    tasks = scoped(everything, args)
     ids = {t["id"] for t in tasks}
     base = latest_baselines(conn, {t["project"] for t in tasks})
+    day, limit = today().isoformat(), (today() + timedelta(days=14)).isoformat()
     nodes = []
     for t in tasks:
         node = {k: t[k] for k in NODE_FIELDS}
         node["baseline"] = base.get(t["id"])
+        node["rag"] = node_rag(everything, t, day, limit)
         node["depends_on"] = [i for i in t["depends_on"] if i in ids]
         node["blocks"] = [i for i in t["blocks"] if i in ids]
         node["parent"] = t["parent"] if t["parent"] in ids else None

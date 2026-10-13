@@ -110,3 +110,66 @@ def test_risk_and_issue_render(browser, raid_file, view):
     assert page.evaluate("cy.edges('.threat').map(e => e.id())") == ["2-1"]
     assert problems == []
     page.close()
+
+
+def open_page(browser, path, query="", height=900):
+    page = browser.new_page(viewport={"width": 1400, "height": height})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}{query}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    return page, problems
+
+
+COVERED = "() => covered()"
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_fit_keeps_nodes_clear_of_legend(browser, raid_file, page_file, view):
+    for path in (page_file, raid_file):
+        page, problems = open_page(browser, path, f"?view={view}", height=520)
+        assert page.evaluate(COVERED) is False
+        page.click("#fit")
+        assert page.evaluate(COVERED) is False
+        assert problems == []
+        page.close()
+
+
+def test_legend_collapses_and_remembers(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    tall = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
+    page.click("#legendToggle")
+    short = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
+    assert short < tall / 2 and page.inner_text("#legendToggle") == "Legend ▸"
+    page.reload()
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("document.getElementById('legend').classList.contains('closed')")
+    page.click("#legendToggle")
+    assert problems == []
+    page.close()
+
+
+def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    drawn = "() => cy.edges('.tl-dep').map(e => e.id()).sort()"
+    assert page.evaluate(drawn) == ["5-3"]
+    page.select_option("#depsMode", "critical")
+    assert page.evaluate(drawn) == ["3-2", "5-3"]
+    assert page.evaluate("cy.edges('.tl-critical').map(e => e.id()).sort()") == ["3-2", "5-3"]
+    assert "deps=critical" in page.url
+    page.select_option("#depsMode", "all")
+    assert "deps=1" in page.url and len(page.evaluate(drawn)) >= 2
+    rows = page.evaluate("cy.nodes('.tl-name').map(n => [n.position('y'), n.data('name')]).sort((a, b) => a[0] - b[0]).map(r => r[1])")
+    launch = next(i for i, r in enumerate(rows) if "#1 Launch" in r)
+    assert rows[launch + 1].startswith("#2 Ship v1") and rows[launch + 2].startswith("#4 Write docs")
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", ("lanes", "timeline"))
+def test_lane_rag_stripes(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}")
+    rag = page.evaluate("cy.nodes('.lane-rag').map(n => n.data('rag'))")
+    assert "red" in rag and len(rag) == page.evaluate("cy.nodes('.lane-bg').length")
+    assert problems == []
+    page.close()
