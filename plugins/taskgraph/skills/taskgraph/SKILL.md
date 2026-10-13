@@ -52,6 +52,12 @@ tg.py date ID --promised 2027-02-01
 - An external slipped: `date ID --promised ...` and `edit ID --meta chase=YYYY-MM-DD`.
 - A new risk or blocker: `add` a decision or external and link it with `--blocks`.
 
+## Will we hit it?
+
+`path ID` walks every unfinished node upstream of a milestone (or any node): its dependencies, and the children of a summary. Each hop shows the upstream node's due, the date it is needed (the dependent's start, else its due; a child is needed by its parent's due) and the slack between them. It ends with the driving chain, the chain whose worst slack is lowest, and a verdict: `at risk` when anything upstream is late or any hop has negative slack, `unknown` when nothing upstream has a date, else `on track`.
+
+Every milestone and objective carries the same verdict as `outlook` (`verdict`, `min_slack`, `negative_slack`, `late_upstream`, `undated`). `show` prints it, `agenda` lists at-risk ones, and the graph outlines them in amber. Slack comes from the dates you entered; nothing is rescheduled.
+
 ## History
 
 Every command that changes data records what changed (title, status, type, parent, dates, dependencies, notes, meta) in an `events` table, in the same transaction. `changes [--since 7d|2w|DATE]` reads it back as New, Started, Completed, Reopened, Slipped, Pulled in, Re-scoped (title, type, parent, dependencies, person, lane, team, a date set or cleared) and Removed. Changes are netted per task over the window, so a date moved and moved back shows nothing. History starts when this version first touches the DB; earlier changes were not recorded.
@@ -63,7 +69,7 @@ When the plan is agreed (a steering committee, a funding gate), run `baseline se
 ## Weekly steering prep
 
 1. `changes` for what moved since last week.
-2. `agenda` groups what needs attention: Late, Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
+2. `agenda` groups what needs attention: Late, At risk (milestones and objectives), Should have started (open tasks whose start has passed), Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
 3. `ls --type decision` for open decisions; `ls --status done` lists completions, since `ls` hides done by default.
 4. `serve` and open the Timeline view for the picture.
 
@@ -120,9 +126,10 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `show ID` | Full details, dependencies, dependents, conflicts |
 | `start ID` / `done ID` / `reopen ID` | Change status |
 | `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates |
-| `agenda [--within DAYS] [--type T ...] [--all-projects]` | Late, conflicts, due soon, chase due, missing dates |
+| `agenda [--within DAYS] [--type T ...] [--all-projects]` | Late, at risk, should have started, conflicts, due soon, chase due, missing dates |
 | `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--meta k=v ...] [--unset-meta k ...]` | Edit fields; meta merges, values parsed as JSON when valid |
 | `rm ID [--recursive]` | Delete a task and its edges |
+| `path ID` | Upstream chain with slack per hop, driving chain and verdict |
 | `why ID` | Chains up to the goals a task serves, through dependents and parents (`via`: `blocks` or `parent`) |
 | `tree [ID]` / `tree --children [ID]` | Dependency tree from goals (milestones, objectives and nodes with dependencies that block nothing) / parent hierarchy |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |

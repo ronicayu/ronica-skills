@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS baselines (
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
     "id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at",
-    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts",
+    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook",
 )
 TYPES = ("task", "milestone", "decision", "external", "objective")
 PARENT_TYPES = ("task", "objective")
@@ -220,6 +220,7 @@ def load(conn):
     day = today()
     for task in tasks.values():
         task["derived_status"] = current[task["id"]]
+        task["waits_for"] = effective[task["id"]]
         deps = task["depends_on"] if computed(task) and task["type"] != "milestone" else effective[task["id"]]
         task["blocked_by"] = sum(current[d] != "done" for d in deps)
         if is_summary(task):
@@ -235,7 +236,83 @@ def load(conn):
         task["span"] = span(tasks, task) if is_summary(task) else None
     finish_derived(tasks, effective, current)
     find_conflicts(tasks, effective, current)
+    for task in tasks.values():
+        task["outlook"] = outlook(tasks, task["id"]) if task["type"] in ("milestone", "objective") else None
     return tasks
+
+
+def hops_into(tasks, task):
+    found = []
+    need = task["start"] or task["due"]
+    for d in task["waits_for"]:
+        found.append((d, need, "dependency"))
+    if is_summary(task):
+        found += [(c, task["due"], "child") for c in task["children"]]
+    return [(d, n, k) for d, n, k in found if tasks[d]["derived_status"] != "done"]
+
+
+def upstream(tasks, root):
+    hops, seen, queue = [], {root}, [root]
+    while queue:
+        task = tasks[queue.pop(0)]
+        for d, need, kind in hops_into(tasks, task):
+            dep = tasks[d]
+            due = dep["due"] or (dep["span"] or {}).get("end")
+            hops.append({"from": d, "to": task["id"], "kind": kind, "due": due, "need": need,
+                         "slack": days_between(due, need), "status": dep["derived_status"], "late_days": dep["late_days"]})
+            if d not in seen:
+                seen.add(d)
+                queue.append(d)
+    return hops
+
+
+def outlook(tasks, root, hops=None):
+    hops = upstream(tasks, root) if hops is None else hops
+    above = {h["from"] for h in hops}
+    slacks = [h["slack"] for h in hops if h["slack"] is not None]
+    late = sorted(i for i in above if tasks[i]["late_days"])
+    negative = sum(s < 0 for s in slacks)
+    undated = sorted(i for i in above if not tasks[i]["due"] and not is_summary(tasks[i]))
+    if negative or late or tasks[root]["late_days"]:
+        verdict = "at_risk"
+    elif not slacks:
+        verdict = "unknown" if hops else "on_track"
+    else:
+        verdict = "on_track"
+    return {"verdict": verdict, "min_slack": min(slacks, default=None), "negative_slack": negative, "late_upstream": late, "undated": undated}
+
+
+def driving(tasks, root, hops):
+    into, memo, never = {}, {}, float("inf")
+    for h in hops:
+        into.setdefault(h["to"], []).append(h)
+
+    def worst(node):
+        if node not in memo:
+            options = []
+            for h in into.get(node, []):
+                low, chain = worst(h["from"])
+                options.append((min(low, never if h["slack"] is None else h["slack"]), h["from"], chain))
+            low, _, chain = min(options, key=lambda o: o[:2]) if options else (never, None, [])
+            memo[node] = (low, chain + [node])
+        return memo[node]
+
+    return worst(root)[1]
+
+
+def outlook_text(o):
+    if o["verdict"] == "on_track":
+        return "on track" + (f" — min slack {o['min_slack']:+d}d" if o["min_slack"] is not None else "")
+    if o["verdict"] == "unknown":
+        return "unknown — nothing upstream has a date"
+    parts = []
+    if o["late_upstream"]:
+        parts.append(f"{len(o['late_upstream'])} late upstream ({', '.join(f'#{i}' for i in o['late_upstream'])})")
+    if o["negative_slack"]:
+        parts.append(f"{o['negative_slack']} hops with negative slack")
+    if o["min_slack"] is not None:
+        parts.append(f"min slack {o['min_slack']:+d}d")
+    return "at risk — " + (", ".join(parts) or "itself late")
 
 
 def finish_derived(tasks, effective, current):
@@ -614,6 +691,8 @@ def cmd_show(conn, args):
         out.append(f"baseline: due {base['due'] or '-'} ({base['label']})" + (f", now {delta:+d}d" if delta is not None else ""))
     if task["late_days"]:
         out.append(f"late:    {task['late_days']}d")
+    if task["outlook"] and task["derived_status"] != "done":
+        out.append(f"outlook: {outlook_text(task['outlook'])} (path {task['id']} for detail)")
     if task["chase_due"]:
         out.append("chase:   due")
     if task["conflicts"]:
@@ -759,6 +838,42 @@ def cmd_tree(conn, args):
     emit(args, nodes, "\n".join(l for n in nodes for l in render(n)))
 
 
+def cmd_path(conn, args):
+    tasks = load(conn)
+    root = get(tasks, args.id)
+    hops = upstream(tasks, root["id"])
+    o = outlook(tasks, root["id"], hops)
+    chain = driving(tasks, root["id"], hops)
+    into = {}
+    for h in hops:
+        into.setdefault(h["to"], []).append(h)
+    head = f"#{root['id']} {marker(root)}{root['title']}" + (f" — due {root['due']}" if root["due"] else "")
+    out, seen = [head], {root["id"]}
+
+    def walk(node, depth):
+        for h in sorted(into.get(node, []), key=lambda h: (h["slack"] if h["slack"] is not None else float("inf"), h["from"])):
+            dep = tasks[h["from"]]
+            parts = [f"due {h['due']}" if h["due"] else "no due date"]
+            if h["need"]:
+                parts.append(f"needed {h['need']}")
+            if h["slack"] is not None:
+                parts.append(f"slack {h['slack']:+d}d")
+            if dep["late_days"]:
+                parts.append(f"late {dep['late_days']}d")
+            part = "(part of) " if h["kind"] == "child" else ""
+            again = " (see above)" if h["from"] in seen else ""
+            out.append(f"{'  ' * depth}{part}#{dep['id']} {marker(dep)}{dep['title']} [{dep['derived_status']}] — " + " · ".join(parts) + again)
+            if not again:
+                seen.add(h["from"])
+                walk(h["from"], depth + 1)
+
+    walk(root["id"], 1)
+    if len(chain) > 1:
+        out.append("driving: " + " → ".join(f"#{i}" for i in chain))
+    out.append("verdict: " + outlook_text(o))
+    emit(args, {"id": root["id"], "due": root["due"], "hops": hops, "driving": chain, **o}, "\n".join(out))
+
+
 def cmd_date(conn, args):
     task = get(load(conn), args.id)
     meta = dict(task["meta"])
@@ -799,6 +914,8 @@ def cmd_agenda(conn, args):
     by_due = lambda t: (t["due"] or "9999-12-31", t["id"])
     buckets = {
         "late": sorted((t for t in items if t["late_days"]), key=lambda t: (-t["late_days"], t["id"])),
+        "at_risk": sorted((t for t in items if t["outlook"] and t["outlook"]["verdict"] == "at_risk"), key=by_due),
+        "late_start": sorted((t for t in items if t["status"] == "open" and not computed(t) and t["start"] and t["start"] < day.isoformat()), key=lambda t: (t["start"], t["id"])),
         "conflicts": sorted((t for t in items if t["conflicts"]), key=by_due),
         "due_soon": sorted((t for t in items if t["due"] and day.isoformat() <= t["due"] <= limit), key=by_due),
         "chase_due": sorted((t for t in items if t["chase_due"]), key=lambda t: (t["meta"]["chase"], t["id"])),
@@ -806,17 +923,20 @@ def cmd_agenda(conn, args):
     }
     notes = {
         "late": lambda t: f"late {t['late_days']}d",
+        "at_risk": lambda t: outlook_text(t["outlook"]).removeprefix("at risk — "),
+        "late_start": lambda t: f"start {t['start']}, still {t['derived_status']}",
         "conflicts": lambda t: "; ".join(c["message"] for c in t["conflicts"]),
         "due_soon": lambda t: None,
         "chase_due": lambda t: f"chase {t['meta']['chase']}",
         "missing_date": lambda t: None,
     }
-    headings = {"late": "Late", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "missing_date": "Missing date"}
+    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "missing_date": "Missing date"}
     out = []
     for name, found in buckets.items():
         if found:
             out += [headings[name], *(f"  {agenda_line(t, notes[name](t))}" for t in found), ""]
-    emit(args, {name: [brief_task(t) for t in found] for name, found in buckets.items()}, "\n".join(out).rstrip() or "nothing needs attention")
+    data = {name: [dict(brief_task(t), outlook=t["outlook"]) if name == "at_risk" else brief_task(t) for t in found] for name, found in buckets.items()}
+    emit(args, data, "\n".join(out).rstrip() or "nothing needs attention")
 
 
 def resolve_since(value):
@@ -1168,6 +1288,7 @@ COMMANDS = {
     "rm": cmd_rm,
     "why": cmd_why,
     "date": cmd_date,
+    "path": cmd_path,
     "agenda": cmd_agenda,
     "changes": cmd_changes,
     "export": cmd_export,
@@ -1237,7 +1358,7 @@ def build_parser():
     p = command("ready")
     p.add_argument("--all-projects", action="store_true")
 
-    for name in ("show", "start", "done", "reopen", "rm", "why"):
+    for name in ("show", "start", "done", "reopen", "rm", "why", "path"):
         p = command(name)
         p.add_argument("id", type=int)
         if name == "rm":

@@ -723,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "baseline"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "baseline"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -999,7 +999,7 @@ def test_agenda_buckets(tg):
     done = add(tg, "finished", "--due", "2026-10-01")
     tg("done", str(done))
     data = tg("agenda")
-    assert set(data) == {"late", "conflicts", "due_soon", "chase_due", "missing_date"}
+    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "missing_date"}
     assert ids(data["late"]) == [late_big, late_small]
     assert ids(data["due_soon"]) == [soon]
     assert ids(data["chase_due"]) == [ext]
@@ -1352,3 +1352,54 @@ def test_ids_are_never_reused(tg):
     assert add(tg, "C") == b + 1
     tg("rm", str(a))
     assert add(tg, "D") == b + 2
+
+
+def milestone_chain(tg):
+    gate = add(tg, "Approve", "--type", "decision", "--due", "2026-10-25")
+    ws = add(tg, "Infra")
+    vpc = add(tg, "VPC", "--parent", str(ws), "--due", "2026-10-10")
+    rep = add(tg, "Replicate", "--start", "2026-10-15", "--due", "2026-11-15", "--depends", str(gate), str(ws))
+    cut = add(tg, "Cut over", "--due", "2026-12-12", "--depends", str(rep))
+    m = add(tg, "Pilot", "--type", "milestone", "--due", "2026-12-15", "--depends", str(cut))
+    return gate, ws, vpc, rep, cut, m
+
+
+def test_path_slack_driving_and_verdict(tg, raw):
+    gate, ws, vpc, rep, cut, m = milestone_chain(tg)
+    data = tg("path", str(m))
+    slack = {(h["from"], h["to"]): h["slack"] for h in data["hops"]}
+    assert slack[(cut, m)] == 3 and slack[(rep, cut)] == 27
+    assert slack[(gate, rep)] == -10 and slack[(vpc, ws)] is None
+    assert data["driving"] == [gate, rep, cut, m]
+    assert data["verdict"] == "at_risk" and data["late_upstream"] == [vpc] and data["min_slack"] == -10
+    assert data["negative_slack"] == 1
+    out = raw("--project", "demo", "path", str(m)).stdout
+    assert f"#{gate} [decision] Approve [ready] — due 2026-10-25 · needed 2026-10-15 · slack -10d" in out
+    assert f"(part of) #{vpc} VPC [ready] — due 2026-10-10 · late 3d" in out
+    assert f"driving: #{gate} → #{rep} → #{cut} → #{m}" in out
+    tg("done", str(gate))
+    tg("date", str(vpc), "--due", "2026-10-14")
+    data = tg("path", str(m))
+    assert data["verdict"] == "on_track" and gate not in {h["from"] for h in data["hops"]}
+
+
+def test_outlook_on_milestones_show_and_agenda(tg, raw):
+    gate, ws, vpc, rep, cut, m = milestone_chain(tg)
+    assert tg("show", str(m))["outlook"]["verdict"] == "at_risk"
+    assert tg("show", str(cut))["outlook"] is None
+    assert "outlook: at risk — 1 late upstream (#" in raw("--project", "demo", "show", str(m)).stdout
+    agenda = tg("agenda")
+    assert ids(agenda["at_risk"]) == [m] and agenda["at_risk"][0]["outlook"]["min_slack"] == -10
+    empty = add(tg, "Lonely", "--type", "milestone", "--due", "2026-12-01")
+    assert tg("show", str(empty))["outlook"]["verdict"] == "on_track"
+    undated = add(tg, "Undated gate", "--type", "milestone", "--depends", str(add(tg, "x")))
+    assert tg("show", str(undated))["outlook"]["verdict"] == "unknown"
+
+
+def test_agenda_should_have_started(tg, raw):
+    late = add(tg, "Late start", "--start", "2026-10-01", "--due", "2026-12-01")
+    going = add(tg, "Going", "--start", "2026-10-01", "--due", "2026-12-01")
+    tg("start", str(going))
+    add(tg, "Future", "--start", "2026-11-01")
+    assert ids(tg("agenda")["late_start"]) == [late]
+    assert f"#{late} Late start — due 2026-12-01 · start 2026-10-01, still ready" in raw("--project", "demo", "agenda").stdout

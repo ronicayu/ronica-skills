@@ -77,4 +77,5 @@ def test_timeline_marks_baseline_and_today(browser, page_file):
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
     assert page.evaluate("cy.nodes('.tl-base').map(n => n.id())") == ["tl:base:3"]
     assert page.evaluate("cy.getElementById('tl:today').data('name')") == "Today 10/13"
+    assert page.evaluate("cy.getElementById('2').hasClass('atrisk')")
     page.close()
