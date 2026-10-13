@@ -1,84 +1,123 @@
 ---
 name: taskgraph
-description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "下一步做什么", "任务依赖", "看图". Agents operate the CLI; humans view the graph.
+description: Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project or programme backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, track dates, decisions and outside dependencies, prepare a weekly steering review, add or update tasks and dependencies, or see the plan as a picture — "work backwards from shipping v1", "what's next", "what's blocking X", "what's late", "下一步做什么", "任务依赖", "看图". Agents operate the CLI; humans view the graph.
 ---
 
 # taskgraph
 
 ## When to use this skill
 
-Use when the user wants to plan work backwards from a goal, track tasks with dependencies, ask what can be done next, or see the plan as a picture.
+Use when the user wants to plan work backwards from a goal, track tasks with dependencies and dates, ask what can be done next or what is late, prepare a steering review, or see the plan as a picture. Agents drive the CLI; the user views the graph.
 
-Trigger keywords (English): task, todo, dependency, work backwards, what's next, blocked, ready
-Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图
+Trigger keywords (English): task, todo, dependency, work backwards, what's next, blocked, ready, late, agenda, programme
+Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图, 排期
 
-## Work-backwards workflow
+## Choosing the project
 
-1. `add` the goal: `--type milestone` (with `--meta date=YYYY-MM-DD` when the date is fixed) or `--type objective` for a programme-level aim.
-2. Ask "what must be true before this is done?" and `add --blocks GOAL` for each prerequisite. Recurse on each prerequisite until tasks are half a day or less and concrete. Set `--meta lane=<workstream>` on each task when decomposing. Mark choices someone must make as `--type decision` (`decider`, `decide_by`) and things waiting on outsiders as `--type external` (`party`, `needed_by`, `contact`, `chase`). Decompose big work into children with `--parent` instead of a long flat list.
-3. `ready` shows what can be done now. `start` before working, `done` when finished.
-4. Run `graph` for a one-off snapshot file when the user wants to see the picture.
-5. When the user wants to watch the plan as it changes, start `serve` as a background process (it blocks), give them the URL, and leave it running. The page has a Graph | Swimlane toggle; Swimlane groups tasks into rows by `lane`, or by owner, tag or project. One server per DB serves every project; the URL's `?project=` picks the view.
+Once the user names a plan, pass `--project NAME` on every command, or set `TASKGRAPH_PROJECT`. Otherwise the project falls back to the git repo name, then the directory name, and a typo silently starts a new project. `projects` lists what exists. Dependencies and parents cannot cross projects.
 
-## Types
+## Programme recipe
 
-Stored as `meta.type`, absent means `task`. Set with `add --type T` / `edit --type T` (`--type task` clears it); unknown types are rejected. Per-type meta keys are ordinary and not enforced. Date keys (`date`, `decide_by`, `needed_by`, `chase`) must be `YYYY-MM-DD`.
+For a large plan (hundreds of nodes), build top-down and stay coarse:
+
+1. `--type objective` for each programme aim.
+2. `--type milestone` for each fixed point, with a date (`--due`).
+3. The `--type decision` and `--type external` nodes that gate those milestones: who decides or delivers, and by when.
+4. Workstream parents (a task with children, `--meta lane=<workstream>`) that depend on the gates.
+5. Tasks only where the team does the work. Do not decompose a programme into half-day tasks; the half-day rule is for small personal projects only.
+
+Work backwards: ask "what must be true before this is done?" and `add --blocks GOAL` for each answer. Put the why and acceptance criteria in `--notes`.
+
+## Dates
+
+All dates are `YYYY-MM-DD`, entered by hand, never computed from durations. Use the `date` command so you need not know the field names:
+
+```bash
+tg.py date ID --due 2027-01-15 --start +1w --clear start
+tg.py date ID --promised 2027-02-01
+```
+
+- `--due` writes the type's own key: milestone `date`, decision `decide_by`, external `needed_by`, task and objective `due`.
+- `--start`: when work begins (task) or when it was requested or ordered (external). Ignored for milestones and decisions.
+- `--promised`: externals only, the date the outside party committed to.
+- Values accept `today` and offsets `+3d`, `+2w`, `-1w` (`--due -1w` works). `add` takes `--start` and `--due` too. `start` after `due` is rejected.
+- A dependency conflicts when it is due after the date its dependent needs it (the dependent's `start`, else its `due`); a child due after its parent's due conflicts; an external promised after `needed_by` conflicts. Conflicts show as `(conflict)` in `ls` and in `show`; JSON has `conflicts` per task.
+- `late_days` is set for any unfinished node past `due` except objectives. A summary carries `span` (earliest start to latest due among its descendants). `$TASKGRAPH_TODAY=YYYY-MM-DD` overrides today.
+
+## Keeping it current
+
+- A date moved: `date ID --due ...`.
+- A decision was made: `done ID`, with the outcome in `edit ID --notes`.
+- An external slipped: `date ID --promised ...` and `edit ID --meta chase=YYYY-MM-DD`.
+- A new risk or blocker: `add` a decision or external and link it with `--blocks`.
+
+## Weekly steering prep
+
+1. `agenda` groups what needs attention: Late, Conflicts, due soon (`--within DAYS`, default 14), Chase due, and decisions or externals with no date. `--type` and `--all-projects` narrow or widen it.
+2. `ls --type decision` for open decisions.
+3. `serve` and open the Timeline view for the picture.
+
+## Avoiding duplicates and big plans
+
+- Run `ls --search TEXT` (title and notes, case-insensitive) before every `add`.
+- Add `--brief` when scanning a big plan: it implies `--json` and cuts `ls`, `ready`, `agenda` and `show` to `id, title, type, derived_status, project, parent, lane, start, due, late_days, conflict_count` (`show` adds `depends_on` and `blocks` id lists).
+
+## Types, parents, status
+
+Stored as `meta.type`, absent means `task`. Unknown types are rejected; `--type task` clears it.
 
 - `task`: work to do. Keys `owner`, `estimate` (hours).
-- `milestone`: a fixed point that is reached when its dependencies are done; never worked on. Key `date` (fixed target date).
-- `decision`: a choice someone must make. Keys `decider`, `decide_by`.
-- `external`: something outside the team's control. Keys `party`, `needed_by`, `contact`, `chase` (next chase date).
-- `objective`: top-level aim that groups tasks; never scheduled. Key `owner`.
+- `milestone`: a fixed point, done once it has dependencies and all are done; never worked on.
+- `decision`: a choice someone must make. Keys `decider`.
+- `external`: something outside the team's control. Keys `party`, `contact`, `chase` (next chase date).
+- `objective`: top-level aim that groups work; never scheduled. Key `owner`.
 
-## Parents and derived status
+Parents:
 
-- Parent = "part of", dependency = "must finish before". `add --parent ID`, `edit --parent ID`, `edit --no-parent`, `ls --parent ID` (direct children), `tree --children [ID]` (parent hierarchy).
-- Parents must be a `task` or `objective`; an objective's parent must be an objective. No cycles. A task cannot depend on its own ancestor or descendant; siblings and other subtrees are fine. Any change that would make nodes wait on each other forever (a dependency plus a parent chain, e.g. L1 depends on S, S's child L2 depends on L1) fails with `deadlock: ...` naming the chain.
-- A child inherits its ancestors' dependencies: it is blocked while any of them is unfinished.
-- A node with children, and every objective, is a summary: its status is derived from its children (all done is `done`, any started or done is `in_progress`, otherwise `blocked`). Depending on a summary means waiting for all its children.
-- A milestone is `done` once it has dependencies and all are done, otherwise `blocked`.
-- `start`, `done`, `reopen` fail on summaries and milestones. `ready` lists only leaf tasks, decisions and externals.
-- `rollup` is `{done, total}` over leaf descendants. `late_days` is set for a milestone past `date`, a decision past `decide_by` or an external past `needed_by` while not done; `chase_due` is true for an external whose `chase` date has come. `$TASKGRAPH_TODAY=YYYY-MM-DD` overrides today.
-- `rm ID` fails when the task has children; `rm ID --recursive` deletes the whole subtree.
+- Parent = "part of", dependency = "must finish before". Parents must be a task or objective; an objective's parent must be an objective. No cycles.
+- A task cannot depend on its own ancestor or descendant. Changes that would make nodes wait on each other forever fail with `deadlock: ...` naming the chain.
+- A child inherits its ancestors' dependencies and is blocked while any is unfinished.
+- A node with children, and every objective, is a summary. It is `done` only when it has children, all are done and its own dependencies are done; otherwise `in_progress` if any child started or finished, else `blocked`. Depending on a summary waits for all its children.
+- `start`, `done`, `reopen` fail on summaries and milestones. `ready` lists leaf tasks, decisions and externals only.
+- `rollup` is `{done, total}` over leaf descendants. `chase_due` is true for an external whose `chase` date has come.
+- `rm ID` fails when the task has children; `--recursive` deletes the subtree.
 
 ## Rules
 
-- Always pass `--json` when parsing output.
+- Always pass `--json` (or `--brief`) when parsing output. With either, commands that print a stderr warning (`done` with unfinished dependencies) add `"warnings": [...]` to their object output; list outputs carry no warnings.
 - Titles are imperative verbs, at most 60 characters.
-- Put the why and acceptance criteria in `--notes`.
-- Never mark a task with children, an objective or a milestone done; finish its children or dependencies.
-- Use meta keys consistently: the per-type keys above, plus `tags` (array), `link`, `lane` (workstream name, groups rows in the Swimlane view).
+- Use meta keys consistently: the per-type keys, plus `tags` (array), `link`, `lane` (workstream; groups rows in the Swimlane view).
 - Never mark a blocked task done without telling the user which dependencies are unfinished.
-- After bulk changes, offer to run `graph` or `serve`.
-- `serve` runs one server per DB for all projects. Running it again, even from another project, reuses the server and opens that project's view, so it is safe to call whenever the user asks to see the graph.
 - `--depends X` means the new task depends on X; `--blocks Y` means Y depends on the new task.
+- After bulk changes, offer to run `graph` or `serve`. `serve` blocks: start it as a background process, give the user the URL and leave it running. One server per DB serves every project; the URL's `?project=` picks the view, and running it again reuses the server.
 
 ## Usage
 
 ```bash
-python3 scripts/tg.py [--db PATH] [--project NAME] [--json] <command> ...
+python3 scripts/tg.py [--db PATH] [--project NAME] [--json | --brief] <command> ...
 ```
 
-`scripts/` is relative to this skill's directory, not the working directory. Installed as a plugin it is `${CLAUDE_PLUGIN_ROOT}/skills/taskgraph/scripts/tg.py`. Python 3.10+ standard library only; the graph page loads Cytoscape.js from a CDN.
+`scripts/` is relative to this skill's directory. Installed as a plugin it is `${CLAUDE_PLUGIN_ROOT}/skills/taskgraph/scripts/tg.py`. Python 3.10+ standard library only. The graph page works offline: Cytoscape.js, dagre and cytoscape-dagre (MIT) are vendored in `scripts/vendor/` and inlined.
 
-Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`. Project defaults to `--project`, then `$TASKGRAPH_PROJECT`, then the git repo name, then the current directory name.
+Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 
 | Command | Purpose |
 | --- | --- |
-| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--notes T] [--meta k=v ...]` | Create a task and its edges |
-| `dep add TASK DEPENDS_ON` | Add a dependency (cycles rejected) |
-| `dep rm TASK DEPENDS_ON` | Remove a dependency |
-| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--all-projects]` | List tasks, done excluded by default |
-| `ready [--all-projects]` | List tasks that can be started now |
-| `show ID` | Full details with dependencies and dependents |
+| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--notes T] [--meta k=v ...]` | Create a task and its edges |
+| `dep add TASK DEPENDS_ON` / `dep rm TASK DEPENDS_ON` | Add (cycles rejected) or remove a dependency |
+| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--all-projects]` | List tasks, done excluded by default; repeated flags accumulate |
+| `ready [--all-projects]` | Leaf tasks that can be started now |
+| `show ID` | Full details, dependencies, dependents, conflicts |
 | `start ID` / `done ID` / `reopen ID` | Change status |
-| `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--meta k=v ...] [--unset-meta k ...]` | Edit fields, meta merges, values parsed as JSON when valid |
-| `rm ID [--recursive]` | Delete a task and its edges; `--recursive` deletes its children too |
-| `why ID` | Chains from a task up to the goals it serves |
-| `tree [ID]` | Goals with their dependencies indented below |
-| `tree --children [ID]` | The parent hierarchy, roots first, with derived status and type |
+| `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates |
+| `agenda [--within DAYS] [--type T ...] [--all-projects]` | Late, conflicts, due soon, chase due, missing dates |
+| `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--meta k=v ...] [--unset-meta k ...]` | Edit fields; meta merges, values parsed as JSON when valid |
+| `rm ID [--recursive]` | Delete a task and its edges |
+| `why ID` | Chains up to the goals a task serves, through dependents and parents (`via`: `blocks` or `parent`) |
+| `tree [ID]` / `tree --children [ID]` | Dependency tree / parent hierarchy |
 | `graph [--out PATH] [--all-projects] [--no-open]` | Write the interactive HTML graph and open it |
-| `serve [--port N] [--all-projects] [--no-open]` | Serve every project of the DB live and open `/?project=NAME` (`/` with `--all-projects`); checks the DB every 30 s, Refresh button pulls immediately |
+| `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
+| `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
 | `projects` | Projects with total, done, ready, blocked counts |
 
-Stored statuses are `open`, `in_progress`, `done`. `blocked` and `ready` are derived: an open leaf is blocked while any effective dependency is not done, otherwise ready. Exit code 1 with a message on stderr signals an error.
+Stored statuses are `open`, `in_progress`, `done`; `blocked` and `ready` are derived. Exit code 1 with an `error:` message on stderr signals an error.

@@ -2,12 +2,13 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import urllib.request
 import webbrowser
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -37,12 +38,15 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project, status);
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
     "id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at",
-    "type", "parent", "children", "rollup", "late_days", "chase_due",
+    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts",
 )
 TYPES = ("task", "milestone", "decision", "external", "objective")
 PARENT_TYPES = ("task", "objective")
-DATE_KEYS = ("date", "decide_by", "needed_by", "chase")
-LATE_KEYS = {"milestone": "date", "decision": "decide_by", "external": "needed_by"}
+DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised")
+DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by"}
+POINTS = ("milestone", "decision")
+DATE_FLAGS = ("--start", "--due", "--promised")
+VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
 
 
@@ -132,7 +136,7 @@ def node_status(task, deps, current):
         return "done" if deps_done and all(deps_done) else "blocked"
     if is_summary(task):
         kids = [current[c] for c in task["children"]]
-        if kids and all(k == "done" for k in kids):
+        if kids and all(k == "done" for k in kids) and all(deps_done):
             return "done"
         return "in_progress" if any(k in ("in_progress", "done") for k in kids) else "blocked"
     if task["status"] != "open":
@@ -148,8 +152,11 @@ def load(conn):
         task["type"] = task["meta"].get("type", "task")
         task["parent"] = task.pop("parent_id")
         task["children"] = []
+        task["conflicts"] = []
         task["depends_on"] = []
         task["blocks"] = []
+        task["start"] = None if task["type"] in POINTS else normal(task["meta"].get("start"))
+        task["due"] = normal(task["meta"].get(DUE_KEYS[task["type"]]))
         tasks[task["id"]] = task
     for task in tasks.values():
         if task["parent"] is not None:
@@ -175,11 +182,44 @@ def load(conn):
         else:
             task["rollup"] = None
         unfinished = current[task["id"]] != "done"
-        due = parse_date(task["meta"].get(LATE_KEYS.get(task["type"])))
-        task["late_days"] = (day - due).days if due and due < day and unfinished else None
+        due = parse_date(task["due"])
+        task["late_days"] = (day - due).days if due and due < day and unfinished and task["type"] != "objective" else None
         chase = parse_date(task["meta"].get("chase")) if task["type"] == "external" else None
         task["chase_due"] = bool(chase and chase <= day and unfinished)
+        task["span"] = span(tasks, task) if is_summary(task) else None
+    find_conflicts(tasks, effective, current)
     return tasks
+
+
+def normal(value):
+    return value if parse_date(value) else None
+
+
+def span(tasks, task):
+    below = [tasks[d] for d in descendants(tasks, task["id"])]
+    starts = [t["start"] or t["due"] for t in below if t["start"] or t["due"]]
+    ends = [t["due"] or t["start"] for t in below if t["start"] or t["due"]]
+    return {"start": min(starts), "end": max(ends)} if starts else None
+
+
+def find_conflicts(tasks, effective, current):
+    def flag(task, kind, other, message):
+        task["conflicts"].append({"kind": kind, "with": other, "message": message})
+
+    for n in tasks.values():
+        need = n["start"] or n["due"]
+        for d in effective[n["id"]] if need else []:
+            dep = tasks[d]
+            if dep["due"] and dep["due"] > need and current[d] != "done":
+                message = f"#{d} due {dep['due']} after #{n['id']} needs it {need}"
+                flag(dep, "dependency", n["id"], message)
+                flag(n, "dependency", d, message)
+        parent = tasks[n["parent"]] if n["parent"] is not None else None
+        if parent and parent["due"] and n["due"] and n["due"] > parent["due"]:
+            flag(n, "parent", parent["id"], f"#{n['id']} due {n['due']} after parent #{parent['id']} due {parent['due']}")
+        promised = normal(n["meta"].get("promised")) if n["type"] == "external" else None
+        if promised and n["due"] and promised > n["due"]:
+            flag(n, "promised", None, f"#{n['id']} promised {promised} after needed {n['due']}")
 
 
 def get(tasks, task_id):
@@ -213,6 +253,30 @@ def check_meta(meta):
             raise Fail(f"{key} must be YYYY-MM-DD: {meta[key]!r}")
 
 
+def resolve_date(value):
+    if value == "today":
+        return today().isoformat()
+    match = re.fullmatch(r"([+-])(\d+)([dw])", value)
+    if match:
+        days = int(match[2]) * (7 if match[3] == "w" else 1)
+        return (today() + timedelta(days=-days if match[1] == "-" else days)).isoformat()
+    if parse_date(value) is None:
+        raise Fail(f"date must be YYYY-MM-DD, today, or an offset like +3d / -1w: {value!r}")
+    return value
+
+
+def check_span(meta):
+    kind = meta.get("type", "task")
+    start, due = meta.get("start"), meta.get(DUE_KEYS[kind])
+    if kind not in POINTS and start and due and start > due:
+        raise Fail(f"start {start} is after due {due}")
+
+
+def brief_task(task):
+    keys = ("id", "title", "type", "derived_status", "project", "parent", "start", "due", "late_days")
+    return {**{k: task[k] for k in keys}, "lane": task["meta"].get("lane"), "conflict_count": len(task["conflicts"])}
+
+
 def emit(args, data, text=None):
     if args.json:
         print(json.dumps(data, ensure_ascii=False))
@@ -231,6 +295,8 @@ def line(task, with_project=False):
         suffix += f"  (late {task['late_days']}d)"
     if task["chase_due"]:
         suffix += "  (chase due)"
+    if task["conflicts"]:
+        suffix += "  (conflict)"
     return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {marker(task)}{task['title']}{suffix}"
 
 
@@ -281,6 +347,8 @@ def add_dep(conn, task_id, dep_id):
     tasks = load(conn)
     get(tasks, task_id)
     get(tasks, dep_id)
+    if tasks[task_id]["project"] != tasks[dep_id]["project"]:
+        raise Fail(f"#{task_id} is in project {tasks[task_id]['project']} and #{dep_id} in {tasks[dep_id]['project']}; dependencies cannot cross projects")
     if task_id in ancestors(tasks, dep_id) or dep_id in ancestors(tasks, task_id):
         raise Fail(f"#{task_id} and #{dep_id} are in the same parent chain; a task cannot depend on its ancestor or descendant")
     if reaches(conn, dep_id, task_id):
@@ -298,6 +366,8 @@ def place(conn, task_id, kind, parent_id):
         raise Fail(f"#{task_id} has objective children, so its type must be objective")
     if parent_id is not None:
         parent = get(tasks, parent_id)
+        if parent["project"] != tasks[task_id]["project"]:
+            raise Fail(f"#{parent_id} is in project {parent['project']} and #{task_id} in {tasks[task_id]['project']}; parents cannot cross projects")
         if parent["type"] not in PARENT_TYPES:
             raise Fail(f"#{parent_id} is a {parent['type']}; parents must be a task or objective")
         if kind == "objective" and parent["type"] != "objective":
@@ -320,6 +390,11 @@ def cmd_add(conn, args):
     check_meta(meta)
     if meta.get("type") == "task":
         del meta["type"]
+    if args.start is not None:
+        meta["start"] = resolve_date(args.start)
+    if args.due is not None:
+        meta[DUE_KEYS[meta.get("type", "task")]] = resolve_date(args.due)
+    check_span(meta)
     ts = now()
     with conn:
         cur = conn.execute(
@@ -358,18 +433,22 @@ def cmd_ls(conn, args):
         tasks = [t for t in tasks if t["parent"] == args.parent]
     if args.type:
         tasks = [t for t in tasks if t["type"] in args.type]
+    if args.search:
+        needle = args.search.lower()
+        tasks = [t for t in tasks if needle in t["title"].lower() or needle in t["notes"].lower()]
     wanted = args.status
     if wanted:
         tasks = [t for t in tasks if t["derived_status"] in wanted or (t["status"] in wanted and not computed(t))]
     else:
         tasks = [t for t in tasks if t["derived_status"] != "done"]
-    emit(args, tasks, "\n".join(line(t, args.all_projects) for t in tasks))
+    emit(args, [brief_task(t) for t in tasks] if args.brief else tasks, "\n".join(line(t, args.all_projects) for t in tasks))
 
 
 def cmd_ready(conn, args):
     args.status = ["ready"]
     args.parent = None
     args.type = None
+    args.search = None
     cmd_ls(conn, args)
 
 
@@ -381,6 +460,8 @@ def cmd_show(conn, args):
         return {k: tasks[i][k] for k in ("id", "title", "status", "derived_status")}
 
     data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]])
+    if args.brief:
+        data = dict(brief_task(task), depends_on=task["depends_on"], blocks=task["blocks"])
     out = [
         f"#{task['id']} {task['title']}",
         f"type:    {task['type']}",
@@ -395,17 +476,26 @@ def cmd_show(conn, args):
         out.append("children: " + ", ".join(f"#{c}" for c in task["children"]))
     if task["rollup"]:
         out.append(f"rollup:  {task['rollup']['done']}/{task['rollup']['total']}")
+    if task["start"]:
+        out.append(f"start:   {task['start']}")
+    if task["due"]:
+        out.append(f"due:     {task['due']}")
+    if task["meta"].get("promised") and task["type"] == "external":
+        out.append(f"promised: {task['meta']['promised']}")
     if task["late_days"]:
         out.append(f"late:    {task['late_days']}d")
     if task["chase_due"]:
         out.append("chase:   due")
+    if task["conflicts"]:
+        out.append("conflicts:")
+        out.extend(f"  {c['message']}" for c in task["conflicts"])
     if task["notes"]:
         out.append(f"notes:\n{task['notes']}")
     if task["meta"]:
         out.append("meta:\n" + json.dumps(task["meta"], indent=2, ensure_ascii=False))
     for label, key in (("depends on", "depends_on"), ("blocks", "blocks")):
         out.append(f"{label}:")
-        out.extend(f"  #{r['id']} [{r['derived_status']}] {r['title']}" for r in data[key])
+        out.extend(f"  #{r['id']} [{r['derived_status']}] {r['title']}" for r in (tasks[i] for i in task[key]))
     emit(args, data, "\n".join(out))
 
 
@@ -417,15 +507,18 @@ def set_status(conn, args, status):
     if task["type"] == "milestone":
         raise Fail(f"status of #{task['id']} is derived from its dependencies")
     unfinished = [d for d in effective_deps(tasks, task) if tasks[d]["derived_status"] != "done"]
+    warnings = []
     if status == "done" and unfinished:
-        print(f"warning: #{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}", file=sys.stderr)
+        warnings.append(f"#{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}")
+        print(f"warning: {warnings[0]}", file=sys.stderr)
     ts = now()
     with conn:
         conn.execute(
             "UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?",
             (status, ts if status == "done" else None, ts, args.id),
         )
-    emit(args, load(conn)[args.id], f"#{args.id} {status}")
+    data = load(conn)[args.id]
+    emit(args, dict(data, warnings=warnings) if warnings else data, f"#{args.id} {status}")
 
 
 def cmd_start(conn, args):
@@ -476,42 +569,54 @@ def cmd_rm(conn, args):
     emit(args, data, f"deleted #{args.id}" + (f" and {len(below)} descendants" if below else ""))
 
 
-def subtree(tasks, task_id, key, seen):
+def subtree(tasks, task_id, kids, seen, via=None):
     task = tasks[task_id]
     node = {"id": task_id, "title": task["title"], "type": task["type"], "derived_status": task["derived_status"], "children": []}
+    if via:
+        node["via"] = via
     if task_id in seen:
         node["repeat"] = True
         return node
     seen.add(task_id)
-    node["children"] = [subtree(tasks, i, key, seen) for i in task[key]]
+    node["children"] = [subtree(tasks, i, kids, seen, v) for i, v in kids(task)]
     return node
 
 
 def render(node, depth=0):
     mark = " (see above)" if node.get("repeat") else ""
     kind = f"[{node['type']}] " if node["type"] != "task" else ""
-    yield f"{'  ' * depth}[{node['derived_status']}] #{node['id']} {kind}{node['title']}{mark}"
+    part = "(part of) " if node.get("via") == "parent" else ""
+    yield f"{'  ' * depth}{part}[{node['derived_status']}] #{node['id']} {kind}{node['title']}{mark}"
     for child in node["children"]:
         yield from render(child, depth + 1)
 
 
-def paths_up(tasks, task_id):
-    here = {"id": task_id, "title": tasks[task_id]["title"]}
-    if not tasks[task_id]["blocks"]:
+def upward(task):
+    return [(b, "blocks") for b in task["blocks"]] + ([(task["parent"], "parent")] if task["parent"] is not None else [])
+
+
+def paths_up(tasks, task_id, via=None):
+    here = {"id": task_id, "title": tasks[task_id]["title"], "via": via}
+    steps = upward(tasks[task_id])
+    if not steps:
         return [[here]]
-    return [[here] + path for b in tasks[task_id]["blocks"] for path in paths_up(tasks, b)]
+    return [[here] + path for b, v in steps for path in paths_up(tasks, b, v)]
 
 
 def cmd_why(conn, args):
     tasks = load(conn)
     get(tasks, args.id)
-    text = "\n".join(render(subtree(tasks, args.id, "blocks", set())))
+    text = "\n".join(render(subtree(tasks, args.id, upward, set())))
     emit(args, paths_up(tasks, args.id), text)
 
 
 def cmd_tree(conn, args):
     tasks = load(conn)
     key = "children" if args.children else "depends_on"
+
+    def kids(task):
+        return [(i, None) for i in task[key]]
+
     if args.id is not None:
         roots = [get(tasks, args.id)["id"]]
     elif args.children:
@@ -519,8 +624,81 @@ def cmd_tree(conn, args):
     else:
         roots = [t["id"] for t in tasks.values() if t["project"] == args.project and not any(tasks[b]["project"] == args.project for b in t["blocks"])]
     seen = set()
-    nodes = [subtree(tasks, r, key, seen) for r in roots]
+    nodes = [subtree(tasks, r, kids, seen) for r in roots]
     emit(args, nodes, "\n".join(l for n in nodes for l in render(n)))
+
+
+def cmd_date(conn, args):
+    task = get(load(conn), args.id)
+    meta = dict(task["meta"])
+    keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
+    given = {"start": args.start, "due": args.due, "promised": args.promised}
+    setting = {n for n, v in given.items() if v is not None}
+    if not setting and not args.clear:
+        raise Fail("nothing to change (pass --start, --due, --promised or --clear)")
+    if "promised" in setting | set(args.clear) and task["type"] != "external":
+        raise Fail(f"promised applies to externals, but #{task['id']} is a {task['type']}")
+    if setting & set(args.clear):
+        raise Fail("cannot set and clear the same date")
+    for name in setting:
+        meta[keys[name]] = resolve_date(given[name])
+    for name in args.clear:
+        meta.pop(keys[name], None)
+    check_span(meta)
+    with conn:
+        conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
+    data = load(conn)[args.id]
+    text = f"#{args.id} start {data['start'] or '-'} due {data['due'] or '-'}"
+    if data["type"] == "external":
+        text += f" promised {data['meta'].get('promised') or '-'}"
+    emit(args, data, text)
+
+
+def agenda_line(task, note):
+    person = task["meta"].get({"decision": "decider", "external": "party"}.get(task["type"], "owner"))
+    parts = [f"due {task['due']}" if task["due"] else "no due date"]
+    parts += [x for x in (person, note) if x]
+    return f"#{task['id']} {marker(task)}{task['title']} — " + " · ".join(parts)
+
+
+def cmd_agenda(conn, args):
+    day = today()
+    limit = (day + timedelta(days=args.within)).isoformat()
+    items = [t for t in scoped(load(conn), args) if t["derived_status"] != "done" and (not args.type or t["type"] in args.type)]
+    by_due = lambda t: (t["due"] or "9999-12-31", t["id"])
+    buckets = {
+        "late": sorted((t for t in items if t["late_days"]), key=lambda t: (-t["late_days"], t["id"])),
+        "conflicts": sorted((t for t in items if t["conflicts"]), key=by_due),
+        "due_soon": sorted((t for t in items if t["due"] and day.isoformat() <= t["due"] <= limit), key=by_due),
+        "chase_due": sorted((t for t in items if t["chase_due"]), key=lambda t: (t["meta"]["chase"], t["id"])),
+        "missing_date": [t for t in items if t["type"] in ("decision", "external") and not t["due"]],
+    }
+    notes = {
+        "late": lambda t: f"late {t['late_days']}d",
+        "conflicts": lambda t: "; ".join(c["message"] for c in t["conflicts"]),
+        "due_soon": lambda t: None,
+        "chase_due": lambda t: f"chase {t['meta']['chase']}",
+        "missing_date": lambda t: None,
+    }
+    headings = {"late": "Late", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "missing_date": "Missing date"}
+    out = []
+    for name, found in buckets.items():
+        if found:
+            out += [headings[name], *(f"  {agenda_line(t, notes[name](t))}" for t in found), ""]
+    emit(args, {name: [brief_task(t) for t in found] for name, found in buckets.items()}, "\n".join(out).rstrip() or "nothing needs attention")
+
+
+def cmd_export(conn, args):
+    keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
+    tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
+    text = json.dumps({"version": 1, "exported_at": now(), "tasks": tasks}, ensure_ascii=False, indent=2)
+    if args.out is None:
+        print(text)
+        return
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text + "\n", encoding="utf-8")
+    emit(args, {"path": str(out), "tasks": len(tasks)}, str(out))
 
 
 def graph_payload(conn, args):
@@ -535,13 +713,23 @@ def graph_payload(conn, args):
         node["children"] = [i for i in t["children"] if i in ids]
         nodes.append(node)
     edges = [{"source": d, "target": n["id"]} for n in nodes for d in n["depends_on"]]
-    return {"nodes": nodes, "edges": edges, "projects": sorted({t["project"] for t in tasks}), "generated_at": now(), "live": False}
+    return {"nodes": nodes, "edges": edges, "projects": sorted({t["project"] for t in tasks}), "generated_at": now(), "today": today().isoformat(), "live": False}
 
 
 def render_page(payload):
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    template = (Path(__file__).parent / "graph_template.html").read_text(encoding="utf-8")
-    return template.replace("__DATA__", data, 1)
+    head, tail = (Path(__file__).parent / "graph_template.html").read_text(encoding="utf-8").split("__DATA__", 1)
+    return inline_vendor(head) + data + inline_vendor(tail)
+
+
+def inline_vendor(html):
+    def swap(match):
+        path = VENDOR / match[1]
+        if not path.is_file():
+            return match[0]
+        return "<script>" + path.read_text(encoding="utf-8").replace("</script", "<\\/script") + "</script>"
+
+    return re.sub(r'<script src="https://cdn\.jsdelivr\.net/npm/[^"]*/([^/"]+)"></script>', swap, html)
 
 
 def cmd_graph(conn, args):
@@ -656,6 +844,9 @@ COMMANDS = {
     "edit": cmd_edit,
     "rm": cmd_rm,
     "why": cmd_why,
+    "date": cmd_date,
+    "agenda": cmd_agenda,
+    "export": cmd_export,
     "tree": cmd_tree,
     "graph": cmd_graph,
     "serve": cmd_serve,
@@ -668,6 +859,7 @@ def build_parser():
     common.add_argument("--db", default=argparse.SUPPRESS)
     common.add_argument("--project", default=argparse.SUPPRESS)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument("--brief", action="store_true", default=argparse.SUPPRESS)
 
     parser = argparse.ArgumentParser(prog="tg", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -683,6 +875,8 @@ def build_parser():
     p.add_argument("--meta", nargs="+", action="extend", default=[])
     p.add_argument("--type")
     p.add_argument("--parent", type=int)
+    p.add_argument("--start")
+    p.add_argument("--due")
 
     dep = command("dep")
     dep_sub = dep.add_subparsers(dest="dep_command", required=True)
@@ -692,9 +886,10 @@ def build_parser():
         p.add_argument("depends_on", type=int)
 
     p = command("ls")
-    p.add_argument("--status", choices=FILTERS, nargs="+")
+    p.add_argument("--status", choices=FILTERS, nargs="+", action="extend")
     p.add_argument("--parent", type=int)
-    p.add_argument("--type", choices=TYPES, nargs="+")
+    p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
+    p.add_argument("--search")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("ready")
@@ -716,6 +911,22 @@ def build_parser():
     p.add_argument("--parent", type=int)
     p.add_argument("--no-parent", action="store_true")
 
+    p = command("date")
+    p.add_argument("id", type=int)
+    p.add_argument("--start")
+    p.add_argument("--due")
+    p.add_argument("--promised")
+    p.add_argument("--clear", choices=("start", "due", "promised"), nargs="+", action="extend", default=[])
+
+    p = command("agenda")
+    p.add_argument("--within", type=int, default=14)
+    p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
+    p.add_argument("--all-projects", action="store_true")
+
+    p = command("export")
+    p.add_argument("--out")
+    p.add_argument("--all-projects", action="store_true")
+
     p = command("tree")
     p.add_argument("id", type=int, nargs="?")
     p.add_argument("--children", action="store_true")
@@ -734,8 +945,20 @@ def build_parser():
     return parser
 
 
+def join_offsets(argv):
+    out = []
+    for arg in argv:
+        if out and out[-1] in DATE_FLAGS and re.fullmatch(r"-\d+[dw]", arg):
+            out[-1] += "=" + arg
+        else:
+            out.append(arg)
+    return out
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False))
+    argv = join_offsets(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False))
+    args.json = args.json or args.brief
     args.project = args.project or default_project()
     key = f"dep {args.dep_command}" if args.command == "dep" else args.command
     try:

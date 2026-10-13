@@ -177,7 +177,8 @@ def test_why_returns_path_to_goal(tg):
     paths = tg("why", str(leaf))
     assert sorted([[n["id"] for n in p] for p in paths]) == [[leaf, mid, goal], [leaf, other]]
     assert paths[0][0]["title"] == "leaf"
-    assert tg("why", str(goal)) == [[{"id": goal, "title": "goal"}]]
+    assert sorted([[n["via"] for n in p] for p in paths], key=len) == [[None, "blocks"], [None, "blocks", "blocks"]]
+    assert tg("why", str(goal)) == [[{"id": goal, "title": "goal", "via": None}]]
 
 
 def test_tree_downward(tg):
@@ -722,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -730,10 +731,12 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     assert nodes[m]["chase_due"] is False
 
 
-def test_payload_scoped_drops_outside_parent_refs(raw, tg, tmp_path):
+def test_payload_scoped_drops_outside_parent_refs(raw, tg, tmp_path, db):
     p = add(tg, "P")
     inside = add(tg, "Inside", "--parent", str(p))
-    outside = json.loads(raw("--project", "other", "--json", "add", "Kid", "--parent", str(p)).stdout)["id"]
+    outside = json.loads(raw("--project", "other", "--json", "add", "Kid").stdout)["id"]
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE tasks SET parent_id=? WHERE id=?", (p, outside))
     out = tmp_path / "g.html"
     tg("graph", "--no-open", "--out", str(out))
     data = json.loads(out.read_text().split("let DATA = ", 1)[1].split(";\n", 1)[0])
@@ -796,3 +799,337 @@ def test_no_deadlock_for_siblings_and_cross_subtree_deps(tg):
     tg("dep", "add", str(b), str(a))
     tg("dep", "add", str(c), str(a))
     tg("dep", "add", str(q), str(p))
+
+
+def test_summary_waits_for_own_dependencies(tg):
+    gate = add(tg, "gate")
+    parent = add(tg, "P", "--depends", str(gate))
+    child = add(tg, "C", "--parent", str(parent))
+    after = add(tg, "after", "--type", "milestone", "--depends", str(parent))
+    tg("done", str(child))
+    assert tg("show", str(parent))["derived_status"] == "in_progress"
+    assert tg("show", str(after))["derived_status"] == "blocked"
+    tg("done", str(gate))
+    assert tg("show", str(parent))["derived_status"] == "done"
+    assert tg("show", str(after))["derived_status"] == "done"
+
+
+def test_why_follows_parent_links(tg, raw):
+    milestone = add(tg, "launch", "--type", "milestone")
+    parent = add(tg, "workstream", "--blocks", str(milestone))
+    child = add(tg, "child", "--parent", str(parent))
+    paths = tg("why", str(child))
+    assert [[(n["id"], n["via"]) for n in p] for p in paths] == [[(child, None), (parent, "parent"), (milestone, "blocks")]]
+    out = raw("--project", "demo", "why", str(child)).stdout.splitlines()
+    assert "(part of)" not in out[0] and "(part of)" in out[1] and "(part of)" not in out[2]
+    assert "#" + str(milestone) in out[2]
+
+
+def test_ls_repeated_flags_accumulate(tg):
+    a = add(tg, "A")
+    b = add(tg, "B", "--depends", str(a))
+    c = add(tg, "C", "--type", "decision")
+    tg("done", str(c))
+    assert ids(tg("ls", "--status", "ready", "--status", "done")) == [a, c]
+    assert ids(tg("ls", "--status", "blocked", "--status", "ready")) == [a, b]
+    assert ids(tg("ls", "--status", "ready", "--status", "done", "--type", "task", "--type", "decision")) == [a, c]
+
+
+def test_date_command_maps_due_per_type(tg):
+    keys = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by"}
+    for kind, key in keys.items():
+        t = add(tg, kind, "--type", kind)
+        r = tg("date", str(t), "--due", "2026-12-01")
+        assert r["meta"][key] == "2026-12-01" and r["due"] == "2026-12-01"
+    t = add(tg, "plain")
+    r = tg("date", str(t), "--start", "2026-11-01", "--due", "2026-12-01")
+    assert r["meta"] == {"start": "2026-11-01", "due": "2026-12-01"} and r["start"] == "2026-11-01"
+    r = tg("date", str(t), "--clear", "start", "due")
+    assert r["meta"] == {} and r["start"] is None and r["due"] is None
+
+
+def test_date_command_relative_and_validation(tg, fail, raw):
+    t = add(tg, "T")
+    assert tg("date", str(t), "--due", "today")["due"] == "2026-10-13"
+    assert tg("date", str(t), "--due", "+3d")["due"] == "2026-10-16"
+    assert tg("date", str(t), "--due", "+2w")["due"] == "2026-10-27"
+    assert tg("date", str(t), "--due", "-1w")["due"] == "2026-10-06"
+    assert tg("date", str(t), "--start", "-2w")["start"] == "2026-09-29"
+    assert "YYYY-MM-DD" in fail("date", str(t), "--due", "tomorrow").stderr
+    fail("date", str(t), "--due", "2026-13-01")
+    fail("date", str(t))
+    fail("date", "99", "--due", "today")
+    assert "same date" in fail("date", str(t), "--due", "today", "--clear", "due").stderr
+    assert tg("show", str(t))["due"] == "2026-10-06"
+    human = raw("--project", "demo", "date", str(t), "--due", "+1d").stdout.strip()
+    assert human == f"#{t} start 2026-09-29 due 2026-10-14"
+
+
+def test_date_start_after_due_rejected(tg, fail):
+    t = add(tg, "T", "--start", "2026-11-01", "--due", "2026-11-05")
+    assert "after due" in fail("date", str(t), "--start", "2026-11-06").stderr
+    assert "after due" in fail("date", str(t), "--due", "2026-10-30").stderr
+    assert "after due" in fail("add", "X", "--start", "2026-11-06", "--due", "2026-11-05").stderr
+    assert tg("show", str(t))["start"] == "2026-11-01"
+    tg("date", str(t), "--start", "2026-11-05")
+    m = add(tg, "M", "--type", "milestone")
+    r = tg("date", str(m), "--start", "2026-12-31", "--due", "2026-12-01")
+    assert r["start"] is None and r["due"] == "2026-12-01" and r["meta"]["start"] == "2026-12-31"
+
+
+def test_promised_only_for_externals(tg, fail):
+    e = add(tg, "E", "--type", "external")
+    r = tg("date", str(e), "--start", "2026-10-01", "--due", "2026-11-01", "--promised", "2026-10-20")
+    assert r["meta"] == {"type": "external", "start": "2026-10-01", "needed_by": "2026-11-01", "promised": "2026-10-20"}
+    assert tg("date", str(e), "--clear", "promised")["meta"].get("promised") is None
+    t = add(tg, "T")
+    assert "external" in fail("date", str(t), "--promised", "2026-10-20").stderr
+    fail("date", str(t), "--clear", "promised")
+
+
+def test_add_with_start_and_due(tg):
+    assert tg("add", "T", "--start", "+1d", "--due", "+1w")["meta"] == {"start": "2026-10-14", "due": "2026-10-20"}
+    m = tg("add", "M", "--type", "milestone", "--due", "2026-12-01")
+    assert m["meta"]["date"] == "2026-12-01" and m["due"] == "2026-12-01"
+    d = tg("add", "D", "--type", "decision", "--due", "2026-12-01", "--start", "2026-11-01")
+    assert d["meta"]["decide_by"] == "2026-12-01" and d["start"] is None
+
+
+def test_load_normalizes_start_and_due(tg, db):
+    t = add(tg, "T", "--meta", "due=2026-11-01", "start=2026-10-20")
+    bad = add(tg, "Bad")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE tasks SET meta=? WHERE id=?", (json.dumps({"due": "soon", "start": 5}), bad))
+    nodes = {n["id"]: n for n in tg("ls")}
+    assert (nodes[t]["start"], nodes[t]["due"]) == ("2026-10-20", "2026-11-01")
+    assert (nodes[bad]["start"], nodes[bad]["due"]) == (None, None)
+    assert nodes[t]["conflicts"] == [] and nodes[t]["span"] is None
+
+
+def test_tasks_can_be_late_objectives_cannot(tg):
+    t = add(tg, "T", "--due", "2026-10-01")
+    o = add(tg, "O", "--type", "objective", "--due", "2026-10-01")
+    nodes = {n["id"]: n for n in tg("ls")}
+    assert nodes[t]["late_days"] == 12 and nodes[o]["late_days"] is None
+    tg("done", str(t))
+    assert tg("show", str(t))["late_days"] is None
+
+
+def test_summary_span(tg):
+    p = add(tg, "P", "--type", "objective")
+    assert tg("show", str(p))["span"] is None
+    a = add(tg, "A", "--parent", str(p), "--start", "2026-11-01", "--due", "2026-11-10")
+    sub = add(tg, "Sub", "--parent", str(p))
+    b = add(tg, "B", "--parent", str(sub), "--due", "2026-12-05")
+    c = add(tg, "C", "--parent", str(sub), "--start", "2026-10-20")
+    add(tg, "undated", "--parent", str(sub))
+    assert tg("show", str(p))["span"] == {"start": "2026-10-20", "end": "2026-12-05"}
+    assert tg("show", str(sub))["span"] == {"start": "2026-10-20", "end": "2026-12-05"}
+    assert tg("show", str(a))["span"] is None
+    tg("date", str(c), "--clear", "start")
+    tg("date", str(b), "--clear", "due")
+    assert tg("show", str(sub))["span"] is None
+    assert tg("show", str(p))["span"] == {"start": "2026-11-01", "end": "2026-11-10"}
+
+
+def test_dependency_conflict(tg, raw):
+    a = add(tg, "A", "--due", "2027-02-01")
+    b = add(tg, "B", "--depends", str(a), "--start", "2027-01-15", "--due", "2027-03-01")
+    ca, cb = tg("show", str(a))["conflicts"], tg("show", str(b))["conflicts"]
+    message = f"#{a} due 2027-02-01 after #{b} needs it 2027-01-15"
+    assert ca == [{"kind": "dependency", "with": b, "message": message}]
+    assert cb == [{"kind": "dependency", "with": a, "message": message}]
+    out = raw("--project", "demo", "ls").stdout
+    assert out.count("(conflict)") == 2
+    assert message in raw("--project", "demo", "show", str(a)).stdout
+    tg("date", str(b), "--start", "2027-02-01")
+    assert tg("show", str(a))["conflicts"] == [] and tg("show", str(b))["conflicts"] == []
+    tg("date", str(b), "--clear", "start", "--due", "2027-01-31")
+    assert tg("show", str(b))["conflicts"][0]["with"] == a
+    tg("done", str(a))
+    assert tg("show", str(b))["conflicts"] == []
+
+
+def test_dependency_conflict_uses_milestone_date_and_inherited_deps(tg):
+    gate = add(tg, "gate", "--due", "2026-12-20")
+    m = add(tg, "M", "--type", "milestone", "--depends", str(gate), "--meta", "date=2026-12-01")
+    assert tg("show", str(m))["conflicts"][0]["with"] == gate
+    parent = add(tg, "P", "--depends", str(gate))
+    child = add(tg, "C", "--parent", str(parent), "--due", "2026-12-10")
+    shown = tg("show", str(child))["conflicts"]
+    assert [c["kind"] for c in shown] == ["dependency"] and shown[0]["with"] == gate
+    assert {c["with"] for c in tg("show", str(gate))["conflicts"]} == {m, child}
+
+
+def test_parent_due_conflict(tg):
+    p = add(tg, "P", "--due", "2026-12-01")
+    ok = add(tg, "ok", "--parent", str(p), "--due", "2026-12-01")
+    late = add(tg, "late", "--parent", str(p), "--due", "2026-12-02")
+    free = add(tg, "free", "--parent", str(p))
+    assert tg("show", str(ok))["conflicts"] == [] and tg("show", str(free))["conflicts"] == []
+    c = tg("show", str(late))["conflicts"]
+    assert [(x["kind"], x["with"]) for x in c] == [("parent", p)]
+    assert tg("show", str(p))["conflicts"] == []
+
+
+def test_promised_conflict(tg):
+    e = add(tg, "E", "--type", "external", "--due", "2026-12-01")
+    tg("date", str(e), "--promised", "2026-12-01")
+    assert tg("show", str(e))["conflicts"] == []
+    tg("date", str(e), "--promised", "2026-12-15")
+    c = tg("show", str(e))["conflicts"]
+    assert [(x["kind"], x["with"]) for x in c] == [("promised", None)]
+    assert "2026-12-15" in c[0]["message"]
+
+
+def agenda_fixture(tg):
+    late_small = add(tg, "late small", "--due", "2026-10-10")
+    late_big = add(tg, "late big", "--due", "2026-09-01", "--meta", "owner=ana")
+    soon = add(tg, "soon", "--due", "2026-10-20")
+    far = add(tg, "far", "--due", "2026-12-20")
+    nodate = add(tg, "no date", "--type", "decision", "--meta", "decider=bo")
+    ext = add(tg, "ext", "--type", "external", "--meta", "party=acme", "chase=2026-10-12", "needed_by=2027-01-01")
+    plain = add(tg, "undated task")
+    return late_small, late_big, soon, far, nodate, ext, plain
+
+
+def test_agenda_buckets(tg):
+    late_small, late_big, soon, far, nodate, ext, plain = agenda_fixture(tg)
+    conflicted = add(tg, "needs gate", "--start", "2026-11-01", "--depends", str(far))
+    done = add(tg, "finished", "--due", "2026-10-01")
+    tg("done", str(done))
+    data = tg("agenda")
+    assert set(data) == {"late", "conflicts", "due_soon", "chase_due", "missing_date"}
+    assert ids(data["late"]) == [late_big, late_small]
+    assert ids(data["due_soon"]) == [soon]
+    assert ids(data["chase_due"]) == [ext]
+    assert ids(data["missing_date"]) == [nodate]
+    assert ids(data["conflicts"]) == [far, conflicted]
+    assert set(data["late"][0]) == {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
+    assert data["late"][0]["late_days"] == 42
+
+
+def test_agenda_within_and_type_and_scope(tg, raw):
+    late_small, late_big, soon, far, nodate, ext, plain = agenda_fixture(tg)
+    assert ids(tg("agenda", "--within", "100")["due_soon"]) == [soon, far, ext]
+    assert ids(tg("agenda", "--within", "0")["due_soon"]) == []
+    typed = tg("agenda", "--type", "decision", "external")
+    assert ids(typed["missing_date"]) == [nodate] and ids(typed["late"]) == [] and ids(typed["chase_due"]) == [ext]
+    other = json.loads(raw("--project", "other", "--json", "add", "elsewhere", "--due", "2026-01-01").stdout)["id"]
+    assert other not in ids(tg("agenda")["late"])
+    assert other in ids(tg("agenda", "--all-projects")["late"])
+
+
+def test_agenda_human_output(raw, tg):
+    late_small, late_big, soon, far, nodate, ext, plain = agenda_fixture(tg)
+    add(tg, "needs gate", "--start", "2026-11-01", "--depends", str(far))
+    out = raw("--project", "demo", "agenda").stdout
+    headings = [l for l in out.splitlines() if l and not l.startswith(" ")]
+    assert headings == ["Late", "Conflicts", "Due in 14 days", "Chase due", "Missing date"]
+    assert f"  #{late_big} late big — due 2026-09-01 · ana · late 42d" in out
+    assert f"  #{nodate} [decision] no date — no due date · bo" in out
+    assert f"  #{ext} [external] ext — due 2027-01-01 · acme · chase 2026-10-12" in out
+    assert "Due in 30 days" in raw("--project", "demo", "agenda", "--within", "30").stdout
+
+
+def test_agenda_empty(raw, tg):
+    add(tg, "calm")
+    assert raw("--project", "demo", "agenda").stdout.strip() == "nothing needs attention"
+
+
+def test_ls_search(tg):
+    a = add(tg, "Order Venue booking")
+    b = add(tg, "Other", "--notes", "ask the VENUE manager")
+    add(tg, "Unrelated")
+    c = add(tg, "Venue decision", "--type", "decision")
+    assert ids(tg("ls", "--search", "venue")) == [a, b, c]
+    assert ids(tg("ls", "--search", "venue", "--type", "decision")) == [c]
+    assert ids(tg("ls", "--search", "venue", "--status", "done")) == []
+    assert ids(tg("ls", "--search", "nothing")) == []
+
+
+def test_brief_output(tg, raw):
+    p = add(tg, "P", "--meta", "lane=ops", "--due", "2026-10-01")
+    c = add(tg, "C", "--parent", str(p), "--depends", str(add(tg, "G")))
+    keys = {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
+    for command in (("ls",), ("ready",)):
+        rows = tg("--brief", *command)
+        assert rows and all(set(r) == keys for r in rows)
+    by_id = {r["id"]: r for r in tg("ls", "--brief")}
+    assert by_id[p]["lane"] == "ops" and by_id[p]["late_days"] == 12 and by_id[c]["parent"] == p
+    shown = tg("show", str(c), "--brief")
+    assert set(shown) == keys | {"depends_on", "blocks"} and shown["depends_on"] == [2] and shown["blocks"] == []
+    out = raw("--project", "demo", "--brief", "ls").stdout
+    assert out.startswith("[") and json.loads(out)
+    assert set(tg("--brief", "agenda")["late"][0]) == keys
+
+
+def test_done_warning_appears_in_json(tg, raw):
+    a = add(tg, "A")
+    b = add(tg, "B", "--depends", str(a))
+    done = tg("done", str(b))
+    assert done["warnings"] == [f"#{b} has unfinished dependencies: #{a}"]
+    assert "warnings" not in tg("done", str(a))
+    assert "warnings" not in tg("show", str(b))
+
+
+def test_cross_project_links_rejected(tg, raw, fail):
+    mine = add(tg, "mine")
+    theirs = json.loads(raw("--project", "other", "--json", "add", "theirs").stdout)["id"]
+    assert "cross projects" in fail("dep", "add", str(mine), str(theirs)).stderr
+    fail("dep", "add", str(theirs), str(mine))
+    assert "cross projects" in fail("add", "X", "--depends", str(theirs)).stderr
+    fail("add", "X", "--blocks", str(theirs))
+    assert "cross projects" in fail("add", "X", "--parent", str(theirs)).stderr
+    child = add(tg, "child")
+    fail("edit", str(child), "--parent", str(theirs))
+    assert tg("show", str(child))["parent"] is None
+    assert ids(tg("ls", "--all-projects")) == [mine, theirs, child]
+    same = json.loads(raw("--project", "other", "--json", "add", "same", "--depends", str(theirs)).stdout)
+    assert same["depends_on"] == [theirs]
+
+
+def test_export_shape_and_scope(tg, raw, tmp_path):
+    p = add(tg, "P", "--notes", "why", "--meta", "owner=x")
+    c = add(tg, "C", "--parent", str(p))
+    d = add(tg, "D", "--depends", str(c))
+    tg("done", str(c))
+    raw("--project", "other", "--json", "add", "elsewhere")
+    data = json.loads(raw("--project", "demo", "export").stdout)
+    assert data["version"] == 1 and data["exported_at"].endswith("Z")
+    assert [t["id"] for t in data["tasks"]] == [p, c, d]
+    keys = {"id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at"}
+    assert all(set(t) == keys for t in data["tasks"])
+    by_id = {t["id"]: t for t in data["tasks"]}
+    assert by_id[p]["notes"] == "why" and by_id[p]["meta"] == {"owner": "x"}
+    assert by_id[c]["parent"] == p and by_id[c]["status"] == "done" and by_id[c]["done_at"]
+    assert by_id[d]["depends_on"] == [c]
+    assert len(json.loads(raw("--project", "demo", "export", "--all-projects").stdout)["tasks"]) == 4
+    out = tmp_path / "sub" / "backup.json"
+    r = tg("export", "--out", str(out))
+    assert r == {"path": str(out), "tasks": 3}
+    assert json.loads(out.read_text())["tasks"] == data["tasks"]
+
+
+def test_graph_page_is_offline(tg, tmp_path):
+    add(tg, "A")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    html = out.read_text()
+    assert "cdn.jsdelivr.net" not in html
+    assert "cytoscape" in html and "dagre" in html
+    assert html.count("<script>") >= 4 and "__DATA__" not in html
+
+
+def test_payload_conflicts_span_and_dates(tg, tmp_path):
+    p = add(tg, "P", "--type", "objective")
+    a = add(tg, "A", "--parent", str(p), "--due", "2026-12-10")
+    b = add(tg, "B", "--parent", str(p), "--depends", str(a), "--start", "2026-12-01")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    data = json.loads(out.read_text().split("let DATA = ", 1)[1].split(";\n", 1)[0])
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes[p]["span"] == {"start": "2026-12-01", "end": "2026-12-10"}
+    assert nodes[a]["span"] is None and nodes[a]["start"] is None and nodes[a]["due"] == "2026-12-10"
+    assert nodes[b]["start"] == "2026-12-01" and nodes[b]["due"] is None
+    assert [c["with"] for c in nodes[a]["conflicts"]] == [b] and nodes[p]["conflicts"] == []

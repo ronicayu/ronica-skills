@@ -55,8 +55,9 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 <body>
 <div id="toolbar">
   <select id="project"></select>
-  <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button></span>
+  <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
   <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
+  <label id="depsBy" hidden><input type="checkbox" id="showDeps"> Show dependencies</label>
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
   <span class="seg" id="types"></span>
   <input type="text" id="search" placeholder="Search" size="9">
@@ -95,12 +96,13 @@ const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked',
 const GOAL = '#fbbf24';
 const TYPES = ['task', 'milestone', 'decision', 'external', 'objective'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase'];
+const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase', 'promised'];
+const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#4b5563';
 const FIELDS = {
   task: [['owner', 'Owner'], ['estimate', 'Estimate']],
   milestone: [['date', 'Date']],
   decision: [['decider', 'Decider'], ['decide_by', 'Decide by']],
-  external: [['party', 'Party'], ['contact', 'Contact'], ['needed_by', 'Needed by'], ['chase', 'Chase']],
+  external: [['party', 'Party'], ['contact', 'Contact'], ['needed_by', 'Needed by'], ['promised', 'Promised'], ['chase', 'Chase']],
   objective: [['owner', 'Owner']]
 };
 const day = s => {
@@ -108,11 +110,11 @@ const day = s => {
   return m ? `${+m[3]} ${MONTHS[m[2] - 1]} ${m[1]}` : String(s);
 };
 const SUBTITLE = {
-  task: m => [m.owner, m.estimate != null && m.estimate + 'h'],
-  milestone: m => [m.date ? day(m.date) : 'no date'],
-  decision: m => [m.decider, m.decide_by && 'decide by ' + day(m.decide_by)],
-  external: m => [m.party, m.needed_by && 'needed by ' + day(m.needed_by), m.chase && 'chase ' + day(m.chase)],
-  objective: m => [m.owner]
+  task: n => [n.due && 'due ' + day(n.due), n.meta.owner, n.meta.estimate != null && n.meta.estimate + 'h'],
+  milestone: n => [n.due ? day(n.due) : 'no date'],
+  decision: n => [n.due && 'decide by ' + day(n.due), n.meta.decider],
+  external: n => [n.due && 'needed by ' + day(n.due), n.meta.party, n.meta.chase && 'chase ' + day(n.meta.chase)],
+  objective: n => [n.meta.owner]
 };
 const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
 let byId = new Map(DATA.nodes.map(n => [n.id, n]));
@@ -120,6 +122,7 @@ const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned';
 const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
+const TL = { row: 26, head: 32, names: 260, px: 4, bar: 14, indent: 14, readable: 0.8 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 102, DECISION_LANE_W = 136;
 const LANE_KEYS = {
   lane: n => n.meta.lane,
@@ -132,7 +135,9 @@ const store = {
   set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
 };
 const query = new URLSearchParams(location.search);
-let view = (query.get('view') || store.get('taskgraph.view')) === 'lanes' ? 'lanes' : 'graph';
+const VIEWS = ['graph', 'lanes', 'timeline'];
+let view = VIEWS.find(v => v === (query.get('view') || store.get('taskgraph.view'))) || 'graph';
+let showDeps = (query.get('deps') || store.get('taskgraph.deps')) === '1';
 let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
 const parseTypes = s => (s || '').split(',').filter(t => TYPES.includes(t));
 let types = new Set([query.get('types'), store.get('taskgraph.types')].map(parseTypes).find(l => l.length) || TYPES);
@@ -218,7 +223,7 @@ const cy = cytoscape({
       'border-style': 'double', 'border-width': 6, 'border-color': '#9ca3af'
     } },
     { selector: 'node.goal', style: { 'border-width': 3, 'border-color': GOAL, 'font-weight': 'bold' } },
-    { selector: 'node.late', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': '#ef4444', 'outline-opacity': 0.8 } },
+    { selector: 'node.late, node.conflict', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': RED, 'outline-opacity': 0.8 } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lanes[type="milestone"]', style: {
       'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 10, 'font-weight': 'normal', 'color': ele => color(ele).fg
@@ -233,10 +238,46 @@ const cy = cytoscape({
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
       'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
     } },
-    { selector: 'edge.lanes', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
+    { selector: 'edge.lanes, edge.tl', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
     { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#4b5563', 'target-arrow-color': '#4b5563', 'target-arrow-shape': 'none' } },
     { selector: 'edge.lifted, edge.bridged', style: { 'line-style': 'dashed' } },
-    { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': '#f87171', 'target-arrow-color': '#f87171' } },
+    { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': AMBER, 'target-arrow-color': AMBER } },
+    { selector: 'node.tl', style: {
+      'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'shape': 'round-rectangle', 'border-width': 0, 'border-style': 'solid',
+      'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 6, 'text-margin-y': 0, 'text-wrap': 'none',
+      'font-size': 11, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
+    } },
+    { selector: 'node.tl.mk-pt', style: { 'shape': 'ellipse' } },
+    { selector: 'node.tl.mk-sum', style: {
+      'shape': 'rectangle', 'background-fill': 'linear-gradient', 'background-gradient-direction': 'to-right',
+      'background-gradient-stop-colors': COLORS.done.bg + ' ' + COLORS.done.bg + ' ' + AXIS + ' ' + AXIS,
+      'background-gradient-stop-positions': ele => `0% ${ele.data('pct')}% ${ele.data('pct')}% 100%`
+    } },
+    { selector: 'node.tl[type="milestone"]', style: { 'shape': 'diamond', 'border-width': 1.5, 'border-color': '#9ca3af' } },
+    { selector: 'node.tl[type="decision"]', style: { 'shape': 'hexagon', 'background-opacity': 0.25, 'border-width': 2, 'border-color': '#c4b5fd' } },
+    { selector: 'node.tl[type="external"]', style: { 'background-opacity': 0.2, 'border-width': 2, 'border-style': 'dashed', 'border-color': ele => color(ele).bg } },
+    { selector: 'node.tl.mk-none', style: { 'background-opacity': 0, 'border-width': 0, 'shape': 'rectangle' } },
+    { selector: 'node.tl.late, node.tl.conflict', style: { 'color': RED, 'outline-width': 1.5, 'outline-offset': 0, 'outline-opacity': 1 } },
+    { selector: 'node.tl-name', style: {
+      'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
+      'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 'data(tx)',
+      'color': '#e5e7eb', 'font-size': 12, 'font-weight': 'normal', 'z-index-compare': 'manual', 'z-index': 0
+    } },
+    { selector: 'node.tl-head', style: { 'color': '#9ca3af', 'font-weight': 'bold' } },
+    { selector: 'node.tl-grid', style: {
+      'shape': 'rectangle', 'width': 1, 'height': 'data(h)', 'padding': 0, 'background-color': AXIS, 'background-opacity': 0.55, 'border-width': 0, 'events': 'no',
+      'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'top', 'text-margin-x': 4, 'text-margin-y': 20,
+      'color': '#9ca3af', 'font-size': 11, 'z-index-compare': 'manual', 'z-index': 0
+    } },
+    { selector: 'node.tl-pin', style: {
+      'shape': 'rectangle', 'width': 1, 'height': 1, 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
+      'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'top', 'text-margin-x': 4, 'text-margin-y': 20,
+      'color': '#fbbf24', 'font-size': 11, 'font-weight': 'bold', 'z-index-compare': 'manual', 'z-index': 1
+    } },
+    { selector: 'edge.tl-today', style: { 'curve-style': 'straight', 'line-style': 'dashed', 'line-color': '#fbbf24', 'width': 1.5, 'target-arrow-shape': 'none', 'events': 'no', 'z-index-compare': 'manual', 'z-index': 1 } },
+    { selector: 'edge.tl-off', style: { 'display': 'none' } },
+    { selector: 'edge.tl-dep', style: { 'width': 1.2, 'line-color': AXIS, 'target-arrow-color': AXIS, 'arrow-scale': 0.8, 'line-style': 'solid', 'z-index-compare': 'manual', 'z-index': 1 } },
+    { selector: 'edge.tl-conflict', style: { 'width': 1.5, 'line-color': RED, 'target-arrow-color': RED, 'line-style': 'dashed' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
@@ -251,23 +292,24 @@ const keeps = n => {
 };
 const passes = n => keeps(n) && types.has(n.type);
 
+function topOf(n, open) {
+  const chain = [n];
+  while (byId.has(chain[0].parent)) chain.unshift(byId.get(chain[0].parent));
+  return chain.find(a => !open.has(a.id)) || n;
+}
+
 function visibleData() {
   const open = expandedIds();
-  const topOf = n => {
-    const chain = [n];
-    while (byId.has(chain[0].parent)) chain.unshift(byId.get(chain[0].parent));
-    return chain.find(a => !open.has(a.id)) || n;
-  };
   const put = (map, s, t, f) => {
     if (s === t) return;
     const k = s + '-' + t, o = map.get(k);
     f = { partof: false, lifted: false, bridged: false, ...f };
     map.set(k, o ? { s, t, partof: o.partof && f.partof, lifted: o.lifted && f.lifted, bridged: o.bridged && f.bridged } : { s, t, ...f });
   };
-  const level = DATA.nodes.filter(n => topOf(n) === n);
+  const level = DATA.nodes.filter(n => topOf(n, open) === n);
   const mapped = new Map();
   DATA.edges.forEach(e => {
-    const a = topOf(byId.get(e.source)).id, b = topOf(byId.get(e.target)).id;
+    const a = topOf(byId.get(e.source), open).id, b = topOf(byId.get(e.target), open).id;
     put(mapped, a, b, { lifted: a !== e.source || b !== e.target });
   });
   level.filter(p => p.children.length && open.has(p.id)).forEach(p => p.children.forEach(c => put(mapped, c, p.id, { partof: true })));
@@ -319,9 +361,10 @@ function labelOf(n, open) {
   const m = n.meta;
   const parts = isSummary(n)
     ? [m.owner, n.rollup && n.rollup.total ? `${n.rollup.done}/${n.rollup.total} done` : null]
-    : (SUBTITLE[n.type] || SUBTITLE.task)(m);
+    : (SUBTITLE[n.type] || SUBTITLE.task)(n);
   if (n.children.length && !open.has(n.id)) parts.unshift('▸ ' + descendants(n));
   if (n.chase_due) parts.unshift('chase due');
+  if (conflicted(n)) parts.unshift('conflict');
   if (n.late_days != null) parts.unshift(n.late_days + 'd late');
   const sub = parts.filter(Boolean).join(' · ');
   const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
@@ -330,14 +373,17 @@ function labelOf(n, open) {
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
 
-const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: labelOf(n, open) });
+const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: view === 'timeline' ? dateText(n) : labelOf(n, open) });
 const flagsOf = (n, sources) => ({
   summary: isSummary(n),
   late: n.late_days != null,
-  goal: !sources.has(n.id) && (n.type === 'task' || n.type === 'milestone')
+  conflict: conflicted(n),
+  goal: !sources.has(n.id) && (n.type === 'milestone' || n.type === 'objective')
 });
 const classesOf = (n, sources) => Object.entries(flagsOf(n, sources)).filter(([, on]) => on).map(([k]) => k).join(' ');
-const tasks = () => cy.nodes().not('.lane-bg');
+const tasks = () => cy.nodes().not('.bg');
+const links = () => cy.edges().not('.bg');
+const conflicted = n => (n.conflicts ?? []).length > 0;
 const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
   return v == null || String(v).trim() === '' ? UNASSIGNED : String(v).trim();
@@ -387,6 +433,14 @@ function backEdges(nodes, edges) {
   return back;
 }
 
+function elbow(s, t, points) {
+  const vx = t.x - s.x, vy = t.y - s.y, len2 = vx * vx + vy * vy;
+  return {
+    'segment-weights': points.map(([x, y]) => ((x - s.x) * vx + (y - s.y) * vy) / len2).join(' '),
+    'segment-distances': points.map(([x, y]) => ((y - s.y) * vx - (x - s.x) * vy) / Math.sqrt(len2)).join(' ')
+  };
+}
+
 function routeEdges() {
   const rs = cy.edges().not('.back').map(edge => {
     const s = edge.source().position(), t = edge.target().position();
@@ -426,12 +480,7 @@ function routeEdges() {
     const { s, t, edge } = r;
     const style = { 'source-endpoint': `${NODE_W / 2}px ${r.sy - s.y}px`, 'target-endpoint': `${-NODE_W / 2}px ${r.ty - t.y}px` };
     if (!r.va) style['curve-style'] = 'straight';
-    else {
-      const points = r.long ? [[r.va.x, r.sy], [r.va.x, r.y], [r.vb.x, r.y], [r.vb.x, r.ty]] : [[r.va.x, r.sy], [r.va.x, r.ty]];
-      const vx = t.x - s.x, vy = t.y - s.y, len2 = vx * vx + vy * vy;
-      style['segment-weights'] = points.map(([x, y]) => ((x - s.x) * vx + (y - s.y) * vy) / len2).join(' ');
-      style['segment-distances'] = points.map(([x, y]) => ((y - s.y) * vx - (x - s.x) * vy) / Math.sqrt(len2)).join(' ');
-    }
+    else Object.assign(style, elbow(s, t, r.long ? [[r.va.x, r.sy], [r.va.x, r.y], [r.vb.x, r.y], [r.vb.x, r.ty]] : [[r.va.x, r.sy], [r.va.x, r.ty]]));
     edge.style(style);
   });
 }
@@ -466,7 +515,7 @@ function layoutLanes(fit) {
     });
     const height = Math.max(...rows.values()) * ROW_H;
     const band = {
-      group: 'nodes', classes: 'lane-bg', locked: true, selectable: false, grabbable: false,
+      group: 'nodes', classes: 'lane-bg bg', locked: true, selectable: false, grabbable: false,
       data: { id: 'lane:' + i, name: clampLabel(name, LANE_W, LABEL_LINES), w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
       position: { x: width / 2, y: top + height / 2 }
     };
@@ -479,11 +528,181 @@ function layoutLanes(fit) {
   if (fit) cy.fit(undefined, 40);
 }
 
+const dnum = s => {
+  const [y, m, d] = s.split('-');
+  return Date.UTC(y, m - 1, d) / 864e5;
+};
+const md = s => +s.slice(5, 7) + '/' + +s.slice(8, 10);
+const isPoint = n => n.type === 'milestone' || n.type === 'decision';
+
+function datesOf(n) {
+  const span = isSummary(n) ? n.span : null;
+  const start = n.start ?? null, due = n.due ?? null;
+  const a = span ? span.start : isPoint(n) ? due ?? start : start ?? due;
+  const b = span ? span.end : isPoint(n) ? a : due ?? start;
+  return a ? [a, b] : null;
+}
+
+function dateText(n) {
+  const d = datesOf(n);
+  if (!d) return '';
+  const parts = [d[0] === d[1] ? md(d[0]) : md(d[0]) + '–' + md(d[1])];
+  if (isSummary(n) && n.rollup && n.rollup.total) parts.push(`${n.rollup.done} of ${n.rollup.total} done`);
+  if (n.late_days != null) parts.push(n.late_days + 'd late');
+  return parts.join(' · ');
+}
+
+function conflictEdges(open) {
+  const ids = new Set();
+  DATA.nodes.forEach(n => (n.conflicts ?? []).filter(c => c.kind === 'dependency' && byId.has(c.with)).forEach(c => {
+    const w = byId.get(c.with);
+    const a = topOf(n, open).id, b = topOf(w, open).id;
+    ids.add(a + '-' + b).add(b + '-' + a);
+  }));
+  return ids;
+}
+
+function routeDeps(shown, marks, right) {
+  const rs = shown.map(edge => {
+    const s = marks.get(edge.source().id()), t = marks.get(edge.target().id());
+    const dir = t.y > s.y ? 1 : -1;
+    return { edge, s, t, dir, y1: s.y + dir * TL.row / 2, y2: t.y - dir * TL.row / 2 };
+  });
+  const ports = new Map();
+  const dock = (m, side, r, end, far) => {
+    const key = m.id + side;
+    ports.set(key, [...(ports.get(key) || []), { m, r, end, far }]);
+  };
+  rs.forEach(r => {
+    dock(r.s, r.dir, r, 'ex', r.t);
+    dock(r.t, -r.dir, r, 'nx', r.s);
+  });
+  ports.forEach(g => {
+    g.sort((p, q) => p.far.x - q.far.x);
+    g.forEach((p, i) => { p.r[p.end] = p.m.x + (i + 0.5 - g.length / 2) * Math.min(4, (p.m.x2 - p.m.x1 - 2) / g.length); });
+  });
+  rs.filter(r => r.y1 !== r.y2).forEach(r => {
+    const lo = Math.min(r.s.y, r.t.y), hi = Math.max(r.s.y, r.t.y);
+    const between = [...marks.values()].filter(m => m.y > lo && m.y < hi);
+    const free = x => !between.some(m => m.from < x && x < m.end + 4);
+    const cost = x => Math.abs(r.ex - x) + Math.abs(x - r.nx);
+    let best = TL.names + 8;
+    for (let x = best; x <= right; x += 6) if (free(x) && cost(x) < cost(best)) best = x;
+    r.xc = best;
+  });
+  groupBy(rs.filter(r => r.xc != null), r => r.xc).forEach(g => {
+    const items = g.map(r => ({ r, lo: Math.min(r.y1, r.y2), hi: Math.max(r.y1, r.y2) }));
+    assignTracks(items);
+    items.forEach(it => { it.r.xc -= it.slot * 3; });
+  });
+  const runs = rs.flatMap(r => {
+    const mid = r.xc ?? r.nx;
+    r.h1 = { lo: Math.min(r.ex, mid), hi: Math.max(r.ex, mid), y: r.y1 };
+    r.h2 = r.xc == null ? r.h1 : { lo: Math.min(mid, r.nx), hi: Math.max(mid, r.nx), y: r.y2 };
+    return r.h1 === r.h2 ? [r.h1] : [r.h1, r.h2];
+  });
+  groupBy(runs, h => h.y).forEach(g => {
+    const step = Math.min(2, 4 / assignTracks(g));
+    g.forEach(h => { h.off = trackUnit(h.slot) * step; });
+  });
+  rs.forEach(r => {
+    const ya = r.y1 + r.h1.off, yd = r.y2 + r.h2.off;
+    const raw = r.xc == null ? [[r.ex, ya], [r.nx, ya]] : [[r.ex, ya], [r.xc, ya], [r.xc, yd], [r.nx, yd]];
+    const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
+    const style = {
+      'source-endpoint': `${r.ex - r.s.x}px ${r.dir * r.s.h / 2}px`,
+      'target-endpoint': `${r.nx - r.t.x}px ${-r.dir * r.t.h / 2}px`
+    };
+    if (points.length === 2 && points[0][0] === points[1][0]) style['curve-style'] = 'straight';
+    else Object.assign(style, elbow(r.s, r.t, points));
+    r.edge.style(style);
+  });
+}
+
+function layoutTimeline(fit) {
+  const { nodes, open } = visibleData();
+  const shown = new Set(nodes.map(n => n.id));
+  const kids = new Map(nodes.map(n => [n.id, n.children.filter(c => shown.has(c)).map(c => byId.get(c)).filter(datesOf)]));
+  const cmp = (a, b) => (datesOf(a)?.[0] ?? '~').localeCompare(datesOf(b)?.[0] ?? '~') || a.id - b.id;
+  const groups = new Map();
+  nodes.filter(n => !datesOf(n) || !shown.has(n.parent)).forEach(n => {
+    const name = datesOf(n) ? laneOf(n) : null;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(n);
+  });
+  const names = [...groups.keys()].filter(k => k !== null).sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
+  if (groups.has(null)) names.push(null);
+  const rows = [];
+  const spans = [];
+  const walk = (n, depth) => {
+    rows.push({ n, depth });
+    kids.get(n.id).sort(cmp).forEach(c => walk(c, depth + 1));
+  };
+  names.forEach(name => {
+    const from = rows.length;
+    rows.push({ head: name === null ? 'Undated' : name });
+    groups.get(name).sort(cmp).forEach(n => walk(n, 0));
+    spans.push([from, rows.length]);
+  });
+  const today = DATA.today || new Date().toLocaleDateString('sv');
+  const days = [today, ...rows.flatMap(r => r.n ? datesOf(r.n) || [] : [])].map(dnum);
+  const lo = Math.min(...days) - 7, hi = Math.max(...days) + 14;
+  const left = TL.names + 16;
+  const xOf = d => left + (dnum(d) - lo) * TL.px;
+  const height = TL.head + rows.length * TL.row;
+  const yOf = i => TL.head + i * TL.row + TL.row / 2;
+  const bg = (classes, id, data, x, y) => ({ group: 'nodes', classes: 'bg ' + classes, locked: true, selectable: false, grabbable: false, data: { id, ...data }, position: { x, y } });
+  const els = [];
+  const marks = new Map();
+  rows.forEach((r, i) => {
+    const y = yOf(i);
+    if (r.head) return els.push(bg('tl-name tl-head', 'tl:name:' + i, { name: r.head, w: TL.names, h: TL.row, tx: 14 - TL.names }, TL.names / 2, y));
+    const n = r.n, ele = cy.getElementById(String(n.id)), d = datesOf(n);
+    const mark = !d ? 'mk-none' : isSummary(n) ? 'mk-sum' : isPoint(n) || d[0] === d[1] ? 'mk-pt' : 'mk-bar';
+    const x1 = d ? xOf(d[0]) : 0, x2 = d ? xOf(d[1]) : 0;
+    const size = n.type === 'decision' || n.type === 'milestone' ? 16 : 10;
+    const w = mark === 'mk-none' ? TL.names - 8 : mark === 'mk-pt' ? size : Math.max(x2 - x1, mark === 'mk-sum' ? 4 : 6);
+    const h = mark === 'mk-none' ? TL.row - 4 : mark === 'mk-pt' ? size : mark === 'mk-sum' ? 6 : TL.bar;
+    const x = mark === 'mk-none' ? TL.names / 2 : mark === 'mk-pt' ? x1 : x1 + w / 2;
+    const pct = n.rollup && n.rollup.total ? Math.round(100 * n.rollup.done / n.rollup.total) : 0;
+    ele.removeClass('mk-none mk-pt mk-bar mk-sum').addClass(mark).data({ w, h, pct }).position({ x, y });
+    if (d) marks.set(String(n.id), { id: String(n.id), x, y, h, x1: x - w / 2, x2: x + w / 2, pt: mark === 'mk-pt', from: mark === 'mk-sum' ? x + w / 2 : x - w / 2 - 4, end: x + w / 2 + 6 + ctx.measureText(ele.data('label')).width });
+    const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + '#' + n.id + ' ' + n.title;
+    els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
+  });
+  const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
+  spans.forEach(([from, to], i) => els.push(bg('lane-bg', 'tl:band:' + i, { name: '', w: width, h: (to - from) * TL.row, tx: 0, shade: i % 2 ? '#171b22' : '#14181e' }, width / 2, TL.head + (from + to) * TL.row / 2)));
+  const begin = new Date(lo * 864e5);
+  for (let m = new Date(Date.UTC(begin.getUTCFullYear(), begin.getUTCMonth() + 1, 1)); m / 864e5 <= hi; m.setUTCMonth(m.getUTCMonth() + 1)) {
+    const at = m / 864e5, month = m.getUTCMonth();
+    els.push(bg('tl-grid', 'tl:grid:' + at, { name: MONTHS[month] + (month === 0 ? ' ' + m.getUTCFullYear() : ''), h: height }, left + (at - lo) * TL.px, height / 2));
+  }
+  const tx = xOf(today);
+  els.push(bg('tl-pin', 'tl:today', { name: '今天 ' + md(today) }, tx, TL.head - 4), bg('tl-pin', 'tl:today-end', { name: '' }, tx, height));
+  els.push({ group: 'edges', classes: 'bg tl-today', data: { id: 'tl:today-line', source: 'tl:today', target: 'tl:today-end' } });
+  cy.add(els);
+  const hot = conflictEdges(open);
+  const drawn = links().filter(e => {
+    const bad = hot.has(e.id());
+    return (bad || showDeps) && !e.data('kind').includes('partof') && marks.has(e.source().id()) && marks.has(e.target().id());
+  });
+  links().not(drawn).addClass('tl-off');
+  drawn.addClass('tl-dep').filter(e => hot.has(e.id())).addClass('tl-conflict');
+  routeDeps(drawn.toArray(), marks, width);
+  if (!fit) return;
+  cy.fit(undefined, 40);
+  if (cy.zoom() < TL.readable) {
+    const box = cy.elements().boundingBox();
+    cy.viewport({ zoom: TL.readable, pan: { x: 40 - box.x1 * TL.readable, y: 40 - box.y1 * TL.readable } });
+  }
+}
+
 function layout(fit = true) {
-  cy.nodes('.lane-bg').remove();
-  cy.edges().removeStyle().removeClass('back');
-  cy.elements().toggleClass('lanes', view === 'lanes');
+  cy.elements('.bg').remove();
+  cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-conflict');
+  cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
   if (view === 'lanes') layoutLanes(fit);
+  else if (view === 'timeline') layoutTimeline(fit);
   else cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit, padding: 40 }).run();
 }
 
@@ -518,7 +737,7 @@ function rebuild(keepView, flash) {
 }
 
 function sameShape(nodes, edges) {
-  return tasks().length === nodes.length && cy.edges().length === edges.length
+  return tasks().length === nodes.length && links().length === edges.length
     && nodes.every(n => cy.getElementById(String(n.id)).nonempty())
     && edges.every(e => {
       const ele = cy.getElementById(e.id);
@@ -543,7 +762,7 @@ function applyData(next) {
       ele.data(nodeData(n, open));
       Object.entries(flagsOf(n, sources)).forEach(([k, on]) => ele.toggleClass(k, on));
     });
-    if (view === 'lanes') {
+    if (view !== 'graph') {
       layout(false);
       fitIfOutside();
     }
@@ -574,13 +793,22 @@ function reveal(id) {
 
 function focusOn(n) {
   const keep = n.union(n.predecessors()).union(n.successors());
-  cy.elements().not('.lane-bg').addClass('faded');
+  cy.elements().not('.bg').addClass('faded');
   keep.removeClass('faded').addClass('hl');
+  mirrorNames();
 }
 
 function refocus() {
   cy.elements().removeClass('faded hl');
   if (pinned) focusOn(cy.getElementById(String(pinned)));
+  mirrorNames();
+}
+
+function mirrorNames() {
+  cy.nodes('.tl-name[of]').forEach(b => {
+    const t = cy.getElementById(b.data('of'));
+    b.toggleClass('faded', t.hasClass('faded')).toggleClass('dim', t.hasClass('dim'));
+  });
 }
 
 function applySearch() {
@@ -589,6 +817,7 @@ function applySearch() {
     const hit = !q || n.data('title').toLowerCase().includes(q) || ('#' + n.id()).includes(q);
     n.toggleClass('dim', !hit);
   });
+  mirrorNames();
 }
 
 function badge(status) {
@@ -614,13 +843,22 @@ function refList(ids) {
   }));
 }
 
+function conflictList(list) {
+  return el('ul', null, ...list.map(c => {
+    const on = byId.has(c.with) && passes(byId.get(c.with));
+    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message }));
+    if (on) li.onclick = () => reveal(c.with);
+    return li;
+  }));
+}
+
 function openPanel(n) {
   const panel = $('panel');
   const top = panel.scrollTop;
   const fields = FIELDS[n.type] || FIELDS.task;
-  const shown = new Set(['type', ...fields.map(([k]) => k)]);
+  const shown = new Set(['type', 'start', 'due', ...fields.map(([k]) => k)]);
   const extra = Object.entries(n.meta).filter(([k]) => !shown.has(k));
-  panel.replaceChildren(
+  panel.replaceChildren(...[
     el('h2', { textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
@@ -628,11 +866,15 @@ function openPanel(n) {
     el('table', null,
       row('Type', n.type),
       row('Project', n.project),
+      n.start ? row('Start', day(n.start)) : null,
+      n.type === 'task' && n.due ? row('Due', day(n.due)) : null,
       ...fields.filter(([k]) => n.meta[k] != null && n.meta[k] !== '').map(([k, label]) => row(label, show(k, n.meta[k]))),
       n.rollup && n.rollup.total ? row('Progress', `${n.rollup.done}/${n.rollup.total} done`) : null,
       row('Created', fmt(n.created_at)),
       row('Done', fmt(n.done_at))),
     n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+    conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
+    conflicted(n) ? conflictList(n.conflicts) : null,
     n.parent != null && byId.has(n.parent) ? el('h3', { textContent: 'Parent' }) : null,
     n.parent != null && byId.has(n.parent) ? refList([n.parent]) : null,
     n.children.length ? el('h3', { textContent: 'Children' }) : null,
@@ -647,7 +889,7 @@ function openPanel(n) {
     refList(n.depends_on),
     el('h3', { textContent: 'Blocks' }),
     refList(n.blocks)
-  );
+  ].filter(c => c != null));
   panel.scrollTop = top;
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
@@ -707,8 +949,9 @@ if (wanted) {
 const params = () => {
   const q = new URLSearchParams();
   if (projectSelect.value) q.set('project', projectSelect.value);
-  if (view === 'lanes') q.set('view', 'lanes');
+  if (view !== 'graph') q.set('view', view);
   if (laneKey !== 'lane') q.set('lanes', laneKey);
+  if (view === 'timeline' && showDeps) q.set('deps', '1');
   if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
   return q.toString().replaceAll('%2C', ',');
 };
@@ -716,7 +959,10 @@ const syncUrl = () => history.replaceState(null, '', params() ? '?' + params() :
 const syncControls = () => {
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
-  $('lanesBy').hidden = view !== 'lanes';
+  $('viewTimeline').classList.toggle('on', view === 'timeline');
+  $('lanesBy').hidden = view === 'graph';
+  $('depsBy').hidden = view !== 'timeline';
+  $('showDeps').checked = showDeps;
   $('laneKey').value = laneKey;
   TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
 };
@@ -745,11 +991,20 @@ projectSelect.onchange = () => {
 };
 $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
+$('viewTimeline').onclick = () => setView('timeline');
+$('showDeps').onchange = e => {
+  showDeps = e.target.checked;
+  store.set('taskgraph.deps', showDeps ? '1' : '0');
+  syncUrl();
+  layout(false);
+  applySearch();
+  refocus();
+};
 $('laneKey').onchange = e => {
   laneKey = e.target.value;
   store.set('taskgraph.lanes', laneKey);
   syncUrl();
-  if (view === 'lanes') rebuild();
+  if (view !== 'graph') rebuild();
 };
 $('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
 syncControls();
@@ -767,7 +1022,7 @@ $('collapseAll').onclick = () => {
 };
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => cy.fit(undefined, 40);
-$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late'));
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])), el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'));
 
 rebuild();
 
