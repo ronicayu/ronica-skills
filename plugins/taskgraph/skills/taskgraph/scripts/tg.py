@@ -544,8 +544,8 @@ def add_dep(conn, task_id, dep_id):
     tasks = load(conn)
     get(tasks, task_id)
     get(tasks, dep_id)
-    if tasks[task_id]["project"] != tasks[dep_id]["project"]:
-        raise Fail(f"#{task_id} is in project {tasks[task_id]['project']} and #{dep_id} in {tasks[dep_id]['project']}; dependencies cannot cross projects")
+    if tasks[task_id]["project"] != tasks[dep_id]["project"] and tasks[dep_id]["type"] != "milestone":
+        raise Fail(f"#{task_id} is in project {tasks[task_id]['project']} and #{dep_id} in {tasks[dep_id]['project']}; dependencies cannot cross projects except on another project's milestone")
     if task_id in ancestors(tasks, dep_id) or dep_id in ancestors(tasks, task_id):
         raise Fail(f"#{task_id} and #{dep_id} are in the same parent chain; a task cannot depend on its ancestor or descendant")
     if reaches(conn, dep_id, task_id):
@@ -575,6 +575,8 @@ def place(conn, task_id, kind, parent_id):
     tasks = load(conn)
     for task in tasks.values():
         for dep in task["depends_on"]:
+            if tasks[dep]["project"] != task["project"] and tasks[dep]["type"] != "milestone":
+                raise Fail(f"#{task['id']} in project {task['project']} depends on #{dep} in {tasks[dep]['project']}, which must stay a milestone")
             if dep in ancestors(tasks, task["id"]) or task["id"] in ancestors(tasks, dep):
                 raise Fail(f"#{task['id']} depends on #{dep}, which would be its ancestor or descendant")
     check_deadlock(conn)
@@ -1540,15 +1542,33 @@ def cmd_serve(conn, args):
 
 
 def cmd_projects(conn, args):
+    tasks = load(conn)
+    day = today().isoformat()
+    limit = (today() + timedelta(days=14)).isoformat()
     stats = {}
-    for t in load(conn).values():
+    for t in tasks.values():
         s = stats.setdefault(t["project"], {"project": t["project"], "total": 0, "done": 0, "in_progress": 0, "ready": 0, "blocked": 0})
         s["total"] += 1
         if t["derived_status"] in s:
             s[t["derived_status"]] += 1
+    for name, s in stats.items():
+        mine = [t for t in tasks.values() if t["project"] == name]
+        open_ = [t for t in mine if t["derived_status"] != "done"]
+        ahead = sorted((t for t in open_ if t["type"] == "milestone"), key=lambda t: (t["due"] or "9999-12-31", t["id"]))
+        s["late"] = sum(bool(t["late_days"]) for t in open_)
+        s["conflicts"] = sum(bool(t["conflicts"]) for t in open_)
+        s["at_risk"] = sum(t["outlook"]["verdict"] == "at_risk" for t in ahead)
+        s["next_milestone"] = {"id": ahead[0]["id"], "title": ahead[0]["title"], "due": ahead[0]["due"]} if ahead else None
+        s["rag"] = group_status(tasks, [t for t in mine if not is_summary(t)], day, limit)[0]
     rows = sorted(stats.values(), key=lambda s: s["project"])
-    text = "\n".join(f"{s['project']:<20} total {s['total']:>3}  done {s['done']:>3}  ready {s['ready']:>3}  blocked {s['blocked']:>3}" for s in rows)
-    emit(args, rows, text)
+
+    def text(s):
+        n = s["next_milestone"]
+        nxt = f" · next #{n['id']} {n['title']} {n['due'] or 'no date'}" if n else ""
+        return (f"{s['project']:<20} {s['rag'].upper():<6} total {s['total']:>3}  done {s['done']:>3}  ready {s['ready']:>3}  blocked {s['blocked']:>3}"
+                f" · {s['late']} late · {plural(s['conflicts'], 'conflict')} · {s['at_risk']} at risk{nxt}")
+
+    emit(args, rows, "\n".join(map(text, rows)))
 
 
 COMMANDS = {
@@ -1670,7 +1690,7 @@ def build_parser():
     p.add_argument("--all-projects", action="store_true")
 
     p = command("deps")
-    p.add_argument("--cross", choices=("lane", "team", "owner"))
+    p.add_argument("--cross", choices=("lane", "team", "owner", "project"))
     p.add_argument("--open", action="store_true")
     p.add_argument("--all-projects", action="store_true")
 

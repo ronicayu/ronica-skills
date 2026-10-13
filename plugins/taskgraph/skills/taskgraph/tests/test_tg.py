@@ -1536,3 +1536,33 @@ def test_report_all_green(tg, raw):
     r = tg("report")
     assert r["overall"] == "green" and r["asks"] == []
     assert raw("--project", "demo", "report").stdout.rstrip().endswith("Asks\n  none")
+
+
+def test_projects_portfolio_columns(tg, raw):
+    late = add(tg, "VPC", "--due", "2026-10-10")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-12-01", "--depends", str(late))
+    add(tg, "Later", "--type", "milestone", "--due", "2027-01-01")
+    raw("--project", "calm", "add", "Docs", "--due", "2026-12-01")
+    rows = {r["project"]: r for r in tg("projects")}
+    demo = rows["demo"]
+    assert demo["late"] == 1 and demo["conflicts"] == 0 and demo["at_risk"] == 1 and demo["rag"] == "red"
+    assert demo["next_milestone"] == {"id": m, "title": "Live", "due": "2026-12-01"}
+    assert rows["calm"]["rag"] == "green" and rows["calm"]["next_milestone"] is None
+    out = raw("--project", "demo", "projects").stdout
+    assert f"demo                 RED    total   3  done   0  ready   1  blocked   2 · 1 late · 0 conflicts · 1 at risk · next #{m} Live 2026-12-01" in out
+
+
+def test_cross_project_dependency_only_on_milestones(tg, raw, fail):
+    gate = json.loads(raw("--project", "platform", "--json", "add", "Dev env live", "--type", "milestone", "--due", "2026-11-01").stdout)["id"]
+    work = json.loads(raw("--project", "platform", "--json", "add", "Build env", "--blocks", str(gate), "--due", "2026-10-20").stdout)["id"]
+    load_ = add(tg, "Load warehouse", "--start", "2026-10-25", "--depends", str(gate))
+    assert tg("show", str(load_))["derived_status"] == "blocked"
+    conflicts = tg("show", str(load_))["conflicts"]
+    assert [c["from"] for c in conflicts] == [gate]
+    assert "milestone" in fail("dep", "add", str(load_), str(work)).stderr
+    assert "must stay a milestone" in fail("edit", str(gate), "--type", "task").stderr
+    assert tg("show", str(gate))["type"] == "milestone"
+    tg("--project", "platform", "done", str(work))
+    assert tg("show", str(load_))["derived_status"] == "ready"
+    rows = tg("deps", "--cross", "project", "--all-projects")
+    assert [(r["from"]["id"], r["to"]["id"]) for r in rows] == [(gate, load_)]

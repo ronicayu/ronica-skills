@@ -14,7 +14,7 @@ Trigger keywords (中文): 任务, 依赖, 计划, 下一步, 看图, 排期
 
 ## Choosing the project
 
-Once the user names a plan, pass `--project NAME` on every command, or set `TASKGRAPH_PROJECT`. Otherwise the project falls back to the git repo name, then the directory name, and a typo silently starts a new project. `projects` lists what exists. Dependencies and parents cannot cross projects.
+Once the user names a plan, pass `--project NAME` on every command, or set `TASKGRAPH_PROJECT`. Otherwise the project falls back to the git repo name, then the directory name, and a typo silently starts a new project. `projects` lists what exists. Parents cannot cross projects. A dependency may cross projects only onto another project's milestone, so a portfolio can say "the warehouse load waits for platform's Dev environment live"; that milestone then cannot change type while other projects depend on it.
 
 ## Programme recipe
 
@@ -155,9 +155,9 @@ Data lives in `$TASKGRAPH_DB`, default `~/.taskgraph/tasks.db`.
 | `serve [--port N] [--all-projects] [--no-open]` | Serve every project live; refreshes on DB change |
 | `changes [--since 7d\|DATE] [--all-projects]` | What changed since a date: new, started, completed, reopened, slipped, pulled in, re-scoped, removed |
 | `baseline set [--label L] [--replace]` / `baseline ls` / `baseline diff [--label L]` / `baseline rm LABEL` | Snapshot dates, list snapshots, compare now against one, delete one |
-| `deps [--cross lane\|team\|owner] [--open] [--all-projects]` | Dependency edges with both sides' person, lane and status and the slack between them, tightest first; `--cross` keeps hand-offs between lanes, teams or people, `--open` drops finished upstream work |
+| `deps [--cross lane\|team\|owner\|project] [--open] [--all-projects]` | Dependency edges with both sides' person, lane and status and the slack between them, tightest first; `--cross` keeps hand-offs between lanes, teams or people, `--open` drops finished upstream work |
 | `report [--by lane\|team\|owner\|project] [--within DAYS] [--since 7d\|DATE] [--risks N] [--md] [--all-projects]` | One-page status with RAG per group, milestones, decisions, externals, risks, issues and asks |
 | `export [--all-projects] [--out PATH]` | JSON backup of tasks, meta and edges (no import) |
-| `projects` | Projects with total, done, ready, blocked counts |
+| `projects` | Portfolio: per project RAG (same rules as `report`), total, done, ready, blocked, late, conflicts, at-risk milestones and the next milestone |
 
 Stored statuses are `open`, `in_progress`, `done`; `blocked` and `ready` are derived. Exit code 1 with an `error:` message on stderr signals an error.
