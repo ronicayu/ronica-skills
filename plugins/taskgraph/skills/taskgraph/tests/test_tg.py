@@ -647,7 +647,7 @@ def test_milestone_late_clears_when_derived_done(tg):
 def test_human_output_type_and_late(raw):
     raw("--project", "demo", "add", "Wave 1 date", "--type", "decision", "--meta", "decide_by=2026-10-01")
     out = raw("--project", "demo", "ls").stdout.rstrip("\n")
-    assert out == "   1  ready       [decision] Wave 1 date  (late 12d)"
+    assert out == "   1  ready       [decision] Wave 1 date — due 2026-10-01  (late 12d)"
     shown = raw("--project", "demo", "show", "1").stdout
     assert "type:    decision" in shown and "late:    12d" in shown
 
@@ -723,7 +723,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "baseline"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -937,8 +937,9 @@ def test_dependency_conflict(tg, raw):
     b = add(tg, "B", "--depends", str(a), "--start", "2027-01-15", "--due", "2027-03-01")
     ca, cb = tg("show", str(a))["conflicts"], tg("show", str(b))["conflicts"]
     message = f"#{a} due 2027-02-01 after #{b} needs it 2027-01-15"
-    assert ca == [{"kind": "dependency", "with": b, "message": message}]
-    assert cb == [{"kind": "dependency", "with": a, "message": message}]
+    common = {"kind": "dependency", "from": a, "to": b, "due": "2027-02-01", "need": "2027-01-15", "gap": -17, "message": message}
+    assert ca == [dict(common, **{"with": b})]
+    assert cb == [dict(common, **{"with": a})]
     out = raw("--project", "demo", "ls").stdout
     assert out.count("(conflict)") == 2
     assert message in raw("--project", "demo", "show", str(a)).stdout
@@ -999,12 +1000,12 @@ def test_agenda_buckets(tg):
     done = add(tg, "finished", "--due", "2026-10-01")
     tg("done", str(done))
     data = tg("agenda")
-    assert set(data) == {"late", "conflicts", "due_soon", "chase_due", "missing_date"}
+    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "review_due", "missing_date"}
     assert ids(data["late"]) == [late_big, late_small]
     assert ids(data["due_soon"]) == [soon]
     assert ids(data["chase_due"]) == [ext]
     assert ids(data["missing_date"]) == [nodate]
-    assert ids(data["conflicts"]) == [far, conflicted]
+    assert [(c["from"]["id"], c["to"]["id"], c["gap"]) for c in data["conflicts"]] == [(far, conflicted, -49)]
     assert set(data["late"][0]) == {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
     assert data["late"][0]["late_days"] == 42
 
@@ -1133,3 +1134,435 @@ def test_payload_conflicts_span_and_dates(tg, tmp_path):
     assert nodes[a]["span"] is None and nodes[a]["start"] is None and nodes[a]["due"] == "2026-12-10"
     assert nodes[b]["start"] == "2026-12-01" and nodes[b]["due"] is None
     assert [c["with"] for c in nodes[a]["conflicts"]] == [b] and nodes[p]["conflicts"] == []
+
+
+def test_ls_human_shows_due_person_and_inherited_lane(tg, raw):
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    add(tg, "Build VPC", "--parent", str(ws), "--due", "2026-11-01", "--meta", "owner=Priya")
+    add(tg, "Approve", "--type", "decision", "--meta", "decider=CISO")
+    out = raw("--project", "demo", "ls").stdout
+    assert "Build VPC — due 2026-11-01 · Priya · Infra" in out
+    assert "[decision] Approve — CISO" in out
+    assert tg("--brief", "ls")[1]["lane"] == "Infra"
+
+
+def test_ls_filters_and_sort(tg):
+    ws = add(tg, "Infra", "--meta", "lane=Infra", "team=Platform")
+    a = add(tg, "a", "--parent", str(ws), "--due", "2026-12-01", "--meta", "owner=Priya", "tags=[\"net\"]")
+    b = add(tg, "b", "--due", "2026-10-20", "--meta", "owner=raj", "lane=Data")
+    c = add(tg, "c", "--due", "2026-10-01")
+    d = add(tg, "d", "--type", "decision", "--meta", "decider=Priya")
+    assert ids(tg("ls", "--owner", "priya")) == [a, d]
+    assert ids(tg("ls", "--lane", "infra")) == [ws, a]
+    assert ids(tg("ls", "--team", "Platform")) == [ws, a]
+    assert ids(tg("ls", "--meta", "tags=net")) == [a]
+    assert ids(tg("ls", "--meta", "lane=Data", "owner=raj")) == [b]
+    assert ids(tg("ls", "--due-before", "2026-10-31")) == [b, c]
+    assert ids(tg("ls", "--sort", "due")) == [c, b, a, ws, d]
+    assert ids(tg("ls", "--sort", "late"))[0] == c
+    assert ids(tg("ready")) == [a, b, c, d]
+
+
+def test_add_promised(tg, fail):
+    e = tg("add", "Pen test", "--type", "external", "--due", "2026-11-01", "--promised", "+2w")
+    assert e["meta"]["promised"] == "2026-10-27"
+    fail("add", "plain", "--promised", "2026-11-01")
+
+
+def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
+    p = add(tg, "P")
+    a = add(tg, "a", "--parent", str(p))
+    b = add(tg, "b", "--parent", str(p))
+    m = add(tg, "M", "--type", "milestone", "--depends", str(p))
+    tg("done", str(a))
+    assert tg("show", str(p))["done_at"] is None
+    tg("done", str(b))
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET done_at='2026-10-01T00:00:00Z' WHERE id=?", (a,))
+        conn.execute("UPDATE tasks SET done_at='2026-10-05T00:00:00Z' WHERE id=?", (b,))
+    assert tg("show", str(p))["done_at"] == "2026-10-05T00:00:00Z"
+    assert tg("show", str(m))["done_at"] == "2026-10-05T00:00:00Z"
+
+
+def test_tree_roots_skip_isolated_leaves(tg):
+    goal = add(tg, "goal")
+    add(tg, "a", "--blocks", str(goal))
+    loose = add(tg, "loose")
+    ms = add(tg, "M", "--type", "milestone")
+    assert [n["id"] for n in tg("tree")] == [goal, ms]
+    tg("rm", str(goal), "--recursive")
+    tg("rm", str(ms))
+    assert loose in [n["id"] for n in tg("tree")]
+
+
+def age_events(db, at="2026-09-01T00:00:00Z"):
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE events SET at=?", (at,))
+
+
+def events(db):
+    with closing(sqlite3.connect(db)) as conn:
+        return [(t, f, json.loads(o) if o else None, json.loads(n) if n else None) for t, f, o, n in conn.execute("SELECT task_id, field, old, new FROM events ORDER BY id")]
+
+
+def test_events_record_every_mutation(tg, fail, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    b = add(tg, "B")
+    tg("date", str(a), "--due", "2026-11-10")
+    tg("edit", str(b), "--title", "B2", "--meta", "owner=ann")
+    tg("dep", "add", str(b), str(a))
+    tg("start", str(a))
+    fail("dep", "add", str(a), str(b))
+    tg("dep", "rm", str(b), str(a))
+    tg("rm", str(b))
+    assert events(db) == [
+        (a, "created", None, "A"),
+        (b, "created", None, "B"),
+        (a, "due", "2026-11-01", "2026-11-10"),
+        (b, "meta.owner", None, "ann"),
+        (b, "title", "B", "B2"),
+        (b, "depends_on", [], [a]),
+        (a, "status", "open", "in_progress"),
+        (b, "depends_on", [a], []),
+        (b, "removed", "B2", None),
+    ]
+
+
+def test_events_capture_recursive_delete(tg, db):
+    p = add(tg, "P")
+    c = add(tg, "C", "--parent", str(p))
+    tg("rm", str(p), "--recursive")
+    assert [e[:2] for e in events(db)[-2:]] == [(p, "removed"), (c, "removed")]
+
+
+def test_changes_buckets(tg, raw, db):
+    late = add(tg, "VPC", "--due", "2026-10-10", "--meta", "owner=Priya")
+    early = add(tg, "App", "--due", "2026-11-01")
+    renamed = add(tg, "Old")
+    gone = add(tg, "Gone")
+    started = add(tg, "Begin")
+    finished = add(tg, "Finish")
+    back = add(tg, "Back")
+    tg("done", str(back))
+    m = add(tg, "M", "--type", "milestone", "--depends", str(finished))
+    age_events(db)
+    tg("date", str(late), "--due", "2026-10-24")
+    tg("date", str(early), "--due", "2026-10-25")
+    tg("edit", str(renamed), "--title", "Renamed", "--meta", "owner=Mei")
+    tg("dep", "add", str(early), str(late))
+    tg("rm", str(gone))
+    tg("start", str(started))
+    tg("done", str(finished))
+    tg("reopen", str(back))
+    fresh = add(tg, "Fresh")
+    temp = add(tg, "Temp")
+    tg("rm", str(temp))
+    data = tg("changes")
+    assert data["since"] == "2026-10-06"
+    assert ids(data["new"]) == [fresh]
+    assert ids(data["started"]) == [started]
+    assert ids(data["completed"]) == [finished, m]
+    assert ids(data["reopened"]) == [back]
+    assert [(s["id"], s["field"], s["from"], s["to"], s["days"]) for s in data["slipped"]] == [(late, "due", "2026-10-10", "2026-10-24", 14)]
+    assert [(s["id"], s["days"]) for s in data["pulled_in"]] == [(early, -7)]
+    assert {r["id"]: [c["field"] for c in r["changes"]] for r in data["rescoped"]} == {early: ["depends_on"], renamed: ["title", "meta.owner"]}
+    assert data["removed"] == [{"id": gone, "title": "Gone", "project": "demo"}]
+    out = raw("--project", "demo", "changes").stdout
+    assert f"#{late} VPC — due 2026-10-10 → 2026-10-24 (+14d)" in out
+    assert f'#{renamed} Renamed — title "Old" → "Renamed"; owner - → Mei' in out
+    assert f"#{early} App — depends on +#{late}" in out
+
+
+def test_changes_since_and_scope(tg, raw, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    other = json.loads(raw("--project", "other", "--json", "add", "X", "--due", "2026-11-01").stdout)["id"]
+    age_events(db, "2026-10-01T09:00:00Z")
+    tg("date", str(a), "--due", "2026-11-02")
+    raw("--project", "other", "date", str(other), "--due", "2026-11-03")
+    assert ids(tg("changes")["slipped"]) == [a]
+    assert ids(tg("changes", "--all-projects")["slipped"]) == [a, other]
+    assert ids(tg("changes", "--since", "30d")["new"]) == [a]
+    assert ids(tg("changes", "--since", "2026-10-01")["new"]) == [a]
+    assert tg("changes", "--since", "-1w")["since"] == "2026-10-06"
+    assert raw("--project", "demo", "changes", "--since", "2027-01-01").stdout.strip() == "no changes since 2027-01-01"
+
+
+def test_changes_net_out_round_trips(tg, db):
+    a = add(tg, "A", "--due", "2026-11-01")
+    age_events(db)
+    tg("date", str(a), "--due", "2026-11-09")
+    tg("date", str(a), "--due", "2026-11-01")
+    data = tg("changes")
+    assert data["slipped"] == [] and data["pulled_in"] == [] and data["rescoped"] == []
+
+
+def test_baseline_set_ls_diff_rm(tg, fail, raw):
+    fail("baseline", "set")
+    m = add(tg, "Pilot", "--type", "milestone", "--due", "2026-12-15")
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    a = add(tg, "VPC", "--parent", str(ws), "--start", "2026-10-01", "--due", "2026-10-10")
+    b = add(tg, "Runbook", "--due", "2026-11-01")
+    gone = add(tg, "Gone")
+    assert tg("baseline", "set", "--label", "SteerCo")["tasks"] == 5
+    fail("baseline", "set", "--label", "SteerCo")
+    tg("date", str(m), "--due", "2027-01-08")
+    tg("date", str(a), "--due", "2026-10-24")
+    tg("date", str(b), "--due", "2026-10-25")
+    tg("rm", str(gone))
+    new = add(tg, "New")
+    diff = tg("baseline", "diff")
+    assert diff["label"] == "SteerCo"
+    assert [(r["id"], r["field"], r["baseline"], r["now"], r["days"]) for r in diff["moved"]] == [
+        (m, "due", "2026-12-15", "2027-01-08", 24),
+        (a, "due", "2026-10-10", "2026-10-24", 14),
+        (b, "due", "2026-11-01", "2026-10-25", -7),
+    ]
+    assert ids(diff["added"]) == [new]
+    assert diff["removed"] == [{"id": gone, "title": "Gone", "type": "task"}]
+    assert diff["lanes"] == [{"lane": "Infra", "later": 1, "earlier": 0, "max_days": 14}, {"lane": "Unassigned", "later": 1, "earlier": 1, "max_days": 24}]
+    out = raw("--project", "demo", "baseline", "diff").stdout
+    assert f"#{m} [milestone] Pilot — due 2026-12-15 → 2027-01-08 (+24d)" in out
+    shown = raw("--project", "demo", "show", str(a)).stdout
+    assert "baseline: due 2026-10-10 (SteerCo), now +14d" in shown
+    assert tg("show", str(a))["baseline"] == {"label": "SteerCo", "start": "2026-10-01", "due": "2026-10-10"}
+    tg("baseline", "set", "--label", "later")
+    assert [l["label"] for l in tg("baseline", "ls")] == ["SteerCo", "later"]
+    assert tg("baseline", "diff")["moved"] == []
+    assert tg("baseline", "diff", "--label", "SteerCo")["moved"]
+    tg("baseline", "set", "--label", "later", "--replace")
+    tg("baseline", "rm", "later")
+    fail("baseline", "rm", "later")
+    fail("baseline", "diff", "--label", "nope")
+
+
+def test_baseline_is_per_project_and_in_graph_payload(tg, raw, tmp_path):
+    a = add(tg, "A", "--due", "2026-11-01")
+    tg("baseline", "set")
+    raw("--project", "other", "add", "B")
+    assert json.loads(raw("--project", "other", "--json", "baseline", "ls").stdout) == []
+    tg("date", str(a), "--due", "2026-11-05")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    assert '"baseline": {"label": "2026-10-13", "start": null, "due": "2026-11-01"}' in out.read_text()
+
+
+def test_ids_are_never_reused(tg):
+    a = add(tg, "A")
+    b = add(tg, "B")
+    tg("rm", str(b))
+    assert add(tg, "C") == b + 1
+    tg("rm", str(a))
+    assert add(tg, "D") == b + 2
+
+
+def milestone_chain(tg):
+    gate = add(tg, "Approve", "--type", "decision", "--due", "2026-10-25")
+    ws = add(tg, "Infra")
+    vpc = add(tg, "VPC", "--parent", str(ws), "--due", "2026-10-10")
+    rep = add(tg, "Replicate", "--start", "2026-10-15", "--due", "2026-11-15", "--depends", str(gate), str(ws))
+    cut = add(tg, "Cut over", "--due", "2026-12-12", "--depends", str(rep))
+    m = add(tg, "Pilot", "--type", "milestone", "--due", "2026-12-15", "--depends", str(cut))
+    return gate, ws, vpc, rep, cut, m
+
+
+def test_path_slack_driving_and_verdict(tg, raw):
+    gate, ws, vpc, rep, cut, m = milestone_chain(tg)
+    data = tg("path", str(m))
+    slack = {(h["from"], h["to"]): h["slack"] for h in data["hops"]}
+    assert slack[(cut, m)] == 3 and slack[(rep, cut)] == 27
+    assert slack[(gate, rep)] == -10 and slack[(vpc, ws)] is None
+    assert data["driving"] == [gate, rep, cut, m]
+    assert data["verdict"] == "at_risk" and data["late_upstream"] == [vpc] and data["min_slack"] == -10
+    assert data["negative_slack"] == 1
+    out = raw("--project", "demo", "path", str(m)).stdout
+    assert f"#{gate} [decision] Approve [ready] — due 2026-10-25 · needed 2026-10-15 · slack -10d" in out
+    assert f"(part of) #{vpc} VPC [ready] — due 2026-10-10 · late 3d" in out
+    assert f"driving: #{gate} → #{rep} → #{cut} → #{m}" in out
+    tg("done", str(gate))
+    tg("date", str(vpc), "--due", "2026-10-14")
+    data = tg("path", str(m))
+    assert data["verdict"] == "on_track" and gate not in {h["from"] for h in data["hops"]}
+
+
+def test_outlook_on_milestones_show_and_agenda(tg, raw):
+    gate, ws, vpc, rep, cut, m = milestone_chain(tg)
+    assert tg("show", str(m))["outlook"]["verdict"] == "at_risk"
+    assert tg("show", str(cut))["outlook"] is None
+    assert "outlook: at risk — 1 late upstream (#" in raw("--project", "demo", "show", str(m)).stdout
+    agenda = tg("agenda")
+    assert ids(agenda["at_risk"]) == [m] and agenda["at_risk"][0]["outlook"]["min_slack"] == -10
+    empty = add(tg, "Lonely", "--type", "milestone", "--due", "2026-12-01")
+    assert tg("show", str(empty))["outlook"]["verdict"] == "on_track"
+    undated = add(tg, "Undated gate", "--type", "milestone", "--depends", str(add(tg, "x")))
+    assert tg("show", str(undated))["outlook"]["verdict"] == "unknown"
+
+
+def test_agenda_should_have_started(tg, raw):
+    late = add(tg, "Late start", "--start", "2026-10-01", "--due", "2026-12-01")
+    going = add(tg, "Going", "--start", "2026-10-01", "--due", "2026-12-01")
+    tg("start", str(going))
+    add(tg, "Future", "--start", "2026-11-01")
+    assert ids(tg("agenda")["late_start"]) == [late]
+    assert f"#{late} Late start — due 2026-12-01 · start 2026-10-01, still ready" in raw("--project", "demo", "agenda").stdout
+
+
+def test_risk_type_threatens_without_blocking(tg, raw, fail):
+    ws = add(tg, "Infra", "--meta", "lane=Infra")
+    work = add(tg, "Build", "--parent", str(ws), "--due", "2026-11-01")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-11-15", "--depends", str(ws))
+    r = tg("add", "Vendor may slip", "--type", "risk", "--parent", str(ws), "--blocks", str(work), "--due", "2026-10-10",
+           "--meta", "owner=Priya", "likelihood=high", "impact=high", "mitigation=second vendor")
+    assert r["meta"]["review"] == "2026-10-10" and r["start"] is None and r["lane"] == "Infra"
+    assert r["late_days"] is None and r["derived_status"] == "ready"
+    w = tg("show", str(work))
+    assert w["derived_status"] == "ready" and w["threats"] == [r["id"]] and w["conflicts"] == []
+    p = tg("show", str(ws))
+    assert p["rollup"] == {"done": 0, "total": 1} and p["span"] == {"start": "2026-11-01", "end": "2026-11-01"}
+    tg("done", str(work))
+    assert tg("show", str(ws))["derived_status"] == "done" and tg("show", str(m))["derived_status"] == "done"
+    tg("reopen", str(work))
+    o = tg("show", str(m))["outlook"]
+    assert o["open_risks"] == [r["id"]] and r["id"] not in {h["from"] for h in tg("path", str(m))["hops"]}
+    assert r["id"] not in ids(tg("ready"))
+    agenda = tg("agenda")
+    assert ids(agenda["review_due"]) == [r["id"]] and r["id"] not in ids(agenda["late"])
+    assert f"#{r['id']} [risk] Vendor may slip — review 2026-10-10 · Priya · high/high" in raw("--project", "demo", "agenda").stdout
+    assert "threatened by: #" in raw("--project", "demo", "show", str(work)).stdout
+    tg("add", "Unreviewed", "--type", "risk")
+    assert len(tg("agenda")["missing_date"]) == 1
+    fail("add", "child", "--parent", str(r["id"]))
+
+
+def test_issue_type_blocks_and_can_come_from_a_risk(tg):
+    r = add(tg, "Key person leaves", "--type", "risk", "--meta", "review=2026-11-01")
+    work = add(tg, "Build", "--depends", str(r))
+    assert tg("show", str(work))["derived_status"] == "ready"
+    tg("edit", str(r), "--type", "issue", "--meta", "severity=high", "raised=2026-10-12", "due=2026-10-20")
+    issue = tg("show", str(r))
+    assert issue["type"] == "issue" and issue["due"] == "2026-10-20"
+    assert tg("show", str(work))["derived_status"] == "blocked"
+    assert ids(tg("ready")) == [r]
+
+
+def test_agenda_conflicts_once_per_edge_with_both_people(tg, raw):
+    infra = add(tg, "Infra", "--meta", "lane=Infra")
+    runners = add(tg, "CI runners", "--parent", str(infra), "--due", "2026-10-25", "--meta", "owner=Raj")
+    auth = add(tg, "Auth service", "--start", "2026-10-20", "--due", "2026-11-10", "--depends", str(runners), "--meta", "owner=Tom", "lane=App")
+    pen = add(tg, "Pen test", "--type", "external", "--due", "2026-12-05", "--promised", "2026-12-10", "--meta", "party=SecureCo")
+    data = tg("agenda")["conflicts"]
+    assert [(c["kind"], c["from"]["id"], c["to"] and c["to"]["id"], c["gap"]) for c in data] == [
+        ("dependency", runners, auth, -5), ("promised", pen, None, -5)]
+    assert data[0]["from"]["person"] == "Raj" and data[0]["from"]["lane"] == "Infra" and data[0]["to"]["person"] == "Tom"
+    out = raw("--project", "demo", "agenda").stdout
+    assert f"#{runners} CI runners (Raj · Infra) → #{auth} Auth service (Tom · App): due 2026-10-25, needed 2026-10-20, gap -5d" in out
+    assert f"#{pen} [external] Pen test (SecureCo): promised 2026-12-10, needed 2026-12-05, gap -5d" in out
+    assert out.count("CI runners (Raj") == 1
+
+
+def test_deps_cross_and_open(tg, raw):
+    infra = add(tg, "Infra", "--meta", "lane=Infra", "team=Platform")
+    a = add(tg, "VPC", "--parent", str(infra), "--due", "2026-10-24", "--meta", "owner=Priya")
+    b = add(tg, "IAM", "--parent", str(infra), "--due", "2026-10-20", "--meta", "owner=Priya", "--depends", str(a))
+    c = add(tg, "Replicate", "--start", "2026-10-15", "--meta", "owner=Mei", "lane=Data", "--depends", str(a))
+    d = add(tg, "Done dep", "--meta", "owner=Mei", "lane=Data")
+    e = add(tg, "Uses done", "--meta", "owner=Priya", "lane=Infra", "--depends", str(d))
+    add(tg, "Threat", "--type", "risk", "--blocks", str(c))
+    tg("done", str(d))
+    rows = tg("deps")
+    assert [(r["from"]["id"], r["to"]["id"], r["slack"]) for r in rows] == [(a, c, -9), (a, b, -4), (d, e, None)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "lane")] == [(a, c), (d, e)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "lane", "--open")] == [(a, c)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "owner")] == [(a, c), (d, e)]
+    assert [(r["from"]["id"], r["to"]["id"]) for r in tg("deps", "--cross", "team")] == [(a, c)]
+    out = raw("--project", "demo", "deps", "--cross", "lane", "--open").stdout.strip()
+    assert out == f"#{a} VPC [ready] (Priya · Infra) → #{c} Replicate [blocked] (Mei · Data) · slack -9d"
+
+
+def report_fixture(tg):
+    infra = add(tg, "Infra", "--meta", "lane=Infra")
+    late = add(tg, "VPC", "--parent", str(infra), "--due", "2026-10-10", "--meta", "owner=Priya")
+    iam = add(tg, "IAM", "--parent", str(infra), "--due", "2026-10-30", "--meta", "owner=Priya")
+    tg("done", str(iam))
+    data = add(tg, "Replicate", "--start", "2026-10-15", "--due", "2026-11-15", "--meta", "owner=Mei", "lane=Data", "--depends", str(late))
+    calm = add(tg, "Docs", "--due", "2026-12-01", "--meta", "owner=Bo", "lane=Docs")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-12-15", "--depends", str(data), "--meta", "lane=Programme")
+    gate = add(tg, "Approve | sign", "--type", "decision", "--due", "2026-10-20", "--meta", "decider=CISO", "lane=Security")
+    undecided = add(tg, "Vendor", "--type", "decision", "--meta", "decider=CTO", "lane=Security")
+    ext = add(tg, "Pen test", "--type", "external", "--due", "2026-12-05", "--promised", "2026-12-10", "--meta", "party=SecureCo", "lane=Security")
+    risk = add(tg, "Capacity", "--type", "risk", "--due", "2026-11-01", "--blocks", str(data), "--meta", "owner=Priya", "likelihood=high", "impact=high", "lane=Data", "mitigation=second region")
+    low = add(tg, "Minor", "--type", "risk", "--due", "2026-11-01", "--meta", "likelihood=low", "impact=low", "lane=Data")
+    issue = add(tg, "Runners flaky", "--type", "issue", "--due", "2026-10-18", "--meta", "owner=Raj", "severity=high", "lane=App")
+    return locals()
+
+
+def test_report_rag_groups_and_asks(tg):
+    f = report_fixture(tg)
+    r = tg("report")
+    assert r["scope"] == "demo" and r["date"] == "2026-10-13" and r["overall"] == "red"
+    assert [(m["id"], m["rag"]) for m in r["milestones"]] == [(f["m"], "red")]
+    groups = {g["name"]: g for g in r["groups"]}
+    assert [g["name"] for g in r["groups"]] == ["App", "Infra", "Programme", "Data", "Security", "Docs"]
+    assert groups["Infra"]["rag"] == "red" and groups["Infra"]["rollup"] == {"done": 1, "total": 2} and groups["Infra"]["late"] == 1
+    assert f"#{f['late']} VPC late 3d" in groups["Infra"]["reasons"]
+    assert groups["App"]["rag"] == "red" and groups["Data"]["rag"] == "amber" and groups["Docs"]["rag"] == "green"
+    assert any("high/high risk open" in why for why in groups["Data"]["reasons"])
+    assert groups["Security"]["rag"] == "amber" and groups["Programme"]["next"]["id"] == f["m"]
+    assert ids(r["decisions"]) == [f["gate"], f["undecided"]]
+    assert ids(r["externals"]) == [f["ext"]] and r["externals"][0]["promised"] == "2026-12-10"
+    assert ids(r["risks"]) == [f["risk"], f["low"]] and r["risks"][0]["score"] == 9
+    assert ids(tg("report", "--risks", "1")["risks"]) == [f["risk"]]
+    assert ids(r["issues"]) == [f["issue"]]
+    assert [(a["kind"], a["id"]) for a in r["asks"]] == [("resolve", f["issue"]), ("decide", f["gate"]), ("chase", f["ext"]), ("decide", f["undecided"])]
+    assert r["changes"]["new"] == 12 and r["changes"]["completed"] == 1
+
+
+def test_report_by_owner_and_text_and_markdown(tg, raw):
+    f = report_fixture(tg)
+    owners = {g["name"]: g["rag"] for g in tg("report", "--by", "owner")["groups"]}
+    assert owners["Priya"] == "red" and owners["Bo"] == "green" and owners["CISO"] == "green" and owners["SecureCo"] == "amber"
+    text = raw("--project", "demo", "report").stdout
+    assert text.startswith("Status: demo — 2026-10-13 — overall RED\nSince 2026-10-06: 12 new · 1 completed")
+    assert "  GREEN  Docs — 0/1 done · 0 late · 0 conflicts · next #" in text
+    assert f"  - Chase #{f['ext']} Pen test (SecureCo): promised 2026-12-10 after needed 2026-12-05" in text
+    md = raw("--project", "demo", "report", "--md").stdout
+    assert md.startswith("# Status: demo, 2026-10-13\n\n**Overall: Red**")
+    assert "## Workstreams" in md and "| RAG | Workstream | Progress | Late | Conflicts | Next | Why |" in md
+    assert f"| {f['gate']} | Approve \\| sign | CISO | 2026-10-20 |" in md
+    assert "## Asks" in md and f"- Resolve #{f['issue']} Runners flaky (Raj): severity high, due 2026-10-18" in md
+
+
+def test_report_all_green(tg, raw):
+    add(tg, "Docs", "--due", "2026-12-01", "--meta", "lane=Docs")
+    r = tg("report")
+    assert r["overall"] == "green" and r["asks"] == []
+    assert raw("--project", "demo", "report").stdout.rstrip().endswith("Asks\n  none")
+
+
+def test_projects_portfolio_columns(tg, raw):
+    late = add(tg, "VPC", "--due", "2026-10-10")
+    m = add(tg, "Live", "--type", "milestone", "--due", "2026-12-01", "--depends", str(late))
+    add(tg, "Later", "--type", "milestone", "--due", "2027-01-01")
+    raw("--project", "calm", "add", "Docs", "--due", "2026-12-01")
+    rows = {r["project"]: r for r in tg("projects")}
+    demo = rows["demo"]
+    assert demo["late"] == 1 and demo["conflicts"] == 0 and demo["at_risk"] == 1 and demo["rag"] == "red"
+    assert demo["next_milestone"] == {"id": m, "title": "Live", "due": "2026-12-01"}
+    assert rows["calm"]["rag"] == "green" and rows["calm"]["next_milestone"] is None
+    out = raw("--project", "demo", "projects").stdout
+    assert f"demo                 RED    total   3  done   0  ready   1  blocked   2 · 1 late · 0 conflicts · 1 at risk · next #{m} Live 2026-12-01" in out
+
+
+def test_cross_project_dependency_only_on_milestones(tg, raw, fail):
+    gate = json.loads(raw("--project", "platform", "--json", "add", "Dev env live", "--type", "milestone", "--due", "2026-11-01").stdout)["id"]
+    work = json.loads(raw("--project", "platform", "--json", "add", "Build env", "--blocks", str(gate), "--due", "2026-10-20").stdout)["id"]
+    load_ = add(tg, "Load warehouse", "--start", "2026-10-25", "--depends", str(gate))
+    assert tg("show", str(load_))["derived_status"] == "blocked"
+    conflicts = tg("show", str(load_))["conflicts"]
+    assert [c["from"] for c in conflicts] == [gate]
+    assert "milestone" in fail("dep", "add", str(load_), str(work)).stderr
+    assert "must stay a milestone" in fail("edit", str(gate), "--type", "task").stderr
+    assert tg("show", str(gate))["type"] == "milestone"
+    tg("--project", "platform", "done", str(work))
+    assert tg("show", str(load_))["derived_status"] == "ready"
+    rows = tg("deps", "--cross", "project", "--all-projects")
+    assert [(r["from"]["id"], r["to"]["id"]) for r in rows] == [(gate, load_)]
