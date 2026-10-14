@@ -827,6 +827,7 @@ function layoutTimeline(fit) {
 }
 
 function layout(fit = true) {
+  if (fit) keepWhole = false;
   fitBar();
   cy.elements('.bg').remove();
   cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
@@ -873,11 +874,20 @@ function fitView(whole) {
   if (!t) return;
   if (t.zoom < READABLE && !whole) t = anchored(READABLE);
   cy.viewport(t);
+  userMoved = false;
 }
+
+// Until the viewer drags or zooms, the page keeps the plan fitted as data, expansion and the
+// window change; after that it leaves their view alone.
+let userMoved = false, keepWhole = false;
+cy.on('dragpan scrollzoom pinchzoom', () => { userMoved = true; });
 
 function covered() {
   const t = fitTarget();
-  if (!t || t.zoom < READABLE) return false;
+  return !!t && t.zoom >= READABLE && hiddenTasks();
+}
+
+function hiddenTasks() {
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
   return tasks().some(n => {
@@ -888,9 +898,16 @@ function covered() {
 }
 
 function fitIfOutside() {
+  if (!userMoved && hiddenTasks()) return fitView(keepWhole);
   const target = covered() && fitTarget();
   if (target) cy.animate(target, { duration: 300 });
 }
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (!userMoved && hiddenTasks()) fitView(keepWhole); }, 150);
+});
 
 function rebuild(keepView, flash) {
   syncLegend();
@@ -1013,6 +1030,7 @@ function applyData(next) {
       fitIfOutside();
     }
   } else rebuild(true, true);
+  if (!userMoved && hiddenTasks()) fitView(keepWhole);
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
@@ -1208,7 +1226,10 @@ function select(id, center) {
   pinned = id;
   openPanel(byId.get(id));
   refocus();
-  if (center) cy.animate({ center: { eles: node } }, { duration: 250 });
+  if (center) {
+    userMoved = true;
+    cy.animate({ center: { eles: node } }, { duration: 250 });
+  }
 }
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
@@ -1372,7 +1393,10 @@ $('collapseAll').onclick = () => {
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
-$('fit').onclick = () => fitView(true);
+$('fit').onclick = () => {
+  keepWhole = true;
+  fitView(true);
+};
 
 // Save the whole view as filtered (not just what is on screen) with a title bar, without
 // hover or selection fading; search dimming stays because it is a filter the viewer chose.

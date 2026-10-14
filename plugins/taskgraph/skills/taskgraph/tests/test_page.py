@@ -713,3 +713,54 @@ def test_back_and_forward_step_through_navigation(browser, page_file):
     assert page.evaluate("cy.nodes('.tl-head').length") > 0
     assert problems == []
     page.close()
+
+
+GROW = """() => {
+    const base = DATA.nodes.find(n => n.id === 5);
+    const extra = [101, 102, 103, 104, 105, 106, 107, 108].map((id, i) => ({ ...base, id, title: 'Added ' + id, depends_on: [], blocks: [], due: '2026-11-0' + (i + 1), start: null, children: [], parent: null, conflicts: [], outlook: null }));
+    applyData({ ...DATA, nodes: [...DATA.nodes, ...extra] });
+}"""
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_refresh_and_resize_keep_the_plan_fitted(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}", height=700)
+    assert page.evaluate(INSIDE)
+    page.evaluate(GROW)
+    assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert page.evaluate("hiddenTasks()") is False or page.evaluate("cy.zoom() <= 0.9 + 1e-9")
+    page.set_viewport_size({"width": 900, "height": 600})
+    page.wait_for_timeout(400)
+    assert page.evaluate("userMoved") is False
+    assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert problems == []
+    page.close()
+
+
+def test_view_left_alone_after_viewer_zooms(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=graph")
+    box = page.evaluate("document.getElementById('cy').getBoundingClientRect().toJSON()")
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -400)
+    page.wait_for_timeout(200)
+    assert page.evaluate("userMoved") is True
+    zoom = page.evaluate("cy.zoom()")
+    page.set_viewport_size({"width": 1200, "height": 800})
+    page.wait_for_timeout(400)
+    assert abs(page.evaluate("cy.zoom()") - zoom) < 1e-6
+    page.click("#fit")
+    assert page.evaluate("userMoved") is False and page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+def test_fit_whole_survives_refresh(browser, tall_file):
+    page, problems = open_page(browser, tall_file, "?view=graph")
+    page.click("#fit")
+    assert page.evaluate(INSIDE)
+    page.evaluate("applyData({ ...DATA })")
+    assert page.evaluate(INSIDE) and page.evaluate("cy.zoom()") < 0.9
+    page.click("#viewLanes")
+    assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert problems == []
+    page.close()
