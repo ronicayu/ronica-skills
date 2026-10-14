@@ -352,3 +352,32 @@ def test_toolbar_never_overflows(browser, page_file, view):
         bar = page.evaluate(TOOLBAR)
         assert bar["scrollLeft"] == 0 and bar["project"] >= 0
         page.close()
+
+
+def test_search_reveals_collapsed_and_counts(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.click("#collapseAll")
+    page.fill("#search", "docs")
+    page.wait_for_timeout(300)
+    assert page.evaluate("tasks().filter(n => !n.hasClass('dim')).map(n => n.id())") == ["4"]
+    assert page.inner_text("#searchCount") == "1 match"
+    assert page.evaluate("expandedIds().has(1)")
+    page.fill("#search", "zzz")
+    page.wait_for_timeout(300)
+    assert page.inner_text("#searchCount") == "No matches"
+    page.fill("#search", "e")
+    page.wait_for_timeout(300)
+    hits = page.evaluate("searchHits('e').map(n => n.id)")
+    assert hits == [3, 4, 5, 6] and page.inner_text("#searchCount") == "4 matches"
+    page.press("#search", "Enter")
+    assert page.evaluate("document.getElementById('panel').style.display") == "block"
+    assert page.evaluate("pinned") == hits[0]
+    page.press("#search", "Enter")
+    assert page.evaluate("pinned") == hits[1]
+    page.press("#search", "Shift+Enter")
+    assert page.evaluate("pinned") == hits[0]
+    page.fill("#search", "")
+    page.wait_for_timeout(300)
+    assert page.inner_text("#searchCount") == "" and page.evaluate("cy.nodes('.dim').length") == 0
+    assert problems == []
+    page.close()
