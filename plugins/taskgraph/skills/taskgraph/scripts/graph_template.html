@@ -162,7 +162,7 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
-const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9;
+const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
@@ -458,12 +458,26 @@ function visibleData() {
   return { nodes: level.filter(n => shown.has(n.id)), edges, open };
 }
 
+// A collapsed summary must not hide trouble: count late and conflicting open work beneath it.
+const collapsed = n => n.children.length > 0 && !expandedIds().has(n.id);
+const beneath = n => n.children.flatMap(c => byId.has(c) ? [byId.get(c), ...beneath(byId.get(c))] : []);
+function trouble(n) {
+  const open = beneath(n).filter(k => k.derived_status !== 'done' && k.type !== 'risk' && keeps(k));
+  return { late: open.filter(k => k.late_days != null).length, conflicts: open.filter(conflicted).length };
+}
+const troubleText = n => {
+  if (!collapsed(n)) return null;
+  const t = trouble(n);
+  return t.late ? t.late + ' late inside' : t.conflicts ? (t.conflicts === 1 ? '1 conflict' : t.conflicts + ' conflicts') + ' inside' : null;
+};
+
 function labelOf(n, open) {
   const m = n.meta;
   const parts = isSummary(n)
     ? [m.owner, n.rollup && n.rollup.total ? `${n.rollup.done}/${n.rollup.total} done` : null]
     : (SUBTITLE[n.type] || SUBTITLE.task)(n);
   if (n.children.length && !open.has(n.id)) parts.unshift('▸ ' + descendants(n));
+  if (troubleText(n)) parts.unshift(troubleText(n));
   if (n.chase_due) parts.unshift('chase due');
   if (conflicted(n)) parts.unshift('conflict');
   if (atRisk(n)) parts.unshift('at risk');
@@ -478,7 +492,7 @@ function labelOf(n, open) {
 const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: view === 'timeline' ? dateText(n) : labelOf(n, open) });
 const flagsOf = (n, sources) => ({
   summary: isSummary(n),
-  late: n.late_days != null,
+  late: n.late_days != null || (collapsed(n) && trouble(n).late > 0),
   conflict: conflicted(n),
   atrisk: atRisk(n),
   goal: !sources.has(n.id) && (n.type === 'milestone' || n.type === 'objective')
@@ -662,6 +676,7 @@ function dateText(n) {
   if (!d) return '';
   const parts = [d[0] === d[1] ? day(d[0]) : day(d[0]) + '–' + day(d[1])];
   if (isSummary(n) && n.rollup && n.rollup.total) parts.push(`${n.rollup.done} of ${n.rollup.total} done`);
+  if (troubleText(n)) parts.push(troubleText(n));
   if (n.late_days != null) parts.push(n.late_days + 'd late');
   if (atRisk(n)) parts.push('at risk');
   if (conflicted(n)) parts.push('conflict');
@@ -827,6 +842,7 @@ function layoutTimeline(fit) {
 }
 
 function layout(fit = true) {
+  if (fit) keepWhole = false;
   fitBar();
   cy.elements('.bg').remove();
   cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
@@ -846,7 +862,7 @@ function fitTarget(eles = cy.elements(), pad = 40) {
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
   const reserve = Math.max(pad, box.bottom - legend.top + 12);
   const w = box.width - 2 * pad, h = box.height - pad - reserve;
-  const zoom = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
+  const zoom = Math.min(MAX_FIT, Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
@@ -866,16 +882,27 @@ function anchored(zoom) {
   return { zoom, pan: { x: 40 - zoom * bb.x1, y: 40 - zoom * bb.y1 } };
 }
 
-function fitView() {
+// Automatic fits keep labels readable and let a big plan scroll; the Fit button (whole)
+// always shows everything, however small, because that is what the person asked for.
+function fitView(whole) {
   let t = fitTarget();
   if (!t) return;
-  if (t.zoom < READABLE) t = anchored(READABLE);
+  if (t.zoom < READABLE && !whole) t = anchored(READABLE);
   cy.viewport(t);
+  userMoved = false;
 }
+
+// Until the viewer drags or zooms, the page keeps the plan fitted as data, expansion and the
+// window change; after that it leaves their view alone.
+let userMoved = false, keepWhole = false;
+cy.on('dragpan scrollzoom pinchzoom', () => { userMoved = true; });
 
 function covered() {
   const t = fitTarget();
-  if (!t || t.zoom < READABLE) return false;
+  return !!t && t.zoom >= READABLE && hiddenTasks();
+}
+
+function hiddenTasks() {
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
   return tasks().some(n => {
@@ -886,9 +913,16 @@ function covered() {
 }
 
 function fitIfOutside() {
+  if (!userMoved && hiddenTasks()) return fitView(keepWhole);
   const target = covered() && fitTarget();
   if (target) cy.animate(target, { duration: 300 });
 }
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (!userMoved && hiddenTasks()) fitView(keepWhole); }, 150);
+});
 
 function rebuild(keepView, flash) {
   syncLegend();
@@ -981,7 +1015,7 @@ function setGoal(id) {
   goal = id != null && byId.has(id) ? id : null;
   fillGoals();
   setTitle();
-  syncUrl();
+  syncUrl(true);
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 }
@@ -995,7 +1029,11 @@ function applyData(next) {
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
-  if (goal != null && !byId.has(goal)) goal = null;
+  if (goal != null && !byId.has(goal)) {
+    goal = null;
+    setTitle();
+    syncUrl();
+  }
   fillGoals();
   syncLegend();
   const { nodes, edges, open } = visibleData();
@@ -1011,6 +1049,7 @@ function applyData(next) {
       fitIfOutside();
     }
   } else rebuild(true, true);
+  if (!userMoved && hiddenTasks()) fitView(keepWhole);
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
@@ -1063,8 +1102,9 @@ const searchHits = q => q ? DATA.nodes.filter(n => passes(n) && (n.title.toLower
 function applySearch() {
   const q = searchQuery();
   const hits = new Set(searchHits(q).map(n => String(n.id)));
-  tasks().forEach(n => n.toggleClass('dim', !!q && !hits.has(n.id())));
-  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : hits.size + ' matches';
+  tasks().forEach(n => n.toggleClass('dim', hits.size > 0 && !hits.has(n.id())));
+  const at = searched.q === q && searched.at >= 0 && hits.size > 1 ? `${searched.at + 1} of ` : '';
+  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : `${at}${hits.size} matches`;
   mirrorNames();
 }
 
@@ -1088,6 +1128,7 @@ function stepSearch(back) {
   if (!hits.length) return;
   searched.at = searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length;
   select(hits[searched.at].id, true);
+  applySearch();
 }
 
 function clearSearch() {
@@ -1206,7 +1247,14 @@ function select(id, center) {
   pinned = id;
   openPanel(byId.get(id));
   refocus();
-  if (center) cy.animate({ center: { eles: node } }, { duration: 250 });
+  if (center) {
+    userMoved = true;
+    if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
+    // Timeline: scroll the row to mid-height only. The name column is how a row is recognised,
+    // so it stays in view; the panel carries the dates when the bar itself is off to the right.
+    const z = cy.zoom(), box = $('cy').getBoundingClientRect();
+    cy.animate({ pan: { x: 40 - z * cy.elements().boundingBox().x1, y: box.height / 2 - z * node.position('y') } }, { duration: 250 });
+  }
 }
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
@@ -1255,7 +1303,29 @@ const params = () => {
   if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
   return q.toString().replaceAll('%2C', ',');
 };
-const syncUrl = () => history.replaceState(null, '', params() ? '?' + params() : location.pathname);
+// Navigation (view, goal, project, dependencies, lanes) adds a history entry so Back returns to
+// the previous state; filters only rewrite the current one so Back does not replay every click.
+const syncUrl = push => {
+  const url = params() ? '?' + params() : location.pathname;
+  if (url === (location.search || location.pathname)) return;
+  history[push ? 'pushState' : 'replaceState'](null, '', url);
+};
+window.addEventListener('popstate', () => {
+  const q = new URLSearchParams(location.search);
+  view = VIEWS.find(v => v === q.get('view')) || 'graph';
+  depsMode = DEPS[q.get('deps')] || 'off';
+  laneKey = Object.hasOwn(LANE_KEYS, q.get('lanes')) ? q.get('lanes') : 'lane';
+  types = new Set(parseTypes(q.get('types')).length ? parseTypes(q.get('types')) : TYPES);
+  const project = q.get('project') || '';
+  if (project && !Array.from(projectSelect.options).some(o => o.value === project)) projectSelect.append(el('option', { value: project, textContent: project }));
+  projectSelect.value = project;
+  goal = byId.has(Number(q.get('goal'))) ? Number(q.get('goal')) : null;
+  syncControls();
+  fillGoals();
+  setTitle();
+  rebuild();
+  if (pinned) openPanel(byId.get(pinned));
+});
 const syncControls = () => {
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
@@ -1278,7 +1348,7 @@ const setView = v => {
   view = v;
   store.set('taskgraph.view', v);
   syncControls();
-  syncUrl();
+  syncUrl(true);
   rebuild();
 };
 const toggleType = t => {
@@ -1297,7 +1367,7 @@ projectSelect.onchange = () => {
   if (goal != null && projectSelect.value && byId.get(goal).project !== projectSelect.value) goal = null;
   fillGoals();
   setTitle();
-  syncUrl();
+  syncUrl(true);
   rebuild();
 };
 $('goal').onchange = e => setGoal(e.target.value ? Number(e.target.value) : null);
@@ -1307,7 +1377,7 @@ $('viewTimeline').onclick = () => setView('timeline');
 $('depsMode').onchange = e => {
   depsMode = e.target.value;
   store.set('taskgraph.deps', depsMode);
-  syncUrl();
+  syncUrl(true);
   layout(false);
   applySearch();
   refocus();
@@ -1315,7 +1385,7 @@ $('depsMode').onchange = e => {
 $('laneKey').onchange = e => {
   laneKey = e.target.value;
   store.set('taskgraph.lanes', laneKey);
-  syncUrl();
+  syncUrl(true);
   if (view !== 'graph') rebuild();
 };
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
@@ -1348,7 +1418,10 @@ $('collapseAll').onclick = () => {
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
-$('fit').onclick = () => fitView();
+$('fit').onclick = () => {
+  keepWhole = true;
+  fitView(true);
+};
 
 // Save the whole view as filtered (not just what is on screen) with a title bar, without
 // hover or selection fading; search dimming stays because it is a filter the viewer chose.

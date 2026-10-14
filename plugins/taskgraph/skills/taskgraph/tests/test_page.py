@@ -293,10 +293,26 @@ ANCHOR = """() => {
 }"""
 
 
+INSIDE = """() => {
+    const box = document.getElementById('cy').getBoundingClientRect();
+    return tasks().every(n => { const b = n.renderedBoundingBox(); return b.x1 >= 0 && b.y1 >= 0 && b.x2 <= box.width && b.y2 <= box.height; });
+}"""
+
+
+@pytest.fixture(scope="module")
+def solo_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("solo")
+    tg = runner(tmp / "t.db")
+    tg("add", "Only task", "--due", "2026-11-01")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
 @pytest.mark.parametrize("view", VIEWS)
 def test_readability_floor(browser, tall_file, view):
     page, problems = open_page(browser, tall_file, f"?view={view}")
-    for action in (None, "#fit", "#expandAll"):
+    for action in (None, "#expandAll", "#relayout"):
         if action:
             page.click(action)
         assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6, action
@@ -306,10 +322,26 @@ def test_readability_floor(browser, tall_file, view):
     page.close()
 
 
-INSIDE = """() => {
-    const box = document.getElementById('cy').getBoundingClientRect();
-    return tasks().every(n => { const b = n.renderedBoundingBox(); return b.x1 >= 0 && b.y1 >= 0 && b.x2 <= box.width && b.y2 <= box.height; });
-}"""
+@pytest.mark.parametrize("view", VIEWS)
+def test_fit_button_shows_the_whole_plan(browser, tall_file, view):
+    page, problems = open_page(browser, tall_file, f"?view={view}")
+    assert not page.evaluate(INSIDE)
+    page.click("#fit")
+    assert page.evaluate("cy.zoom()") < 0.9
+    assert abs(page.evaluate("cy.zoom() - fitTarget().zoom")) < 1e-6
+    assert page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_tiny_plan_is_not_blown_up(browser, solo_file, view):
+    page, problems = open_page(browser, solo_file, f"?view={view}")
+    assert 0.9 <= page.evaluate("cy.zoom()") <= 1.25 + 1e-9
+    page.click("#fit")
+    assert page.evaluate("cy.zoom()") <= 1.25 + 1e-9
+    assert problems == []
+    page.close()
 
 
 @pytest.mark.parametrize("view", VIEWS)
@@ -369,17 +401,21 @@ def test_search_reveals_collapsed_and_counts(browser, page_file):
     page.fill("#search", "zzz")
     page.wait_for_timeout(300)
     assert page.inner_text("#searchCount") == "No matches"
+    assert page.evaluate("cy.nodes('.dim').length") == 0
     page.fill("#search", "e")
     page.wait_for_timeout(300)
     hits = page.evaluate("searchHits('e').map(n => n.id)")
     assert hits == [3, 4, 5, 6] and page.inner_text("#searchCount") == "4 matches"
     page.press("#search", "Enter")
     assert page.evaluate("document.getElementById('panel').style.display") == "block"
-    assert page.evaluate("pinned") == hits[0]
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
     page.press("#search", "Enter")
-    assert page.evaluate("pinned") == hits[1]
+    assert page.evaluate("pinned") == hits[1] and page.inner_text("#searchCount") == "2 of 4 matches"
     page.press("#search", "Shift+Enter")
-    assert page.evaluate("pinned") == hits[0]
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
+    page.fill("#search", "ee")
+    page.wait_for_timeout(300)
+    assert "of" not in page.inner_text("#searchCount")
     page.fill("#search", "")
     page.wait_for_timeout(300)
     assert page.inner_text("#searchCount") == "" and page.evaluate("cy.nodes('.dim').length") == 0
@@ -653,5 +689,133 @@ def test_export_png(browser, page_file, tmp_path, view):
     assert width > 400 and height > 200
     assert page.evaluate("cy.nodes('.faded').map(n => n.id()).sort()") == faded
     assert page.evaluate("exportTitle()") == f"taskgraph · demo · #2 Ship v1 · {dict(graph='Graph', lanes='Swimlane', timeline='Timeline')[view]}"
+    assert problems == []
+    page.close()
+
+
+def test_back_and_forward_step_through_navigation(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    state = "() => [view, goal, depsMode, location.search]"
+    page.click("#viewTimeline")
+    page.select_option("#goal", "2")
+    page.select_option("#depsMode", "critical")
+    page.click("#type-task")
+    assert page.evaluate(state)[:3] == ["timeline", 2, "critical"]
+    assert "types=" in page.evaluate("location.search")
+    page.go_back()
+    page.wait_for_function("depsMode === 'off'")
+    assert page.evaluate(state)[:3] == ["timeline", 2, "off"]
+    assert page.input_value("#depsMode") == "off"
+    page.go_back()
+    page.wait_for_function("goal === null")
+    assert page.evaluate(state)[:3] == ["timeline", None, "off"] and page.input_value("#goal") == ""
+    page.go_back()
+    page.wait_for_function("view === 'graph'")
+    assert page.evaluate("tasks().length") > 0 and page.url.startswith("file:")
+    page.go_forward()
+    page.wait_for_function("view === 'timeline'")
+    assert page.evaluate("cy.nodes('.tl-head').length") > 0
+    assert problems == []
+    page.close()
+
+
+GROW = """() => {
+    const base = DATA.nodes.find(n => n.id === 5);
+    const extra = [101, 102, 103, 104, 105, 106, 107, 108].map((id, i) => ({ ...base, id, title: 'Added ' + id, depends_on: [], blocks: [], due: '2026-11-0' + (i + 1), start: null, children: [], parent: null, conflicts: [], outlook: null }));
+    applyData({ ...DATA, nodes: [...DATA.nodes, ...extra] });
+}"""
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_refresh_and_resize_keep_the_plan_fitted(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}", height=700)
+    assert page.evaluate(INSIDE)
+    page.evaluate(GROW)
+    assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert page.evaluate("hiddenTasks()") is False or page.evaluate("cy.zoom() <= 0.9 + 1e-9")
+    page.set_viewport_size({"width": 900, "height": 600})
+    page.wait_for_timeout(400)
+    assert page.evaluate("userMoved") is False
+    assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert problems == []
+    page.close()
+
+
+def test_view_left_alone_after_viewer_zooms(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=graph")
+    box = page.evaluate("document.getElementById('cy').getBoundingClientRect().toJSON()")
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -400)
+    page.wait_for_timeout(200)
+    assert page.evaluate("userMoved") is True
+    zoom = page.evaluate("cy.zoom()")
+    page.set_viewport_size({"width": 1200, "height": 800})
+    page.wait_for_timeout(400)
+    assert abs(page.evaluate("cy.zoom()") - zoom) < 1e-6
+    page.click("#fit")
+    assert page.evaluate("userMoved") is False and page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+def test_fit_whole_survives_refresh(browser, tall_file):
+    page, problems = open_page(browser, tall_file, "?view=graph")
+    page.click("#fit")
+    assert page.evaluate(INSIDE)
+    page.evaluate("applyData({ ...DATA })")
+    assert page.evaluate(INSIDE) and page.evaluate("cy.zoom()") < 0.9
+    page.click("#viewLanes")
+    assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    assert problems == []
+    page.close()
+
+
+def test_timeline_search_enter_keeps_names_in_view(browser, tall_file):
+    page, problems = open_page(browser, tall_file, "?view=timeline")
+    page.fill("#search", "Step 35")
+    page.wait_for_timeout(300)
+    page.focus("#search")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(400)
+    names = page.evaluate("cy.nodes('.tl-name[of]').map(n => n.renderedBoundingBox().x1)")
+    assert min(names) >= 0
+    row = page.evaluate("""() => {
+        const b = cy.getElementById(String(pinned)).renderedBoundingBox(), box = document.getElementById('cy').getBoundingClientRect();
+        return b.y1 >= 0 && b.y2 <= box.height;
+    }""")
+    assert row and page.evaluate("byId.get(pinned).title") == "Step 35"
+    assert page.evaluate("document.getElementById('panel').style.display") == "block"
+    assert problems == []
+    page.close()
+
+
+def test_deleted_goal_leaves_the_url(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline&goal=2")
+    assert "goal=2" in page.url
+    page.evaluate("""() => {
+        const nodes = DATA.nodes.filter(n => n.id !== 2).map(n => ({ ...n, depends_on: n.depends_on.filter(i => i !== 2), blocks: n.blocks.filter(i => i !== 2), children: n.children.filter(i => i !== 2) }));
+        applyData({ ...DATA, nodes, edges: DATA.edges.filter(e => e.source !== 2 && e.target !== 2) });
+    }""")
+    assert "goal=" not in page.url and "view=timeline" in page.url
+    assert page.input_value("#goal") == "" and "#2" not in page.evaluate("document.title")
+    assert page.evaluate("tasks().length") > 0
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view):
+    page, problems = open_page(browser, programme_file, f"?view={view}")
+    page.click("#collapseAll")
+    marked = "id => [cy.getElementById(String(id)).data('label'), cy.getElementById(String(id)).hasClass('late')]"
+    label, late = page.evaluate(f"({marked})(1)")
+    assert "1 late inside" in label and late
+    page.evaluate("toggleExpand(1)")
+    label, late = page.evaluate(f"({marked})(3)")
+    assert "1 late inside" in label and late
+    page.click("#expandAll")
+    label, late = page.evaluate(f"({marked})(3)")
+    assert "late inside" not in label and not late
+    assert page.evaluate("cy.getElementById('4').hasClass('late')")
     assert problems == []
     page.close()
