@@ -59,6 +59,11 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel li.off { opacity: .45; cursor: default; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 #panel .none { color: #6b7280; }
+#empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
+#empty[hidden], #empty [hidden] { display: none; }
+#empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
+#empty button { pointer-events: auto; margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+#empty button:hover { background: #2d333d; }
 </style>
 </head>
 <body>
@@ -104,6 +109,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   </div>
 </div>
 <div id="panel"></div>
+<div id="empty" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
@@ -732,6 +738,7 @@ function routeDeps(shown, marks, right) {
 
 function layoutTimeline(fit) {
   const { nodes, open } = visibleData();
+  if (!nodes.length) return;
   const shown = new Set(nodes.map(n => n.id));
   const nests = n => !!datesOf(n) && shown.has(n.parent) && laneOf(n) === laneOf(byId.get(n.parent));
   const kids = new Map(nodes.map(n => [n.id, n.children.filter(c => shown.has(c)).map(c => byId.get(c)).filter(nests)]));
@@ -893,6 +900,40 @@ function rebuild(keepView, flash) {
   }
   applySearch();
   refocus();
+  syncEmpty();
+}
+
+// Say why the canvas is blank, and offer the one click that fills it.
+function syncEmpty() {
+  const project = $('project').value;
+  const candidates = DATA.nodes.filter(n => !project || n.project === project);
+  const action = $('emptyAction');
+  $('empty').hidden = tasks().length > 0;
+  if (tasks().length) return;
+  let text;
+  action.hidden = false;
+  if (!candidates.length) {
+    text = project ? `No tasks in ${project} yet.` : 'No tasks yet.';
+    action.hidden = true;
+  } else if ($('hideDone').checked && candidates.every(n => n.derived_status === 'done')) {
+    text = candidates.length === 1 ? 'All 1 item is done.' : `All ${candidates.length} items are done.`;
+    action.textContent = 'Show done';
+    action.onclick = () => {
+      $('hideDone').checked = false;
+      rebuild();
+    };
+  } else {
+    text = 'Nothing matches the current filters.';
+    action.textContent = 'Reset filters';
+    action.onclick = () => {
+      types = new Set(TYPES);
+      store.set('taskgraph.types', TYPES.join(','));
+      $('search').value = '';
+      syncControls();
+      setGoal(null);
+    };
+  }
+  $('emptyText').textContent = text;
 }
 
 function sameShape(nodes, edges) {
@@ -962,6 +1003,7 @@ function applyData(next) {
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
+  syncEmpty();
 }
 
 function toggleExpand(id) {

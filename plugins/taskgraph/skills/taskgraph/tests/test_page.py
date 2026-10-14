@@ -408,3 +408,51 @@ def test_hover_does_not_fade(browser, page_file):
     assert float(page.evaluate("cy.nodes('.faded')[0].style('opacity')")) == 0.35
     assert problems == []
     page.close()
+
+
+@pytest.fixture(scope="module")
+def done_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("done")
+    tg = runner(tmp / "t.db")
+    tg("add", "Ship", "--type", "milestone", "--due", "2026-10-01")
+    tg("add", "Build", "--due", "2026-09-20")
+    tg("dep", "add", "1", "2")
+    tg("done", "2")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_all_done_offers_show_done(browser, done_file, view):
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{done_file.as_uri()}?view={view}")
+    page.wait_for_function("typeof cy !== 'undefined'")
+    assert page.evaluate("tasks().length") == 0
+    assert page.is_visible("#empty")
+    assert page.inner_text("#emptyText") == "All 2 items are done."
+    assert page.inner_text("#emptyAction") == "Show done"
+    if view == "timeline":
+        assert page.evaluate("cy.nodes('.bg').length") == 0
+    page.click("#emptyAction")
+    assert page.evaluate("tasks().length") == 2
+    assert page.is_hidden("#empty")
+    assert problems == []
+    page.close()
+
+
+def test_nothing_matches_offers_reset(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.select_option("#goal", "2")
+    for t in ("task", "milestone", "decision", "external", "objective", "issue"):
+        page.click(f"#type-{t}")
+    assert page.evaluate("tasks().length") == 0
+    assert page.inner_text("#emptyText") == "Nothing matches the current filters."
+    page.click("#emptyAction")
+    assert page.evaluate("Array.from(document.querySelectorAll('#types button')).every(b => b.classList.contains('on'))")
+    assert page.input_value("#goal") == "" and "goal=" not in page.url
+    assert page.evaluate("tasks().length") > 0 and page.is_hidden("#empty")
+    assert problems == []
+    page.close()
