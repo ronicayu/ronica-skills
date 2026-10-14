@@ -147,9 +147,9 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
-const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
-const TL = { row: 26, head: 32, names: 260, px: 4, bar: 14, indent: 14, readable: 0.8 };
-const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 102, DECISION_LANE_W = 136;
+const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9;
+const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
   lane: n => inheritedMeta(n, 'lane'),
   owner: n => n.meta.owner,
@@ -209,7 +209,7 @@ function el(tag, props, ...children) {
 // fixed Swimlane boxes. Wrap here instead, breaking anywhere when a line has no space, and
 // end the last allowed line with an ellipsis. Measured bold so goal labels fit as well.
 const ctx = document.createElement('canvas').getContext('2d');
-ctx.font = 'bold 12px ' + FONT;
+ctx.font = 'bold 13px ' + FONT;
 const clamped = new Map();
 function clampLabel(text, width, maxLines) {
   const key = width + ':' + maxLines + ':' + text;
@@ -249,7 +249,7 @@ const cy = cytoscape({
     { selector: 'node', style: {
       'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
       'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': LABEL_W + 8,
-      'text-valign': 'center', 'text-halign': 'center', 'font-size': 12,
+      'text-valign': 'center', 'text-halign': 'center', 'font-size': 13,
       'font-family': FONT, 'color': ele => color(ele).fg,
       'background-color': ele => color(ele).bg, 'border-width': 2, 'border-color': ele => color(ele).bd,
       'opacity': ele => color(ele).op || 1, 'transition-property': 'opacity', 'transition-duration': '120ms'
@@ -272,13 +272,13 @@ const cy = cytoscape({
     { selector: 'node.late, node.conflict', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': RED, 'outline-opacity': 0.8 } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lanes[type="milestone"]', style: {
-      'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 10, 'font-weight': 'normal', 'color': ele => color(ele).fg
+      'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 11, 'font-weight': 'normal', 'color': ele => color(ele).fg
     } },
     { selector: 'node.lane-bg', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-color': 'data(shade)',
       'border-width': 1, 'border-color': '#262c36', 'opacity': 1, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': LANE_W + 8, 'text-halign': 'right', 'text-valign': 'center',
-      'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': -1
+      'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 13, 'z-index-compare': 'manual', 'z-index': -1
     } },
     { selector: 'edge', style: {
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
@@ -292,7 +292,7 @@ const cy = cytoscape({
     { selector: 'node.tl', style: {
       'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'shape': 'round-rectangle', 'border-width': 0, 'border-style': 'solid',
       'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 6, 'text-margin-y': 0, 'text-wrap': 'none',
-      'font-size': 11, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
+      'font-size': 12, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
     } },
     { selector: 'node.tl.mk-pt', style: { 'shape': 'ellipse' } },
     { selector: 'node.tl.mk-sum', style: {
@@ -311,13 +311,13 @@ const cy = cytoscape({
     { selector: 'node.tl-name', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 'data(tx)',
-      'color': '#e5e7eb', 'font-size': 12, 'font-weight': 'normal', 'z-index-compare': 'manual', 'z-index': 0
+      'color': '#e5e7eb', 'font-size': 13, 'font-weight': 'normal', 'z-index-compare': 'manual', 'z-index': 0
     } },
     { selector: 'node.tl-head', style: { 'color': '#9ca3af', 'font-weight': 'bold' } },
     { selector: 'node.tl-grid', style: {
       'shape': 'rectangle', 'width': 1, 'height': 'data(h)', 'padding': 0, 'background-color': AXIS, 'background-opacity': 0.55, 'border-width': 0, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'top', 'text-margin-x': 4, 'text-margin-y': 20,
-      'color': '#9ca3af', 'font-size': 11, 'z-index-compare': 'manual', 'z-index': 0
+      'color': '#9ca3af', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': 0
     } },
     { selector: 'node.tl-pin', style: {
       'shape': 'rectangle', 'width': 1, 'height': 1, 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
@@ -805,12 +805,7 @@ function layoutTimeline(fit) {
   drawn.filter(e => critical.has(e.id())).addClass('tl-critical');
   drawn.filter(e => hot.has(e.id())).addClass('tl-conflict');
   routeDeps(drawn.toArray(), marks, width);
-  if (!fit) return;
-  fitView();
-  if (cy.zoom() < TL.readable) {
-    const box = cy.elements().boundingBox();
-    cy.viewport({ zoom: TL.readable, pan: { x: 40 - box.x1 * TL.readable, y: 40 - box.y1 * TL.readable } });
-  }
+  if (fit) fitView();
 }
 
 function layout(fit = true) {
@@ -836,12 +831,32 @@ function fitTarget(eles = cy.elements(), pad = 40) {
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
-function fitView(eles) {
-  const target = fitTarget(eles);
-  if (target) cy.viewport(target);
+// Too big to show whole at a readable zoom: show the start of the plan at READABLE instead.
+function anchored(zoom) {
+  const box = $('cy').getBoundingClientRect();
+  if (view === 'graph') {
+    const shown = tasks(), objectives = shown.filter('[type="objective"]').sort((a, b) => a.id() - b.id());
+    const g = shown.getElementById(String(goal));
+    const a = g.nonempty() ? g : objectives.nonempty() ? objectives[0] : shown.min(n => n.position('y')).ele;
+    if (a) {
+      const bb = a.boundingBox();
+      return { zoom, pan: { x: box.width / 2 - zoom * (bb.x1 + bb.x2) / 2, y: 40 - zoom * bb.y1 } };
+    }
+  }
+  const bb = cy.elements().boundingBox();
+  return { zoom, pan: { x: 40 - zoom * bb.x1, y: 40 - zoom * bb.y1 } };
+}
+
+function fitView() {
+  let t = fitTarget();
+  if (!t) return;
+  if (t.zoom < READABLE) t = anchored(READABLE);
+  cy.viewport(t);
 }
 
 function covered() {
+  const t = fitTarget();
+  if (!t || t.zoom < READABLE) return false;
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
   return tasks().some(n => {

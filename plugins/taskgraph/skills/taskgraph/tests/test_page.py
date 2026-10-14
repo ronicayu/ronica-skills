@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -259,5 +260,66 @@ def test_timeline_nests_only_within_lane(browser, programme_file):
     assert rows[infra + 1] == "▾ #3 Build landing zone" and rows[infra + 2] == "#4 Write modules"
     assert not any("#3 Build landing zone" in r for r in rows[rows.index("Objectives"):rows.index("Data")])
     assert page.evaluate("cy.nodes('.tl-name[of=\"4\"]').data('tx') === 14 + 14 - TL.names")
+    assert problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def tall_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("tall")
+    tg = runner(tmp / "t.db")
+    tg("add", "Programme", "--type", "objective")
+    for i in range(1, 41):
+        start = date(2026, 10, 20) + timedelta(weeks=i - 1)
+        dep = ["--depends", str(i)] if i > 1 else []
+        tg("add", f"Step {i}", "--parent", "1", "--start", start.isoformat(), "--due", (start + timedelta(days=6)).isoformat(), "--meta", "lane=dev", *dep)
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+ANCHOR = """() => {
+    const box = document.getElementById('cy').getBoundingClientRect();
+    if (view === 'graph') {
+        const b = cy.getElementById('1').renderedBoundingBox();
+        return b.y1 >= 0 && b.x2 <= box.width && Math.abs((b.x1 + b.x2) / 2 - box.width / 2) < 1 && Math.abs(b.y1 - 40) < 1;
+    }
+    const b = cy.elements().renderedBoundingBox();
+    return Math.abs(b.x1 - 40) < 1 && Math.abs(b.y1 - 40) < 1;
+}"""
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_readability_floor(browser, tall_file, view):
+    page, problems = open_page(browser, tall_file, f"?view={view}")
+    for action in (None, "#fit", "#expandAll"):
+        if action:
+            page.click(action)
+        assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6, action
+        assert page.evaluate(ANCHOR), action
+        assert page.evaluate(COVERED) is False
+    assert problems == []
+    page.close()
+
+
+INSIDE = """() => {
+    const box = document.getElementById('cy').getBoundingClientRect();
+    return tasks().every(n => { const b = n.renderedBoundingBox(); return b.x1 >= 0 && b.y1 >= 0 && b.x2 <= box.width && b.y2 <= box.height; });
+}"""
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_small_plan_fits_above_floor(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}")
+    assert page.evaluate("cy.zoom()") > 0.9
+    assert page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+def test_cjk_label_clamps(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    lines = page.evaluate("clampLabel('完成所有租户的数据迁移并验证数据一致性以及回滚方案的演练', LABEL_W, 2)").split("\n")
+    assert len(lines) == 2 and lines[-1].endswith("…")
     assert problems == []
     page.close()
