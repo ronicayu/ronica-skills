@@ -615,3 +615,18 @@ def test_lanes_by_owner_fallback(browser, programme_file, page_file):
     assert page.evaluate(f"({BAND_OF})(1)") == "Objectives"
     assert problems == []
     page.close()
+
+
+def test_expand_collapse_refit(browser, page_file, tall_file):
+    page, problems = open_page(browser, page_file)
+    page.click("#collapseAll")
+    assert page.evaluate(INSIDE)
+    assert abs(page.evaluate("cy.zoom() - fitTarget().zoom")) < 1e-6
+    page.close()
+    page, problems = open_page(browser, tall_file)
+    page.click("#expandAll")
+    assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
+    page.click("#collapseAll")
+    assert abs(page.evaluate("cy.zoom() - Math.max(READABLE, fitTarget().zoom)")) < 1e-6
+    assert problems == []
+    page.close()

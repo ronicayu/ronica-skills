@@ -1338,12 +1338,12 @@ document.addEventListener('keydown', e => {
 });
 $('expandAll').onclick = () => {
   setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
-  rebuild(true);
+  rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('collapseAll').onclick = () => {
   setExpanded(new Set());
-  rebuild(true);
+  rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
