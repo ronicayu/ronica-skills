@@ -297,7 +297,7 @@ const cy = cytoscape({
     } },
     { selector: 'edge', style: {
       'curve-style': 'bezier', 'width': 1.5, 'line-color': '#6b7280',
-      'target-arrow-shape': 'triangle', 'target-arrow-color': '#6b7280', 'arrow-scale': 1.2
+      'target-arrow-shape': 'triangle', 'target-arrow-color': '#6b7280', 'arrow-scale': 1.2, 'overlay-padding': 6
     } },
     { selector: 'edge.lanes, edge.tl', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
     { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#6b7280', 'target-arrow-color': '#6b7280', 'target-arrow-shape': 'none' } },
@@ -1290,6 +1290,37 @@ cy.on('dbltap', 'node', e => {
   const n = byId.get(Number(e.target.id()));
   clearTimeout(pendingSelect);
   if (n.children.length) toggleExpand(n.id);
+});
+// A line explains itself: hover says who waits for whom and any date conflict in words;
+// a click opens the late side, whose panel lists the conflict.
+function edgeConflicts(edge) {
+  const open = expandedIds(), s = edge.source().id(), t = edge.target().id();
+  return DATA.nodes.flatMap(n => (n.conflicts ?? []).filter(c => c.kind === 'dependency' && c.from === n.id && byId.has(c.to)
+    && String(topOf(n, open).id) === s && String(topOf(byId.get(c.to), open).id) === t));
+}
+function edgeStory(edge) {
+  const [s, t] = [edge.source(), edge.target()].map(n => byId.get(Number(n.id())));
+  const lifted = edge.data('kind').includes('lifted') || edge.data('kind').includes('bridged');
+  const head = edge.data('kind').includes('partof') ? `#${s.id} is part of #${t.id}` : `#${t.id} waits for ${lifted ? 'work in ' : ''}#${s.id}`;
+  const clashes = edgeConflicts(edge).map(c => `#${c.from} is due ${day(c.due)} but #${c.to} needs it ${day(c.need)} (${-c.gap}d short)`);
+  return [head, ...clashes].join(' · ');
+}
+cy.on('mouseover', 'edge', e => {
+  if (e.target.hasClass('bg')) return;
+  $('cy').title = edgeStory(e.target);
+  e.target.addClass('hl');
+});
+cy.on('mouseout', 'edge', e => {
+  $('cy').title = '';
+  e.target.removeClass('hl');
+  refocus();
+});
+cy.on('tap', 'edge', e => {
+  if (e.target.hasClass('bg')) return;
+  const clash = edgeConflicts(e.target)[0];
+  const id = clash ? clash.from : Number(e.target.target().id());
+  if (cy.getElementById(String(id)).nonempty()) select(id, false);
+  else select(Number(e.target.source().id()), false);
 });
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
 

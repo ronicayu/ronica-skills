@@ -847,3 +847,25 @@ def test_panel_shows_driving_chain(browser, page_file):
     assert page.query_selector("#chainHead") is None
     assert problems == []
     page.close()
+
+
+def test_conflict_line_explains_itself(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    edge = page.evaluate("cy.edges('.tl-conflict').map(e => e.id())")
+    assert edge == ["5-3"]
+    box = page.evaluate("""() => {
+        const e = cy.getElementById('5-3'), c = document.getElementById('cy').getBoundingClientRect();
+        const p = e.renderedMidpoint();
+        return [c.left + p.x, c.top + p.y];
+    }""")
+    page.mouse.move(*box)
+    page.wait_for_timeout(150)
+    story = page.evaluate("document.getElementById('cy').title")
+    assert story == "#3 waits for #5 · #5 is due 5 Nov but #3 needs it 20 Oct (16d short)"
+    page.mouse.click(*box)
+    page.wait_for_function("pinned === 5")
+    assert "#5 due 5 Nov after #3 needs it 20 Oct" in page.inner_text("#panel")
+    page.mouse.move(5, 300)
+    assert page.evaluate("document.getElementById('cy').title") == ""
+    assert problems == []
+    page.close()
