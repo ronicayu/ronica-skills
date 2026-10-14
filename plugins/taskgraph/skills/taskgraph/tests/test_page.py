@@ -256,7 +256,7 @@ def test_bands_and_rag_match_across_views(browser, programme_file):
 def test_timeline_nests_only_within_lane(browser, programme_file):
     page, problems = open_page(browser, programme_file, "?view=timeline")
     page.click("#expandAll")
-    rows = page.evaluate(f"{BY_Y}('.tl-name', 'name')")
+    rows = page.evaluate(f"{BY_Y}('.tl-name', 'name').map(s => s.replace(/ · (RED|AMBER|GREEN)$/, ''))")
     infra = rows.index("Infra")
     assert rows[infra + 1] == "▾ #3 Build landing zone" and rows[infra + 2] == "#4 Write modules"
     assert not any("#3 Build landing zone" in r for r in rows[rows.index("Objectives"):rows.index("Data")])
@@ -463,7 +463,7 @@ def test_date_format(browser, page_file):
     page, problems = open_page(browser, page_file, "?view=timeline")
     assert page.evaluate("day('2026-10-30')") == "30 Oct"
     assert page.evaluate("day('2027-03-15')") == "15 Mar 2027"
-    assert page.evaluate("cy.getElementById('3').data('label')") == "20 Oct–25 Nov"
+    assert page.evaluate("cy.getElementById('3').data('label')") == "20 Oct–25 Nov · conflict"
     assert page.evaluate("document.querySelector('#goal option[value=\"2\"]').textContent") == "#2 Ship v1 · 1 Dec"
     page.evaluate("select(3, false)")
     text = page.inner_text("#panel")
@@ -471,5 +471,20 @@ def test_date_format(browser, page_file):
     assert not re.search(r"\d{4}-\d{2}-\d{2}", text)
     assert re.search(r"Created\s+\d{1,2} Oct \d{2}:\d{2}", text)
     assert re.fullmatch(r"Generated \d{1,2} \w{3}( \d{4})? \d{2}:\d{2}", page.inner_text("#stamp"))
+    assert problems == []
+    page.close()
+
+
+def test_status_words_and_rag_headers(browser, programme_file):
+    page, problems = open_page(browser, programme_file, "?view=timeline")
+    assert page.evaluate("cy.getElementById('2').data('label')") == "15 Dec · at risk"
+    page.click("#expandAll")
+    assert page.evaluate("cy.getElementById('6').data('label')").endswith(" · conflict")
+    assert page.evaluate("cy.getElementById('4').data('label')") == "20 Sep–10 Oct · 3d late"
+    assert page.evaluate(f"{BY_Y}('.tl-head', 'name')") == ["Objectives · RED", "Data · AMBER", "Infra · RED", "Programme · RED", "Security · AMBER"]
+    page.close()
+    page, problems = open_page(browser, programme_file, "?view=lanes")
+    assert page.evaluate("cy.getElementById('lane:1').data('name')").endswith("\nAMBER")
+    assert page.evaluate("cy.nodes('.lane-rag')[0].width()") == 8
     assert problems == []
     page.close()
