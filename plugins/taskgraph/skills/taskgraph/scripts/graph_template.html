@@ -7,10 +7,12 @@
 <style>
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-#toolbar { position: fixed; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow-x: auto; font-size: 13px; }
+:root { --bar: 48px; --panel-w: 0px; }
+#toolbar { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 14px; min-height: 48px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow: visible; font-size: 13px; }
 #toolbar > * { flex: none; }
 #toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
+#toolbar input::placeholder { color: #9ca3af; opacity: 1; }
 #toolbar button:hover { background: #2d333d; }
 #toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; white-space: nowrap; }
 #toolbar [hidden] { display: none; }
@@ -22,25 +24,27 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .seg button + button { margin-left: -1px; }
 #toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .spacer { flex: 1 1 0; min-width: 0; }
-#toolbar #goal { max-width: 260px; }
+#toolbar #goal { flex: 0 1 auto; max-width: min(320px, 40vw); }
 #toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
-#toolbar .goalinfo { color: #9ca3af; font-size: 12px; white-space: nowrap; }
-#toolbar .stamp { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
+#toolbar .goalinfo, #searchCount { color: #9ca3af; font-size: 12px; white-space: nowrap; }
+#toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #9ca3af; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
-#cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
-#legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 6px 12px 8px; z-index: 2; }
-#legend #legendBody { display: flex; gap: 22px; margin-top: 4px; }
-#legend.closed { padding-bottom: 6px; }
+#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
+#legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
+#legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
+#legend .col { display: contents; }
+#legend.closed { padding-bottom: 4px; }
 #legend.closed #legendBody { display: none; }
 #legendToggle { background: none; border: 0; padding: 0; color: #9ca3af; font: inherit; font-size: 12px; cursor: pointer; }
 #legendToggle:hover { color: #e5e7eb; }
-#legend .col div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+#legend .col div { display: flex; align-items: center; gap: 6px; margin: 0; }
+#legend .col div[hidden] { display: none; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
-#panel { position: fixed; top: 48px; right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
-#panel h2 { margin: 0 0 6px; font-size: 17px; line-height: 1.3; }
+#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel h2 { margin: 0 0 6px; padding-right: 30px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
 #panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 12px; }
@@ -48,6 +52,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel .badge.chase { background: #f59e0b; color: #1c1004; border: 1px solid #f59e0b; }
 #panel button { margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #panel button:hover { background: #2d333d; }
+#panel #panelClose { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; margin-top: 0; padding: 0; font-size: 18px; line-height: 1; }
 #panel .notes { white-space: pre-wrap; background: #1e232b; border-radius: 6px; padding: 8px 10px; }
 #panel table { width: 100%; border-collapse: collapse; }
 #panel td { padding: 3px 6px; border-bottom: 1px solid #2a2f38; vertical-align: top; word-break: break-word; }
@@ -57,7 +62,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel li:hover { background: #232830; }
 #panel li.off { opacity: .45; cursor: default; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-#panel .none { color: #6b7280; }
+#panel .none { color: #9ca3af; }
+#empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
+#empty[hidden], #empty [hidden] { display: none; }
+#empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
+#empty button { pointer-events: auto; margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+#empty button:hover { background: #2d333d; }
 </style>
 </head>
 <body>
@@ -71,10 +81,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
   <span class="seg" id="types"></span>
   <input type="text" id="search" placeholder="Search" size="9">
+  <span id="searchCount" aria-live="polite"></span>
   <button id="expandAll">Expand all</button>
   <button id="collapseAll">Collapse all</button>
   <button id="relayout">Re-layout</button>
   <button id="fit">Fit</button>
+  <button id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
   <button id="refresh" hidden>Refresh</button>
   <span class="spacer"></span>
   <span class="stamp" id="stamp"></span>
@@ -85,23 +97,24 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <div id="legendBody">
   <div class="col">
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#e5e7eb"/></svg>Task</div>
-    <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#262c36" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
-    <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#262c36" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
-    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#262c36" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
+    <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#2f3744" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
+    <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#2f3744" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
+    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#2f3744" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
   </div>
   <div class="col">
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
-    <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#262c36" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
-    <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#262c36" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
-    <div><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
+    <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#2f3744" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
+    <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#2f3744" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
+    <div id="legendRag"><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
   </div>
   <div class="col" id="legendStatus"></div>
   <div class="col" id="legendMarks">
-    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+    <div id="legendBaseline"><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#6b7280"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
   </div>
   </div>
 </div>
 <div id="panel"></div>
+<div id="empty" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
@@ -110,8 +123,8 @@ let DATA = __DATA__;
 const COLORS = {
   ready: { bg: '#e5e7eb', fg: '#0b0f14', bd: '#e5e7eb' },
   in_progress: { bg: '#34d399', fg: '#052e16', bd: '#34d399' },
-  blocked: { bg: '#262c36', fg: '#9ca3af', bd: '#343b47' },
-  done: { bg: '#1d4ed8', fg: '#dbeafe', bd: '#1d4ed8', op: 0.75 }
+  blocked: { bg: '#2f3744', fg: '#d1d5db', bd: '#6b7280' },
+  done: { bg: '#2563eb', fg: '#ffffff', bd: '#2563eb', op: 0.85 }
 };
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
 const GOAL = '#fbbf24';
@@ -119,7 +132,7 @@ const TYPES = ['task', 'milestone', 'decision', 'external', 'objective', 'risk',
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase', 'promised', 'due', 'review', 'raised'];
 const ISSUE = '#f87171';
-const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#4b5563';
+const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#6b7280';
 const FIELDS = {
   task: [['owner', 'Owner'], ['estimate', 'Estimate']],
   milestone: [['date', 'Date']],
@@ -129,10 +142,12 @@ const FIELDS = {
   risk: [['owner', 'Owner'], ['likelihood', 'Likelihood'], ['impact', 'Impact'], ['mitigation', 'Mitigation'], ['review', 'Review']],
   issue: [['owner', 'Owner'], ['severity', 'Severity'], ['raised', 'Raised'], ['due', 'Due']]
 };
+const todayYear = (DATA.today || new Date().toLocaleDateString('sv')).slice(0, 4);
 const day = s => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  return m ? `${+m[3]} ${MONTHS[m[2] - 1]} ${m[1]}` : String(s);
+  return m ? `${+m[3]} ${MONTHS[m[2] - 1]}` + (m[1] === todayYear ? '' : ' ' + m[1]) : String(s);
 };
+const HM = { hour: '2-digit', minute: '2-digit', hour12: false };
 const SUBTITLE = {
   task: n => [n.due && 'due ' + day(n.due), n.meta.owner, n.meta.estimate != null && n.meta.estimate + 'h'],
   milestone: n => [n.due ? day(n.due) : 'no date'],
@@ -146,13 +161,13 @@ const color = ele => COLORS[ele.data('derived_status')] || COLORS.blocked;
 let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
-const UNASSIGNED = 'Unassigned';
-const GUTTER = 140, COL_W = 240, ROW_H = 84, NODE_W = 180, NODE_H = 52;
-const TL = { row: 26, head: 32, names: 260, px: 4, bar: 14, indent: 14, readable: 0.8 };
-const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 102, DECISION_LANE_W = 136;
+const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
+const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9;
+const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
-  lane: n => n.meta.lane,
-  owner: n => n.meta.owner,
+  lane: n => inheritedMeta(n, 'lane'),
+  owner: n => n.meta.owner ?? n.meta.decider ?? n.meta.party,
   tag: n => Array.isArray(n.meta.tags) ? n.meta.tags[0] : n.meta.tags,
   project: n => n.project
 };
@@ -182,11 +197,21 @@ const setExpanded = ids => {
 };
 const RAG_COLORS = { red: '#ef4444', amber: '#f59e0b', green: '#34d399' };
 const ragOf = list => ['red', 'amber', 'green'].find(r => list.some(n => n.rag === r)) || 'green';
-const stripe = (id, h, x, y, list) => ({
-  group: 'nodes', classes: 'lane-rag bg', locked: true, selectable: false, grabbable: false,
-  data: { id, h, color: RAG_COLORS[ragOf(list)], rag: ragOf(list) }, position: { x, y }
-});
 const isSummary = n => n.children.length > 0 || n.type === 'objective';
+const bandRag = name => ragOf(DATA.nodes.filter(n => keeps(n) && laneOf(n) === name && (!isSummary(n) || n.type === 'objective')));
+const stripe = (id, h, x, y, name) => {
+  const rag = bandRag(name);
+  return { group: 'nodes', classes: 'lane-rag bg', locked: true, selectable: false, grabbable: false, data: { id, h, color: RAG_COLORS[rag], rag }, position: { x, y } };
+};
+const bandRank = s => s === OBJECTIVES ? 0 : s === UNASSIGNED ? 2 : 1;
+const bandOrder = (a, b) => bandRank(a) - bandRank(b) || a.toLowerCase().localeCompare(b.toLowerCase());
+const inheritedMeta = (n, key) => {
+  for (; n; n = byId.get(n.parent)) {
+    const v = n.meta[key];
+    if (v != null && String(v).trim()) return String(v).trim();
+  }
+  return null;
+};
 const descendants = n => n.children.reduce((sum, c) => sum + 1 + descendants(byId.get(c)), 0);
 
 function el(tag, props, ...children) {
@@ -199,7 +224,7 @@ function el(tag, props, ...children) {
 // fixed Swimlane boxes. Wrap here instead, breaking anywhere when a line has no space, and
 // end the last allowed line with an ellipsis. Measured bold so goal labels fit as well.
 const ctx = document.createElement('canvas').getContext('2d');
-ctx.font = 'bold 12px ' + FONT;
+ctx.font = 'bold 13px ' + FONT;
 const clamped = new Map();
 function clampLabel(text, width, maxLines) {
   const key = width + ':' + maxLines + ':' + text;
@@ -239,7 +264,7 @@ const cy = cytoscape({
     { selector: 'node', style: {
       'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
       'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': LABEL_W + 8,
-      'text-valign': 'center', 'text-halign': 'center', 'font-size': 12,
+      'text-valign': 'center', 'text-halign': 'center', 'font-size': 13,
       'font-family': FONT, 'color': ele => color(ele).fg,
       'background-color': ele => color(ele).bg, 'border-width': 2, 'border-color': ele => color(ele).bd,
       'opacity': ele => color(ele).op || 1, 'transition-property': 'opacity', 'transition-duration': '120ms'
@@ -262,27 +287,27 @@ const cy = cytoscape({
     { selector: 'node.late, node.conflict', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': RED, 'outline-opacity': 0.8 } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lanes[type="milestone"]', style: {
-      'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 10, 'font-weight': 'normal', 'color': ele => color(ele).fg
+      'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 11, 'font-weight': 'normal', 'color': ele => color(ele).fg
     } },
     { selector: 'node.lane-bg', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-color': 'data(shade)',
       'border-width': 1, 'border-color': '#262c36', 'opacity': 1, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'wrap', 'text-max-width': LANE_W + 8, 'text-halign': 'right', 'text-valign': 'center',
-      'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': -1
+      'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 13, 'z-index-compare': 'manual', 'z-index': -1
     } },
     { selector: 'edge', style: {
-      'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
-      'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
+      'curve-style': 'bezier', 'width': 1.5, 'line-color': '#6b7280',
+      'target-arrow-shape': 'triangle', 'target-arrow-color': '#6b7280', 'arrow-scale': 1.2
     } },
     { selector: 'edge.lanes, edge.tl', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
-    { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#4b5563', 'target-arrow-color': '#4b5563', 'target-arrow-shape': 'none' } },
+    { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#6b7280', 'target-arrow-color': '#6b7280', 'target-arrow-shape': 'none' } },
     { selector: 'edge.lifted, edge.bridged', style: { 'line-style': 'dashed' } },
     { selector: 'edge.threat', style: { 'line-style': 'dotted', 'line-color': AMBER, 'target-arrow-color': AMBER } },
     { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': AMBER, 'target-arrow-color': AMBER } },
     { selector: 'node.tl', style: {
       'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'shape': 'round-rectangle', 'border-width': 0, 'border-style': 'solid',
       'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 6, 'text-margin-y': 0, 'text-wrap': 'none',
-      'font-size': 11, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
+      'font-size': 12, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
     } },
     { selector: 'node.tl.mk-pt', style: { 'shape': 'ellipse' } },
     { selector: 'node.tl.mk-sum', style: {
@@ -301,13 +326,13 @@ const cy = cytoscape({
     { selector: 'node.tl-name', style: {
       'shape': 'rectangle', 'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 'data(tx)',
-      'color': '#e5e7eb', 'font-size': 12, 'font-weight': 'normal', 'z-index-compare': 'manual', 'z-index': 0
+      'color': '#e5e7eb', 'font-size': 13, 'font-weight': 'normal', 'z-index-compare': 'manual', 'z-index': 0
     } },
     { selector: 'node.tl-head', style: { 'color': '#9ca3af', 'font-weight': 'bold' } },
     { selector: 'node.tl-grid', style: {
       'shape': 'rectangle', 'width': 1, 'height': 'data(h)', 'padding': 0, 'background-color': AXIS, 'background-opacity': 0.55, 'border-width': 0, 'events': 'no',
       'label': 'data(name)', 'text-wrap': 'none', 'text-halign': 'right', 'text-valign': 'top', 'text-margin-x': 4, 'text-margin-y': 20,
-      'color': '#9ca3af', 'font-size': 11, 'z-index-compare': 'manual', 'z-index': 0
+      'color': '#9ca3af', 'font-size': 12, 'z-index-compare': 'manual', 'z-index': 0
     } },
     { selector: 'node.tl-pin', style: {
       'shape': 'rectangle', 'width': 1, 'height': 1, 'padding': 0, 'background-opacity': 0, 'border-width': 0, 'events': 'no',
@@ -323,15 +348,15 @@ const cy = cytoscape({
     { selector: 'edge.tl-dep', style: { 'width': 1.2, 'line-color': AXIS, 'target-arrow-color': AXIS, 'arrow-scale': 0.8, 'line-style': 'solid', 'z-index-compare': 'manual', 'z-index': 1 } },
     { selector: 'edge.tl-critical', style: { 'width': 2.2, 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb' } },
     { selector: 'node.lane-rag', style: {
-      'shape': 'rectangle', 'width': 4, 'height': 'data(h)', 'padding': 0, 'background-color': 'data(color)', 'border-width': 0,
+      'shape': 'rectangle', 'width': 8, 'height': 'data(h)', 'padding': 0, 'background-color': 'data(color)', 'border-width': 0,
       'events': 'no', 'label': '', 'z-index-compare': 'manual', 'z-index': 0
     } },
     { selector: 'edge.tl-conflict', style: { 'width': 1.5, 'line-color': RED, 'target-arrow-color': RED, 'line-style': 'dashed' } },
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
-    { selector: '.faded', style: { 'opacity': 0.15 } },
-    { selector: '.dim', style: { 'opacity': 0.15 } }
+    { selector: '.faded', style: { 'opacity': 0.35 } },
+    { selector: '.dim', style: { 'opacity': 0.2 } }
   ]
 });
 
@@ -474,7 +499,7 @@ function outlookText(o) {
 }
 const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
-  return v == null || String(v).trim() === '' ? UNASSIGNED : String(v).trim();
+  return v == null || String(v).trim() === '' ? (n.type === 'objective' ? OBJECTIVES : UNASSIGNED) : String(v).trim();
 };
 
 const gapAfter = c => GUTTER + (c + 1) * COL_W;
@@ -590,7 +615,7 @@ function layoutLanes(fit) {
     if (!groups.has(name)) groups.set(name, []);
     groups.get(name).push(n);
   });
-  const names = [...groups.keys()].sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
+  const names = [...groups.keys()].sort(bandOrder);
   const width = GUTTER + (maxUp + 1) * COL_W;
   let top = 0;
   const stripes = [];
@@ -605,10 +630,10 @@ function layoutLanes(fit) {
     const height = Math.max(...rows.values()) * ROW_H;
     const band = {
       group: 'nodes', classes: 'lane-bg bg', locked: true, selectable: false, grabbable: false,
-      data: { id: 'lane:' + i, name: clampLabel(name, LANE_W, LABEL_LINES), w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
+      data: { id: 'lane:' + i, name: clampLabel(name, LANE_W, 2) + '\n' + bandRag(name).toUpperCase(), w: width, h: height, tx: 14 - width, shade: i % 2 ? '#171b22' : '#14181e' },
       position: { x: width / 2, y: top + height / 2 }
     };
-    stripes.push(stripe('lane-rag:' + i, height, 2, top + height / 2, groups.get(name)));
+    stripes.push(stripe('lane-rag:' + i, height, 4, top + height / 2, name));
     top += height;
     return band;
   });
@@ -622,7 +647,6 @@ const dnum = s => {
   const [y, m, d] = s.split('-');
   return Date.UTC(y, m - 1, d) / 864e5;
 };
-const md = s => +s.slice(5, 7) + '/' + +s.slice(8, 10);
 const isPoint = n => n.type === 'milestone' || n.type === 'decision' || n.type === 'risk';
 
 function datesOf(n) {
@@ -636,9 +660,12 @@ function datesOf(n) {
 function dateText(n) {
   const d = datesOf(n);
   if (!d) return '';
-  const parts = [d[0] === d[1] ? md(d[0]) : md(d[0]) + '–' + md(d[1])];
+  const parts = [d[0] === d[1] ? day(d[0]) : day(d[0]) + '–' + day(d[1])];
   if (isSummary(n) && n.rollup && n.rollup.total) parts.push(`${n.rollup.done} of ${n.rollup.total} done`);
   if (n.late_days != null) parts.push(n.late_days + 'd late');
+  if (atRisk(n)) parts.push('at risk');
+  if (conflicted(n)) parts.push('conflict');
+  if (n.chase_due) parts.push('chase due');
   return parts.join(' · ');
 }
 
@@ -720,16 +747,18 @@ function routeDeps(shown, marks, right) {
 
 function layoutTimeline(fit) {
   const { nodes, open } = visibleData();
+  if (!nodes.length) return;
   const shown = new Set(nodes.map(n => n.id));
-  const kids = new Map(nodes.map(n => [n.id, n.children.filter(c => shown.has(c)).map(c => byId.get(c)).filter(datesOf)]));
+  const nests = n => !!datesOf(n) && shown.has(n.parent) && laneOf(n) === laneOf(byId.get(n.parent));
+  const kids = new Map(nodes.map(n => [n.id, n.children.filter(c => shown.has(c)).map(c => byId.get(c)).filter(nests)]));
   const cmp = (a, b) => (b.type === 'milestone') - (a.type === 'milestone') || (datesOf(a)?.[0] ?? '~').localeCompare(datesOf(b)?.[0] ?? '~') || a.id - b.id;
   const groups = new Map();
-  nodes.filter(n => !datesOf(n) || !shown.has(n.parent)).forEach(n => {
+  nodes.filter(n => !nests(n)).forEach(n => {
     const name = datesOf(n) ? laneOf(n) : null;
     if (!groups.has(name)) groups.set(name, []);
     groups.get(name).push(n);
   });
-  const names = [...groups.keys()].filter(k => k !== null).sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
+  const names = [...groups.keys()].filter(k => k !== null).sort(bandOrder);
   if (groups.has(null)) names.push(null);
   const rows = [];
   const spans = [];
@@ -738,10 +767,10 @@ function layoutTimeline(fit) {
     kids.get(n.id).sort(cmp).forEach(c => walk(c, depth + 1));
   };
   names.forEach(name => {
-    const from = rows.length;
-    rows.push({ head: name === null ? 'Undated' : name });
+    const from = rows.length, head = name === null ? 'Undated' : name;
+    rows.push({ head, undated: name === null });
     groups.get(name).sort(cmp).forEach(n => walk(n, 0));
-    spans.push([from, rows.length]);
+    spans.push([from, rows.length, head, name === null]);
   });
   const today = DATA.today || new Date().toLocaleDateString('sv');
   const baseDue = n => n.baseline && n.baseline.due && n.baseline.due !== n.due && datesOf(n) ? n.baseline.due : null;
@@ -756,7 +785,7 @@ function layoutTimeline(fit) {
   const marks = new Map();
   rows.forEach((r, i) => {
     const y = yOf(i);
-    if (r.head) return els.push(bg('tl-name tl-head', 'tl:name:' + i, { name: r.head, w: TL.names, h: TL.row, tx: 14 - TL.names }, TL.names / 2, y));
+    if (r.head) return els.push(bg('tl-name tl-head', 'tl:name:' + i, { name: r.undated ? r.head : r.head + ' · ' + bandRag(r.head).toUpperCase(), w: TL.names, h: TL.row, tx: 14 - TL.names }, TL.names / 2, y));
     const n = r.n, ele = cy.getElementById(String(n.id)), d = datesOf(n);
     const mark = !d ? 'mk-none' : isSummary(n) ? 'mk-sum' : isPoint(n) || d[0] === d[1] ? 'mk-pt' : 'mk-bar';
     const x1 = d ? xOf(d[0]) : 0, x2 = d ? xOf(d[1]) : 0;
@@ -772,7 +801,7 @@ function layoutTimeline(fit) {
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
   });
   const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
-  spans.forEach(([from, to], i) => els.push(stripe('tl:rag:' + i, (to - from) * TL.row, 2, TL.head + (from + to) * TL.row / 2, rows.slice(from, to).filter(r => r.n).map(r => r.n))));
+  spans.forEach(([from, to, head, undated], i) => undated || els.push(stripe('tl:rag:' + i, (to - from) * TL.row, 4, TL.head + (from + to) * TL.row / 2, head)));
   spans.forEach(([from, to], i) => els.push(bg('lane-bg', 'tl:band:' + i, { name: '', w: width, h: (to - from) * TL.row, tx: 0, shade: i % 2 ? '#171b22' : '#14181e' }, width / 2, TL.head + (from + to) * TL.row / 2)));
   const begin = new Date(lo * 864e5);
   for (let m = new Date(Date.UTC(begin.getUTCFullYear(), begin.getUTCMonth() + 1, 1)); m / 864e5 <= hi; m.setUTCMonth(m.getUTCMonth() + 1)) {
@@ -780,7 +809,7 @@ function layoutTimeline(fit) {
     els.push(bg('tl-grid', 'tl:grid:' + at, { name: MONTHS[month] + (month === 0 ? ' ' + m.getUTCFullYear() : ''), h: height }, left + (at - lo) * TL.px, height / 2));
   }
   const tx = xOf(today);
-  els.push(bg('tl-pin', 'tl:today', { name: 'Today ' + md(today) }, tx, TL.head - 4), bg('tl-pin', 'tl:today-end', { name: '' }, tx, height));
+  els.push(bg('tl-pin', 'tl:today', { name: 'Today ' + day(today) }, tx, TL.head - 4), bg('tl-pin', 'tl:today-end', { name: '' }, tx, height));
   els.push({ group: 'edges', classes: 'bg tl-today', data: { id: 'tl:today-line', source: 'tl:today', target: 'tl:today-end' } });
   cy.add(els);
   const hot = conflictEdges(open);
@@ -794,15 +823,11 @@ function layoutTimeline(fit) {
   drawn.filter(e => critical.has(e.id())).addClass('tl-critical');
   drawn.filter(e => hot.has(e.id())).addClass('tl-conflict');
   routeDeps(drawn.toArray(), marks, width);
-  if (!fit) return;
-  fitView();
-  if (cy.zoom() < TL.readable) {
-    const box = cy.elements().boundingBox();
-    cy.viewport({ zoom: TL.readable, pan: { x: 40 - box.x1 * TL.readable, y: 40 - box.y1 * TL.readable } });
-  }
+  if (fit) fitView();
 }
 
 function layout(fit = true) {
+  fitBar();
   cy.elements('.bg').remove();
   cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
   cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
@@ -825,12 +850,32 @@ function fitTarget(eles = cy.elements(), pad = 40) {
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
-function fitView(eles) {
-  const target = fitTarget(eles);
-  if (target) cy.viewport(target);
+// Too big to show whole at a readable zoom: show the start of the plan at READABLE instead.
+function anchored(zoom) {
+  const box = $('cy').getBoundingClientRect();
+  if (view === 'graph') {
+    const shown = tasks(), objectives = shown.filter('[type="objective"]').sort((a, b) => a.id() - b.id());
+    const g = shown.getElementById(String(goal));
+    const a = g.nonempty() ? g : objectives.nonempty() ? objectives[0] : shown.min(n => n.position('y')).ele;
+    if (a) {
+      const bb = a.boundingBox();
+      return { zoom, pan: { x: box.width / 2 - zoom * (bb.x1 + bb.x2) / 2, y: 40 - zoom * bb.y1 } };
+    }
+  }
+  const bb = cy.elements().boundingBox();
+  return { zoom, pan: { x: 40 - zoom * bb.x1, y: 40 - zoom * bb.y1 } };
+}
+
+function fitView() {
+  let t = fitTarget();
+  if (!t) return;
+  if (t.zoom < READABLE) t = anchored(READABLE);
+  cy.viewport(t);
 }
 
 function covered() {
+  const t = fitTarget();
+  if (!t || t.zoom < READABLE) return false;
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
   return tasks().some(n => {
@@ -846,6 +891,7 @@ function fitIfOutside() {
 }
 
 function rebuild(keepView, flash) {
+  syncLegend();
   const { nodes, edges, open } = visibleData();
   const before = new Set(tasks().map(n => n.id()));
   const sources = new Set(edges.map(e => e.source));
@@ -864,6 +910,40 @@ function rebuild(keepView, flash) {
   }
   applySearch();
   refocus();
+  syncEmpty();
+}
+
+// Say why the canvas is blank, and offer the one click that fills it.
+function syncEmpty() {
+  const project = $('project').value;
+  const candidates = DATA.nodes.filter(n => !project || n.project === project);
+  const action = $('emptyAction');
+  $('empty').hidden = tasks().length > 0;
+  if (tasks().length) return;
+  let text;
+  action.hidden = false;
+  if (!candidates.length) {
+    text = project ? `No tasks in ${project} yet.` : 'No tasks yet.';
+    action.hidden = true;
+  } else if ($('hideDone').checked && candidates.every(n => n.derived_status === 'done')) {
+    text = candidates.length === 1 ? 'All 1 item is done.' : `All ${candidates.length} items are done.`;
+    action.textContent = 'Show done';
+    action.onclick = () => {
+      $('hideDone').checked = false;
+      rebuild();
+    };
+  } else {
+    text = 'Nothing matches the current filters.';
+    action.textContent = 'Reset filters';
+    action.onclick = () => {
+      types = new Set(TYPES);
+      store.set('taskgraph.types', TYPES.join(','));
+      $('search').value = '';
+      syncControls();
+      setGoal(null);
+    };
+  }
+  $('emptyText').textContent = text;
 }
 
 function sameShape(nodes, edges) {
@@ -883,7 +963,7 @@ function fillGoals() {
   const byDate = (a, b) => (a.derived_status === 'done') - (b.derived_status === 'done') || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
   const list = DATA.nodes.filter(n => GOAL_TYPES.includes(n.type) && (!project || n.project === project)).sort(byDate);
   if (goal != null && byId.has(goal) && !list.some(n => n.id === goal)) list.unshift(byId.get(goal));
-  const label = n => `#${n.id} ${n.title}` + (n.type === 'milestone' && n.due ? ` · ${md(n.due)}` : '') + (n.derived_status === 'done' ? ' · done' : '');
+  const label = n => `#${n.id} ${n.title}` + (n.type === 'milestone' && n.due ? ` · ${day(n.due)}` : '') + (n.derived_status === 'done' ? ' · done' : '');
   select.replaceChildren(el('option', { value: '', textContent: 'All goals' }), ...list.map(n => el('option', { value: String(n.id), textContent: label(n) })));
   select.value = goal != null && byId.has(goal) ? String(goal) : '';
   select.classList.toggle('on', select.value !== '');
@@ -917,6 +997,7 @@ function applyData(next) {
   addProjects();
   if (goal != null && !byId.has(goal)) goal = null;
   fillGoals();
+  syncLegend();
   const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
     const sources = new Set(edges.map(e => e.source));
@@ -933,6 +1014,7 @@ function applyData(next) {
   if (pinned) openPanel(byId.get(pinned));
   applySearch();
   refocus();
+  syncEmpty();
 }
 
 function toggleExpand(id) {
@@ -954,16 +1036,17 @@ function reveal(id) {
   select(id, true);
 }
 
-function focusOn(n) {
+function focusOn(n, fade) {
   const keep = n.union(n.predecessors()).union(n.successors());
-  cy.elements().not('.bg').addClass('faded');
+  if (fade) cy.elements().not('.bg').addClass('faded');
   keep.removeClass('faded').addClass('hl');
   mirrorNames();
+  return keep;
 }
 
 function refocus() {
   cy.elements().removeClass('faded hl');
-  if (pinned) focusOn(cy.getElementById(String(pinned)));
+  if (pinned) focusOn(cy.getElementById(String(pinned)), true);
   mirrorNames();
 }
 
@@ -974,13 +1057,42 @@ function mirrorNames() {
   });
 }
 
+const searchQuery = () => $('search').value.trim().toLowerCase();
+const searchHits = q => q ? DATA.nodes.filter(n => passes(n) && (n.title.toLowerCase().includes(q) || ('#' + n.id).includes(q))).sort((a, b) => a.id - b.id) : [];
+
 function applySearch() {
-  const q = $('search').value.trim().toLowerCase();
-  tasks().forEach(n => {
-    const hit = !q || n.data('title').toLowerCase().includes(q) || ('#' + n.id()).includes(q);
-    n.toggleClass('dim', !hit);
-  });
+  const q = searchQuery();
+  const hits = new Set(searchHits(q).map(n => String(n.id)));
+  tasks().forEach(n => n.toggleClass('dim', !!q && !hits.has(n.id())));
+  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : hits.size + ' matches';
   mirrorNames();
+}
+
+// Expand whatever hides a hit, so a match inside a collapsed summary is never just a dimmed screen.
+let searchTimer, searched = { q: null, at: -1 };
+function runSearch() {
+  clearTimeout(searchTimer);
+  const q = searchQuery();
+  searched = { q, at: -1 };
+  const open = new Set(expandedIds()), size = open.size;
+  searchHits(q).forEach(h => { for (let n = h; byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent); });
+  if (open.size !== size) {
+    setExpanded(open);
+    rebuild(true);
+  } else applySearch();
+}
+
+function stepSearch(back) {
+  if (searched.q !== searchQuery()) runSearch();
+  const hits = searchHits(searched.q);
+  if (!hits.length) return;
+  searched.at = searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length;
+  select(hits[searched.at].id, true);
+}
+
+function clearSearch() {
+  $('search').value = '';
+  runSearch();
 }
 
 function badge(status) {
@@ -989,7 +1101,8 @@ function badge(status) {
 }
 
 function fmt(iso) {
-  return iso ? new Date(iso).toLocaleString() : '-';
+  const d = new Date(iso);
+  return !iso ? '-' : isNaN(d) ? String(iso) : day(d.toLocaleDateString('sv')) + ' ' + d.toLocaleTimeString([], HM);
 }
 
 const show = (k, v) => DATE_KEYS.includes(k) ? day(v) : k === 'estimate' ? v + ' h' : typeof v === 'string' ? v : JSON.stringify(v);
@@ -1000,7 +1113,8 @@ function refList(ids) {
   return el('ul', null, ...ids.map(id => {
     const n = byId.get(id);
     const on = passes(n);
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + (COLORS[n.derived_status] || COLORS.blocked).bg }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
+    const c = COLORS[n.derived_status] || COLORS.blocked;
+    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
     if (on) li.onclick = () => reveal(id);
     return li;
   }));
@@ -1015,7 +1129,7 @@ function baselineText(n) {
 function conflictList(list) {
   return el('ul', null, ...list.map(c => {
     const on = byId.has(c.with) && passes(byId.get(c.with));
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message }));
+    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m)) }));
     if (on) li.onclick = () => reveal(c.with);
     return li;
   }));
@@ -1027,7 +1141,10 @@ function openPanel(n) {
   const fields = FIELDS[n.type] || FIELDS.task;
   const shown = new Set(['type', 'start', 'due', ...fields.map(([k]) => k)]);
   const extra = Object.entries(n.meta).filter(([k]) => !shown.has(k));
+  const focus = goal === n.id || n.type !== 'risk';
+  const focusText = goal === n.id ? 'Show everything' : GOAL_TYPES.includes(n.type) ? 'Focus on this goal' : 'Show only what this needs';
   panel.replaceChildren(...[
+    el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close', textContent: '×', onclick: closePanel }),
     el('h2', { textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
@@ -1044,8 +1161,8 @@ function openPanel(n) {
       row('Created', fmt(n.created_at)),
       row('Done', fmt(n.done_at))),
     n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
-    el('button', { id: 'focusGoal', textContent: goal === n.id ? 'Show everything' : 'Focus on this goal', title: 'Show only what this needs',
-      style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }),
+    focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs',
+      style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
     (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
     (n.threats ?? []).length ? refList(n.threats) : null,
     conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
@@ -1068,6 +1185,7 @@ function openPanel(n) {
   panel.scrollTop = top;
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
+  document.documentElement.style.setProperty('--panel-w', '340px');
   $('cy').style.right = '340px';
   cy.resize();
   if (wasHidden) fitView();
@@ -1076,6 +1194,7 @@ function openPanel(n) {
 function closePanel() {
   pinned = null;
   $('panel').style.display = 'none';
+  document.documentElement.style.setProperty('--panel-w', '0px');
   $('cy').style.right = '0';
   cy.resize();
   refocus();
@@ -1090,13 +1209,18 @@ function select(id, center) {
   if (center) cy.animate({ center: { eles: node } }, { duration: 250 });
 }
 
+// Hover only highlights: on a projector a resting mouse must not fade the slide.
+let hoverTimer, hovered = null;
 cy.on('mouseover', 'node', e => {
-  cy.elements().removeClass('faded hl');
-  focusOn(e.target);
+  clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => { hovered = focusOn(e.target, false); }, 120);
   $('cy').title = '#' + e.target.id() + ' ' + e.target.data('title');
 });
 cy.on('mouseout', 'node', () => {
+  clearTimeout(hoverTimer);
   $('cy').title = '';
+  if (hovered) hovered.removeClass('hl');
+  hovered = null;
   refocus();
 });
 let pendingSelect;
@@ -1141,7 +1265,14 @@ const syncControls = () => {
   $('depsMode').value = depsMode;
   $('laneKey').value = laneKey;
   TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
+  syncLegend();
 };
+// Only explain what can appear on screen right now.
+function syncLegend() {
+  $('legendBaseline').hidden = !DATA.nodes.some(n => n.baseline && n.baseline.due);
+  $('legendRag').hidden = view === 'graph';
+  $('legend-done').hidden = $('hideDone').checked;
+}
 const setView = v => {
   if (v === view) return;
   view = v;
@@ -1187,38 +1318,102 @@ $('laneKey').onchange = e => {
   syncUrl();
   if (view !== 'graph') rebuild();
 };
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
+$('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 $('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
 syncControls();
 $('hideDone').onchange = () => rebuild();
-$('search').oninput = applySearch;
+$('search').oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 150);
+};
+$('search').onkeydown = e => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  stepSearch(e.shiftKey);
+};
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (document.activeElement === $('search') && $('search').value) clearSearch();
+  else if ($('panel').style.display === 'block') closePanel();
+});
 $('expandAll').onclick = () => {
   setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
-  rebuild(true);
+  rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('collapseAll').onclick = () => {
   setExpanded(new Set());
-  rebuild(true);
+  rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => fitView();
-const setLegend = open => {
+
+// Save the whole view as filtered (not just what is on screen) with a title bar, without
+// hover or selection fading; search dimming stays because it is a filter the viewer chose.
+const VIEW_NAMES = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline' };
+function exportTitle() {
+  const g = goal != null && byId.has(goal) ? byId.get(goal) : null;
+  return ['taskgraph', projectSelect.value || 'All projects', g && `#${g.id} ${g.title}`, VIEW_NAMES[view]].filter(Boolean).join(' · ');
+}
+function exportName() {
+  const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'all';
+  return ['taskgraph', slug(projectSelect.value || 'all-projects'), goal != null && 'goal-' + goal, view, DATA.today || new Date().toLocaleDateString('sv')].filter(Boolean).join('-') + '.png';
+}
+async function exportPng() {
+  const faded = cy.elements('.faded'), lit = cy.elements('.hl');
+  faded.union(lit).removeClass('faded hl');
+  mirrorNames();
+  let shot;
+  try {
+    shot = await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000, bg: '#111418' });
+  } finally {
+    faded.addClass('faded');
+    lit.addClass('hl');
+    mirrorNames();
+  }
+  const img = await createImageBitmap(shot);
+  const k = Math.max(1, img.width / 2400), head = Math.round(64 * k), pad = Math.round(24 * k);
+  const canvas = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height + head });
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#111418';
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.textBaseline = 'middle';
+  g.fillStyle = '#e5e7eb';
+  g.font = `bold ${Math.round(22 * k)}px ${FONT}`;
+  g.fillText(exportTitle(), pad, head * 0.36);
+  g.fillStyle = '#9ca3af';
+  g.font = `${Math.round(15 * k)}px ${FONT}`;
+  g.fillText('As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + ($('hideDone').checked ? ' · done items hidden' : ''), pad, head * 0.74);
+  g.drawImage(img, 0, head);
+  const blob = await new Promise(done => canvas.toBlob(done, 'image/png'));
+  const link = el('a', { href: URL.createObjectURL(blob), download: exportName() });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+$('exportPng').onclick = () => exportPng();
+const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
-  store.set('taskgraph.legend', open ? 'open' : 'closed');
+  if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
-setLegend(store.get('taskgraph.legend') !== 'closed');
+const savedLegend = store.get('taskgraph.legend');
+setLegend(savedLegend ? savedLegend !== 'closed' : window.innerWidth >= 1366, false);
 $('legendToggle').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
   fitIfOutside();
 };
-$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
-$('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 
-if (goal != null && !byId.has(goal)) goal = null;
-fillGoals();
-rebuild();
+const toolbar = $('toolbar');
+const fitBar = () => {
+  document.documentElement.style.setProperty('--bar', toolbar.getBoundingClientRect().height + 'px');
+  cy.resize();
+};
+fitBar();
+new ResizeObserver(fitBar).observe(toolbar);
 
 if (DATA.live) {
   let lastVersion = DATA.version;
@@ -1226,7 +1421,7 @@ if (DATA.live) {
   let busy = false;
   const setStatus = ok => {
     connected = ok;
-    const when = new Date().toLocaleTimeString();
+    const when = new Date().toLocaleTimeString([], HM);
     $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), (ok ? 'Live · checked ' : 'Disconnected · tried ') + when);
   };
   const getJson = async path => {
@@ -1259,6 +1454,10 @@ if (DATA.live) {
 } else {
   $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
 }
+
+if (goal != null && !byId.has(goal)) goal = null;
+fillGoals();
+rebuild();
 </script>
 </body>
 </html>
