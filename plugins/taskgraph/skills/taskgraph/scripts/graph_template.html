@@ -7,7 +7,8 @@
 <style>
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-#toolbar { position: fixed; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow-x: auto; font-size: 13px; }
+:root { --bar: 48px; }
+#toolbar { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 14px; min-height: 48px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow: visible; font-size: 13px; }
 #toolbar > * { flex: none; }
 #toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
@@ -22,14 +23,14 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .seg button + button { margin-left: -1px; }
 #toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .spacer { flex: 1 1 0; min-width: 0; }
-#toolbar #goal { max-width: 260px; }
+#toolbar #goal { flex: 0 1 auto; max-width: min(320px, 40vw); }
 #toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .goalinfo { color: #9ca3af; font-size: 12px; white-space: nowrap; }
-#toolbar .stamp { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
+#toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
-#cy { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; }
+#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
 #legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 6px 12px 8px; z-index: 2; }
 #legend #legendBody { display: flex; gap: 22px; margin-top: 4px; }
 #legend.closed { padding-bottom: 6px; }
@@ -39,7 +40,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #legend .col div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
-#panel { position: fixed; top: 48px; right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
 #panel h2 { margin: 0 0 6px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
@@ -809,6 +810,7 @@ function layoutTimeline(fit) {
 }
 
 function layout(fit = true) {
+  fitBar();
   cy.elements('.bg').remove();
   cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
   cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
@@ -1242,9 +1244,13 @@ $('legendToggle').onclick = () => {
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 
-if (goal != null && !byId.has(goal)) goal = null;
-fillGoals();
-rebuild();
+const toolbar = $('toolbar');
+const fitBar = () => {
+  document.documentElement.style.setProperty('--bar', toolbar.getBoundingClientRect().height + 'px');
+  cy.resize();
+};
+fitBar();
+new ResizeObserver(fitBar).observe(toolbar);
 
 if (DATA.live) {
   let lastVersion = DATA.version;
@@ -1285,6 +1291,10 @@ if (DATA.live) {
 } else {
   $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
 }
+
+if (goal != null && !byId.has(goal)) goal = null;
+fillGoals();
+rebuild();
 </script>
 </body>
 </html>

@@ -323,3 +323,32 @@ def test_cjk_label_clamps(browser, page_file):
     assert len(lines) == 2 and lines[-1].endswith("…")
     assert problems == []
     page.close()
+
+
+TOOLBAR = """() => {
+    const bar = document.getElementById('toolbar'), r = bar.getBoundingClientRect();
+    const kids = Array.from(document.querySelectorAll('#toolbar > *:not([hidden])'), k => k.getBoundingClientRect());
+    return {
+        overflow: bar.scrollWidth - bar.clientWidth, height: bar.offsetHeight, scrollLeft: bar.scrollLeft,
+        left: Math.min(...kids.map(k => k.left)), right: Math.max(...kids.map(k => k.right)),
+        gap: document.getElementById('cy').getBoundingClientRect().top - r.bottom,
+        project: document.getElementById('project').getBoundingClientRect().left
+    };
+}"""
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_toolbar_never_overflows(browser, page_file, view):
+    for width in (1024, 1280, 1440, 1920):
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        page.goto(f"{page_file.as_uri()}?view={view}")
+        page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+        bar = page.evaluate(TOOLBAR)
+        assert bar["overflow"] <= 0 and bar["left"] >= 0 and bar["right"] <= width, (width, bar)
+        assert bar["height"] <= (140 if width == 1024 else 96), (width, bar)
+        assert bar["gap"] == 0, (width, bar)
+        page.click("#fit")
+        page.click("#expandAll")
+        bar = page.evaluate(TOOLBAR)
+        assert bar["scrollLeft"] == 0 and bar["project"] >= 0
+        page.close()
