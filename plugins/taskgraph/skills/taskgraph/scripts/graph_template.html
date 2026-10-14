@@ -1474,6 +1474,23 @@ function exportName() {
   const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'all';
   return ['taskgraph', slug(projectSelect.value || 'all-projects'), goal != null && 'goal-' + goal, view, DATA.today || new Date().toLocaleDateString('sv')].filter(Boolean).join('-') + '.png';
 }
+// The legend entries the page shows right now, as drawable items for the exported image.
+async function legendItems() {
+  const items = [...document.querySelectorAll('#legendBody .col > div')].filter(d => !d.hidden);
+  return Promise.all(items.map(async d => {
+    const text = d.textContent.trim(), svg = d.querySelector('svg'), swatch = d.querySelector('i');
+    if (svg) {
+      const image = new Image();
+      image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+      await image.decode();
+      return { text, image };
+    }
+    const css = getComputedStyle(swatch);
+    const clear = c => !c || c === 'rgba(0, 0, 0, 0)' || c === 'transparent';
+    return { text, fill: clear(css.backgroundColor) ? '#111418' : css.backgroundColor, border: css.borderTopColor, outline: css.outlineStyle !== 'none' ? css.outlineColor : null };
+  }));
+}
+
 async function exportPng() {
   const faded = cy.elements('.faded'), lit = cy.elements('.hl');
   faded.union(lit).removeClass('faded hl');
@@ -1488,7 +1505,20 @@ async function exportPng() {
   }
   const img = await createImageBitmap(shot);
   const k = Math.max(1, img.width / 2400), head = Math.round(64 * k), pad = Math.round(24 * k);
-  const canvas = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height + head });
+  const key = await legendItems();
+  const font = `${Math.round(14 * k)}px ${FONT}`, icon = { w: Math.round(34 * k), h: Math.round(20 * k) }, gap = Math.round(8 * k), rowH = Math.round(30 * k);
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = font;
+  let x = pad, rows = 1;
+  const placed = key.map(item => {
+    const w = icon.w + gap + measure.measureText(item.text).width + 2 * gap;
+    if (x + w > img.width - pad && x > pad) { x = pad; rows += 1; }
+    const at = { ...item, x, row: rows - 1 };
+    x += w;
+    return at;
+  });
+  const foot = key.length ? rows * rowH + pad : 0;
+  const canvas = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height + head + foot });
   const g = canvas.getContext('2d');
   g.fillStyle = '#111418';
   g.fillRect(0, 0, canvas.width, canvas.height);
@@ -1500,6 +1530,21 @@ async function exportPng() {
   g.font = `${Math.round(15 * k)}px ${FONT}`;
   g.fillText('As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + ($('hideDone').checked ? ' · done items hidden' : ''), pad, head * 0.74);
   g.drawImage(img, 0, head);
+  g.font = font;
+  g.fillStyle = '#9ca3af';
+  placed.forEach(item => {
+    const y = head + img.height + pad / 2 + item.row * rowH + rowH / 2;
+    if (item.image) g.drawImage(item.image, item.x, y - icon.h / 2, icon.w, icon.h);
+    else {
+      const s = Math.round(16 * k), sx = item.x + (icon.w - s) / 2;
+      if (item.outline) { g.strokeStyle = item.outline; g.lineWidth = 2 * k; g.strokeRect(sx - 2 * k, y - s / 2 - 2 * k, s + 4 * k, s + 4 * k); }
+      g.fillStyle = item.fill;
+      g.fillRect(sx, y - s / 2, s, s);
+      g.strokeStyle = item.border; g.lineWidth = 2 * k; g.strokeRect(sx, y - s / 2, s, s);
+    }
+    g.fillStyle = '#9ca3af';
+    g.fillText(item.text, item.x + icon.w + gap, y);
+  });
   const blob = await new Promise(done => canvas.toBlob(done, 'image/png'));
   const link = el('a', { href: URL.createObjectURL(blob), download: exportName() });
   document.body.append(link);

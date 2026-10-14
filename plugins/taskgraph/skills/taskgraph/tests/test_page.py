@@ -869,3 +869,22 @@ def test_conflict_line_explains_itself(browser, page_file):
     assert page.evaluate("document.getElementById('cy').title") == ""
     assert problems == []
     page.close()
+
+
+def test_export_png_includes_the_legend(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    items = page.evaluate("legendItems().then(l => l.map(i => i.text))")
+    shown = page.evaluate("[...document.querySelectorAll('#legendBody .col > div')].filter(d => !d.hidden).map(d => d.textContent.trim())")
+    assert items == shown and "Milestone" in items and "Lane RAG" in items and "Done" not in items
+    page.click("#legendToggle")
+    assert page.evaluate("legendItems().then(l => l.length)") == len(items)
+    import struct
+    with page.expect_download() as info:
+        page.click("#exportPng")
+    data = open(info.value.path(), "rb").read()
+    w, h = struct.unpack(">II", data[16:24])
+    plan = page.evaluate("(async () => (await createImageBitmap(await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000 }))).height)()")
+    k = max(1, w / 2400)
+    assert h >= plan + round(64 * k) + round(30 * k)
+    assert problems == []
+    page.close()
