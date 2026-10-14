@@ -24,7 +24,12 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .seg button + button { margin-left: -1px; }
 #toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .spacer { flex: 1 1 0; min-width: 0; }
-#toolbar #goal { flex: 0 1 auto; max-width: min(320px, 40vw); }
+#toolbar .typesWrap { position: relative; }
+#toolbar #typesBtn.on { background: #3b4658; border-color: #566176; color: #fff; }
+#toolbar #types { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; padding: 6px; background: #181c22; border: 1px solid #2a2f38; border-radius: 8px; box-shadow: 0 6px 18px #0008; }
+#toolbar .typesWrap.open #types { display: flex; }
+#toolbar #goal { flex: 0 1 auto; max-width: min(260px, 30vw); }
+#toolbar .actions { display: flex; gap: 6px; }
 #toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .goalinfo, #searchCount { color: #9ca3af; font-size: 12px; white-space: nowrap; }
 #toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #9ca3af; font-size: 12px; white-space: nowrap; }
@@ -79,15 +84,17 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
   <label id="depsBy" hidden>Dependencies <select id="depsMode"><option value="off">Conflicts only</option><option value="critical">Critical path</option><option value="all">All</option></select></label>
   <label><input type="checkbox" id="hideDone" checked> Hide done</label>
-  <span class="seg" id="types"></span>
+  <span class="typesWrap"><button id="typesBtn" aria-haspopup="true" aria-expanded="false" title="Choose which node types to show">Types: all ▾</button><span class="seg" id="types"></span></span>
   <input type="text" id="search" placeholder="Search" size="9">
   <span id="searchCount" aria-live="polite"></span>
-  <button id="expandAll">Expand all</button>
-  <button id="collapseAll">Collapse all</button>
-  <button id="relayout">Re-layout</button>
-  <button id="fit">Fit</button>
-  <button id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
-  <button id="refresh" hidden>Refresh</button>
+  <span class="actions">
+    <button id="expandAll" title="Expand all summaries">Expand</button>
+    <button id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse</button>
+    <button id="relayout" title="Lay the view out again">Re-layout</button>
+    <button id="fit" title="Show the whole plan">Fit</button>
+    <button id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
+    <button id="refresh" hidden title="Check for changes now">Refresh</button>
+  </span>
   <span class="spacer"></span>
   <span class="stamp" id="stamp"></span>
 </div>
@@ -1374,6 +1381,8 @@ const syncControls = () => {
   $('depsMode').value = depsMode;
   $('laneKey').value = laneKey;
   TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
+  $('typesBtn').textContent = (types.size === TYPES.length ? 'Types: all' : `Types: ${types.size} of ${TYPES.length}`) + ' ▾';
+  $('typesBtn').classList.toggle('on', types.size < TYPES.length);
   syncLegend();
 };
 // Only explain what can appear on screen right now.
@@ -1430,6 +1439,15 @@ $('laneKey').onchange = e => {
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 $('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
+// The seven type chips live in a dropdown so the toolbar fits a laptop; it stays open while
+// several chips are toggled and closes on a click elsewhere or Esc.
+const setTypesOpen = open => {
+  $('typesBtn').parentElement.classList.toggle('open', open);
+  $('typesBtn').setAttribute('aria-expanded', String(open));
+};
+$('typesBtn').onclick = () => setTypesOpen(!$('typesBtn').parentElement.classList.contains('open'));
+document.addEventListener('click', e => { if (!e.target.closest('.typesWrap')) setTypesOpen(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') setTypesOpen(false); });
 syncControls();
 $('hideDone').onchange = () => rebuild();
 $('search').oninput = () => {

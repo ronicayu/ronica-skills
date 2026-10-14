@@ -486,6 +486,7 @@ def test_all_done_offers_show_done(browser, done_file, view):
 def test_nothing_matches_offers_reset(browser, page_file):
     page, problems = open_page(browser, page_file)
     page.select_option("#goal", "2")
+    page.click("#typesBtn")
     for t in ("task", "milestone", "decision", "external", "objective", "issue"):
         page.click(f"#type-{t}")
     assert page.evaluate("tasks().length") == 0
@@ -699,6 +700,7 @@ def test_back_and_forward_step_through_navigation(browser, page_file):
     page.click("#viewTimeline")
     page.select_option("#goal", "2")
     page.select_option("#depsMode", "critical")
+    page.click("#typesBtn")
     page.click("#type-task")
     assert page.evaluate(state)[:3] == ["timeline", 2, "critical"]
     assert "types=" in page.evaluate("location.search")
@@ -886,5 +888,24 @@ def test_export_png_includes_the_legend(browser, page_file):
     plan = page.evaluate("(async () => (await createImageBitmap(await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000 }))).height)()")
     k = max(1, w / 2400)
     assert h >= plan + round(64 * k) + round(30 * k)
+    assert problems == []
+    page.close()
+
+
+def test_types_dropdown(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    assert page.inner_text("#typesBtn") == "Types: all ▾" and page.is_hidden("#type-task")
+    page.click("#typesBtn")
+    assert page.is_visible("#type-task") and page.get_attribute("#typesBtn", "aria-expanded") == "true"
+    page.click("#type-task")
+    page.click("#type-external")
+    assert page.is_visible("#type-task")
+    assert page.inner_text("#typesBtn") == "Types: 5 of 7 ▾" and "on" in page.get_attribute("#typesBtn", "class")
+    assert "5" not in page.evaluate("tasks().map(n => n.id())")
+    page.mouse.click(700, 500)
+    assert page.is_hidden("#type-task")
+    page.click("#typesBtn")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#type-task")
     assert problems == []
     page.close()
