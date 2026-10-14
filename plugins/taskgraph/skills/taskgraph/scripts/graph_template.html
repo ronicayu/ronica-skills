@@ -983,7 +983,7 @@ function setGoal(id) {
   goal = id != null && byId.has(id) ? id : null;
   fillGoals();
   setTitle();
-  syncUrl();
+  syncUrl(true);
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 }
@@ -1257,7 +1257,29 @@ const params = () => {
   if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
   return q.toString().replaceAll('%2C', ',');
 };
-const syncUrl = () => history.replaceState(null, '', params() ? '?' + params() : location.pathname);
+// Navigation (view, goal, project, dependencies, lanes) adds a history entry so Back returns to
+// the previous state; filters only rewrite the current one so Back does not replay every click.
+const syncUrl = push => {
+  const url = params() ? '?' + params() : location.pathname;
+  if (url === (location.search || location.pathname)) return;
+  history[push ? 'pushState' : 'replaceState'](null, '', url);
+};
+window.addEventListener('popstate', () => {
+  const q = new URLSearchParams(location.search);
+  view = VIEWS.find(v => v === q.get('view')) || 'graph';
+  depsMode = DEPS[q.get('deps')] || 'off';
+  laneKey = Object.hasOwn(LANE_KEYS, q.get('lanes')) ? q.get('lanes') : 'lane';
+  types = new Set(parseTypes(q.get('types')).length ? parseTypes(q.get('types')) : TYPES);
+  const project = q.get('project') || '';
+  if (project && !Array.from(projectSelect.options).some(o => o.value === project)) projectSelect.append(el('option', { value: project, textContent: project }));
+  projectSelect.value = project;
+  goal = byId.has(Number(q.get('goal'))) ? Number(q.get('goal')) : null;
+  syncControls();
+  fillGoals();
+  setTitle();
+  rebuild();
+  if (pinned) openPanel(byId.get(pinned));
+});
 const syncControls = () => {
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
@@ -1280,7 +1302,7 @@ const setView = v => {
   view = v;
   store.set('taskgraph.view', v);
   syncControls();
-  syncUrl();
+  syncUrl(true);
   rebuild();
 };
 const toggleType = t => {
@@ -1299,7 +1321,7 @@ projectSelect.onchange = () => {
   if (goal != null && projectSelect.value && byId.get(goal).project !== projectSelect.value) goal = null;
   fillGoals();
   setTitle();
-  syncUrl();
+  syncUrl(true);
   rebuild();
 };
 $('goal').onchange = e => setGoal(e.target.value ? Number(e.target.value) : null);
@@ -1309,7 +1331,7 @@ $('viewTimeline').onclick = () => setView('timeline');
 $('depsMode').onchange = e => {
   depsMode = e.target.value;
   store.set('taskgraph.deps', depsMode);
-  syncUrl();
+  syncUrl(true);
   layout(false);
   applySearch();
   refocus();
@@ -1317,7 +1339,7 @@ $('depsMode').onchange = e => {
 $('laneKey').onchange = e => {
   laneKey = e.target.value;
   store.set('taskgraph.lanes', laneKey);
-  syncUrl();
+  syncUrl(true);
   if (view !== 'graph') rebuild();
 };
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));

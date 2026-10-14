@@ -687,3 +687,29 @@ def test_export_png(browser, page_file, tmp_path, view):
     assert page.evaluate("exportTitle()") == f"taskgraph · demo · #2 Ship v1 · {dict(graph='Graph', lanes='Swimlane', timeline='Timeline')[view]}"
     assert problems == []
     page.close()
+
+
+def test_back_and_forward_step_through_navigation(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    state = "() => [view, goal, depsMode, location.search]"
+    page.click("#viewTimeline")
+    page.select_option("#goal", "2")
+    page.select_option("#depsMode", "critical")
+    page.click("#type-task")
+    assert page.evaluate(state)[:3] == ["timeline", 2, "critical"]
+    assert "types=" in page.evaluate("location.search")
+    page.go_back()
+    page.wait_for_function("depsMode === 'off'")
+    assert page.evaluate(state)[:3] == ["timeline", 2, "off"]
+    assert page.input_value("#depsMode") == "off"
+    page.go_back()
+    page.wait_for_function("goal === null")
+    assert page.evaluate(state)[:3] == ["timeline", None, "off"] and page.input_value("#goal") == ""
+    page.go_back()
+    page.wait_for_function("view === 'graph'")
+    assert page.evaluate("tasks().length") > 0 and page.url.startswith("file:")
+    page.go_forward()
+    page.wait_for_function("view === 'timeline'")
+    assert page.evaluate("cy.nodes('.tl-head').length") > 0
+    assert problems == []
+    page.close()
