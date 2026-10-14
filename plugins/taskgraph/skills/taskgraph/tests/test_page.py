@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -82,7 +83,7 @@ def test_timeline_marks_baseline_and_today(browser, page_file):
     page.goto(f"{page_file.as_uri()}?view=timeline")
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
     assert page.evaluate("cy.nodes('.tl-base').map(n => n.id())") == ["tl:base:3"]
-    assert page.evaluate("cy.getElementById('tl:today').data('name')") == "Today 10/13"
+    assert page.evaluate("cy.getElementById('tl:today').data('name')") == "Today 13 Oct"
     assert page.evaluate("cy.getElementById('2').hasClass('atrisk')")
     page.close()
 
@@ -454,5 +455,21 @@ def test_nothing_matches_offers_reset(browser, page_file):
     assert page.evaluate("Array.from(document.querySelectorAll('#types button')).every(b => b.classList.contains('on'))")
     assert page.input_value("#goal") == "" and "goal=" not in page.url
     assert page.evaluate("tasks().length") > 0 and page.is_hidden("#empty")
+    assert problems == []
+    page.close()
+
+
+def test_date_format(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    assert page.evaluate("day('2026-10-30')") == "30 Oct"
+    assert page.evaluate("day('2027-03-15')") == "15 Mar 2027"
+    assert page.evaluate("cy.getElementById('3').data('label')") == "20 Oct–25 Nov"
+    assert page.evaluate("document.querySelector('#goal option[value=\"2\"]').textContent") == "#2 Ship v1 · 1 Dec"
+    page.evaluate("select(3, false)")
+    text = page.inner_text("#panel")
+    assert "Baseline due" in text and "20 Nov (+5d) · plan" in text
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", text)
+    assert re.search(r"Created\s+\d{1,2} Oct \d{2}:\d{2}", text)
+    assert re.fullmatch(r"Generated \d{1,2} \w{3}( \d{4})? \d{2}:\d{2}", page.inner_text("#stamp"))
     assert problems == []
     page.close()
