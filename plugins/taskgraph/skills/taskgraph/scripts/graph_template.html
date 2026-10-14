@@ -166,7 +166,7 @@ const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
   lane: n => inheritedMeta(n, 'lane'),
-  owner: n => n.meta.owner,
+  owner: n => n.meta.owner ?? n.meta.decider ?? n.meta.party,
   tag: n => Array.isArray(n.meta.tags) ? n.meta.tags[0] : n.meta.tags,
   project: n => n.project
 };

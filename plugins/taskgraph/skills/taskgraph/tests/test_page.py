@@ -595,3 +595,23 @@ def test_legend_defaults_and_rows(browser, page_file, raid_file):
         page.click("#legendToggle")
         assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 28
         page.close()
+
+
+BAND_OF = """id => {
+    const y = cy.getElementById(String(id)).position('y');
+    return cy.nodes('.lane-bg').filter(b => Math.abs(b.position('y') - y) < b.data('h') / 2).data('name').split('\\n')[0];
+}"""
+
+
+def test_lanes_by_owner_fallback(browser, programme_file, page_file):
+    page, problems = open_page(browser, programme_file, "?view=lanes&lanes=owner")
+    assert heads(page, "lanes") == ["ciso", "mei", "pd", "priya", "Unassigned"]
+    assert page.evaluate(f"({BAND_OF})(8)") == "ciso"
+    assert page.evaluate(f"({BAND_OF})(2)") == "Unassigned"
+    page.close()
+    page, problems = open_page(browser, page_file, "?view=lanes")
+    names = heads(page, "lanes")
+    assert names[0] == "Objectives" and "Unassigned" not in names
+    assert page.evaluate(f"({BAND_OF})(1)") == "Objectives"
+    assert problems == []
+    page.close()
