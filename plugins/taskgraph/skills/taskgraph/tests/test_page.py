@@ -797,3 +797,21 @@ def test_deleted_goal_leaves_the_url(browser, page_file):
     assert page.evaluate("tasks().length") > 0
     assert problems == []
     page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view):
+    page, problems = open_page(browser, programme_file, f"?view={view}")
+    page.click("#collapseAll")
+    marked = "id => [cy.getElementById(String(id)).data('label'), cy.getElementById(String(id)).hasClass('late')]"
+    label, late = page.evaluate(f"({marked})(1)")
+    assert "1 late inside" in label and late
+    page.evaluate("toggleExpand(1)")
+    label, late = page.evaluate(f"({marked})(3)")
+    assert "1 late inside" in label and late
+    page.click("#expandAll")
+    label, late = page.evaluate(f"({marked})(3)")
+    assert "late inside" not in label and not late
+    assert page.evaluate("cy.getElementById('4').hasClass('late')")
+    assert problems == []
+    page.close()
