@@ -293,10 +293,26 @@ ANCHOR = """() => {
 }"""
 
 
+INSIDE = """() => {
+    const box = document.getElementById('cy').getBoundingClientRect();
+    return tasks().every(n => { const b = n.renderedBoundingBox(); return b.x1 >= 0 && b.y1 >= 0 && b.x2 <= box.width && b.y2 <= box.height; });
+}"""
+
+
+@pytest.fixture(scope="module")
+def solo_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("solo")
+    tg = runner(tmp / "t.db")
+    tg("add", "Only task", "--due", "2026-11-01")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
 @pytest.mark.parametrize("view", VIEWS)
 def test_readability_floor(browser, tall_file, view):
     page, problems = open_page(browser, tall_file, f"?view={view}")
-    for action in (None, "#fit", "#expandAll"):
+    for action in (None, "#expandAll", "#relayout"):
         if action:
             page.click(action)
         assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6, action
@@ -306,10 +322,26 @@ def test_readability_floor(browser, tall_file, view):
     page.close()
 
 
-INSIDE = """() => {
-    const box = document.getElementById('cy').getBoundingClientRect();
-    return tasks().every(n => { const b = n.renderedBoundingBox(); return b.x1 >= 0 && b.y1 >= 0 && b.x2 <= box.width && b.y2 <= box.height; });
-}"""
+@pytest.mark.parametrize("view", VIEWS)
+def test_fit_button_shows_the_whole_plan(browser, tall_file, view):
+    page, problems = open_page(browser, tall_file, f"?view={view}")
+    assert not page.evaluate(INSIDE)
+    page.click("#fit")
+    assert page.evaluate("cy.zoom()") < 0.9
+    assert abs(page.evaluate("cy.zoom() - fitTarget().zoom")) < 1e-6
+    assert page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_tiny_plan_is_not_blown_up(browser, solo_file, view):
+    page, problems = open_page(browser, solo_file, f"?view={view}")
+    assert 0.9 <= page.evaluate("cy.zoom()") <= 1.25 + 1e-9
+    page.click("#fit")
+    assert page.evaluate("cy.zoom()") <= 1.25 + 1e-9
+    assert problems == []
+    page.close()
 
 
 @pytest.mark.parametrize("view", VIEWS)

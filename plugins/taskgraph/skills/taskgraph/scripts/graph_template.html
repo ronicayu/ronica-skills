@@ -162,7 +162,7 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
-const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9;
+const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
@@ -846,7 +846,7 @@ function fitTarget(eles = cy.elements(), pad = 40) {
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
   const reserve = Math.max(pad, box.bottom - legend.top + 12);
   const w = box.width - 2 * pad, h = box.height - pad - reserve;
-  const zoom = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
+  const zoom = Math.min(MAX_FIT, Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
@@ -866,10 +866,12 @@ function anchored(zoom) {
   return { zoom, pan: { x: 40 - zoom * bb.x1, y: 40 - zoom * bb.y1 } };
 }
 
-function fitView() {
+// Automatic fits keep labels readable and let a big plan scroll; the Fit button (whole)
+// always shows everything, however small, because that is what the person asked for.
+function fitView(whole) {
   let t = fitTarget();
   if (!t) return;
-  if (t.zoom < READABLE) t = anchored(READABLE);
+  if (t.zoom < READABLE && !whole) t = anchored(READABLE);
   cy.viewport(t);
 }
 
@@ -1348,7 +1350,7 @@ $('collapseAll').onclick = () => {
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
-$('fit').onclick = () => fitView();
+$('fit').onclick = () => fitView(true);
 
 // Save the whole view as filtered (not just what is on screen) with a title bar, without
 // hover or selection fading; search dimming stays because it is a filter the viewer chose.
