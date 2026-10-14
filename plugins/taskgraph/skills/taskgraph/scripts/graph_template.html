@@ -1014,7 +1014,11 @@ function applyData(next) {
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
-  if (goal != null && !byId.has(goal)) goal = null;
+  if (goal != null && !byId.has(goal)) {
+    goal = null;
+    setTitle();
+    syncUrl();
+  }
   fillGoals();
   syncLegend();
   const { nodes, edges, open } = visibleData();

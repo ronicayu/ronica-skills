@@ -783,3 +783,17 @@ def test_timeline_search_enter_keeps_names_in_view(browser, tall_file):
     assert page.evaluate("document.getElementById('panel').style.display") == "block"
     assert problems == []
     page.close()
+
+
+def test_deleted_goal_leaves_the_url(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline&goal=2")
+    assert "goal=2" in page.url
+    page.evaluate("""() => {
+        const nodes = DATA.nodes.filter(n => n.id !== 2).map(n => ({ ...n, depends_on: n.depends_on.filter(i => i !== 2), blocks: n.blocks.filter(i => i !== 2), children: n.children.filter(i => i !== 2) }));
+        applyData({ ...DATA, nodes, edges: DATA.edges.filter(e => e.source !== 2 && e.target !== 2) });
+    }""")
+    assert "goal=" not in page.url and "view=timeline" in page.url
+    assert page.input_value("#goal") == "" and "#2" not in page.evaluate("document.title")
+    assert page.evaluate("tasks().length") > 0
+    assert problems == []
+    page.close()
