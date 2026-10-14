@@ -834,3 +834,16 @@ def test_external_label_names_who_to_chase(browser, page_file, view):
     assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
     assert problems == []
     page.close()
+
+
+def test_panel_shows_driving_chain(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.evaluate("select(2, false)")
+    assert page.text_content("#chainHead") == "Driving chain"
+    items = page.evaluate("Array.from(document.querySelectorAll('#chainHead + ul li span'), s => s.textContent)")
+    assert items == ["#5 Vendor key", "#3 Build feature"]
+    page.click("#chainHead + ul li:first-child")
+    page.wait_for_function("pinned === 5")
+    assert page.query_selector("#chainHead") is None
+    assert problems == []
+    page.close()

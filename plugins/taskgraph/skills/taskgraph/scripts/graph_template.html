@@ -1152,6 +1152,9 @@ function fmt(iso) {
 const show = (k, v) => DATE_KEYS.includes(k) ? day(v) : k === 'estimate' ? v + ' h' : typeof v === 'string' ? v : JSON.stringify(v);
 const row = (k, v) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: v }));
 
+// The chain with the least slack into an open milestone or objective, first step first, as `tg.py path` prints it.
+const chainOf = n => n.outlook && n.derived_status !== 'done' ? (n.outlook.driving || []).filter(i => i !== n.id && byId.has(i)) : [];
+
 function refList(ids) {
   if (!ids.length) return el('div', { className: 'none', textContent: 'None' });
   return el('ul', null, ...ids.map(id => {
@@ -1207,6 +1210,8 @@ function openPanel(n) {
     n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
     focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs',
       style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
+    chainOf(n).length ? el('h3', { id: 'chainHead', textContent: 'Driving chain' }) : null,
+    chainOf(n).length ? refList(chainOf(n)) : null,
     (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
     (n.threats ?? []).length ? refList(n.threats) : null,
     conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
