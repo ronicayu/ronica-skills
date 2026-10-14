@@ -149,6 +149,14 @@ def test_legend_collapses_and_remembers(browser, page_file):
     page.close()
 
 
+BY_Y = "((sel, key) => cy.nodes(sel).sort((a, b) => a.position('y') - b.position('y')).map(n => n.data(key)))"
+
+
+def heads(page, view):
+    sel = ".lane-bg" if view == "lanes" else ".tl-head"
+    return page.evaluate(f"{BY_Y}('{sel}', 'name').map(s => s.replace(/( · |\\n)(RED|AMBER|GREEN)$/, ''))")
+
+
 def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
     page, problems = open_page(browser, page_file, "?view=timeline")
     drawn = "() => cy.edges('.tl-dep').map(e => e.id()).sort()"
@@ -159,9 +167,8 @@ def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
     assert "deps=critical" in page.url
     page.select_option("#depsMode", "all")
     assert "deps=1" in page.url and len(page.evaluate(drawn)) >= 2
-    rows = page.evaluate("cy.nodes('.tl-name').map(n => [n.position('y'), n.data('name')]).sort((a, b) => a[0] - b[0]).map(r => r[1])")
-    launch = next(i for i, r in enumerate(rows) if "#1 Launch" in r)
-    assert rows[launch + 1].startswith("#2 Ship v1") and rows[launch + 2].startswith("#4 Write docs")
+    assert page.evaluate(f"{BY_Y}('.tl-name[of]', 'name')") == ["▾ #1 Launch", "#2 Ship v1", "#3 Build feature", "#5 Vendor key", "#4 Write docs", "#6 Undated chore"]
+    assert heads(page, "timeline") == ["Objectives", "dev", "docs", "Undated"]
     assert problems == []
     page.close()
 
@@ -205,5 +212,52 @@ def test_goal_focus_from_picker_and_panel(browser, page_file):
     assert page.input_value("#goal") == "3" and page.inner_text("#focusGoal") == "Show everything"
     page.click("#focusGoal")
     assert page.evaluate(SHOWN) == everything
+    assert problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def programme_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("programme")
+    tg = runner(tmp / "t.db")
+    tg("add", "Migrate", "--type", "objective", "--meta", "owner=pd")
+    tg("add", "Go live", "--type", "milestone", "--due", "2026-12-15", "--meta", "lane=Programme")
+    tg("add", "Build landing zone", "--parent", "1", "--meta", "lane=Infra", "owner=priya")
+    tg("add", "Write modules", "--parent", "3", "--start", "2026-09-20", "--due", "2026-10-10", "--meta", "owner=priya")
+    tg("add", "Migrate data", "--parent", "1", "--meta", "lane=Data", "owner=mei")
+    tg("add", "Replicate", "--parent", "5", "--start", "2026-10-15", "--due", "2026-11-15", "--meta", "owner=mei")
+    tg("add", "Capacity", "--type", "risk", "--blocks", "6", "--due", "2026-10-20", "--meta", "lane=Data", "owner=priya", "likelihood=medium", "impact=high")
+    tg("add", "Residency", "--type", "decision", "--due", "2026-10-25", "--meta", "lane=Security", "decider=ciso")
+    tg("dep", "add", "2", "3")
+    tg("dep", "add", "2", "5")
+    tg("dep", "add", "6", "8")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+RAGS = f"{BY_Y}('.lane-rag', 'rag')"
+
+
+def test_bands_and_rag_match_across_views(browser, programme_file):
+    for view in ("lanes", "timeline"):
+        page, problems = open_page(browser, programme_file, f"?view={view}")
+        assert heads(page, view) == ["Objectives", "Data", "Infra", "Programme", "Security"]
+        assert page.evaluate(RAGS) == ["red", "amber", "red", "red", "amber"]
+        page.click("#expandAll")
+        assert heads(page, view) == ["Objectives", "Data", "Infra", "Programme", "Security"]
+        assert page.evaluate(RAGS) == ["red", "amber", "red", "red", "amber"]
+        assert problems == []
+        page.close()
+
+
+def test_timeline_nests_only_within_lane(browser, programme_file):
+    page, problems = open_page(browser, programme_file, "?view=timeline")
+    page.click("#expandAll")
+    rows = page.evaluate(f"{BY_Y}('.tl-name', 'name')")
+    infra = rows.index("Infra")
+    assert rows[infra + 1] == "▾ #3 Build landing zone" and rows[infra + 2] == "#4 Write modules"
+    assert not any("#3 Build landing zone" in r for r in rows[rows.index("Objectives"):rows.index("Data")])
+    assert page.evaluate("cy.nodes('.tl-name[of=\"4\"]').data('tx') === 14 + 14 - TL.names")
     assert problems == []
     page.close()
