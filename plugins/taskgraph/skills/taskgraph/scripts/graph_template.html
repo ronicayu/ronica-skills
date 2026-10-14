@@ -152,7 +152,7 @@ const SUBTITLE = {
   task: n => [n.due && 'due ' + day(n.due), n.meta.owner, n.meta.estimate != null && n.meta.estimate + 'h'],
   milestone: n => [n.due ? day(n.due) : 'no date'],
   decision: n => [n.due && 'decide by ' + day(n.due), n.meta.decider],
-  external: n => [n.due && 'needed by ' + day(n.due), n.meta.party, n.meta.chase && 'chase ' + day(n.meta.chase)],
+  external: n => n.chase_due ? [n.due && 'needed by ' + day(n.due)] : [n.meta.party, n.due && 'needed by ' + day(n.due), n.meta.chase && 'chase ' + day(n.meta.chase)],
   objective: n => [n.meta.owner],
   risk: n => [[n.meta.likelihood, n.meta.impact].filter(Boolean).join('/'), n.meta.owner, n.due && 'review ' + day(n.due)],
   issue: n => [n.meta.severity, n.meta.owner, n.due && 'due ' + day(n.due)]
@@ -471,6 +471,9 @@ const troubleText = n => {
   return t.late ? t.late + ' late inside' : t.conflicts ? (t.conflicts === 1 ? '1 conflict' : t.conflicts + ' conflicts') + ' inside' : null;
 };
 
+// Who to chase is the point of a chase-due external, so name the party rather than "chase due".
+const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
+
 function labelOf(n, open) {
   const m = n.meta;
   const parts = isSummary(n)
@@ -478,7 +481,7 @@ function labelOf(n, open) {
     : (SUBTITLE[n.type] || SUBTITLE.task)(n);
   if (n.children.length && !open.has(n.id)) parts.unshift('▸ ' + descendants(n));
   if (troubleText(n)) parts.unshift(troubleText(n));
-  if (n.chase_due) parts.unshift('chase due');
+  if (n.chase_due) parts.unshift(chaseText(n));
   if (conflicted(n)) parts.unshift('conflict');
   if (atRisk(n)) parts.unshift('at risk');
   if (n.late_days != null) parts.unshift(n.late_days + 'd late');
@@ -680,7 +683,7 @@ function dateText(n) {
   if (n.late_days != null) parts.push(n.late_days + 'd late');
   if (atRisk(n)) parts.push('at risk');
   if (conflicted(n)) parts.push('conflict');
-  if (n.chase_due) parts.push('chase due');
+  if (n.chase_due) parts.push(chaseText(n));
   return parts.join(' · ');
 }
 

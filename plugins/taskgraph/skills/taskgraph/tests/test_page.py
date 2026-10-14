@@ -821,3 +821,16 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     assert page.evaluate("cy.getElementById('4').hasClass('late')")
     assert problems == []
     page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_external_label_names_who_to_chase(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}")
+    calm = page.evaluate("cy.getElementById('5').data('label')")
+    if view != "timeline":
+        assert "Acme" in calm and ("needed by" not in calm or calm.index("Acme") < calm.index("needed by"))
+    page.evaluate("applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 5 ? { ...n, chase_due: true, meta: { ...n.meta, chase: '2026-10-10' } } : n) })")
+    label = page.evaluate("cy.getElementById('5').data('label')")
+    assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    assert problems == []
+    page.close()
