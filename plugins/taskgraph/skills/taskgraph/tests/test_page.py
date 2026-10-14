@@ -179,7 +179,10 @@ def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
 def test_lane_rag_stripes(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}")
     rag = page.evaluate("cy.nodes('.lane-rag').map(n => n.data('rag'))")
-    assert "red" in rag and len(rag) == page.evaluate("cy.nodes('.lane-bg').length")
+    bands = page.evaluate("cy.nodes('.lane-bg').length")
+    assert "red" in rag and len(rag) == (bands - 1 if view == "timeline" else bands)
+    if view == "timeline":
+        assert page.evaluate(f"{BY_Y}('.tl-head', 'name')")[-1] == "Undated"
     assert problems == []
     page.close()
 

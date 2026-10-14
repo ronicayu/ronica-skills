@@ -767,9 +767,9 @@ function layoutTimeline(fit) {
   };
   names.forEach(name => {
     const from = rows.length, head = name === null ? 'Undated' : name;
-    rows.push({ head });
+    rows.push({ head, undated: name === null });
     groups.get(name).sort(cmp).forEach(n => walk(n, 0));
-    spans.push([from, rows.length, head]);
+    spans.push([from, rows.length, head, name === null]);
   });
   const today = DATA.today || new Date().toLocaleDateString('sv');
   const baseDue = n => n.baseline && n.baseline.due && n.baseline.due !== n.due && datesOf(n) ? n.baseline.due : null;
@@ -784,7 +784,7 @@ function layoutTimeline(fit) {
   const marks = new Map();
   rows.forEach((r, i) => {
     const y = yOf(i);
-    if (r.head) return els.push(bg('tl-name tl-head', 'tl:name:' + i, { name: r.head + ' · ' + bandRag(r.head).toUpperCase(), w: TL.names, h: TL.row, tx: 14 - TL.names }, TL.names / 2, y));
+    if (r.head) return els.push(bg('tl-name tl-head', 'tl:name:' + i, { name: r.undated ? r.head : r.head + ' · ' + bandRag(r.head).toUpperCase(), w: TL.names, h: TL.row, tx: 14 - TL.names }, TL.names / 2, y));
     const n = r.n, ele = cy.getElementById(String(n.id)), d = datesOf(n);
     const mark = !d ? 'mk-none' : isSummary(n) ? 'mk-sum' : isPoint(n) || d[0] === d[1] ? 'mk-pt' : 'mk-bar';
     const x1 = d ? xOf(d[0]) : 0, x2 = d ? xOf(d[1]) : 0;
@@ -800,7 +800,7 @@ function layoutTimeline(fit) {
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
   });
   const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
-  spans.forEach(([from, to, head], i) => els.push(stripe('tl:rag:' + i, (to - from) * TL.row, 4, TL.head + (from + to) * TL.row / 2, head)));
+  spans.forEach(([from, to, head, undated], i) => undated || els.push(stripe('tl:rag:' + i, (to - from) * TL.row, 4, TL.head + (from + to) * TL.row / 2, head)));
   spans.forEach(([from, to], i) => els.push(bg('lane-bg', 'tl:band:' + i, { name: '', w: width, h: (to - from) * TL.row, tx: 0, shade: i % 2 ? '#171b22' : '#14181e' }, width / 2, TL.head + (from + to) * TL.row / 2)));
   const begin = new Date(lo * 864e5);
   for (let m = new Date(Date.UTC(begin.getUTCFullYear(), begin.getUTCMonth() + 1, 1)); m / 864e5 <= hi; m.setUTCMonth(m.getUTCMonth() + 1)) {
