@@ -381,3 +381,30 @@ def test_search_reveals_collapsed_and_counts(browser, page_file):
     assert page.inner_text("#searchCount") == "" and page.evaluate("cy.nodes('.dim').length") == 0
     assert problems == []
     page.close()
+
+
+def node_xy(page, nid):
+    return page.evaluate(
+        f"""() => {{
+            const p = cy.getElementById('{nid}').renderedPosition(), b = document.getElementById('cy').getBoundingClientRect();
+            return [b.left + p.x, b.top + p.y];
+        }}"""
+    )
+
+
+def test_hover_does_not_fade(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.mouse.move(*node_xy(page, "5"))
+    page.wait_for_timeout(200)
+    assert page.evaluate("cy.nodes('.faded').length") == 0
+    assert page.evaluate("cy.getElementById('5').hasClass('hl') && cy.getElementById('3').hasClass('hl')")
+    left, top = page.evaluate("(b => [b.left, b.top])(document.getElementById('cy').getBoundingClientRect())")
+    page.mouse.move(left + 5, top + 5)
+    page.wait_for_timeout(100)
+    assert page.evaluate("cy.elements('.hl').length") == 0
+    page.mouse.click(*node_xy(page, "5"))
+    page.wait_for_timeout(200)
+    assert page.evaluate("cy.nodes('.faded').length") > 0
+    assert float(page.evaluate("cy.nodes('.faded')[0].style('opacity')")) == 0.35
+    assert problems == []
+    page.close()

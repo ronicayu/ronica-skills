@@ -342,8 +342,8 @@ const cy = cytoscape({
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
-    { selector: '.faded', style: { 'opacity': 0.15 } },
-    { selector: '.dim', style: { 'opacity': 0.15 } }
+    { selector: '.faded', style: { 'opacity': 0.35 } },
+    { selector: '.dim', style: { 'opacity': 0.2 } }
   ]
 });
 
@@ -983,16 +983,17 @@ function reveal(id) {
   select(id, true);
 }
 
-function focusOn(n) {
+function focusOn(n, fade) {
   const keep = n.union(n.predecessors()).union(n.successors());
-  cy.elements().not('.bg').addClass('faded');
+  if (fade) cy.elements().not('.bg').addClass('faded');
   keep.removeClass('faded').addClass('hl');
   mirrorNames();
+  return keep;
 }
 
 function refocus() {
   cy.elements().removeClass('faded hl');
-  if (pinned) focusOn(cy.getElementById(String(pinned)));
+  if (pinned) focusOn(cy.getElementById(String(pinned)), true);
   mirrorNames();
 }
 
@@ -1148,13 +1149,18 @@ function select(id, center) {
   if (center) cy.animate({ center: { eles: node } }, { duration: 250 });
 }
 
+// Hover only highlights: on a projector a resting mouse must not fade the slide.
+let hoverTimer, hovered = null;
 cy.on('mouseover', 'node', e => {
-  cy.elements().removeClass('faded hl');
-  focusOn(e.target);
+  clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => { hovered = focusOn(e.target, false); }, 120);
   $('cy').title = '#' + e.target.id() + ' ' + e.target.data('title');
 });
 cy.on('mouseout', 'node', () => {
+  clearTimeout(hoverTimer);
   $('cy').title = '';
+  if (hovered) hovered.removeClass('hl');
+  hovered = null;
   refocus();
 });
 let pendingSelect;
