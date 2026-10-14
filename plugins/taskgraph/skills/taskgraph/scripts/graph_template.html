@@ -1102,8 +1102,9 @@ const searchHits = q => q ? DATA.nodes.filter(n => passes(n) && (n.title.toLower
 function applySearch() {
   const q = searchQuery();
   const hits = new Set(searchHits(q).map(n => String(n.id)));
-  tasks().forEach(n => n.toggleClass('dim', !!q && !hits.has(n.id())));
-  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : hits.size + ' matches';
+  tasks().forEach(n => n.toggleClass('dim', hits.size > 0 && !hits.has(n.id())));
+  const at = searched.q === q && searched.at >= 0 && hits.size > 1 ? `${searched.at + 1} of ` : '';
+  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : `${at}${hits.size} matches`;
   mirrorNames();
 }
 
@@ -1127,6 +1128,7 @@ function stepSearch(back) {
   if (!hits.length) return;
   searched.at = searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length;
   select(hits[searched.at].id, true);
+  applySearch();
 }
 
 function clearSearch() {

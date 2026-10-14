@@ -401,17 +401,21 @@ def test_search_reveals_collapsed_and_counts(browser, page_file):
     page.fill("#search", "zzz")
     page.wait_for_timeout(300)
     assert page.inner_text("#searchCount") == "No matches"
+    assert page.evaluate("cy.nodes('.dim').length") == 0
     page.fill("#search", "e")
     page.wait_for_timeout(300)
     hits = page.evaluate("searchHits('e').map(n => n.id)")
     assert hits == [3, 4, 5, 6] and page.inner_text("#searchCount") == "4 matches"
     page.press("#search", "Enter")
     assert page.evaluate("document.getElementById('panel').style.display") == "block"
-    assert page.evaluate("pinned") == hits[0]
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
     page.press("#search", "Enter")
-    assert page.evaluate("pinned") == hits[1]
+    assert page.evaluate("pinned") == hits[1] and page.inner_text("#searchCount") == "2 of 4 matches"
     page.press("#search", "Shift+Enter")
-    assert page.evaluate("pinned") == hits[0]
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
+    page.fill("#search", "ee")
+    page.wait_for_timeout(300)
+    assert "of" not in page.inner_text("#searchCount")
     page.fill("#search", "")
     page.wait_for_timeout(300)
     assert page.inner_text("#searchCount") == "" and page.evaluate("cy.nodes('.dim').length") == 0
