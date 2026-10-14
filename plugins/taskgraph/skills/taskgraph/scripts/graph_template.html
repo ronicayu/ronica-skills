@@ -1412,8 +1412,9 @@ $('expandAll').onclick = () => {
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
+// Collapse all folds the workstreams but keeps objectives open, so the programme's shape stays.
 $('collapseAll').onclick = () => {
-  setExpanded(new Set());
+  setExpanded(new Set(DATA.nodes.filter(n => n.type === 'objective').map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
