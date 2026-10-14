@@ -488,3 +488,40 @@ def test_status_words_and_rag_headers(browser, programme_file):
     assert page.evaluate("cy.nodes('.lane-rag')[0].width()") == 8
     assert problems == []
     page.close()
+
+
+def luminance(hex_):
+    def channel(c):
+        c = int(c, 16) / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (channel(hex_[i:i + 2]) for i in (1, 3, 5))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+CONTRAST = [  # foreground, background, is text
+    ("#9ca3af", "#181c22", True),   # stamp, panel "None", search count
+    ("#9ca3af", "#232830", True),   # search placeholder
+    ("#6b7280", "#111418", False),  # dependency and part-of edges
+    ("#6b7280", "#14181e", False),  # AXIS: Timeline bars and grid
+    ("#d1d5db", "#2f3744", True),   # blocked label on blocked fill
+    ("#6b7280", "#111418", False),  # blocked border on canvas
+    ("#ffffff", "#2563eb", True),   # done label on done fill
+    ("#2563eb", "#111418", False),  # done fill on canvas
+]
+
+
+def test_contrast_tokens(browser, page_file):
+    for fg, bg, text in CONTRAST:
+        assert contrast(fg, bg) >= (4.5 if text else 3.0), (fg, bg, contrast(fg, bg))
+    page, problems = open_page(browser, page_file)
+    assert page.evaluate("getComputedStyle(document.getElementById('stamp')).color") == "rgb(156, 163, 175)"
+    assert page.evaluate("cy.getElementById('2').data('derived_status')") == "blocked"
+    assert page.evaluate("cy.getElementById('2').style('background-color')") == "rgb(47,55,68)"
+    assert page.evaluate("cy.edges()[0].style('line-color')") == "rgb(107,114,128)"
+    assert problems == []
+    page.close()

@@ -12,6 +12,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar > * { flex: none; }
 #toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
+#toolbar input::placeholder { color: #9ca3af; opacity: 1; }
 #toolbar button:hover { background: #2d333d; }
 #toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; white-space: nowrap; }
 #toolbar [hidden] { display: none; }
@@ -26,7 +27,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar #goal { flex: 0 1 auto; max-width: min(320px, 40vw); }
 #toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .goalinfo, #searchCount { color: #9ca3af; font-size: 12px; white-space: nowrap; }
-#toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
+#toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #9ca3af; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
@@ -58,7 +59,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel li:hover { background: #232830; }
 #panel li.off { opacity: .45; cursor: default; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-#panel .none { color: #6b7280; }
+#panel .none { color: #9ca3af; }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
 #empty[hidden], #empty [hidden] { display: none; }
 #empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
@@ -92,19 +93,19 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <div id="legendBody">
   <div class="col">
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#e5e7eb"/></svg>Task</div>
-    <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#262c36" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
-    <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#262c36" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
-    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#262c36" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
+    <div><svg width="28" height="16"><polygon points="14,0 22,8 14,16 6,8" fill="#2f3744" stroke="#9ca3af" stroke-width="1.5"/></svg>Milestone</div>
+    <div><svg width="28" height="16"><polygon points="6,1 22,1 27,8 22,15 6,15 1,8" fill="#2f3744" stroke="#c4b5fd" stroke-width="2"/></svg>Decision</div>
+    <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#2f3744" stroke="#9ca3af" stroke-width="2" stroke-dasharray="4 3"/></svg>External</div>
   </div>
   <div class="col">
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
-    <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#262c36" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
-    <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#262c36" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
+    <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#2f3744" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
+    <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#2f3744" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
     <div><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
   </div>
   <div class="col" id="legendStatus"></div>
   <div class="col" id="legendMarks">
-    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#4b5563"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#6b7280"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
   </div>
   </div>
 </div>
@@ -118,8 +119,8 @@ let DATA = __DATA__;
 const COLORS = {
   ready: { bg: '#e5e7eb', fg: '#0b0f14', bd: '#e5e7eb' },
   in_progress: { bg: '#34d399', fg: '#052e16', bd: '#34d399' },
-  blocked: { bg: '#262c36', fg: '#9ca3af', bd: '#343b47' },
-  done: { bg: '#1d4ed8', fg: '#dbeafe', bd: '#1d4ed8', op: 0.75 }
+  blocked: { bg: '#2f3744', fg: '#d1d5db', bd: '#6b7280' },
+  done: { bg: '#2563eb', fg: '#ffffff', bd: '#2563eb', op: 0.85 }
 };
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
 const GOAL = '#fbbf24';
@@ -127,7 +128,7 @@ const TYPES = ['task', 'milestone', 'decision', 'external', 'objective', 'risk',
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATE_KEYS = ['date', 'decide_by', 'needed_by', 'chase', 'promised', 'due', 'review', 'raised'];
 const ISSUE = '#f87171';
-const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#4b5563';
+const RED = '#ef4444', AMBER = '#f59e0b', AXIS = '#6b7280';
 const FIELDS = {
   task: [['owner', 'Owner'], ['estimate', 'Estimate']],
   milestone: [['date', 'Date']],
@@ -291,11 +292,11 @@ const cy = cytoscape({
       'text-margin-x': 'data(tx)', 'color': '#9ca3af', 'font-weight': 'bold', 'font-size': 13, 'z-index-compare': 'manual', 'z-index': -1
     } },
     { selector: 'edge', style: {
-      'curve-style': 'bezier', 'width': 1.5, 'line-color': '#3f4753',
-      'target-arrow-shape': 'triangle', 'target-arrow-color': '#3f4753', 'arrow-scale': 1.2
+      'curve-style': 'bezier', 'width': 1.5, 'line-color': '#6b7280',
+      'target-arrow-shape': 'triangle', 'target-arrow-color': '#6b7280', 'arrow-scale': 1.2
     } },
     { selector: 'edge.lanes, edge.tl', style: { 'curve-style': 'segments', 'edge-distances': 'node-position' } },
-    { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#4b5563', 'target-arrow-color': '#4b5563', 'target-arrow-shape': 'none' } },
+    { selector: 'edge.partof', style: { 'line-style': 'dotted', 'line-color': '#6b7280', 'target-arrow-color': '#6b7280', 'target-arrow-shape': 'none' } },
     { selector: 'edge.lifted, edge.bridged', style: { 'line-style': 'dashed' } },
     { selector: 'edge.threat', style: { 'line-style': 'dotted', 'line-color': AMBER, 'target-arrow-color': AMBER } },
     { selector: 'edge.back', style: { 'curve-style': 'bezier', 'line-style': 'dashed', 'line-color': AMBER, 'target-arrow-color': AMBER } },
@@ -1106,7 +1107,8 @@ function refList(ids) {
   return el('ul', null, ...ids.map(id => {
     const n = byId.get(id);
     const on = passes(n);
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + (COLORS[n.derived_status] || COLORS.blocked).bg }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
+    const c = COLORS[n.derived_status] || COLORS.blocked;
+    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
     if (on) li.onclick = () => reveal(id);
     return li;
   }));
