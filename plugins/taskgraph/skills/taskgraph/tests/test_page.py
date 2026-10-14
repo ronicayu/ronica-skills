@@ -525,3 +525,35 @@ def test_contrast_tokens(browser, page_file):
     assert page.evaluate("cy.edges()[0].style('line-color')") == "rgb(107,114,128)"
     assert problems == []
     page.close()
+
+
+PANEL_OPEN = "document.getElementById('panel').style.display === 'block'"
+
+
+def test_panel_close_and_esc(browser, page_file, raid_file):
+    page, problems = open_page(browser, page_file)
+    page.evaluate("select(5, false)")
+    assert page.is_visible("#panelClose")
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--panel-w').trim()") == "340px"
+    page.click("#panelClose")
+    assert page.evaluate("document.getElementById('panel').style.display") == "none"
+    assert page.evaluate("pinned") is None
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--panel-w').trim()") == "0px"
+    page.evaluate("select(5, false)")
+    page.keyboard.press("Escape")
+    assert not page.evaluate(PANEL_OPEN)
+    page.evaluate("select(5, false)")
+    page.fill("#search", "vendor")
+    page.press("#search", "Escape")
+    assert page.input_value("#search") == "" and page.evaluate(PANEL_OPEN)
+    page.evaluate("select(2, false)")
+    assert page.inner_text("#focusGoal") == "Focus on this goal"
+    page.evaluate("select(3, false)")
+    assert page.inner_text("#focusGoal") == "Show only what this needs"
+    assert problems == []
+    page.close()
+    page, problems = open_page(browser, raid_file)
+    page.evaluate("select(2, false)")
+    assert page.evaluate(PANEL_OPEN) and page.query_selector("#focusGoal") is None
+    assert problems == []
+    page.close()
