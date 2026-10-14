@@ -86,6 +86,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <button id="collapseAll">Collapse all</button>
   <button id="relayout">Re-layout</button>
   <button id="fit">Fit</button>
+  <button id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
   <button id="refresh" hidden>Refresh</button>
   <span class="spacer"></span>
   <span class="stamp" id="stamp"></span>
@@ -1348,6 +1349,52 @@ $('collapseAll').onclick = () => {
 };
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => fitView();
+
+// Save the whole view as filtered (not just what is on screen) with a title bar, without
+// hover or selection fading; search dimming stays because it is a filter the viewer chose.
+const VIEW_NAMES = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline' };
+function exportTitle() {
+  const g = goal != null && byId.has(goal) ? byId.get(goal) : null;
+  return ['taskgraph', projectSelect.value || 'All projects', g && `#${g.id} ${g.title}`, VIEW_NAMES[view]].filter(Boolean).join(' · ');
+}
+function exportName() {
+  const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'all';
+  return ['taskgraph', slug(projectSelect.value || 'all-projects'), goal != null && 'goal-' + goal, view, DATA.today || new Date().toLocaleDateString('sv')].filter(Boolean).join('-') + '.png';
+}
+async function exportPng() {
+  const faded = cy.elements('.faded'), lit = cy.elements('.hl');
+  faded.union(lit).removeClass('faded hl');
+  mirrorNames();
+  let shot;
+  try {
+    shot = await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000, bg: '#111418' });
+  } finally {
+    faded.addClass('faded');
+    lit.addClass('hl');
+    mirrorNames();
+  }
+  const img = await createImageBitmap(shot);
+  const k = Math.max(1, img.width / 2400), head = Math.round(64 * k), pad = Math.round(24 * k);
+  const canvas = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height + head });
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#111418';
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.textBaseline = 'middle';
+  g.fillStyle = '#e5e7eb';
+  g.font = `bold ${Math.round(22 * k)}px ${FONT}`;
+  g.fillText(exportTitle(), pad, head * 0.36);
+  g.fillStyle = '#9ca3af';
+  g.font = `${Math.round(15 * k)}px ${FONT}`;
+  g.fillText('As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + ($('hideDone').checked ? ' · done items hidden' : ''), pad, head * 0.74);
+  g.drawImage(img, 0, head);
+  const blob = await new Promise(done => canvas.toBlob(done, 'image/png'));
+  const link = el('a', { href: URL.createObjectURL(blob), download: exportName() });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+$('exportPng').onclick = () => exportPng();
 const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';

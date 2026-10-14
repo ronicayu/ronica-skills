@@ -633,3 +633,25 @@ def test_expand_collapse_refit(browser, page_file, tall_file):
     assert abs(page.evaluate("cy.zoom() - Math.max(READABLE, fitTarget().zoom)")) < 1e-6
     assert problems == []
     page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_export_png(browser, page_file, tmp_path, view):
+    import struct
+    page, problems = open_page(browser, page_file, f"?view={view}&goal=2")
+    page.evaluate("select(3, false)")
+    faded = page.evaluate("cy.nodes('.faded').map(n => n.id()).sort()")
+    with page.expect_download() as info:
+        page.click("#exportPng")
+    download = info.value
+    assert download.suggested_filename == f"taskgraph-demo-goal-2-{view}-2026-10-13.png"
+    out = tmp_path / download.suggested_filename
+    download.save_as(out)
+    data = out.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", data[16:24])
+    assert width > 400 and height > 200
+    assert page.evaluate("cy.nodes('.faded').map(n => n.id()).sort()") == faded
+    assert page.evaluate("exportTitle()") == f"taskgraph · demo · #2 Ship v1 · {dict(graph='Graph', lanes='Swimlane', timeline='Timeline')[view]}"
+    assert problems == []
+    page.close()
