@@ -173,3 +173,37 @@ def test_lane_rag_stripes(browser, page_file, view):
     assert "red" in rag and len(rag) == page.evaluate("cy.nodes('.lane-bg').length")
     assert problems == []
     page.close()
+
+
+SHOWN = "() => tasks().map(n => n.id()).sort()"
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_goal_focus_from_url_shows_only_what_it_needs(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}&goal=2")
+    assert page.evaluate(SHOWN) == ["1", "2", "3", "5"]
+    assert page.input_value("#goal") == "2"
+    assert page.inner_text("#goalInfo") == "0/2 done · at risk"
+    assert page.evaluate("document.title") == "taskgraph · #2 Ship v1"
+    assert problems == []
+    page.close()
+
+
+def test_goal_focus_from_picker_and_panel(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    everything = page.evaluate(SHOWN)
+    assert "4" in everything and "6" in everything and page.is_hidden("#goalInfo")
+    options = page.evaluate("Array.from(document.querySelectorAll('#goal option'), o => o.value)")
+    assert options == ["", "2", "1"]
+    page.select_option("#goal", "2")
+    assert page.evaluate(SHOWN) == ["1", "2", "3", "5"] and "goal=2" in page.url
+    page.select_option("#goal", "")
+    assert page.evaluate(SHOWN) == everything and "goal=" not in page.url
+    page.evaluate("select(3, false)")
+    page.click("#focusGoal")
+    assert page.evaluate(SHOWN) == ["1", "3", "5"] and "goal=3" in page.url
+    assert page.input_value("#goal") == "3" and page.inner_text("#focusGoal") == "Show everything"
+    page.click("#focusGoal")
+    assert page.evaluate(SHOWN) == everything
+    assert problems == []
+    page.close()

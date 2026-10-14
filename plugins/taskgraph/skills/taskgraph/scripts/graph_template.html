@@ -22,6 +22,9 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .seg button + button { margin-left: -1px; }
 #toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
 #toolbar .spacer { flex: 1 1 0; min-width: 0; }
+#toolbar #goal { max-width: 260px; }
+#toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
+#toolbar .goalinfo { color: #9ca3af; font-size: 12px; white-space: nowrap; }
 #toolbar .stamp { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #6b7280; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
@@ -60,6 +63,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 <body>
 <div id="toolbar">
   <select id="project"></select>
+  <select id="goal" title="Show only what one milestone or objective needs"></select>
+  <span class="goalinfo" id="goalInfo" hidden></span>
   <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
   <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
   <label id="depsBy" hidden>Dependencies <select id="depsMode"><option value="off">Conflicts only</option><option value="critical">Critical path</option><option value="all">All</option></select></label>
@@ -330,9 +335,36 @@ const cy = cytoscape({
   ]
 });
 
+let goal = Number(query.get('goal')) || null;
+let scopeMemo = { goal: null, data: null, ids: null };
+
+// Everything a goal needs: what it depends on, followed all the way down (finished work too),
+// the children of summaries on the way, dependencies inherited from parents, and the risks
+// pointing at any of it. Ancestors come along so collapsed summaries still show.
+function goalScope() {
+  if (goal == null || !byId.has(goal)) return null;
+  if (scopeMemo.goal === goal && scopeMemo.data === DATA) return scopeMemo.ids;
+  const ids = new Set();
+  const visit = id => {
+    if (ids.has(id) || !byId.has(id)) return;
+    ids.add(id);
+    const n = byId.get(id);
+    [...n.depends_on, ...n.children, ...(n.threats ?? [])].forEach(visit);
+    for (let p = byId.get(n.parent); p; p = byId.get(p.parent)) p.depends_on.forEach(visit);
+  };
+  visit(goal);
+  [...ids].forEach(id => {
+    for (let p = byId.get(byId.get(id).parent); p; p = byId.get(p.parent)) ids.add(p.id);
+  });
+  scopeMemo = { goal, data: DATA, ids };
+  return ids;
+}
+
 const keeps = n => {
   const project = $('project').value;
-  return (!project || n.project === project) && !($('hideDone').checked && n.derived_status === 'done');
+  const scope = goalScope();
+  return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id))
+    && !($('hideDone').checked && n.derived_status === 'done');
 };
 const passes = n => keeps(n) && types.has(n.type);
 
@@ -843,6 +875,37 @@ function sameShape(nodes, edges) {
     });
 }
 
+const GOAL_TYPES = ['milestone', 'objective'];
+function fillGoals() {
+  const select = $('goal');
+  const project = projectSelect.value;
+  const key = n => n.due ?? '9999-12-31';
+  const byDate = (a, b) => (a.derived_status === 'done') - (b.derived_status === 'done') || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
+  const list = DATA.nodes.filter(n => GOAL_TYPES.includes(n.type) && (!project || n.project === project)).sort(byDate);
+  if (goal != null && byId.has(goal) && !list.some(n => n.id === goal)) list.unshift(byId.get(goal));
+  const label = n => `#${n.id} ${n.title}` + (n.type === 'milestone' && n.due ? ` · ${md(n.due)}` : '') + (n.derived_status === 'done' ? ' · done' : '');
+  select.replaceChildren(el('option', { value: '', textContent: 'All goals' }), ...list.map(n => el('option', { value: String(n.id), textContent: label(n) })));
+  select.value = goal != null && byId.has(goal) ? String(goal) : '';
+  select.classList.toggle('on', select.value !== '');
+  const info = $('goalInfo');
+  const scope = goalScope();
+  info.hidden = !scope;
+  if (!scope) return;
+  const leaves = [...scope].map(i => byId.get(i)).filter(n => !isSummary(n) && n.type !== 'milestone' && n.type !== 'risk');
+  const g = byId.get(goal);
+  const verdict = g.derived_status === 'done' ? 'done' : g.outlook ? { at_risk: 'at risk', on_track: 'on track', unknown: 'outlook unknown' }[g.outlook.verdict] : null;
+  info.textContent = [`${leaves.filter(n => n.derived_status === 'done').length}/${leaves.length} done`, verdict].filter(Boolean).join(' · ');
+}
+
+function setGoal(id) {
+  goal = id != null && byId.has(id) ? id : null;
+  fillGoals();
+  setTitle();
+  syncUrl();
+  rebuild();
+  if (pinned) openPanel(byId.get(pinned));
+}
+
 function addProjects() {
   const have = new Set(Array.from(projectSelect.options, o => o.value));
   DATA.projects.filter(p => !have.has(p)).forEach(p => projectSelect.append(el('option', { value: p, textContent: p })));
@@ -852,6 +915,8 @@ function applyData(next) {
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
+  if (goal != null && !byId.has(goal)) goal = null;
+  fillGoals();
   const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
     const sources = new Set(edges.map(e => e.source));
@@ -979,6 +1044,8 @@ function openPanel(n) {
       row('Created', fmt(n.created_at)),
       row('Done', fmt(n.done_at))),
     n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+    el('button', { id: 'focusGoal', textContent: goal === n.id ? 'Show everything' : 'Focus on this goal', title: 'Show only what this needs',
+      style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }),
     (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
     (n.threats ?? []).length ? refList(n.threats) : null,
     conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
@@ -1057,6 +1124,7 @@ if (wanted) {
 const params = () => {
   const q = new URLSearchParams();
   if (projectSelect.value) q.set('project', projectSelect.value);
+  if (goal != null) q.set('goal', String(goal));
   if (view !== 'graph') q.set('view', view);
   if (laneKey !== 'lane') q.set('lanes', laneKey);
   if (view === 'timeline' && depsMode !== 'off') q.set('deps', depsMode === 'all' ? '1' : depsMode);
@@ -1090,13 +1158,18 @@ const toggleType = t => {
   syncUrl();
   rebuild();
 };
-const setTitle = () => { document.title = 'taskgraph · ' + (projectSelect.value || 'all projects'); };
+const setTitle = () => {
+  document.title = 'taskgraph · ' + (goal != null && byId.has(goal) ? '#' + goal + ' ' + byId.get(goal).title : projectSelect.value || 'all projects');
+};
 setTitle();
 projectSelect.onchange = () => {
+  if (goal != null && projectSelect.value && byId.get(goal).project !== projectSelect.value) goal = null;
+  fillGoals();
   setTitle();
-  if (DATA.live) syncUrl();
+  syncUrl();
   rebuild();
 };
+$('goal').onchange = e => setGoal(e.target.value ? Number(e.target.value) : null);
 $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
@@ -1143,6 +1216,8 @@ $('legendToggle').onclick = () => {
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 
+if (goal != null && !byId.has(goal)) goal = null;
+fillGoals();
 rebuild();
 
 if (DATA.live) {
