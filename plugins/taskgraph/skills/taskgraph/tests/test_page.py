@@ -142,7 +142,7 @@ def test_legend_collapses_and_remembers(browser, page_file):
     tall = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
     page.click("#legendToggle")
     short = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
-    assert short < tall / 2 and page.inner_text("#legendToggle") == "Legend ▸"
+    assert tall - short >= 20 and tall <= 64 and page.inner_text("#legendToggle") == "Legend ▸"
     page.reload()
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
     assert page.evaluate("document.getElementById('legend').classList.contains('closed')")
@@ -557,3 +557,41 @@ def test_panel_close_and_esc(browser, page_file, raid_file):
     assert page.evaluate(PANEL_OPEN) and page.query_selector("#focusGoal") is None
     assert problems == []
     page.close()
+
+
+LEGEND_SHOWN = "Array.from(document.querySelectorAll('#legendBody .col > div'), d => [d.textContent.trim(), !d.hidden])"
+
+
+def legend_shown(page):
+    return dict(page.evaluate(LEGEND_SHOWN))
+
+
+def test_legend_defaults_and_rows(browser, page_file, raid_file):
+    for width, closed in ((1280, True), (1440, False)):
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        page.goto(page_file.as_uri())
+        page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+        assert page.evaluate("document.getElementById('legend').classList.contains('closed')") is closed
+        assert page.evaluate("localStorage.getItem('taskgraph.legend')") is None
+        page.close()
+    page, problems = open_page(browser, raid_file, "?view=graph")
+    assert legend_shown(page)["Baseline due"] is False
+    page.close()
+    page, problems = open_page(browser, page_file, "?view=graph")
+    shown = legend_shown(page)
+    assert shown["Baseline due"] is True and shown["Lane RAG"] is False and shown["Done"] is False
+    page.click("#hideDone")
+    assert legend_shown(page)["Done"] is True
+    page.close()
+    page, problems = open_page(browser, page_file, "?view=lanes")
+    assert legend_shown(page)["Lane RAG"] is True
+    assert problems == []
+    page.close()
+    for view in VIEWS:
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(f"{page_file.as_uri()}?view={view}")
+        page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 64
+        page.click("#legendToggle")
+        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 28
+        page.close()

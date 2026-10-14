@@ -32,13 +32,15 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
 #cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
-#legend { position: fixed; left: 14px; bottom: 14px; background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 6px 12px 8px; z-index: 2; }
-#legend #legendBody { display: flex; gap: 22px; margin-top: 4px; }
-#legend.closed { padding-bottom: 6px; }
+#legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
+#legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
+#legend .col { display: contents; }
+#legend.closed { padding-bottom: 4px; }
 #legend.closed #legendBody { display: none; }
 #legendToggle { background: none; border: 0; padding: 0; color: #9ca3af; font: inherit; font-size: 12px; cursor: pointer; }
 #legendToggle:hover { color: #e5e7eb; }
-#legend .col div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+#legend .col div { display: flex; align-items: center; gap: 6px; margin: 0; }
+#legend .col div[hidden] { display: none; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
 #panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
@@ -102,11 +104,11 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
     <div><svg width="28" height="16"><rect x="2" y="2" width="24" height="12" fill="#181c22" stroke="#9ca3af" stroke-width="4"/><rect x="4" y="4" width="20" height="8" fill="none" stroke="#181c22" stroke-width="1.5"/></svg>Objective</div>
     <div><svg width="28" height="16"><polygon points="5,1 23,1 27,5 27,11 23,15 5,15 1,11 1,5" fill="#2f3744" stroke="#f59e0b" stroke-width="2"/></svg>Risk</div>
     <div><svg width="28" height="16"><polygon points="1,1 21,1 27,8 21,15 1,15" fill="#2f3744" stroke="#f87171" stroke-width="2"/></svg>Issue</div>
-    <div><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
+    <div id="legendRag"><svg width="28" height="16"><rect x="2" y="0" width="4" height="5" fill="#ef4444"/><rect x="2" y="5.5" width="4" height="5" fill="#f59e0b"/><rect x="2" y="11" width="4" height="5" fill="#34d399"/></svg>Lane RAG</div>
   </div>
   <div class="col" id="legendStatus"></div>
   <div class="col" id="legendMarks">
-    <div><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#6b7280"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
+    <div id="legendBaseline"><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#6b7280"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
   </div>
   </div>
 </div>
@@ -888,6 +890,7 @@ function fitIfOutside() {
 }
 
 function rebuild(keepView, flash) {
+  syncLegend();
   const { nodes, edges, open } = visibleData();
   const before = new Set(tasks().map(n => n.id()));
   const sources = new Set(edges.map(e => e.source));
@@ -993,6 +996,7 @@ function applyData(next) {
   addProjects();
   if (goal != null && !byId.has(goal)) goal = null;
   fillGoals();
+  syncLegend();
   const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
     const sources = new Set(edges.map(e => e.source));
@@ -1260,7 +1264,14 @@ const syncControls = () => {
   $('depsMode').value = depsMode;
   $('laneKey').value = laneKey;
   TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
+  syncLegend();
 };
+// Only explain what can appear on screen right now.
+function syncLegend() {
+  $('legendBaseline').hidden = !DATA.nodes.some(n => n.baseline && n.baseline.due);
+  $('legendRag').hidden = view === 'graph';
+  $('legend-done').hidden = $('hideDone').checked;
+}
 const setView = v => {
   if (v === view) return;
   view = v;
@@ -1306,6 +1317,8 @@ $('laneKey').onchange = e => {
   syncUrl();
   if (view !== 'graph') rebuild();
 };
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
+$('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 $('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
 syncControls();
 $('hideDone').onchange = () => rebuild();
@@ -1335,18 +1348,17 @@ $('collapseAll').onclick = () => {
 };
 $('relayout').onclick = () => layout();
 $('fit').onclick = () => fitView();
-const setLegend = open => {
+const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
-  store.set('taskgraph.legend', open ? 'open' : 'closed');
+  if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
-setLegend(store.get('taskgraph.legend') !== 'closed');
+const savedLegend = store.get('taskgraph.legend');
+setLegend(savedLegend ? savedLegend !== 'closed' : window.innerWidth >= 1366, false);
 $('legendToggle').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
   fitIfOutside();
 };
-$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', null, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
-$('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 
 const toolbar = $('toolbar');
 const fitBar = () => {
