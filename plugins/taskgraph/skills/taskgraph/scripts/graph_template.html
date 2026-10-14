@@ -1228,7 +1228,11 @@ function select(id, center) {
   refocus();
   if (center) {
     userMoved = true;
-    cy.animate({ center: { eles: node } }, { duration: 250 });
+    if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
+    // Timeline: scroll the row to mid-height only. The name column is how a row is recognised,
+    // so it stays in view; the panel carries the dates when the bar itself is off to the right.
+    const z = cy.zoom(), box = $('cy').getBoundingClientRect();
+    cy.animate({ pan: { x: 40 - z * cy.elements().boundingBox().x1, y: box.height / 2 - z * node.position('y') } }, { duration: 250 });
   }
 }
 

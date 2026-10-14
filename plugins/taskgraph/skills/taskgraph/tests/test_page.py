@@ -764,3 +764,22 @@ def test_fit_whole_survives_refresh(browser, tall_file):
     assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
     assert problems == []
     page.close()
+
+
+def test_timeline_search_enter_keeps_names_in_view(browser, tall_file):
+    page, problems = open_page(browser, tall_file, "?view=timeline")
+    page.fill("#search", "Step 35")
+    page.wait_for_timeout(300)
+    page.focus("#search")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(400)
+    names = page.evaluate("cy.nodes('.tl-name[of]').map(n => n.renderedBoundingBox().x1)")
+    assert min(names) >= 0
+    row = page.evaluate("""() => {
+        const b = cy.getElementById(String(pinned)).renderedBoundingBox(), box = document.getElementById('cy').getBoundingClientRect();
+        return b.y1 >= 0 && b.y2 <= box.height;
+    }""")
+    assert row and page.evaluate("byId.get(pinned).title") == "Step 35"
+    assert page.evaluate("document.getElementById('panel').style.display") == "block"
+    assert problems == []
+    page.close()
