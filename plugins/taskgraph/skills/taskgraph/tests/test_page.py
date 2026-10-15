@@ -486,6 +486,7 @@ def test_all_done_offers_show_done(browser, done_file, view):
 def test_nothing_matches_offers_reset(browser, page_file):
     page, problems = open_page(browser, page_file)
     page.select_option("#goal", "2")
+    page.click("#typesBtn")
     for t in ("task", "milestone", "decision", "external", "objective", "issue"):
         page.click(f"#type-{t}")
     assert page.evaluate("tasks().length") == 0
@@ -699,6 +700,7 @@ def test_back_and_forward_step_through_navigation(browser, page_file):
     page.click("#viewTimeline")
     page.select_option("#goal", "2")
     page.select_option("#depsMode", "critical")
+    page.click("#typesBtn")
     page.click("#type-task")
     assert page.evaluate(state)[:3] == ["timeline", 2, "critical"]
     assert "types=" in page.evaluate("location.search")
@@ -808,6 +810,8 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     page, problems = open_page(browser, programme_file, f"?view={view}")
     page.click("#collapseAll")
     marked = "id => [cy.getElementById(String(id)).data('label'), cy.getElementById(String(id)).hasClass('late')]"
+    assert page.evaluate("expandedIds().has(1) && !expandedIds().has(3)")
+    page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(1)")
     assert "1 late inside" in label and late
     page.evaluate("toggleExpand(1)")
@@ -817,5 +821,91 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     label, late = page.evaluate(f"({marked})(3)")
     assert "late inside" not in label and not late
     assert page.evaluate("cy.getElementById('4').hasClass('late')")
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_external_label_names_who_to_chase(browser, page_file, view):
+    page, problems = open_page(browser, page_file, f"?view={view}")
+    calm = page.evaluate("cy.getElementById('5').data('label')")
+    if view != "timeline":
+        assert "Acme" in calm and ("needed by" not in calm or calm.index("Acme") < calm.index("needed by"))
+    page.evaluate("applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 5 ? { ...n, chase_due: true, meta: { ...n.meta, chase: '2026-10-10' } } : n) })")
+    label = page.evaluate("cy.getElementById('5').data('label')")
+    assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    assert problems == []
+    page.close()
+
+
+def test_panel_shows_driving_chain(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.evaluate("select(2, false)")
+    assert page.text_content("#chainHead") == "Driving chain"
+    items = page.evaluate("Array.from(document.querySelectorAll('#chainHead + ul li span'), s => s.textContent)")
+    assert items == ["#5 Vendor key", "#3 Build feature"]
+    page.click("#chainHead + ul li:first-child")
+    page.wait_for_function("pinned === 5")
+    assert page.query_selector("#chainHead") is None
+    assert problems == []
+    page.close()
+
+
+def test_conflict_line_explains_itself(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    edge = page.evaluate("cy.edges('.tl-conflict').map(e => e.id())")
+    assert edge == ["5-3"]
+    box = page.evaluate("""() => {
+        const e = cy.getElementById('5-3'), c = document.getElementById('cy').getBoundingClientRect();
+        const p = e.renderedMidpoint();
+        return [c.left + p.x, c.top + p.y];
+    }""")
+    page.mouse.move(*box)
+    page.wait_for_timeout(150)
+    story = page.evaluate("document.getElementById('cy').title")
+    assert story == "#3 waits for #5 · #5 is due 5 Nov but #3 needs it 20 Oct (16d short)"
+    page.mouse.click(*box)
+    page.wait_for_function("pinned === 5")
+    assert "#5 due 5 Nov after #3 needs it 20 Oct" in page.inner_text("#panel")
+    page.mouse.move(5, 300)
+    assert page.evaluate("document.getElementById('cy').title") == ""
+    assert problems == []
+    page.close()
+
+
+def test_export_png_includes_the_legend(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    items = page.evaluate("legendItems().then(l => l.map(i => i.text))")
+    shown = page.evaluate("[...document.querySelectorAll('#legendBody .col > div')].filter(d => !d.hidden).map(d => d.textContent.trim())")
+    assert items == shown and "Milestone" in items and "Lane RAG" in items and "Done" not in items
+    page.click("#legendToggle")
+    assert page.evaluate("legendItems().then(l => l.length)") == len(items)
+    import struct
+    with page.expect_download() as info:
+        page.click("#exportPng")
+    data = open(info.value.path(), "rb").read()
+    w, h = struct.unpack(">II", data[16:24])
+    plan = page.evaluate("(async () => (await createImageBitmap(await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000 }))).height)()")
+    k = max(1, w / 2400)
+    assert h >= plan + round(64 * k) + round(30 * k)
+    assert problems == []
+    page.close()
+
+
+def test_types_dropdown(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    assert page.inner_text("#typesBtn") == "Types: all ▾" and page.is_hidden("#type-task")
+    page.click("#typesBtn")
+    assert page.is_visible("#type-task") and page.get_attribute("#typesBtn", "aria-expanded") == "true"
+    page.click("#type-task")
+    page.click("#type-external")
+    assert page.is_visible("#type-task")
+    assert page.inner_text("#typesBtn") == "Types: 5 of 7 ▾" and "on" in page.get_attribute("#typesBtn", "class")
+    assert "5" not in page.evaluate("tasks().map(n => n.id())")
+    page.mouse.click(700, 500)
+    assert page.is_hidden("#type-task")
+    page.click("#typesBtn")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#type-task")
     assert problems == []
     page.close()
