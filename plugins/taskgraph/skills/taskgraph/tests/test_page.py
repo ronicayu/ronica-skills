@@ -126,6 +126,28 @@ def open_page(browser, path, query="", height=900):
 COVERED = "() => covered()"
 
 
+def more(page, item):
+    page.click("#moreBtn")
+    page.click(f"#{item}")
+
+
+def pick_goal(page, gid):
+    page.click("#goal")
+    page.click(f'#goalList .choice[data-id="{gid}"]')
+
+
+def view_option(page, name, value):
+    page.click("#optsBtn")
+    page.check(f'input[name="{name}"][value="{value}"]')
+    page.keyboard.press("Escape")
+
+
+def tick(page, selector):
+    if not page.evaluate("menuOpen('filterWrap')"):
+        page.click("#filterBtn")
+    page.click(selector)
+
+
 @pytest.mark.parametrize("view", VIEWS)
 def test_fit_keeps_nodes_clear_of_legend(browser, raid_file, page_file, view):
     for path in (page_file, raid_file):
@@ -139,14 +161,18 @@ def test_fit_keeps_nodes_clear_of_legend(browser, raid_file, page_file, view):
 
 def test_legend_collapses_and_remembers(browser, page_file):
     page, problems = open_page(browser, page_file)
-    tall = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
-    page.click("#legendToggle")
     short = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
-    assert tall - short >= 20 and tall <= 64 and page.inner_text("#legendToggle") == "Legend ▸"
+    assert page.inner_text("#legendToggle") == "Legend ▸"
+    page.click("#legendToggle")
+    tall = page.evaluate("document.getElementById('legend').getBoundingClientRect().height")
+    assert tall - short >= 20 and tall <= 64 and page.inner_text("#legendToggle") == "Legend ▾"
     page.reload()
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert not page.evaluate("document.getElementById('legend').classList.contains('closed')")
+    page.click("#optsBtn")
+    assert page.is_checked("#legendOn")
+    page.uncheck("#legendOn")
     assert page.evaluate("document.getElementById('legend').classList.contains('closed')")
-    page.click("#legendToggle")
     assert problems == []
     page.close()
 
@@ -163,11 +189,11 @@ def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
     page, problems = open_page(browser, page_file, "?view=timeline")
     drawn = "() => cy.edges('.tl-dep').map(e => e.id()).sort()"
     assert page.evaluate(drawn) == ["5-3"]
-    page.select_option("#depsMode", "critical")
+    view_option(page, "depsMode", "critical")
     assert page.evaluate(drawn) == ["3-2", "5-3"]
     assert page.evaluate("cy.edges('.tl-critical').map(e => e.id()).sort()") == ["3-2", "5-3"]
     assert "deps=critical" in page.url
-    page.select_option("#depsMode", "all")
+    view_option(page, "depsMode", "all")
     assert "deps=1" in page.url and len(page.evaluate(drawn)) >= 2
     assert page.evaluate(f"{BY_Y}('.tl-name[of]', 'name')") == ["▾ #1 Launch", "#2 Ship v1", "#3 Build feature", "#5 Vendor key", "#4 Write docs", "#6 Undated chore"]
     assert heads(page, "timeline") == ["Objectives", "dev", "docs", "Undated"]
@@ -194,7 +220,7 @@ SHOWN = "() => tasks().map(n => n.id()).sort()"
 def test_goal_focus_from_url_shows_only_what_it_needs(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}&goal=2")
     assert page.evaluate(SHOWN) == ["1", "2", "3", "5"]
-    assert page.input_value("#goal") == "2"
+    assert page.evaluate("goal") == 2 and page.input_value("#goal") == "#2 Ship v1 · 1 Dec"
     assert page.inner_text("#goalInfo") == "0/2 done · at risk"
     assert page.evaluate("document.title") == "taskgraph · #2 Ship v1"
     assert problems == []
@@ -205,16 +231,24 @@ def test_goal_focus_from_picker_and_panel(browser, page_file):
     page, problems = open_page(browser, page_file)
     everything = page.evaluate(SHOWN)
     assert "4" in everything and "6" in everything and page.is_hidden("#goalInfo")
-    options = page.evaluate("Array.from(document.querySelectorAll('#goal option'), o => o.value)")
+    page.click("#goal")
+    options = page.evaluate("Array.from(document.querySelectorAll('#goalList .choice'), o => o.dataset.id)")
     assert options == ["", "2", "1"]
-    page.select_option("#goal", "2")
+    page.click('#goalList .choice[data-id="2"]')
     assert page.evaluate(SHOWN) == ["1", "2", "3", "5"] and "goal=2" in page.url
-    page.select_option("#goal", "")
+    assert page.is_hidden("#goalList")
+    pick_goal(page, "")
     assert page.evaluate(SHOWN) == everything and "goal=" not in page.url
+    page.click("#goal")
+    page.keyboard.type("laun")
+    assert page.evaluate("Array.from(document.querySelectorAll('#goalList .choice'), o => o.dataset.id)") == ["1"]
+    page.keyboard.press("Enter")
+    assert page.evaluate("goal") == 1 and "goal=1" in page.url
+    pick_goal(page, "")
     page.evaluate("select(3, false)")
     page.click("#focusGoal")
     assert page.evaluate(SHOWN) == ["1", "3", "5"] and "goal=3" in page.url
-    assert page.input_value("#goal") == "3" and page.inner_text("#focusGoal") == "Show everything"
+    assert page.input_value("#goal") == "#3 Build feature" and page.inner_text("#focusGoal") == "Show everything"
     page.click("#focusGoal")
     assert page.evaluate(SHOWN) == everything
     assert problems == []
@@ -249,7 +283,7 @@ def test_bands_and_rag_match_across_views(browser, programme_file):
         page, problems = open_page(browser, programme_file, f"?view={view}")
         assert heads(page, view) == ["Objectives", "Data", "Infra", "Programme", "Security"]
         assert page.evaluate(RAGS) == ["red", "amber", "red", "red", "amber"]
-        page.click("#expandAll")
+        more(page, "expandAll")
         assert heads(page, view) == ["Objectives", "Data", "Infra", "Programme", "Security"]
         assert page.evaluate(RAGS) == ["red", "amber", "red", "red", "amber"]
         assert problems == []
@@ -258,7 +292,7 @@ def test_bands_and_rag_match_across_views(browser, programme_file):
 
 def test_timeline_nests_only_within_lane(browser, programme_file):
     page, problems = open_page(browser, programme_file, "?view=timeline")
-    page.click("#expandAll")
+    more(page, "expandAll")
     rows = page.evaluate(f"{BY_Y}('.tl-name', 'name').map(s => s.replace(/ · (RED|AMBER|GREEN)$/, ''))")
     infra = rows.index("Infra")
     assert rows[infra + 1] == "▾ #3 Build landing zone" and rows[infra + 2] == "#4 Write modules"
@@ -312,9 +346,9 @@ def solo_file(tmp_path_factory):
 @pytest.mark.parametrize("view", VIEWS)
 def test_readability_floor(browser, tall_file, view):
     page, problems = open_page(browser, tall_file, f"?view={view}")
-    for action in (None, "#expandAll", "#relayout"):
+    for action in (None, "expandAll", "relayout"):
         if action:
-            page.click(action)
+            more(page, action)
         assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6, action
         assert page.evaluate(ANCHOR), action
         assert page.evaluate(COVERED) is False
@@ -384,7 +418,7 @@ def test_toolbar_never_overflows(browser, page_file, view):
         assert bar["height"] <= (140 if width == 1024 else 96), (width, bar)
         assert bar["gap"] == 0, (width, bar)
         page.click("#fit")
-        page.click("#expandAll")
+        more(page, "expandAll")
         bar = page.evaluate(TOOLBAR)
         assert bar["scrollLeft"] == 0 and bar["project"] >= 0
         page.close()
@@ -392,7 +426,7 @@ def test_toolbar_never_overflows(browser, page_file, view):
 
 def test_search_reveals_collapsed_and_counts(browser, page_file):
     page, problems = open_page(browser, page_file)
-    page.click("#collapseAll")
+    more(page, "collapseAll")
     page.fill("#search", "docs")
     page.wait_for_timeout(300)
     assert page.evaluate("tasks().filter(n => !n.hasClass('dim')).map(n => n.id())") == ["4"]
@@ -485,14 +519,14 @@ def test_all_done_offers_show_done(browser, done_file, view):
 
 def test_nothing_matches_offers_reset(browser, page_file):
     page, problems = open_page(browser, page_file)
-    page.select_option("#goal", "2")
-    page.click("#typesBtn")
-    for t in ("task", "milestone", "decision", "external", "objective", "issue"):
-        page.click(f"#type-{t}")
+    pick_goal(page, "2")
+    tick(page, "#filters [data-facet=type] .link:text('None')")
     assert page.evaluate("tasks().length") == 0
     assert page.inner_text("#emptyText") == "Nothing matches the current filters."
+    assert "types=none" in page.url
+    page.keyboard.press("Escape")
     page.click("#emptyAction")
-    assert page.evaluate("Array.from(document.querySelectorAll('#types button')).every(b => b.classList.contains('on'))")
+    assert page.evaluate("types.size") == 7 and page.evaluate("chipList().length") == 0
     assert page.input_value("#goal") == "" and "goal=" not in page.url
     assert page.evaluate("tasks().length") > 0 and page.is_hidden("#empty")
     assert problems == []
@@ -504,7 +538,9 @@ def test_date_format(browser, page_file):
     assert page.evaluate("day('2026-10-30')") == "30 Oct"
     assert page.evaluate("day('2027-03-15')") == "15 Mar 2027"
     assert page.evaluate("cy.getElementById('3').data('label')") == "20 Oct–25 Nov · conflict"
-    assert page.evaluate("document.querySelector('#goal option[value=\"2\"]').textContent") == "#2 Ship v1 · 1 Dec"
+    page.click("#goal")
+    assert page.text_content('#goalList .choice[data-id="2"]') == "#2 Ship v11 Dec"
+    page.keyboard.press("Escape")
     page.evaluate("select(3, false)")
     text = page.inner_text("#panel")
     assert "Baseline due" in text and "20 Nov (+5d) · plan" in text
@@ -518,7 +554,7 @@ def test_date_format(browser, page_file):
 def test_status_words_and_rag_headers(browser, programme_file):
     page, problems = open_page(browser, programme_file, "?view=timeline")
     assert page.evaluate("cy.getElementById('2').data('label')") == "15 Dec · at risk"
-    page.click("#expandAll")
+    more(page, "expandAll")
     assert page.evaluate("cy.getElementById('6').data('label')").endswith(" · conflict")
     assert page.evaluate("cy.getElementById('4').data('label')") == "20 Sep–10 Oct · 3d late"
     assert page.evaluate(f"{BY_Y}('.tl-head', 'name')") == ["Objectives · RED", "Data · AMBER", "Infra · RED", "Programme · RED", "Security · AMBER"]
@@ -607,7 +643,7 @@ def legend_shown(page):
 
 
 def test_legend_defaults_and_rows(browser, page_file, raid_file):
-    for width, closed in ((1280, True), (1440, False)):
+    for width, closed in ((1280, True), (1440, True)):
         page = browser.new_page(viewport={"width": width, "height": 900})
         page.goto(page_file.as_uri())
         page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
@@ -620,8 +656,8 @@ def test_legend_defaults_and_rows(browser, page_file, raid_file):
     page, problems = open_page(browser, page_file, "?view=graph")
     shown = legend_shown(page)
     assert shown["Baseline due"] is True and shown["Lane RAG"] is False and shown["Done"] is False
-    page.click("#hideDone")
-    assert legend_shown(page)["Done"] is True
+    tick(page, "#status-done")
+    assert legend_shown(page)["Done"] is True and "status=ready,in_progress,blocked,done" in page.url
     page.close()
     page, problems = open_page(browser, page_file, "?view=lanes")
     assert legend_shown(page)["Lane RAG"] is True
@@ -631,9 +667,9 @@ def test_legend_defaults_and_rows(browser, page_file, raid_file):
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.goto(f"{page_file.as_uri()}?view={view}")
         page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
-        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 64
-        page.click("#legendToggle")
         assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 28
+        page.click("#legendToggle")
+        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 64
         page.close()
 
 
@@ -659,14 +695,14 @@ def test_lanes_by_owner_fallback(browser, programme_file, page_file):
 
 def test_expand_collapse_refit(browser, page_file, tall_file):
     page, problems = open_page(browser, page_file)
-    page.click("#collapseAll")
+    more(page, "collapseAll")
     assert page.evaluate(INSIDE)
     assert abs(page.evaluate("cy.zoom() - fitTarget().zoom")) < 1e-6
     page.close()
     page, problems = open_page(browser, tall_file)
-    page.click("#expandAll")
+    more(page, "expandAll")
     assert abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
-    page.click("#collapseAll")
+    more(page, "collapseAll")
     assert abs(page.evaluate("cy.zoom() - Math.max(READABLE, fitTarget().zoom)")) < 1e-6
     assert problems == []
     page.close()
@@ -679,7 +715,7 @@ def test_export_png(browser, page_file, tmp_path, view):
     page.evaluate("select(3, false)")
     faded = page.evaluate("cy.nodes('.faded').map(n => n.id()).sort()")
     with page.expect_download() as info:
-        page.click("#exportPng")
+        more(page, "exportPng")
     download = info.value
     assert download.suggested_filename == f"taskgraph-demo-goal-2-{view}-2026-10-13.png"
     out = tmp_path / download.suggested_filename
@@ -698,16 +734,16 @@ def test_back_and_forward_step_through_navigation(browser, page_file):
     page, problems = open_page(browser, page_file)
     state = "() => [view, goal, depsMode, location.search]"
     page.click("#viewTimeline")
-    page.select_option("#goal", "2")
-    page.select_option("#depsMode", "critical")
-    page.click("#typesBtn")
-    page.click("#type-task")
+    pick_goal(page, "2")
+    view_option(page, "depsMode", "critical")
+    tick(page, "#type-task")
+    page.keyboard.press("Escape")
     assert page.evaluate(state)[:3] == ["timeline", 2, "critical"]
     assert "types=" in page.evaluate("location.search")
     page.go_back()
     page.wait_for_function("depsMode === 'off'")
     assert page.evaluate(state)[:3] == ["timeline", 2, "off"]
-    assert page.input_value("#depsMode") == "off"
+    assert page.evaluate("document.querySelector('input[name=depsMode]:checked').value") == "off"
     page.go_back()
     page.wait_for_function("goal === null")
     assert page.evaluate(state)[:3] == ["timeline", None, "off"] and page.input_value("#goal") == ""
@@ -808,7 +844,7 @@ def test_deleted_goal_leaves_the_url(browser, page_file):
 @pytest.mark.parametrize("view", VIEWS)
 def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view):
     page, problems = open_page(browser, programme_file, f"?view={view}")
-    page.click("#collapseAll")
+    more(page, "collapseAll")
     marked = "id => [cy.getElementById(String(id)).data('label'), cy.getElementById(String(id)).hasClass('late')]"
     assert page.evaluate("expandedIds().has(1) && !expandedIds().has(3)")
     page.evaluate("toggleExpand(1)")
@@ -817,7 +853,7 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(3)")
     assert "1 late inside" in label and late
-    page.click("#expandAll")
+    more(page, "expandAll")
     label, late = page.evaluate(f"({marked})(3)")
     assert "late inside" not in label and not late
     assert page.evaluate("cy.getElementById('4').hasClass('late')")
@@ -861,14 +897,15 @@ def test_conflict_line_explains_itself(browser, page_file):
         return [c.left + p.x, c.top + p.y];
     }""")
     page.mouse.move(*box)
-    page.wait_for_timeout(150)
-    story = page.evaluate("document.getElementById('cy').title")
+    page.wait_for_timeout(250)
+    story = page.text_content("#tip")
+    assert page.is_visible("#tip")
     assert story == "#3 waits for #5 · #5 is due 5 Nov but #3 needs it 20 Oct (16d short)"
     page.mouse.click(*box)
     page.wait_for_function("pinned === 5")
     assert "#5 due 5 Nov after #3 needs it 20 Oct" in page.inner_text("#panel")
     page.mouse.move(5, 300)
-    assert page.evaluate("document.getElementById('cy').title") == ""
+    assert page.text_content("#tip") == "" and page.is_hidden("#tip")
     assert problems == []
     page.close()
 
@@ -882,7 +919,7 @@ def test_export_png_includes_the_legend(browser, page_file):
     assert page.evaluate("legendItems().then(l => l.length)") == len(items)
     import struct
     with page.expect_download() as info:
-        page.click("#exportPng")
+        more(page, "exportPng")
     data = open(info.value.path(), "rb").read()
     w, h = struct.unpack(">II", data[16:24])
     plan = page.evaluate("(async () => (await createImageBitmap(await cy.png({ output: 'blob-promise', full: true, scale: 2, maxWidth: 8000, maxHeight: 8000 }))).height)()")
@@ -892,20 +929,61 @@ def test_export_png_includes_the_legend(browser, page_file):
     page.close()
 
 
-def test_types_dropdown(browser, page_file):
+def test_filter_popover_and_chips(browser, page_file):
     page, problems = open_page(browser, page_file)
-    assert page.inner_text("#typesBtn") == "Types: all ▾" and page.is_hidden("#type-task")
-    page.click("#typesBtn")
-    assert page.is_visible("#type-task") and page.get_attribute("#typesBtn", "aria-expanded") == "true"
+    assert page.is_hidden("#filters") and page.is_hidden("#clearAll") and page.evaluate("chipList().length") == 0
+    page.click("#filterBtn")
+    assert page.is_visible("#type-task") and page.get_attribute("#filterBtn", "aria-expanded") == "true"
     page.click("#type-task")
     page.click("#type-external")
     assert page.is_visible("#type-task")
-    assert page.inner_text("#typesBtn") == "Types: 5 of 7 ▾" and "on" in page.get_attribute("#typesBtn", "class")
+    assert page.text_content("#chips") == "Types: −task, −external×" and page.is_visible("#clearAll")
     assert "5" not in page.evaluate("tasks().map(n => n.id())")
     page.mouse.click(700, 500)
-    assert page.is_hidden("#type-task")
-    page.click("#typesBtn")
+    assert page.is_hidden("#filters")
+    page.click('#chips .chip[data-key=types] button')
+    assert page.evaluate("types.size") == 7 and page.is_hidden("#clearAll")
+    owner = '#filters [data-facet=owner][data-value="bo"]'
+    page.click("#filterBtn")
+    page.click("#filters [data-facet=owner] .link:text('None')")
+    page.click(owner)
+    assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "4"] and "owner=bo" in page.url
+    assert page.text_content("#chips") == "Owner: bo×"
+    page.click(owner)
+    assert "owner=none" in page.url and page.text_content("#chips") == "Owner: none×"
+    page.click("#filters [data-facet=owner] .link:text('All')")
+    assert page.evaluate("owners") is None and "owner=" not in page.url
+    page.click("#flag-late")
+    assert page.evaluate("tasks().length") == 0
+    page.click("#flag-atrisk")
+    assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "2"] and "flag=late,atrisk" in page.url
+    assert page.text_content("#chips") == "Late or At risk×"
     page.keyboard.press("Escape")
-    assert page.is_hidden("#type-task")
+    assert page.is_hidden("#filters")
+    page.click("#clearAll")
+    assert page.evaluate("flags.size") == 0 and page.evaluate("location.search") == "?project=demo"
+    page.click("#filterBtn")
+    page.click("#status-done")
+    assert page.text_content("#chips") == "Done shown×"
+    assert problems == []
+    page.close()
+
+
+def test_toolbar_rows_hold_still(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    spots = "() => ['project', 'goal', 'viewGraph', 'search', 'filterBtn', 'fit', 'moreBtn'].map(id => { const r = document.getElementById(id).getBoundingClientRect(); return [id, Math.round(r.top)]; })"
+    before = page.evaluate(spots)
+    page.click("#viewTimeline")
+    pick_goal(page, "2")
+    tick(page, "#type-task")
+    page.keyboard.press("Escape")
+    assert page.evaluate(spots) == before
+    page.keyboard.press("e")
+    assert page.evaluate("expandedIds().size") == 1
+    page.keyboard.press("c")
+    page.keyboard.press("f")
+    assert page.evaluate("keepWhole") is True
+    more(page, "relayout")
+    assert page.is_hidden("#more")
     assert problems == []
     page.close()
