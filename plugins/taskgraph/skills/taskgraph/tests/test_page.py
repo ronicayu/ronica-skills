@@ -543,9 +543,9 @@ def test_date_format(browser, page_file):
     page.keyboard.press("Escape")
     page.evaluate("select(3, false)")
     text = page.inner_text("#panel")
-    assert "Baseline due" in text and "20 Nov (+5d) · plan" in text
-    assert not re.search(r"\d{4}-\d{2}-\d{2}", text)
-    assert re.search(r"Created\s+\d{1,2} Oct \d{2}:\d{2}", text)
+    assert "Due\t25 Nov · +5d vs 20 Nov · plan" in text
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", page.text_content("#panel"))
+    assert re.search(r"Created\d{1,2} Oct \d{2}:\d{2}", page.text_content("#details"))
     assert re.fullmatch(r"Generated \d{1,2} \w{3}( \d{4})? \d{2}:\d{2}", page.inner_text("#stamp"))
     assert problems == []
     page.close()
@@ -622,6 +622,9 @@ def test_panel_close_and_esc(browser, page_file, raid_file):
     page.fill("#search", "vendor")
     page.press("#search", "Escape")
     assert page.input_value("#search") == "" and page.evaluate(PANEL_OPEN)
+    page.click("#goal")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#goalList") and page.evaluate(PANEL_OPEN)
     page.evaluate("select(2, false)")
     assert page.inner_text("#focusGoal") == "Focus on this goal"
     page.evaluate("select(3, false)")
@@ -948,6 +951,7 @@ def test_filter_popover_and_chips(browser, page_file):
     page.click("#filters [data-facet=owner] .link:text('None')")
     page.click(owner)
     assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "4"] and "owner=bo" in page.url
+    assert page.evaluate("autoOpened.size") == 0
     assert page.text_content("#chips") == "Owner: bo×"
     page.click(owner)
     assert "owner=none" in page.url and page.text_content("#chips") == "Owner: none×"
@@ -1055,7 +1059,7 @@ def test_search_folds_what_it_opened(browser, programme_file):
     assert not page.evaluate("expandedIds().has(3)")
     page.fill("#search", "write modules")
     page.wait_for_timeout(300)
-    assert page.evaluate("searchOpened.has(3)")
+    assert page.evaluate("autoOpened.has(3)")
     page.evaluate("toggleExpand(3), toggleExpand(3)")
     page.fill("#search", "")
     page.wait_for_timeout(300)
@@ -1079,4 +1083,112 @@ def test_clicked_node_stays_in_view(browser, programme_file, view):
         return [b.x1 >= 0 && b.x2 <= box.width + 1 && b.y1 >= 0 && b.y2 <= box.height + 1, cy.nodes('.tl-name').length ? cy.nodes('.tl-name').renderedBoundingBox().x1 >= -1 : true];
     }""", right)
     assert inside == [True, True], (view, right)
+    page.close()
+
+
+HEADS = "Array.from(document.querySelectorAll('#panel h3'), h => h.textContent)"
+
+
+def test_panel_leads_with_why_it_is_red(browser, programme_file):
+    page, problems = open_page(browser, programme_file)
+    more(page, "expandAll")
+    page.evaluate("select(2, false)")
+    heads = page.evaluate(HEADS)
+    assert heads[:3] == ["Why it is at risk", "Blocks", "Blocked by"] and heads[-1] == "Notes"
+    outlook = page.evaluate("Array.from(document.querySelectorAll('#facts tr'), r => r.textContent).find(t => t.startsWith('Outlook'))")
+    assert outlook.startswith("OutlookAt risk — #4 Write modules is 3d late")
+    late = page.evaluate("Array.from(document.querySelectorAll('#whyHead ~ ul li'), li => li.textContent)")
+    assert "#4 Write modules3d late" in late
+    assert page.text_content("#facts").startswith("Date15 Dec")
+    assert page.is_hidden("#details tr") and page.text_content("#details").startswith("DetailsTypemilestone")
+    page.evaluate("select(4, false)")
+    assert page.evaluate(HEADS)[0] == "Why it is red" and "Due 10 Oct · 3d late" in page.inner_text("#panel")
+    assert page.text_content("#facts").startswith("Ownerpriya")
+    assert problems == []
+    page.close()
+
+
+def test_panel_back_steps_and_deep_link(browser, page_file):
+    context = browser.new_context(viewport={"width": 1400, "height": 900}, permissions=["clipboard-read", "clipboard-write"])
+    page = context.new_page()
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{page_file.as_uri()}?view=lanes&task=3")
+    page.wait_for_function("typeof cy !== 'undefined' && pinned === 3")
+    assert page.evaluate(PANEL_OPEN) and "task=3" in page.url and page.query_selector("#panelBack") is None
+    page.click("#copyLink")
+    page.wait_for_function("document.getElementById('copyLink').textContent === 'Copied'")
+    assert page.evaluate("navigator.clipboard.readText()") == page.url and page.url.endswith("view=lanes&task=3")
+    page.click("h3:text('Blocks') + ul li")
+    page.wait_for_function("pinned === 2")
+    assert page.text_content("#panelBack") == "‹ #3 Build feature" and "task=2" in page.url
+    page.click("h3:text('Blocked by') + ul li")
+    page.wait_for_function("pinned === 3")
+    assert page.evaluate("trail") == [3, 2]
+    page.keyboard.press("Alt+ArrowLeft")
+    page.wait_for_function("pinned === 2")
+    page.click("#panelBack")
+    page.wait_for_function("pinned === 3")
+    assert page.query_selector("#panelBack") is None
+    page.keyboard.press("Escape")
+    assert not page.evaluate(PANEL_OPEN) and "task=" not in page.url
+    page.goto(f"{page_file.as_uri()}?types=task,milestone&task=5")
+    page.wait_for_function("typeof cy !== 'undefined' && pinned === 5")
+    assert page.evaluate("types.has('external')") and "Vendor key" in page.inner_text("#panel")
+    assert problems == []
+    context.close()
+
+
+def test_panel_meta_links_notes_and_width(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    notes = "\n".join(f"line {i}" for i in range(20)) + "\nsee https://wiki.example/runbook for steps"
+    page.evaluate(f"""applyData({{ ...DATA, nodes: DATA.nodes.map(n => n.id !== 5 ? n : {{ ...n, notes: {notes!r}, chase_due: true,
+        meta: {{ ...n.meta, contact: 'Jo <jo@acme.example>', chase: '2026-10-10', promised: '2026-11-10', tags: ['legal', 'q4'], link: 'https://jira.example/browse/PLAT-1', priority: 'high' }},
+        conflicts: [...n.conflicts, {{ kind: 'promised', from: 5, to: null, with: null, due: '2026-11-10', need: '2026-11-05', gap: 5, message: '#5 promised 2026-11-10 after needed 2026-11-05' }}] }}) }})""")
+    page.evaluate("select(5, false)")
+    assert page.evaluate("document.querySelectorAll('#facts .tag').length") == 2
+    assert page.get_attribute("#facts a[href^='https://jira']", "target") == "_blank"
+    assert page.get_attribute("#facts a[href^='mailto:']", "href") == "mailto:jo@acme.example"
+    assert page.text_content("#facts .overdue") == " · overdue"
+    self_row = "#panel li.self"
+    assert page.text_content(self_row) == "Promised 10 Nov is after needed 5 Nov (5d)"
+    assert page.evaluate(f"getComputedStyle(document.querySelector('{self_row}')).opacity") == "1"
+    assert page.evaluate("document.querySelector('#panel .notes').classList.contains('clamp')") and page.is_visible("#notesMore")
+    assert page.get_attribute("#panel .notes a", "href") == "https://wiki.example/runbook"
+    page.click("#notesMore")
+    assert page.text_content("#notesMore") == "Show less"
+    page.evaluate("applyData({ ...DATA })")
+    assert not page.evaluate("document.querySelector('#panel .notes').classList.contains('clamp')")
+    assert "Priority" in page.text_content("#details") and "priority" not in page.text_content("#facts")
+    box = page.evaluate("document.getElementById('panelGrip').getBoundingClientRect().toJSON()")
+    x, y = box["x"] + 3, box["y"] + 200
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x - 100, y, steps=5)
+    page.mouse.up()
+    assert page.evaluate("panelW") == 440 and page.evaluate("localStorage.getItem('taskgraph.panelW')") == "440"
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--panel-w').trim()") == "440px"
+    page.mouse.move(x - 100, y)
+    page.mouse.down()
+    page.mouse.move(x - 600, y, steps=5)
+    page.mouse.up()
+    assert page.evaluate("panelW") == 520
+    assert problems == []
+    page.close()
+
+
+def test_filter_opens_summaries_that_hide_matches(browser, programme_file):
+    page, problems = open_page(browser, programme_file)
+    more(page, "collapseAll")
+    assert not page.evaluate("expandedIds().has(3)")
+    page.click("#filterBtn")
+    page.click("#filters [data-facet=owner] .link:text('None')")
+    page.click('#filters [data-facet=owner][data-value="priya"]')
+    assert page.evaluate("expandedIds().has(3)") and page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "3", "4", "7"]
+    page.click("#clearAll")
+    assert not page.evaluate("expandedIds().has(3)")
+    page.goto(f"{programme_file.as_uri()}?flag=late")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "3", "4"]
+    assert problems == []
     page.close()

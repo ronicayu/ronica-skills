@@ -91,7 +91,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #legend .col div[hidden] { display: none; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
-#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; min-width: 320px; max-width: 520px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
 #panel h2 { margin: 0 0 6px; padding-right: 30px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
@@ -110,7 +110,30 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel li:hover { background: #232830; }
 #panel li.off { opacity: .45; cursor: default; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-#panel .none { color: #9ca3af; }
+#panel .none, #panel .muted { color: #9ca3af; }
+#panel a { color: #93c5fd; }
+#panel .badge + .badge { margin-left: 4px; }
+#panel .badge.risk { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b; }
+#panel .badge.conflict { background: #ef444422; color: #fca5a5; border: 1px solid #ef4444; }
+#panel h3.red { color: #fca5a5; }
+#panel h3.amber { color: #fbbf24; }
+#panel .lead { margin: 8px 0 2px; color: #9ca3af; font-size: 12px; }
+#panel li small { margin-left: auto; padding-left: 8px; color: #9ca3af; font-size: 12px; white-space: nowrap; }
+#panel li.plain { cursor: default; }
+#panel li.plain:hover { background: none; }
+#panel li.plain i { margin-top: 5px; align-self: flex-start; }
+#panel .overdue { color: #fbbf24; }
+#panel .tag { display: inline-block; margin: 0 4px 3px 0; padding: 0 8px; border-radius: 10px; background: #2b3442; border: 1px solid #3d4a5e; font-size: 12px; }
+#panel .actions button { margin-right: 6px; }
+#panel .link { margin: 4px 0 0; padding: 0; background: none; border: 0; color: #93c5fd; cursor: pointer; }
+#panel .link:hover { background: none; text-decoration: underline; }
+#panel #panelBack { display: block; max-width: calc(100% - 36px); margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+#panel .notes.clamp { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+#panel details { margin-top: 16px; }
+#panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
+#panel details table { margin-top: 6px; }
+#panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 3px); width: 6px; cursor: ew-resize; z-index: 3; }
+#panelGrip:hover { background: #3b4658; }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
 #empty[hidden], #empty [hidden] { display: none; }
 #empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
@@ -138,7 +161,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
     </span>
     <span class="spacer"></span>
     <span class="menuWrap" id="searchWrap">
-      <span class="box"><input type="text" id="search" placeholder="Search  /" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
+      <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
       <div class="menu right" id="results" role="listbox"></div>
     </span>
     <span id="searchCount" aria-live="polite"></span>
@@ -159,6 +182,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
         <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
         <button class="item" id="refresh" hidden title="Check for changes now">Refresh now</button>
+        <button class="item" id="copyView" title="Copy a link to exactly this view">Copy link to view</button>
       </div>
     </span>
   </div>
@@ -649,14 +673,15 @@ const tasks = () => cy.nodes().not('.bg');
 const links = () => cy.edges().not('.bg');
 const conflicted = n => (n.conflicts ?? []).length > 0;
 const atRisk = n => !!(n.outlook && n.outlook.verdict === 'at_risk' && n.derived_status !== 'done');
+// "At risk" names what is late, the item to chase, before the slack figure.
 function outlookText(o) {
-  if (o.verdict === 'on_track') return 'On track' + (o.min_slack != null ? ` · min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d` : '');
+  const slack = o.min_slack != null ? `min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d` : null;
+  if (o.verdict === 'on_track') return 'On track' + (slack ? ' · ' + slack : '');
   if (o.verdict === 'unknown') return 'Unknown · nothing upstream has a date';
-  const parts = [];
-  if (o.late_upstream.length) parts.push(o.late_upstream.length + ' late upstream');
-  if (o.negative_slack) parts.push(o.negative_slack + ' negative slack');
-  if (o.min_slack != null) parts.push(`min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d`);
-  return 'At risk' + (parts.length ? ' · ' + parts.join(' · ') : '');
+  const late = o.late_upstream.filter(i => byId.has(i)).map(i => byId.get(i)).sort((a, b) => b.late_days - a.late_days || a.id - b.id);
+  const lead = late.length ? `#${late[0].id} ${late[0].title} is ${late[0].late_days}d late` + (late.length > 1 ? `, +${late.length - 1} more late` : '')
+    : o.negative_slack ? `${o.negative_slack} ${o.negative_slack === 1 ? 'hop' : 'hops'} with negative slack` : null;
+  return 'At risk' + (lead ? ' — ' + lead : '') + (slack ? ' · ' + slack : '');
 }
 const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
@@ -1173,6 +1198,8 @@ function applyData(next) {
   }
   fillGoals();
   syncLegend();
+  matchMemo = null;
+  autoOpen();
   const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
     const sources = new Set(edges.map(e => e.source));
@@ -1202,7 +1229,7 @@ function applyData(next) {
 }
 
 function toggleExpand(id) {
-  searchOpened.delete(id);
+  autoOpened.delete(id);
   const open = new Set(expandedIds());
   if (!open.delete(id)) open.add(id);
   setExpanded(open);
@@ -1210,18 +1237,19 @@ function toggleExpand(id) {
   if (pinned) openPanel(byId.get(pinned));
 }
 
-function reveal(id) {
+// Open an item from the panel (how = 'ref', remembered for Back), a deep link or a back step.
+function reveal(id, how = 'ref') {
   const open = new Set(expandedIds());
   const size = open.size;
   for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) {
     open.add(n.parent);
-    searchOpened.delete(n.parent);
+    autoOpened.delete(n.parent);
   }
   if (open.size !== size) {
     setExpanded(open);
     rebuild(true);
   }
-  select(id, true);
+  select(id, true, how);
 }
 
 function focusOn(n, fade) {
@@ -1329,32 +1357,38 @@ function renderResults() {
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
 }
 
-// Expand whatever hides a hit, so a match inside a collapsed summary is never just a dimmed screen,
-// and fold it again once the search moves on, unless the viewer has used it since.
+// Expand whatever hides a search hit or an item a narrowing filter picked out (owner, lane,
+// flags, status), so a match inside a collapsed summary is never just a box to open by hand,
+// and fold it again once the search or filter moves on, unless the viewer has used it since.
 let searchTimer, searched = { q: null, at: -1, moved: false };
-const searchOpened = new Set();
-function runSearch() {
-  clearTimeout(searchTimer);
-  const q = searchQuery();
-  searched = { q, at: -1, moved: false };
+const autoOpened = new Set();
+const narrowing = () => flags.size > 0 || owners != null || lanes != null || OPEN_STATUSES.some(s => !statuses.has(s));
+function autoOpen() {
   const need = new Set(), keep = new Set();
   const lift = (n, into) => { for (let a = n; byId.has(a.parent); a = byId.get(a.parent)) into.add(a.parent); };
-  searchHits(q).forEach(h => lift(h, need));
+  searchHits(searchQuery()).forEach(h => lift(h, need));
+  if (narrowing()) DATA.nodes.filter(n => own(n) && passes(n)).forEach(n => lift(n, need));
   if (pinned && byId.has(pinned)) lift(byId.get(pinned), keep);
   const open = new Set(expandedIds());
   let changed = false;
-  [...searchOpened].filter(id => !need.has(id)).forEach(id => {
-    searchOpened.delete(id);
+  [...autoOpened].filter(id => !need.has(id)).forEach(id => {
+    autoOpened.delete(id);
     if (!keep.has(id) && open.delete(id)) changed = true;
   });
   need.forEach(id => {
     if (open.has(id)) return;
     open.add(id);
-    searchOpened.add(id);
+    autoOpened.add(id);
     changed = true;
   });
-  if (changed) {
-    setExpanded(open);
+  if (changed) setExpanded(open);
+  return changed;
+}
+function runSearch() {
+  clearTimeout(searchTimer);
+  const q = searchQuery();
+  searched = { q, at: -1, moved: false };
+  if (autoOpen()) {
     rebuild(true);
     if (pinned) openPanel(byId.get(pinned));
   } else applySearch();
@@ -1403,31 +1437,76 @@ function fmt(iso) {
 }
 
 const show = (k, v) => DATE_KEYS.includes(k) ? day(v) : k === 'estimate' ? v + ' h' : typeof v === 'string' ? v : JSON.stringify(v);
-const row = (k, v) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: v }));
+const row = (k, ...v) => el('tr', null, el('td', { textContent: k }), el('td', null, ...v));
+const titleCase = k => k.replace(/[_-]+/g, ' ').replace(/^\w/, c => c.toUpperCase());
+
+// Links become links: URLs in notes and meta open in a new tab, an email address becomes mailto.
+const URL_RE = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/g;
+const EMAIL_RE = /[\w.+-]+@[\w-]+(\.[\w-]+)+/;
+function anchor(href, text) {
+  return el('a', { href, textContent: text, target: href.startsWith('mailto:') ? null : '_blank', rel: 'noopener noreferrer' });
+}
+function shortUrl(u) {
+  try {
+    const x = new URL(u), path = x.pathname.replace(/\/$/, '');
+    const s = x.host + path;
+    return s.length > 42 ? s.slice(0, 41) + '…' : s;
+  } catch (e) { return u; }
+}
+function linkify(text) {
+  const out = [];
+  let at = 0;
+  for (const m of String(text).matchAll(URL_RE)) {
+    out.push(text.slice(at, m.index), anchor(m[0], m[0]));
+    at = m.index + m[0].length;
+  }
+  out.push(String(text).slice(at));
+  return out.filter(p => p !== '');
+}
+const valueNodes = v => {
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  if (/^https?:\/\/\S+$/.test(s)) return [anchor(s, shortUrl(s))];
+  const mail = typeof v === 'string' && EMAIL_RE.exec(s);
+  if (mail) return [s.slice(0, mail.index), anchor('mailto:' + mail[0], mail[0]), s.slice(mail.index + mail[0].length)].filter(p => p !== '');
+  return [s];
+};
 
 // The chain with the least slack into an open milestone or objective, first step first, as `tg.py path` prints it.
 const chainOf = n => n.outlook && n.derived_status !== 'done' ? (n.outlook.driving || []).filter(i => i !== n.id && byId.has(i)) : [];
 
-function refList(ids) {
+// Rows naming other items open them; `note` adds a right-hand word such as "4d late".
+function refList(ids, note) {
+  ids = ids.filter(id => byId.has(id));
   if (!ids.length) return el('div', { className: 'none', textContent: 'None' });
   return el('ul', null, ...ids.map(id => {
     const n = byId.get(id);
     const on = passes(n);
     const c = COLORS[n.derived_status] || COLORS.blocked;
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
+    const li = el('li', { className: on ? '' : 'off', title: on ? null : 'Hidden by the current filters' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+      note && note(n) ? el('small', { textContent: note(n) }) : null);
     if (on) li.onclick = () => reveal(id);
     return li;
   }));
 }
+const plain = (text, color) => el('li', { className: 'plain' }, el('i', { style: 'background:' + (color || RED) }), el('span', null, ...[].concat(text)));
+const lateNote = n => n.late_days != null ? n.late_days + 'd late' : null;
 
-function baselineText(n) {
+function baselineNote(n) {
   const b = n.baseline;
+  if (!b || b.due === n.due) return null;
   const delta = b.due && n.due ? Math.round(dnum(n.due) - dnum(b.due)) : null;
-  return (b.due ? day(b.due) : 'none') + (delta ? ` (${delta > 0 ? '+' : ''}${delta}d)` : '') + ' · ' + b.label;
+  const label = String(b.label).replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
+  return b.due ? (delta ? `${delta > 0 ? '+' : ''}${delta}d vs ${day(b.due)} · ${label}` : `was ${day(b.due)} · ${label}`) : `no date in ${label}`;
 }
 
+// A conflict with another item opens it; one about this item alone (promised after needed) is a
+// plain statement, not a greyed-out row.
 function conflictList(list) {
   return el('ul', null, ...list.map(c => {
+    if (c.with == null) {
+      const text = c.kind === 'promised' ? `Promised ${day(c.due)} is after needed ${day(c.need)} (${Math.abs(c.gap)}d)` : c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
+      return el('li', { className: 'plain self' }, el('i', { style: 'background:' + RED }), el('span', { textContent: text }));
+    }
     const on = byId.has(c.with) && passes(byId.get(c.with));
     const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m)) }));
     if (on) li.onclick = () => reveal(c.with);
@@ -1435,79 +1514,199 @@ function conflictList(list) {
   }));
 }
 
+const DUE_META = { task: 'due', objective: 'due', milestone: 'date', decision: 'decide_by', external: 'needed_by', risk: 'review', issue: 'due' };
+const DUE_LABEL = { task: 'Due', objective: 'Due', milestone: 'Date', decision: 'Decide by', external: 'Needed by', risk: 'Review', issue: 'Due' };
+const WHO = { decision: ['decider', 'Decider'], external: ['party', 'Party'] };
+const EXTRA_FACTS = { external: ['contact', 'promised', 'chase'], risk: ['likelihood', 'impact', 'mitigation'], issue: ['severity', 'raised'] };
+const LINK_KEYS = ['link', 'url'];
+
+// The facts a steering meeting asks first: who, when (against the baseline), where, how big.
+function facts(n) {
+  const [whoKey, whoLabel] = WHO[n.type] || ['owner', 'Owner'];
+  const m = n.meta, rows = [];
+  if (m[whoKey]) rows.push(row(whoLabel, m[whoKey]));
+  const base = baselineNote(n);
+  if (n.due || base) rows.push(row(DUE_LABEL[n.type] || 'Due', n.due ? day(n.due) : 'none', base ? el('span', { className: 'muted', textContent: ' · ' + base }) : null));
+  if (isSummary(n) && n.span) rows.push(row('Span', day(n.span.start) + '–' + day(n.span.end)));
+  if (n.start) rows.push(row('Start', day(n.start)));
+  const lane = inheritedMeta(n, 'lane'), team = inheritedMeta(n, 'team');
+  if (lane) rows.push(row('Lane', lane));
+  if (team && team !== lane) rows.push(row('Team', team));
+  if (m.estimate != null && m.estimate !== '') rows.push(row('Estimate', show('estimate', m.estimate)));
+  (EXTRA_FACTS[n.type] || []).filter(k => m[k] != null && m[k] !== '').forEach(k => {
+    if (k === 'chase') rows.push(row('Chase', day(m.chase), n.chase_due ? el('strong', { className: 'overdue', textContent: ' · overdue' }) : null));
+    else rows.push(row(titleCase(k), ...(DATE_KEYS.includes(k) ? [day(m[k])] : valueNodes(m[k]))));
+  });
+  if (n.outlook && n.derived_status !== 'done') rows.push(row('Outlook', outlookText(n.outlook)));
+  if (n.rollup && n.rollup.total) rows.push(row('Progress', `${n.rollup.done}/${n.rollup.total} done`));
+  if (tagsOf(n).length) rows.push(row('Tags', ...tagsOf(n).map(t => el('span', { className: 'tag', textContent: t }))));
+  LINK_KEYS.filter(k => m[k]).forEach(k => rows.push(row(titleCase(k), ...valueNodes(m[k]))));
+  return rows;
+}
+const factKeys = n => new Set(['type', 'start', 'lane', 'team', 'estimate', 'tags', 'owner', ...LINK_KEYS, DUE_META[n.type], (WHO[n.type] || ['owner'])[0], ...(EXTRA_FACTS[n.type] || [])]);
+
+// Why the item is red or amber, in words, naming the items to chase.
+function why(n) {
+  const rows = [];
+  if (n.late_days != null) rows.push(plain(`${DUE_LABEL[n.type] || 'Due'} ${day(n.due)} · ${n.late_days}d late`));
+  const lateInside = collapsed(n) ? beneath(n).filter(k => k.late_days != null && k.derived_status !== 'done' && k.type !== 'risk' && keeps(k)) : [];
+  const late = atRisk(n) ? n.outlook.late_upstream.filter(i => byId.has(i)).sort((a, b) => byId.get(b).late_days - byId.get(a).late_days || a - b) : [];
+  const parts = [];
+  if (rows.length) parts.push(el('ul', null, ...rows));
+  if (lateInside.length) parts.push(el('div', { className: 'lead', textContent: 'Late inside' }), refList(lateInside.map(k => k.id), lateNote));
+  if (late.length) parts.push(el('div', { className: 'lead', textContent: late.length === 1 ? 'Late upstream' : `${late.length} late upstream` }), refList(late, lateNote));
+  if (atRisk(n) && n.outlook.negative_slack) parts.push(el('ul', null, plain(`${n.outlook.negative_slack} ${n.outlook.negative_slack === 1 ? 'hop' : 'hops'} with negative slack` + (n.outlook.min_slack != null ? ` · min slack ${n.outlook.min_slack}d` : ''), AMBER)));
+  if (conflicted(n)) parts.push(el('div', { className: 'lead', textContent: 'Conflicts' }), conflictList(n.conflicts));
+  if (n.chase_due) parts.push(el('ul', null, plain(['Chase was due ' + day(n.meta.chase), n.meta.party ? ' · ' + n.meta.party : '', ...(n.meta.contact ? [' · ', ...valueNodes(n.meta.contact)] : [])], AMBER)));
+  if (!parts.length) return [];
+  const red = n.late_days != null || lateInside.length || conflicted(n);
+  return [el('h3', { id: 'whyHead', className: red ? 'red' : 'amber', textContent: red ? 'Why it is red' : atRisk(n) ? 'Why it is at risk' : 'Chase due' }), ...parts];
+}
+
+// Long notes fold to eight lines; the choice survives the panel redrawing on refresh.
+let notesOpen = null;
+function notesBlock(n) {
+  if (!n.notes) return [el('div', { className: 'none', textContent: 'None' })];
+  const box = el('div', { className: 'notes' + (notesOpen === n.id ? '' : ' clamp') }, ...linkify(n.notes));
+  const more = el('button', { className: 'link', id: 'notesMore', hidden: true, textContent: notesOpen === n.id ? 'Show less' : 'Show more' });
+  more.onclick = () => {
+    notesOpen = notesOpen === n.id ? null : n.id;
+    box.classList.toggle('clamp', notesOpen !== n.id);
+    more.textContent = notesOpen === n.id ? 'Show less' : 'Show more';
+  };
+  return [box, more];
+}
+
+// Panel-local back steps: following a row in the panel remembers where you came from.
+let trail = [];
+const MIN_PANEL = 320, MAX_PANEL = 520;
+let panelW = Math.max(MIN_PANEL, Math.min(MAX_PANEL, Number(store.get('taskgraph.panelW')) || 340));
+function setPanelWidth(w) {
+  panelW = Math.round(Math.max(MIN_PANEL, Math.min(MAX_PANEL, w)));
+  $('panel').style.width = panelW + 'px';
+  document.documentElement.style.setProperty('--panel-w', panelW + 'px');
+  $('cy').style.right = panelW + 'px';
+}
+function grip() {
+  const g = el('div', { id: 'panelGrip', title: 'Drag to resize' });
+  g.onpointerdown = e => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    g.onpointermove = ev => setPanelWidth(innerWidth - ev.clientX);
+    g.onpointerup = () => {
+      g.onpointermove = g.onpointerup = null;
+      store.set('taskgraph.panelW', String(panelW));
+      cy.resize();
+      if (pinned) keepInView(cy.getElementById(String(pinned)));
+    };
+  };
+  return g;
+}
+
+async function copyLink(btn) {
+  const url = location.href, was = btn.textContent;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(url);
+    ok = true;
+  } catch (e) {
+    const t = el('textarea', { value: url });
+    document.body.append(t);
+    t.select();
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    t.remove();
+  }
+  btn.textContent = ok ? 'Copied' : 'Copy failed';
+  setTimeout(() => { btn.textContent = was; }, 1500);
+}
+
 function openPanel(n) {
   const panel = $('panel');
   const top = panel.scrollTop;
-  const fields = FIELDS[n.type] || FIELDS.task;
-  const shown = new Set(['type', 'start', 'due', ...fields.map(([k]) => k)]);
-  const extra = Object.entries(n.meta).filter(([k]) => !shown.has(k));
+  trail = trail.filter(id => byId.has(id));
+  const known = factKeys(n);
+  const extra = Object.entries(n.meta).filter(([k]) => !known.has(k));
   const focus = goal === n.id || n.type !== 'risk';
   const focusText = goal === n.id ? 'Show everything' : GOAL_TYPES.includes(n.type) ? 'Focus on this goal' : 'Show only what this needs';
+  const back = trail.length ? byId.get(trail[trail.length - 1]) : null;
+  const hasParent = n.parent != null && byId.has(n.parent);
   panel.replaceChildren(...[
-    el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close', textContent: '×', onclick: closePanel }),
+    grip(),
+    el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
+    back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
+      atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
+      conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
       n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null),
-    el('table', null,
-      row('Type', n.type),
-      row('Project', n.project),
-      n.start ? row('Start', day(n.start)) : null,
-      n.type === 'task' && n.due ? row('Due', day(n.due)) : null,
-      n.baseline && n.baseline.due !== n.due ? row('Baseline due', baselineText(n)) : null,
-      ...fields.filter(([k]) => n.meta[k] != null && n.meta[k] !== '').map(([k, label]) => row(label, show(k, n.meta[k]))),
-      n.outlook && n.derived_status !== 'done' ? row('Outlook', outlookText(n.outlook)) : null,
-      n.rollup && n.rollup.total ? row('Progress', `${n.rollup.done}/${n.rollup.total} done`) : null,
-      row('Created', fmt(n.created_at)),
-      row('Done', fmt(n.done_at))),
-    n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
-    focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs',
-      style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
+    el('table', { id: 'facts' }, ...facts(n)),
+    el('div', { className: 'actions' },
+      n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+      focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
+      el('button', { id: 'copyLink', textContent: 'Copy link', title: 'Copy a link that opens this item', onclick: e => copyLink(e.currentTarget) })),
+    ...why(n),
+    el('h3', { textContent: 'Blocks' }),
+    refList(n.blocks),
+    el('h3', { textContent: 'Blocked by' }),
+    refList(n.depends_on, lateNote),
     chainOf(n).length ? el('h3', { id: 'chainHead', textContent: 'Driving chain' }) : null,
     chainOf(n).length ? refList(chainOf(n)) : null,
     (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
     (n.threats ?? []).length ? refList(n.threats) : null,
-    conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
-    conflicted(n) ? conflictList(n.conflicts) : null,
-    n.parent != null && byId.has(n.parent) ? el('h3', { textContent: 'Parent' }) : null,
-    n.parent != null && byId.has(n.parent) ? refList([n.parent]) : null,
+    hasParent ? el('h3', { textContent: 'Parent' }) : null,
+    hasParent ? refList([n.parent]) : null,
     n.children.length ? el('h3', { textContent: 'Children' }) : null,
-    n.children.length ? refList(n.children) : null,
+    n.children.length ? refList(n.children, lateNote) : null,
     el('h3', { textContent: 'Notes' }),
-    n.notes ? el('div', { className: 'notes', textContent: n.notes }) : el('div', { className: 'none', textContent: 'None' }),
-    el('h3', { textContent: 'Meta' }),
-    extra.length
-      ? el('table', null, ...extra.map(([k, v]) => row(k, typeof v === 'string' ? v : JSON.stringify(v))))
-      : el('div', { className: 'none', textContent: 'None' }),
-    el('h3', { textContent: 'Blocked by' }),
-    refList(n.depends_on),
-    el('h3', { textContent: 'Blocks' }),
-    refList(n.blocks)
+    ...notesBlock(n),
+    el('details', { id: 'details', open: detailsOpen },
+      el('summary', { textContent: 'Details' }),
+      el('table', null,
+        row('Type', n.type),
+        row('Project', n.project),
+        row('Created', fmt(n.created_at)),
+        row('Done', fmt(n.done_at)),
+        ...extra.map(([k, v]) => row(titleCase(k), ...(DATE_KEYS.includes(k) ? [day(v)] : valueNodes(v))))))
   ].filter(c => c != null));
+  $('details').ontoggle = e => { detailsOpen = e.target.open; };
   panel.scrollTop = top;
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
-  document.documentElement.style.setProperty('--panel-w', '340px');
-  $('cy').style.right = '340px';
+  setPanelWidth(panelW);
+  const notes = panel.querySelector('.notes');
+  if (notes) $('notesMore').hidden = !(notes.scrollHeight > notes.clientHeight + 1 || notesOpen === n.id);
   cy.resize();
   if (wasHidden) fitView();
+}
+let detailsOpen = false;
+
+function goBack() {
+  if (!trail.length) return;
+  const id = trail.pop();
+  reveal(id, 'back');
 }
 
 function closePanel() {
   pinned = null;
+  trail = [];
   $('panel').style.display = 'none';
   document.documentElement.style.setProperty('--panel-w', '0px');
   $('cy').style.right = '0';
   cy.resize();
   refocus();
+  syncUrl();
 }
 
-function select(id, center) {
+function select(id, center, how) {
   const node = cy.getElementById(String(id));
   if (node.empty()) return;
+  if (how === 'ref' && pinned != null && pinned !== id) trail = [...trail, pinned].slice(-5);
+  else if (how !== 'back') trail = [];
   pinned = id;
   openPanel(byId.get(id));
   refocus();
+  syncUrl();
   if (!center) return keepInView(node);
   userMoved = true;
   if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
@@ -1643,6 +1842,7 @@ const params = () => {
   if (flags.size) q.set('flag', listParam(flags, Object.keys(FLAGS)));
   if (owners) q.set('owner', listParam(owners));
   if (lanes) q.set('lane', listParam(lanes));
+  if (pinned != null) q.set('task', String(pinned));
   return q.toString().replaceAll('%2C', ',');
 };
 // Navigation (view, goal, project, dependencies, lanes) adds a history entry so Back returns to
@@ -1663,11 +1863,14 @@ window.addEventListener('popstate', () => {
   if (project && !Array.from(projectSelect.options).some(o => o.value === project)) projectSelect.append(el('option', { value: project, textContent: project }));
   projectSelect.value = project;
   goal = byId.has(Number(q.get('goal'))) ? Number(q.get('goal')) : null;
+  autoOpen();
   syncControls();
   fillGoals();
   setTitle();
   rebuild();
-  if (pinned) openPanel(byId.get(pinned));
+  const task = Number(q.get('task'));
+  if (byId.has(task) && cy.getElementById(String(task)).nonempty()) select(task, false, 'back');
+  else if (pinned) closePanel();
 });
 
 // What the viewer has narrowed, one removable chip each; nothing shows on a fresh plan.
@@ -1702,6 +1905,7 @@ function filtersChanged(goalToo) {
   matchMemo = null;
   if (owners && sameSet(owners, valuesOf(ownerOf))) owners = null;
   if (lanes && sameSet(lanes, valuesOf(laneName))) lanes = null;
+  autoOpen();
   store.set('taskgraph.types', types.size ? TYPES.filter(t => types.has(t)).join(',') : '');
   if (goalToo) {
     if (goal != null && !byId.has(goal)) goal = null;
@@ -1918,6 +2122,7 @@ goalBox.onkeydown = e => {
     e.preventDefault();
     pickGoal(goalAt);
   } else if (e.key === 'Escape') {
+    e.stopPropagation();
     setMenu('goalWrap', false);
     goalBox.blur();
   }
@@ -1971,6 +2176,11 @@ document.addEventListener('keydown', e => {
     else if ($('panel').style.display === 'block') closePanel();
     return;
   }
+  const panelOpen = $('panel').style.display === 'block';
+  if (panelOpen && trail.length && ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !typing(e.target)))) {
+    e.preventDefault();
+    return goBack();
+  }
   if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
   const key = e.key.toLowerCase();
   if (e.key === '/') {
@@ -1982,19 +2192,20 @@ document.addEventListener('keydown', e => {
   else if (key === 'c') $('collapseAll').click();
 });
 $('expandAll').onclick = () => {
-  searchOpened.clear();
+  autoOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 // Collapse all folds the workstreams but keeps objectives open, so the programme's shape stays.
 $('collapseAll').onclick = () => {
-  searchOpened.clear();
+  autoOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(n => n.type === 'objective').map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
+$('copyView').onclick = e => copyLink(e.currentTarget);
 $('fit').onclick = () => {
   keepWhole = true;
   fitView(true);
@@ -2164,8 +2375,15 @@ if (DATA.live) {
 }
 
 if (goal != null && !byId.has(goal)) goal = null;
+autoOpen();
 fillGoals();
 rebuild();
+// ?task=ID opens that item, loosening whatever filter would hide it: the link asked for it.
+const linked = byId.get(Number(query.get('task')));
+if (linked) {
+  if (!passes(linked)) release([linked]);
+  reveal(linked.id, 'link');
+}
 </script>
 </body>
 </html>
