@@ -427,7 +427,7 @@ def test_toolbar_never_overflows(browser, page_file, view):
 def test_search_reveals_collapsed_and_counts(browser, page_file):
     page, problems = open_page(browser, page_file)
     more(page, "collapseAll")
-    page.fill("#search", "docs")
+    page.fill("#search", "write")
     page.wait_for_timeout(300)
     assert page.evaluate("tasks().filter(n => !n.hasClass('dim')).map(n => n.id())") == ["4"]
     assert page.inner_text("#searchCount") == "1 match"
@@ -439,14 +439,14 @@ def test_search_reveals_collapsed_and_counts(browser, page_file):
     page.fill("#search", "e")
     page.wait_for_timeout(300)
     hits = page.evaluate("searchHits('e').map(n => n.id)")
-    assert hits == [3, 4, 5, 6] and page.inner_text("#searchCount") == "4 matches"
+    assert hits == [3, 4, 5, 6, 2] and page.inner_text("#searchCount") == "5 matches"
     page.press("#search", "Enter")
     assert page.evaluate("document.getElementById('panel').style.display") == "block"
-    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 5 matches"
     page.press("#search", "Enter")
-    assert page.evaluate("pinned") == hits[1] and page.inner_text("#searchCount") == "2 of 4 matches"
+    assert page.evaluate("pinned") == hits[1] and page.inner_text("#searchCount") == "2 of 5 matches"
     page.press("#search", "Shift+Enter")
-    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 4 matches"
+    assert page.evaluate("pinned") == hits[0] and page.inner_text("#searchCount") == "1 of 5 matches"
     page.fill("#search", "ee")
     page.wait_for_timeout(300)
     assert "of" not in page.inner_text("#searchCount")
@@ -986,4 +986,97 @@ def test_toolbar_rows_hold_still(browser, page_file):
     more(page, "relayout")
     assert page.is_hidden("#more")
     assert problems == []
+    page.close()
+
+
+def test_search_fields_exact_id_and_results(browser, programme_file, page_file):
+    page, problems = open_page(browser, programme_file)
+    more(page, "expandAll")
+    hits = lambda q: page.evaluate(f"searchHits({q!r}).map(n => n.id)")
+    assert hits("priya") == [3, 4, 7] and hits("infra") == [3, 4] and hits("ciso") == [8]
+    assert page.evaluate("searchMatches('priya').map(h => h.m.field)") == ["owner", "owner", "owner"]
+    page.close()
+    page, problems = open_page(browser, page_file)
+    hits = lambda q: page.evaluate(f"searchHits({q!r}).map(n => n.id)")
+    assert hits("#1") == [1] and hits("#5") == [5] and hits("acme") == [5] and hits("bo") == [4]
+    page.evaluate("applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 6 ? { ...n, notes: 'Ask legal about the runbook', meta: { ...n.meta, tags: ['ops', 'q4'] } } : n) })")
+    assert hits("runbook") == [6] and hits("q4") == [6]
+    page.press("body", "/")
+    assert page.evaluate("document.activeElement.id") == "search"
+    page.keyboard.type("e")
+    page.wait_for_timeout(300)
+    assert page.is_visible("#results")
+    rows = page.evaluate("Array.from(document.querySelectorAll('#results .hit'), r => [r.dataset.id, r.querySelector('.when').textContent])")
+    assert [r[0] for r in rows] == ["3", "4", "5", "6", "2"] and rows[-1][1] == "dev · lane"
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    assert page.evaluate("document.querySelector('#results .active').dataset.id") == "4" and page.evaluate("pinned") is None
+    page.keyboard.press("Enter")
+    assert page.evaluate("pinned") == 4 and page.is_hidden("#results") and page.inner_text("#searchCount") == "2 of 5 matches"
+    page.keyboard.press("Enter")
+    assert page.evaluate("pinned") == 5
+    page.keyboard.press("ArrowDown")
+    page.click('#results .hit[data-id="2"]')
+    assert page.evaluate("pinned") == 2
+    assert page.is_visible("#searchClear")
+    page.click("#searchClear")
+    assert page.input_value("#search") == "" and page.is_hidden("#searchClear") and page.evaluate("document.activeElement.id") == "search"
+    assert problems == []
+    page.close()
+
+
+def test_search_says_what_a_filter_hides(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    tick(page, "#type-external")
+    page.keyboard.press("Escape")
+    page.fill("#search", "vendor")
+    page.wait_for_timeout(300)
+    assert page.inner_text("#searchCount") == "No matches · 1 hidden by Types Show"
+    page.click("#searchShow")
+    assert page.evaluate("types.has('external')") and page.inner_text("#searchCount") == "1 match"
+    page.fill("#search", "added")
+    page.wait_for_timeout(300)
+    page.evaluate(GROW)
+    assert page.inner_text("#searchCount") == "8 matches (8 new)"
+    assert page.evaluate("cy.nodes('.new').length") == 8
+    assert problems == []
+    page.close()
+
+
+def test_search_folds_what_it_opened(browser, programme_file):
+    page, problems = open_page(browser, programme_file)
+    more(page, "collapseAll")
+    assert not page.evaluate("expandedIds().has(3)")
+    page.fill("#search", "write modules")
+    page.wait_for_timeout(300)
+    assert page.evaluate("expandedIds().has(3)") and page.evaluate("tasks().map(n => n.id())").count("4") == 1
+    page.fill("#search", "")
+    page.wait_for_timeout(300)
+    assert not page.evaluate("expandedIds().has(3)")
+    page.fill("#search", "write modules")
+    page.wait_for_timeout(300)
+    assert page.evaluate("searchOpened.has(3)")
+    page.evaluate("toggleExpand(3), toggleExpand(3)")
+    page.fill("#search", "")
+    page.wait_for_timeout(300)
+    assert page.evaluate("expandedIds().has(3)")
+    assert problems == []
+    page.close()
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_clicked_node_stays_in_view(browser, programme_file, view):
+    page = browser.new_page(viewport={"width": 1280, "height": 720})
+    page.goto(f"{programme_file.as_uri()}?view={view}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    more(page, "expandAll")
+    right = page.evaluate("""() => tasks().max(n => n.renderedBoundingBox({ includeLabels: view !== 'timeline' }).x2).ele.id()""")
+    page.mouse.click(*node_xy(page, right))
+    page.wait_for_timeout(700)
+    assert page.evaluate("pinned") == int(right)
+    inside = page.evaluate("""id => {
+        const b = cy.getElementById(id).renderedBoundingBox({ includeLabels: view !== 'timeline' }), box = document.getElementById('cy').getBoundingClientRect();
+        return [b.x1 >= 0 && b.x2 <= box.width + 1 && b.y1 >= 0 && b.y2 <= box.height + 1, cy.nodes('.tl-name').length ? cy.nodes('.tl-name').renderedBoundingBox().x1 >= -1 : true];
+    }""", right)
+    assert inside == [True, True], (view, right)
     page.close()

@@ -66,6 +66,14 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .choice.done { color: #9ca3af; }
 #toolbar .group { padding: 6px 8px 2px; color: #9ca3af; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 #toolbar .menu .none { padding: 5px 8px; color: #9ca3af; }
+#toolbar .box { position: relative; display: flex; }
+#toolbar #search { width: 200px; padding-right: 24px; }
+#toolbar #searchClear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
+#toolbar #searchClear:hover { color: #e5e7eb; }
+#toolbar #results { width: 460px; max-height: 60vh; }
+#toolbar .hit { align-items: center; }
+#toolbar .hit i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#toolbar .hit .when { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 #banner { margin: 0 -14px -5px; padding: 3px 14px; background: #f59e0b; color: #1c1004; font-size: 12px; }
 #banner[hidden] { display: none; }
 #toolbar #banner button { margin-left: 6px; padding: 0 8px; background: #1c1004; color: #fde68a; border-color: #1c1004; }
@@ -129,7 +137,10 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
       </div>
     </span>
     <span class="spacer"></span>
-    <input type="text" id="search" placeholder="Search" size="9">
+    <span class="menuWrap" id="searchWrap">
+      <span class="box"><input type="text" id="search" placeholder="Search  /" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
+      <div class="menu right" id="results" role="listbox"></div>
+    </span>
     <span id="searchCount" aria-live="polite"></span>
     <span class="stamp" id="stamp"></span>
   </div>
@@ -1151,6 +1162,7 @@ function addProjects() {
 }
 
 function applyData(next) {
+  const had = new Set(searchHits(searchQuery()).map(n => n.id));
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
@@ -1176,12 +1188,21 @@ function applyData(next) {
   } else rebuild(true, true);
   if (!userMoved && hiddenTasks()) fitView(keepWhole);
   if (pinned) openPanel(byId.get(pinned));
+  // A hit that arrives with a refresh flashes and is counted as new for a few seconds.
+  const q = searchQuery(), added = q ? searchHits(q).filter(n => !had.has(n.id)) : [];
+  if (added.length) {
+    fresh = { ids: new Set(added.map(n => n.id)), until: Date.now() + 3000 };
+    const eles = cy.collection(added.map(n => cy.getElementById(String(n.id))).filter(e => e.nonempty()));
+    eles.addClass('new');
+    setTimeout(() => { eles.removeClass('new'); applySearch(); }, 3000);
+  }
   applySearch();
   refocus();
   syncEmpty();
 }
 
 function toggleExpand(id) {
+  searchOpened.delete(id);
   const open = new Set(expandedIds());
   if (!open.delete(id)) open.add(id);
   setExpanded(open);
@@ -1192,7 +1213,10 @@ function toggleExpand(id) {
 function reveal(id) {
   const open = new Set(expandedIds());
   const size = open.size;
-  for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent);
+  for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) {
+    open.add(n.parent);
+    searchOpened.delete(n.parent);
+  }
   if (open.size !== size) {
     setExpanded(open);
     rebuild(true);
@@ -1221,43 +1245,150 @@ function mirrorNames() {
   });
 }
 
+// Search finds what a director types: a title or #id, a person, a lane or team, a tag, a word in
+// the notes. Titles rank first, then people and lanes, then notes. "#12" is that one item;
+// bare digits match ids that start with them.
+const tagsOf = n => Array.isArray(n.meta.tags) ? n.meta.tags.map(String) : n.meta.tags != null ? String(n.meta.tags).split(',').map(t => t.trim()).filter(Boolean) : [];
+const SEARCH_FIELDS = [
+  ['owner', n => n.meta.owner], ['decider', n => n.meta.decider], ['party', n => n.meta.party], ['contact', n => n.meta.contact],
+  ['lane', n => inheritedMeta(n, 'lane')], ['team', n => inheritedMeta(n, 'team')], ['tags', n => tagsOf(n).join(', ')], ['notes', n => n.notes]
+];
+function matchOf(n, q) {
+  if (/^#\d+$/.test(q)) return String(n.id) === q.slice(1) ? { field: 'id', rank: 0 } : null;
+  if (/^\d+$/.test(q) && String(n.id).startsWith(q)) return { field: 'id', rank: 0 };
+  if (n.title.toLowerCase().includes(q)) return { field: 'title', rank: 0 };
+  for (const [field, get] of SEARCH_FIELDS) {
+    const v = get(n);
+    if (v != null && String(v).toLowerCase().includes(q)) return { field, value: String(v), rank: field === 'notes' ? 2 : 1 };
+  }
+  return null;
+}
 const searchQuery = () => $('search').value.trim().toLowerCase();
-const searchHits = q => q ? DATA.nodes.filter(n => passes(n) && (n.title.toLowerCase().includes(q) || ('#' + n.id).includes(q))).sort((a, b) => a.id - b.id) : [];
+const searchMatches = q => q ? DATA.nodes.filter(passes).map(n => ({ n, m: matchOf(n, q) })).filter(h => h.m).sort((a, b) => a.m.rank - b.m.rank || a.n.id - b.n.id) : [];
+const searchHits = q => searchMatches(q).map(h => h.n);
+const hiddenMatches = q => q ? DATA.nodes.filter(n => !passes(n) && matchOf(n, q)) : [];
 
+// A miss that a filter caused says so, with the one click that brings the hits back.
+function hiddenNote(hidden) {
+  const reasons = new Set(hidden.flatMap(hiddenBy));
+  const word = reasons.size === 1 ? [...reasons][0] : null;
+  const text = word === 'goal' || word === 'project' ? `${hidden.length} ${HIDDEN_WORDS[word]}` : `${hidden.length} hidden ${word ? HIDDEN_WORDS[word] : 'by filters'}`;
+  return [' · ' + text + ' ', el('button', { className: 'link', id: 'searchShow', textContent: 'Show', title: 'Loosen just the filters that hide these', onclick: () => { release(hidden); runSearch(); } })];
+}
+
+let fresh = { ids: new Set(), until: 0 };
 function applySearch() {
   const q = searchQuery();
-  const hits = new Set(searchHits(q).map(n => String(n.id)));
-  tasks().forEach(n => n.toggleClass('dim', hits.size > 0 && !hits.has(n.id())));
-  const at = searched.q === q && searched.at >= 0 && hits.size > 1 ? `${searched.at + 1} of ` : '';
-  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : `${at}${hits.size} matches`;
+  const hits = searchHits(q), ids = new Set(hits.map(n => String(n.id)));
+  tasks().forEach(n => n.toggleClass('dim', ids.size > 0 && !ids.has(n.id())));
+  $('searchClear').hidden = !$('search').value;
+  const count = $('searchCount');
+  const added = Date.now() < fresh.until ? hits.filter(n => fresh.ids.has(n.id)).length : 0;
+  if (!q) count.replaceChildren();
+  else if (hits.length) {
+    const at = searched.q === q && searched.at >= 0 && hits.length > 1 ? `${searched.at + 1} of ` : '';
+    count.replaceChildren((hits.length === 1 ? '1 match' : `${at}${hits.length} matches`) + (added ? ` (${added} new)` : ''));
+  } else {
+    const hidden = hiddenMatches(q);
+    count.replaceChildren('No matches', ...(hidden.length ? hiddenNote(hidden) : []));
+  }
+  renderResults();
   mirrorNames();
 }
 
-// Expand whatever hides a hit, so a match inside a collapsed summary is never just a dimmed screen.
-let searchTimer, searched = { q: null, at: -1 };
+// The results list: up to 12 rows around the current one, what matched when it was not the title.
+const RESULT_ROWS = 12;
+function snippet(text, q) {
+  const flat = text.replace(/\s+/g, ' '), i = flat.toLowerCase().indexOf(q);
+  const from = Math.max(0, i - 24);
+  return (from ? '…' : '') + flat.slice(from, i + q.length + 32) + (i + q.length + 32 < flat.length ? '…' : '');
+}
+function resultNote(n, m, q) {
+  if (m.field === 'notes') return 'notes: ' + snippet(m.value, q);
+  if (m.value) return m.value + ' · ' + m.field;
+  return (SUBTITLE[n.type] || SUBTITLE.task)(n).filter(Boolean).join(' · ');
+}
+function renderResults() {
+  const q = searchQuery(), list = searchMatches(q), box = $('results');
+  if (!q || !list.length) {
+    box.replaceChildren();
+    if (menuOpen('searchWrap')) setMenu('searchWrap', false);
+    return;
+  }
+  const at = searched.q === q ? searched.at : -1;
+  const from = Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS));
+  const rows = list.slice(from, from + RESULT_ROWS).map(({ n, m }, k) => {
+    const c = COLORS[n.derived_status] || COLORS.blocked, i = from + k;
+    return el('div', { className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
+      el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+      el('span', { className: 'when', textContent: resultNote(n, m, q) }));
+  });
+  const rest = list.length - from - rows.length;
+  box.replaceChildren(...(from ? [el('div', { className: 'none', textContent: `${from} more above` })] : []), ...rows,
+    ...(rest > 0 ? [el('div', { className: 'none', textContent: `+${rest} more · Enter steps through all` })] : []));
+  box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+// Expand whatever hides a hit, so a match inside a collapsed summary is never just a dimmed screen,
+// and fold it again once the search moves on, unless the viewer has used it since.
+let searchTimer, searched = { q: null, at: -1, moved: false };
+const searchOpened = new Set();
 function runSearch() {
   clearTimeout(searchTimer);
   const q = searchQuery();
-  searched = { q, at: -1 };
-  const open = new Set(expandedIds()), size = open.size;
-  searchHits(q).forEach(h => { for (let n = h; byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent); });
-  if (open.size !== size) {
+  searched = { q, at: -1, moved: false };
+  const need = new Set(), keep = new Set();
+  const lift = (n, into) => { for (let a = n; byId.has(a.parent); a = byId.get(a.parent)) into.add(a.parent); };
+  searchHits(q).forEach(h => lift(h, need));
+  if (pinned && byId.has(pinned)) lift(byId.get(pinned), keep);
+  const open = new Set(expandedIds());
+  let changed = false;
+  [...searchOpened].filter(id => !need.has(id)).forEach(id => {
+    searchOpened.delete(id);
+    if (!keep.has(id) && open.delete(id)) changed = true;
+  });
+  need.forEach(id => {
+    if (open.has(id)) return;
+    open.add(id);
+    searchOpened.add(id);
+    changed = true;
+  });
+  if (changed) {
     setExpanded(open);
     rebuild(true);
+    if (pinned) openPanel(byId.get(pinned));
   } else applySearch();
+  if (q && document.activeElement === $('search')) setMenu('searchWrap', searchHits(q).length > 0);
 }
 
 function stepSearch(back) {
   if (searched.q !== searchQuery()) runSearch();
   const hits = searchHits(searched.q);
   if (!hits.length) return;
-  searched.at = searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length;
-  select(hits[searched.at].id, true);
+  openHit(searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length);
+}
+function moveHit(step) {
+  if (searched.q !== searchQuery()) runSearch();
+  const hits = searchHits(searched.q);
+  if (!hits.length) return;
+  searched.at = searched.at < 0 ? (step > 0 ? 0 : hits.length - 1) : (searched.at + step + hits.length) % hits.length;
+  searched.moved = true;
+  setMenu('searchWrap', true);
+  applySearch();
+}
+function openHit(i) {
+  const hits = searchHits(searched.q);
+  if (!hits[i]) return;
+  searched.at = i;
+  searched.moved = false;
+  setMenu('searchWrap', false);
+  select(hits[i].id, true);
   applySearch();
 }
 
 function clearSearch() {
   $('search').value = '';
+  setMenu('searchWrap', false);
   runSearch();
 }
 
@@ -1377,14 +1508,32 @@ function select(id, center) {
   pinned = id;
   openPanel(byId.get(id));
   refocus();
-  if (center) {
-    userMoved = true;
-    if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
-    // Timeline: scroll the row to mid-height only. The name column is how a row is recognised,
-    // so it stays in view; the panel carries the dates when the bar itself is off to the right.
-    const z = cy.zoom(), box = $('cy').getBoundingClientRect();
-    cy.animate({ pan: { x: 40 - z * cy.elements().boundingBox().x1, y: box.height / 2 - z * node.position('y') } }, { duration: 250 });
-  }
+  if (!center) return keepInView(node);
+  userMoved = true;
+  if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
+  // Timeline: scroll vertically, and only when the row is off screen. The name column is how a row
+  // is recognised, so it stays in view; the panel carries the dates when the bar is off to the right.
+  const z = cy.zoom(), box = $('cy').getBoundingClientRect(), y = node.renderedPosition('y');
+  const x = 40 - z * cy.elements().boundingBox().x1;
+  if (y >= TL.row && y <= box.height - TL.row && Math.abs(cy.pan('x') - x) < 1) return;
+  cy.animate({ pan: { x, y: y >= TL.row && y <= box.height - TL.row ? cy.pan('y') : box.height / 2 - z * node.position('y') } }, { duration: 250 });
+}
+
+// A click must never make its node vanish: when the panel (or the edge) covers it, pan by the
+// least that shows it again. Timeline never pushes the name column off the left edge.
+function keepInView(node) {
+  const box = $('cy').getBoundingClientRect(), m = 16;
+  const b = node.renderedBoundingBox({ includeLabels: view !== 'timeline' });
+  let dx = 0, dy = 0;
+  if (b.x2 > box.width - m) dx = box.width - m - b.x2;
+  if (b.x1 + dx < m) dx = m - b.x1;
+  if (b.y2 > box.height - m) dy = box.height - m - b.y2;
+  if (b.y1 + dy < m) dy = m - b.y1;
+  if (view === 'timeline' && dx < 0) dx = Math.max(dx, Math.min(0, -cy.nodes('.tl-name').renderedBoundingBox().x1));
+  if (!dx && !dy) return;
+  userMoved = true;
+  cy.stop();
+  cy.animate({ panBy: { x: dx, y: dy } }, { duration: 200 });
 }
 
 // A tooltip of our own: the browser's appears after a second, unstyled, and is easy to miss on a
@@ -1627,7 +1776,7 @@ const keepsIgnoringDone = n => {
 
 // Popovers: one open at a time, closed by a click elsewhere or Esc. Menus of actions close
 // after a choice; Filter and View options stay open while several boxes are ticked.
-const MENUS = ['goalWrap', 'optsWrap', 'filterWrap', 'moreWrap'];
+const MENUS = ['goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
 const menuOpen = id => $(id).classList.contains('open');
 function setMenu(id, open) {
   MENUS.forEach(m => {
@@ -1792,33 +1941,55 @@ $('search').oninput = () => {
   searchTimer = setTimeout(runSearch, 150);
 };
 $('search').onkeydown = e => {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-  stepSearch(e.shiftKey);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveHit(e.key === 'ArrowDown' ? 1 : -1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (searched.moved && searched.q === searchQuery()) openHit(searched.at);
+    else stepSearch(e.shiftKey);
+  }
 };
+$('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
+$('search').onblur = () => setTimeout(() => { if (document.activeElement !== $('search')) setMenu('searchWrap', false); }, 0);
+$('searchClear').onclick = () => {
+  clearSearch();
+  $('search').focus();
+};
+$('results').addEventListener('mousedown', e => e.preventDefault());
+$('results').addEventListener('click', e => {
+  const r = e.target.closest('.hit');
+  if (r) openHit(Number(r.dataset.i));
+});
 // Esc closes the innermost thing first: a menu, then the search text, then the panel.
 // Single keys work when no text box has focus: / search, F fit, E expand all, C collapse all.
 const typing = t => t.matches && t.matches('input[type=text], input:not([type]), select, textarea');
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if (closeMenus()) return;
     if (document.activeElement === $('search') && $('search').value) clearSearch();
+    else if (closeMenus()) return;
     else if ($('panel').style.display === 'block') closePanel();
     return;
   }
   if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
   const key = e.key.toLowerCase();
-  if (key === 'f') $('fit').click();
+  if (e.key === '/') {
+    e.preventDefault();
+    $('search').focus();
+    $('search').select();
+  } else if (key === 'f') $('fit').click();
   else if (key === 'e') $('expandAll').click();
   else if (key === 'c') $('collapseAll').click();
 });
 $('expandAll').onclick = () => {
+  searchOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 // Collapse all folds the workstreams but keeps objectives open, so the programme's shape stays.
 $('collapseAll').onclick = () => {
+  searchOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(n => n.type === 'objective').map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
