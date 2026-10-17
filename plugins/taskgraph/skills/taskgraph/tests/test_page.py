@@ -1270,3 +1270,99 @@ def test_timeline_lines_enter_the_left_end(browser, request, fixture):
     assert conflict and all(r["entersLeft"] for r in conflict)
     assert problems == []
     page.close()
+
+
+@pytest.fixture(scope="module")
+def load_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("load")
+    db = tmp / "t.db"
+    tg = runner(db)
+    tg("add", "Workstream", "--meta", "owner=ann", "estimate=999", "lane=dev", "team=core")
+    tg("add", "Build", "--parent", "1", "--start", "2026-10-19", "--due", "2026-10-30", "--meta", "owner=ann", "estimate=40")
+    tg("add", "Fix", "--due", "2026-10-16", "--meta", "owner=ann", "estimate=12h", "lane=ops")
+    tg("add", "Overdue", "--due", "2026-10-09", "--meta", "owner=bo", "estimate=10", "lane=ops")
+    tg("add", "Someday", "--meta", "owner=bo", "estimate=5")
+    tg("add", "Unsized", "--due", "2026-10-20", "--meta", "owner=ann")
+    tg("add", "Next year", "--start", "2027-01-04", "--due", "2027-01-08", "--meta", "owner=ann", "estimate=15")
+    tg("add", "Weekend", "--start", "2026-10-24", "--meta", "owner=cy", "estimate=6", "lane=ops")
+    tg("add", "Decide", "--type", "decision", "--due", "2026-10-22", "--meta", "decider=ann", "estimate=3")
+    tg("add", "Ship", "--type", "milestone", "--due", "2026-10-30", "--depends", "2")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out, db
+
+
+def cli_load(db, *args):
+    env = {**os.environ, "TASKGRAPH_TODAY": "2026-10-13"}
+    import json
+    p = subprocess.run([sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", "--json", "load", "--weeks", "12", *args], check=True, capture_output=True, text=True, env=env)
+    return json.loads(p.stdout)
+
+
+PAGE_LOAD = """() => { const d = computeLoad(); return {
+    weeks: d.weeks.map((w, i) => ({ start: isoOf(w), capacity: d.capacity[i] })),
+    groups: d.rows.map(g => ({ name: g.name, hours: g.hours.map(round1), later: round1(g.later), unscheduled: round1(g.unscheduled), over: g.over.flatMap((o, i) => o ? [i] : []) })),
+    unestimated: d.unestimated.map(n => n.id).sort((a, b) => a - b) }; }"""
+
+
+@pytest.mark.parametrize("by,hours", [("owner", 30), ("lane", 15), ("team", 8)])
+def test_load_view_matches_the_cli(browser, load_file, by, hours):
+    path, db = load_file
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}?view=load&loadby={by}&hours={hours}")
+    page.wait_for_function("typeof cy !== 'undefined' && document.querySelector('#loadView table.load')")
+    cli = cli_load(db, "--by", by, "--week-hours", str(hours))
+    mine = page.evaluate(PAGE_LOAD)
+    assert mine["weeks"] == cli["weeks"]
+    assert mine["unestimated"] == cli["unestimated"]
+    assert mine["groups"] == [{k: g[k] for k in ("name", "hours", "later", "unscheduled", "over")} for g in cli["groups"]]
+    assert problems == []
+    page.close()
+
+
+def test_load_view_cells_filters_and_print(browser, load_file):
+    path, db = load_file
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}?view=lanes")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    page.click("#viewLoad")
+    assert "view=load" in page.url and page.is_hidden("#cy") and page.is_visible("#loadView") and page.is_hidden("#legend")
+    rows = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody td.name'), t => t.textContent)")
+    assert rows == ["ann", "bo", "cy"]
+    first = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody tr:first-child td.c'), t => t.textContent).slice(0, 3)")
+    assert first == ["12", "23", "20"]
+    page.click('#loadView td.c[data-group="ann"][data-week="2026-10-19"]')
+    assert page.text_content("#loadView .loadPick h3") == "ann · week of 19 Oct · 23h of 30h"
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView .loadPick li span'), s => s.textContent)") == ["#2 Build", "#9 Decide"]
+    page.click("#loadView .loadPick li >> nth=0")
+    assert page.evaluate("pinned") == 2 and page.evaluate(PANEL_OPEN) and "task=2" in page.url
+    page.keyboard.press("Escape")
+    page.click("#optsBtn")
+    page.fill("#weekHours", "10")
+    page.press("#weekHours", "Enter")
+    assert "hours=10" in page.url and page.evaluate("weekHours") == 10
+    assert page.text_content('#loadView td.c[data-group="ann"][data-week="2026-10-19"]') == "23!"
+    page.check('input[name="loadKey"][value="lane"]')
+    page.keyboard.press("Escape")
+    assert "loadby=lane" in page.url
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView tbody td.name'), t => t.textContent)") == ["dev", "ops", "Unassigned"]
+    tick(page, "#filters [data-facet=owner] .link:text('None')")
+    page.click('#filters [data-facet=owner][data-value="bo"]')
+    page.keyboard.press("Escape")
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView tbody td.name'), t => t.textContent)") == ["ops", "Unassigned"]
+    assert page.is_disabled("#exportPng")
+    page.evaluate("printSheet()")
+    assert page.evaluate("Array.from(document.getElementById('print').children, c => c.className)")[:3] == ["", "sub", "loadPrint"]
+    assert page.evaluate("document.querySelectorAll('#print table.load tbody tr').length") == 2
+    page.go_back()
+    page.wait_for_function("loadKey === 'owner'")
+    assert page.evaluate("view") == "load"
+    page.go_back()
+    page.wait_for_function("view === 'lanes'")
+    assert page.is_visible("#cy") and page.is_hidden("#loadView") and page.evaluate("tasks().length") > 0
+    assert problems == []
+    page.close()

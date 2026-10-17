@@ -13,6 +13,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .row > * { flex: none; }
 #toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
+#toolbar input[type=number] { width: 64px; margin-left: auto; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 3px 6px; font: inherit; }
+#toolbar button:disabled { opacity: .45; cursor: default; }
 #toolbar input::placeholder { color: #9ca3af; opacity: 1; }
 #toolbar button:hover { background: #2d333d; }
 #toolbar [hidden] { display: none; }
@@ -139,6 +141,34 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
 #empty button { pointer-events: auto; margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #empty button:hover { background: #2d333d; }
+#loadView { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; overflow: auto; padding: 16px 20px 40px; z-index: 1; background: #111418; }
+#loadView[hidden], #cy[hidden] { display: none; }
+body[data-view="load"] #legend { display: none; }
+.loadHead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 24px; margin-bottom: 12px; }
+.loadHead h2 { margin: 0; font-size: 16px; }
+.loadKey { display: flex; align-items: center; gap: 6px; color: #9ca3af; font-size: 12px; }
+.loadKey .sw { display: inline-block; width: 18px; height: 14px; border-radius: 3px; text-align: center; font-weight: 700; font-size: 11px; line-height: 14px; }
+.loadKey .sw.over { margin-left: 10px; }
+.loadKey .muted { margin-left: 10px; }
+.loadScroll { overflow-x: auto; }
+table.load { border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; }
+table.load th { color: #9ca3af; font-weight: 600; font-size: 12px; padding: 4px 6px; text-align: right; white-space: nowrap; }
+table.load th.name, table.load td.name { position: sticky; left: 0; z-index: 1; background: #111418; text-align: left; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 14px; }
+table.load td.name { color: #e5e7eb; }
+table.load td.c { min-width: 54px; height: 30px; padding: 0 8px; border-radius: 4px; text-align: right; font-size: 13px; cursor: pointer; }
+table.load td.c.over { font-weight: 700; }
+table.load td.c.zero { color: #6b7280; cursor: default; }
+table.load td.c.on { outline: 2px solid #f9fafb; outline-offset: 1px; }
+table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
+.loadPick, .loadMissing { margin-top: 16px; max-width: 640px; }
+.loadPick h3 { margin: 0 0 6px; font-size: 13px; }
+.loadPick ul, .loadMissing ul { list-style: none; margin: 0; padding: 0; }
+.loadPick li, .loadMissing li { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.loadPick li:hover, .loadMissing li:hover { background: #232830; }
+.loadPick li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.loadPick li small { margin-left: auto; color: #9ca3af; white-space: nowrap; }
+.loadMissing summary { cursor: pointer; color: #9ca3af; }
+#loadView .none { color: #9ca3af; }
 #print { display: none; }
 /* Printing (or Save as PDF) gives a sheet, not a screenshot of the controls: a title, the whole
    plan as filtered, the legend, and the open item's panel on its own page. */
@@ -156,6 +186,18 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   #print .key i { width: 11pt; height: 11pt; border-radius: 3pt; display: inline-block; box-sizing: border-box; }
   #print .key svg { flex: none; overflow: visible; }
   #print .item { break-before: page; max-width: 170mm; }
+  #print .loadPrint table.load { border-spacing: 1.5pt; font-size: 9pt; }
+  #print .loadPrint table.load th { color: #444; padding: 2pt 4pt; }
+  #print .loadPrint table.load td.name, #print .loadPrint table.load th.name { position: static; background: none; color: #111; }
+  #print .loadPrint table.load td.c { height: 18pt; min-width: 0; padding: 0 5pt; border-radius: 2pt; }
+  #print .loadPrint table.load td.zero { color: #999; }
+  #print .loadPrint table.load td.extra { color: #444; }
+  #print .loadPrint .loadHead h2 { display: none; }
+  #print .loadPrint .loadKey, #print .loadPrint .muted, #print .loadPrint .none { color: #444; }
+  #print .loadPrint details:not([open]) { display: none; }
+  #print .loadPrint li { display: flex; gap: 6pt; padding: 1pt 0; }
+  #print .loadPrint li i { width: 8pt; height: 8pt; border-radius: 50%; box-shadow: 0 0 0 1px #777; }
+  #print .loadPrint li small { margin-left: auto; color: #444; }
   #print .item h2 { margin: 0 0 4pt; font-size: 14pt; }
   #print .item h3 { margin: 10pt 0 3pt; font-size: 9pt; text-transform: uppercase; letter-spacing: .06em; color: #444; break-after: avoid; }
   #print .item table { width: 100%; border-collapse: collapse; }
@@ -190,11 +232,13 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
       <div class="menu" id="goalList" role="listbox"></div>
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
-    <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
+    <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button><button id="viewLoad" title="Hours per person per week, from estimates">Load</button></span>
     <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-haspopup="true" aria-expanded="false" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
         <div class="grp" id="lanesBy"><div class="h">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
         <div class="grp" id="depsBy"><div class="h">Dependencies <span class="note" id="depsNote">Timeline only</span></div></div>
+        <div class="grp" id="loadBy"><div class="h">Load by <span class="note">Load only</span></div>
+          <label class="opt">Hours a week <input type="number" id="weekHours" min="1" max="168" step="1"></label></div>
         <div class="grp"><label class="opt"><input type="checkbox" id="legendOn"> Show legend</label></div>
       </div>
     </span>
@@ -229,6 +273,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   <div id="banner" hidden></div>
 </div>
 <div id="cy"></div>
+<div id="loadView" hidden></div>
 <div id="legend">
   <button id="legendToggle" title="Show or hide the legend">Legend ▾</button>
   <div id="legendBody">
@@ -315,11 +360,14 @@ const store = {
   set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
 };
 const query = new URLSearchParams(location.search);
-const VIEWS = ['graph', 'lanes', 'timeline'];
+const VIEWS = ['graph', 'lanes', 'timeline', 'load'];
 let view = VIEWS.find(v => v === (query.get('view') || store.get('taskgraph.view'))) || 'graph';
 const DEPS = { '0': 'off', off: 'off', critical: 'critical', '1': 'all', all: 'all' };
 let depsMode = DEPS[query.get('deps')] || DEPS[store.get('taskgraph.deps')] || 'off';
 let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
+let loadKey = [query.get('loadby'), store.get('taskgraph.loadby')].find(k => ['owner', 'team', 'lane'].includes(k)) || 'owner';
+const hoursParam = s => (Number(s) > 0 && Number(s) <= 168 ? Number(s) : null);
+let weekHours = hoursParam(query.get('hours')) ?? hoursParam(store.get('taskgraph.hours')) ?? 30;
 // Filters. Types are remembered per browser; the rest live in the URL only. "none" in the URL
 // is an explicit empty choice; an owner or lane filter of null means everyone.
 const STATUSES = ['ready', 'in_progress', 'blocked', 'done'];
@@ -1020,6 +1068,7 @@ function layoutTimeline() {
 }
 
 function layout(fit = true) {
+  if (view === 'load') return void renderLoad();
   if (fit) keepWhole = false;
   fitBar();
   // One batch so Cytoscape restyles once, not once per element; Graph lays out after it because
@@ -1129,8 +1178,153 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { if (!userMoved && hiddenTasks()) fitView(keepWhole); }, 150);
 });
 
+// Load: hours per person (or team, lane) per week, by the same rules as `tg.py load`. Each open
+// item's estimate is spread evenly over the working days left in its window (start, or the
+// Monday of its due week, to due; never before today); late work lands on today; the current
+// week has only the working days left. It counts what the filters show, collapsed or not.
+const LOAD_SKIP = ['milestone', 'risk', 'external'], LOAD_WEEKS = 12;
+const LOAD_KEYS = { owner: 'Owner', team: 'Team', lane: 'Lane' };
+const PERSON = { decision: 'decider', external: 'party' };
+const utc = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') ? new Date(s + 'T00:00:00Z') : null;
+const isoOf = d => d.toISOString().slice(0, 10);
+const plusDays = (d, n) => new Date(d.getTime() + n * 864e5);
+const weekdayOf = d => (d.getUTCDay() + 6) % 7;
+const round1 = h => Math.round(h * 10) / 10;
+function estimateHours(n) {
+  const raw = n.meta.estimate;
+  if (raw == null || raw === '') return null;
+  const h = Number(String(raw).trim().replace(/h$/, ''));
+  return Number.isFinite(h) && h > 0 ? h : null;
+}
+function workingDays(first, last) {
+  const out = [];
+  for (let d = first; d <= last; d = plusDays(d, 1)) if (weekdayOf(d) < 5) out.push(d);
+  return out;
+}
+function loadSpread(n, today) {
+  const hours = estimateHours(n);
+  let due = utc(n.due), start = utc(n.start);
+  if (!due && !start) return null;
+  if (!due) due = weekdayOf(start) < 5 ? plusDays(start, 4 - weekdayOf(start)) : start;
+  if (!start) start = plusDays(due, -weekdayOf(due));
+  if (due < today) return { days: [[today, hours]], overdue: true };
+  const from = start > today ? start : today;
+  const days = workingDays(from, due);
+  const use = days.length ? days : [from];
+  return { days: use.map(d => [d, hours / use.length]), overdue: false };
+}
+const loadGroup = n => {
+  const v = loadKey === 'owner' ? n.meta[PERSON[n.type] || 'owner'] : inheritedMeta(n, loadKey);
+  return v == null || String(v) === '' ? UNASSIGNED : String(v);
+};
+const leafForLoad = n => n.type !== 'objective' && !n.children.some(c => byId.has(c) && byId.get(c).type !== 'risk');
+function computeLoad() {
+  const today = utc(DATA.today || new Date().toLocaleDateString('sv'));
+  const first = plusDays(today, -weekdayOf(today));
+  const weeks = Array.from({ length: LOAD_WEEKS }, (_, i) => plusDays(first, 7 * i));
+  const end = plusDays(weeks[weeks.length - 1], 7);
+  const left = workingDays(today, plusDays(first, 4)).length;
+  const capacity = weeks.map((w, i) => round1(weekHours * (i === 0 ? left / 5 : 1)));
+  const groups = new Map(), unestimated = [];
+  DATA.nodes.filter(n => passes(n) && n.derived_status !== 'done' && leafForLoad(n) && !LOAD_SKIP.includes(n.type)).forEach(n => {
+    if (estimateHours(n) == null) return unestimated.push(n);
+    const name = loadGroup(n);
+    if (!groups.has(name)) groups.set(name, { name, hours: weeks.map(() => 0), cells: weeks.map(() => new Map()), later: 0, unscheduled: 0 });
+    const g = groups.get(name), spread = loadSpread(n, today);
+    if (!spread) return void (g.unscheduled += estimateHours(n));
+    spread.days.forEach(([d, h]) => {
+      if (d >= end) return void (g.later += h);
+      if (d < first) return;
+      const i = Math.floor((d - first) / (7 * 864e5));
+      g.hours[i] += h;
+      const c = g.cells[i].get(n.id) || { n, hours: 0, overdue: spread.overdue };
+      c.hours += h;
+      g.cells[i].set(n.id, c);
+    });
+  });
+  const rows = [...groups.values()].sort((a, b) => (a.name === UNASSIGNED) - (b.name === UNASSIGNED) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  rows.forEach(g => { g.over = g.hours.map((h, i) => round1(h) > capacity[i]); });
+  return { weeks, capacity, rows, unestimated };
+}
+
+// Share of capacity as one blue scale, lighter as the week fills; over capacity is the reserved
+// red, always with "!" so colour never carries it alone. Ink follows the fill for contrast.
+const LOAD_STEPS = [[0.25, '#104281', '#f9fafb'], [0.5, '#1c5cab', '#f9fafb'], [0.75, '#3987e5', '#0b0f14'], [1, '#86b6ef', '#0b0f14']];
+const OVER = ['#d03b3b', '#f9fafb'];
+function loadFill(h, cap) {
+  if (!(round1(h) > 0)) return null;
+  if (round1(h) > cap) return OVER;
+  const r = cap > 0 ? h / cap : 2;
+  return (LOAD_STEPS.find(([top]) => r <= top) || LOAD_STEPS[3]).slice(1);
+}
+const hoursText = h => String(round1(h));
+let loadPick = null;
+function renderLoad() {
+  const box = $('loadView'), d = computeLoad();
+  const head = el('div', { className: 'loadHead' },
+    el('h2', { textContent: `Load by ${loadKey} · ${weekHours}h a week` }),
+    el('div', { className: 'loadKey' }, 'Share of capacity  0',
+      ...LOAD_STEPS.map(([top, bg], i) => el('span', { className: 'sw', style: `background:${bg}`, title: `up to ${top * 100}%` })),
+      ' 100%', el('span', { className: 'sw over', style: `background:${OVER[0]};color:${OVER[1]}`, textContent: '!' }), 'Over capacity',
+      el('span', { className: 'muted', textContent: '* this week: working days left' })));
+  if (!d.rows.length) {
+    box.replaceChildren(head, el('p', { className: 'none', textContent: d.unestimated.length ? `No open item here has an estimate (${d.unestimated.length} without one).` : 'No open items with an estimate.' }), unestimatedBlock(d));
+    return d;
+  }
+  const md = w => day(isoOf(w));
+  const table = el('table', { className: 'load' },
+    el('thead', null, el('tr', null, el('th', { className: 'name', textContent: LOAD_KEYS[loadKey] }),
+      ...d.weeks.map((w, i) => el('th', { textContent: md(w) + (d.capacity[i] < weekHours ? '*' : ''), title: `Week of ${md(w)} · capacity ${d.capacity[i]}h` })),
+      el('th', { textContent: 'Later', title: 'After these weeks' }), el('th', { textContent: 'No dates', title: 'Estimated but not scheduled' }))),
+    el('tbody', null, ...d.rows.map(g => el('tr', null, el('td', { className: 'name', textContent: g.name, title: g.name }),
+      ...g.hours.map((h, i) => {
+        const fill = loadFill(h, d.capacity[i]), items = [...g.cells[i].values()];
+        const td = el('td', { className: 'c' + (fill ? '' : ' zero') + (g.over[i] ? ' over' : '') + (loadPick && loadPick.g === g.name && loadPick.i === i ? ' on' : ''),
+          textContent: fill ? hoursText(h) + (g.over[i] ? '!' : '') : '·', style: fill ? `background:${fill[0]};color:${fill[1]}` : '',
+          dataset: { group: g.name, week: isoOf(d.weeks[i]) } });
+        if (fill) {
+          const pct = d.capacity[i] > 0 ? Math.round(100 * h / d.capacity[i]) + '%' : 'no capacity left';
+          td.onmouseenter = () => showTip(`${g.name} · week of ${md(d.weeks[i])}: ${hoursText(h)}h of ${d.capacity[i]}h (${pct}) · ${items.length} ${items.length === 1 ? 'item' : 'items'}`);
+          td.onmouseleave = hideTip;
+          td.onclick = () => { loadPick = loadPick && loadPick.g === g.name && loadPick.i === i ? null : { g: g.name, i }; renderLoad(); };
+        }
+        return td;
+      }),
+      el('td', { className: 'extra', textContent: g.later ? hoursText(g.later) : '·' }),
+      el('td', { className: 'extra', textContent: g.unscheduled ? hoursText(g.unscheduled) : '·' })))));
+  box.replaceChildren(head, el('div', { className: 'loadScroll' }, table), pickBlock(d), unestimatedBlock(d));
+  return d;
+}
+// The items filling the picked cell, biggest first; each opens its panel.
+function pickBlock(d) {
+  const g = loadPick && d.rows.find(r => r.name === loadPick.g);
+  if (!g || !g.hours[loadPick.i]) return null;
+  const i = loadPick.i, items = [...g.cells[i].values()].sort((a, b) => b.hours - a.hours || a.n.id - b.n.id);
+  return el('div', { className: 'loadPick' },
+    el('h3', { textContent: `${g.name} · week of ${day(isoOf(d.weeks[i]))} · ${hoursText(g.hours[i])}h of ${d.capacity[i]}h` }),
+    el('ul', null, ...items.map(c => {
+      const s = COLORS[c.n.derived_status] || COLORS.blocked;
+      return el('li', { onclick: () => select(c.n.id, false) }, el('i', { style: `background:${s.bg};border:1px solid ${s.bd}` }),
+        el('span', { textContent: '#' + c.n.id + ' ' + c.n.title }), el('small', { textContent: hoursText(c.hours) + 'h' + (c.overdue ? ' · late' : '') }));
+    })));
+}
+function unestimatedBlock(d) {
+  if (!d.unestimated.length) return null;
+  return el('details', { className: 'loadMissing' }, el('summary', { textContent: `No estimate: ${d.unestimated.length} open ${d.unestimated.length === 1 ? 'item' : 'items'}` }),
+    el('ul', null, ...d.unestimated.map(n => el('li', { onclick: () => select(n.id, false) }, el('span', { textContent: '#' + n.id + ' ' + n.title })))));
+}
+
 function rebuild(keepView, flash) {
   syncLegend();
+  const loading = view === 'load';
+  $('cy').hidden = loading;
+  $('loadView').hidden = !loading;
+  if (loading) {
+    cy.batch(() => cy.elements().remove());
+    renderLoad();
+    applySearch();
+    return syncEmpty();
+  }
   const { nodes, edges, open } = visibleData();
   const before = new Set(tasks().map(n => n.id()));
   const sources = new Set(edges.map(e => e.source));
@@ -1156,6 +1350,7 @@ function rebuild(keepView, flash) {
 
 // Say why the canvas is blank, and offer the one click that fills it.
 function syncEmpty() {
+  if (view === 'load') return void ($('empty').hidden = true);
   const project = $('project').value;
   const candidates = DATA.nodes.filter(n => !project || n.project === project);
   const action = $('emptyAction');
@@ -1735,13 +1930,14 @@ function closePanel() {
 
 function select(id, center, how) {
   const node = cy.getElementById(String(id));
-  if (node.empty()) return;
+  if (node.empty() && (view !== 'load' || !byId.has(id))) return;
   if (how === 'ref' && pinned != null && pinned !== id) trail = [...trail, pinned].slice(-5);
   else if (how !== 'back') trail = [];
   pinned = id;
   openPanel(byId.get(id));
   refocus();
   syncUrl();
+  if (node.empty()) return;
   if (!center) return keepInView(node);
   userMoved = true;
   if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
@@ -1796,6 +1992,10 @@ $('cy').addEventListener('mousemove', e => {
   if (!$('tip').hidden) placeTip();
 });
 $('cy').addEventListener('mouseleave', hideTip);
+$('loadView').addEventListener('mousemove', e => {
+  tipAt = { x: e.clientX, y: e.clientY };
+  if (!$('tip').hidden) placeTip();
+});
 cy.on('viewport tapstart', hideTip);
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
@@ -1871,6 +2071,8 @@ const params = () => {
   if (goal != null) q.set('goal', String(goal));
   if (view !== 'graph') q.set('view', view);
   if (laneKey !== 'lane') q.set('lanes', laneKey);
+  if (view === 'load' && loadKey !== 'owner') q.set('loadby', loadKey);
+  if (view === 'load' && weekHours !== 30) q.set('hours', String(weekHours));
   if (view === 'timeline' && depsMode !== 'off') q.set('deps', depsMode === 'all' ? '1' : depsMode);
   if (types.size < TYPES.length) q.set('types', listParam(types, TYPES));
   if (!sameSet(statuses, OPEN_STATUSES)) q.set('status', listParam(statuses, STATUSES));
@@ -1892,6 +2094,8 @@ window.addEventListener('popstate', () => {
   view = VIEWS.find(v => v === q.get('view')) || 'graph';
   depsMode = DEPS[q.get('deps')] || 'off';
   laneKey = Object.hasOwn(LANE_KEYS, q.get('lanes')) ? q.get('lanes') : 'lane';
+  loadKey = ['owner', 'team', 'lane'].includes(q.get('loadby')) ? q.get('loadby') : 'owner';
+  weekHours = hoursParam(q.get('hours')) ?? 30;
   readFilters(q);
   matchMemo = null;
   const project = q.get('project') || '';
@@ -2037,6 +2241,22 @@ $('more').addEventListener('click', e => { if (e.target.closest('.item')) setMen
 const LANE_NAMES = { lane: 'Lane', owner: 'Owner', tag: 'Tag', project: 'Project' };
 const DEPS_NAMES = { off: 'Conflicts only', critical: 'Critical path', all: 'All' };
 $('lanesBy').append(...Object.entries(LANE_NAMES).map(([v, t]) => el('label', { className: 'opt' }, el('input', { type: 'radio', name: 'laneKey', value: v, onchange: () => setLaneKey(v) }), t)));
+$('loadBy').insertBefore(el('div', null, ...Object.entries(LOAD_KEYS).map(([v, t]) => el('label', { className: 'opt' }, el('input', { type: 'radio', name: 'loadKey', value: v, onchange: () => setLoadKey(v) }), t))), $('loadBy').querySelector('.opt'));
+$('weekHours').onchange = e => {
+  const h = hoursParam(e.target.value);
+  if (h == null) return void (e.target.value = String(weekHours));
+  weekHours = h;
+  store.set('taskgraph.hours', String(h));
+  syncUrl();
+  if (view === 'load') renderLoad();
+};
+function setLoadKey(v) {
+  loadKey = v;
+  store.set('taskgraph.loadby', v);
+  loadPick = null;
+  syncUrl(true);
+  if (view === 'load') renderLoad();
+}
 $('depsBy').append(...Object.entries(DEPS_NAMES).map(([v, t]) => el('label', { className: 'opt' }, el('input', { type: 'radio', name: 'depsMode', value: v, onchange: () => setDeps(v) }), t)));
 const radio = (name, v) => document.querySelector(`input[name="${name}"][value="${v}"]`);
 function setDeps(v) {
@@ -2058,9 +2278,16 @@ const syncControls = () => {
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('viewTimeline').classList.toggle('on', view === 'timeline');
+  $('viewLoad').classList.toggle('on', view === 'load');
+  document.body.dataset.view = view;
   radio('laneKey', laneKey).checked = true;
+  radio('loadKey', loadKey).checked = true;
+  $('weekHours').value = String(weekHours);
+  $('loadBy').classList.toggle('off', view !== 'load');
+  $('exportPng').disabled = view === 'load';
+  $('exportPng').title = view === 'load' ? 'The Load view prints (More, Print…) rather than exporting an image' : 'Save the whole current view as a PNG image';
   radio('depsMode', depsMode).checked = true;
-  $('lanesBy').classList.toggle('off', view === 'graph');
+  $('lanesBy').classList.toggle('off', view === 'graph' || view === 'load');
   $('depsBy').classList.toggle('off', view !== 'timeline');
   if (menuOpen('filterWrap')) fillFilters();
   syncChips();
@@ -2172,6 +2399,7 @@ $('goalList').addEventListener('click', e => {
 $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
+$('viewLoad').onclick = () => setView('load');
 $('clearAll').onclick = () => clearAll();
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
@@ -2203,7 +2431,7 @@ $('results').addEventListener('click', e => {
 });
 // Esc closes the innermost thing first: a menu, then the search text, then the panel.
 // Single keys work when no text box has focus: / search, F fit, E expand all, C collapse all.
-const typing = t => t.matches && t.matches('input[type=text], input:not([type]), select, textarea');
+const typing = t => t.matches && t.matches('input[type=text], input[type=number], input:not([type]), select, textarea');
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.activeElement === $('search') && $('search').value) clearSearch();
@@ -2248,7 +2476,7 @@ $('fit').onclick = () => {
 
 // Save the whole view as filtered (not just what is on screen) with a title bar, without
 // hover or selection fading; search dimming stays because it is a filter the viewer chose.
-const VIEW_NAMES = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline' };
+const VIEW_NAMES = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline', load: 'Load' };
 function exportTitle() {
   const g = goal != null && byId.has(goal) ? byId.get(goal) : null;
   return ['taskgraph', projectSelect.value || 'All projects', g && `#${g.id} ${g.title}`, VIEW_NAMES[view]].filter(Boolean).join(' · ');
@@ -2356,7 +2584,8 @@ function printSheet() {
   const parts = [
     el('h1', { textContent: exportTitle() }),
     el('p', { className: 'sub', textContent: 'As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + exportFilters() }),
-    shot ? el('img', { className: 'plan', src: shot, alt: exportTitle() }) : el('p', { className: 'none', textContent: $('emptyText').textContent || 'Nothing to show.' }),
+    view === 'load' ? el('div', { className: 'loadPrint' }, ...Array.from($('loadView').children, c => c.cloneNode(true)))
+      : shot ? el('img', { className: 'plan', src: shot, alt: exportTitle() }) : el('p', { className: 'none', textContent: $('emptyText').textContent || 'Nothing to show.' }),
     shot && key.length ? el('div', { className: 'key' }, ...key) : null
   ];
   if ($('panel').style.display === 'block') {
