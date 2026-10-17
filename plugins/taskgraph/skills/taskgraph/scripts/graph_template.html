@@ -104,7 +104,26 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel button { margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #6b7280; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #panel button:hover { background: #2d333d; }
 #panel #panelClose { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; margin-top: 0; padding: 0; font-size: 18px; line-height: 1; }
-#panel .notes { white-space: pre-wrap; background: #1e232b; border-radius: 6px; padding: 8px 10px; }
+#panel .notes { background: #1e232b; border-radius: 6px; padding: 8px 10px; overflow-wrap: anywhere; }
+#panel .notes > :first-child { margin-top: 0; }
+#panel .notes > :last-child { margin-bottom: 0; }
+#panel .notes p, #panel .notes ul, #panel .notes ol, #panel .notes blockquote, #panel .notes pre, #panel .notes table { margin: 0 0 8px; }
+#panel .notes ul, #panel .notes ol { list-style: revert; padding-left: 22px; }
+#panel .notes li { padding: 1px 0; }
+#panel .notes li.task { list-style: none; margin-left: -18px; }
+#panel .notes li.task input { margin: 0 6px 0 0; vertical-align: -2px; }
+#panel .notes .md-h { margin: 10px 0 4px; color: #e5e7eb; }
+#panel .notes h4 { font-size: 15px; }
+#panel .notes h5 { font-size: 14px; }
+#panel .notes h6 { font-size: 13px; color: #c7cbd1; }
+#panel .notes code { padding: 1px 4px; border-radius: 4px; background: #111418; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#panel .notes pre { padding: 8px 10px; border-radius: 6px; background: #111418; overflow-x: auto; }
+#panel .notes pre code { padding: 0; background: none; white-space: pre; }
+#panel .notes blockquote { padding-left: 10px; border-left: 3px solid #6b7280; color: #c7cbd1; }
+#panel .notes hr { border: 0; border-top: 1px solid #343a45; margin: 10px 0; }
+#panel .notes table.md { width: auto; border-collapse: collapse; }
+#panel .notes table.md th, #panel .notes table.md td { width: auto; padding: 3px 8px; border: 1px solid #343a45; color: #e5e7eb; text-align: left; }
+#panel .notes table.md th { background: #232830; font-weight: 600; }
 #panel table { width: 100%; border-collapse: collapse; }
 #panel td { padding: 3px 6px; border-bottom: 1px solid #2a2f38; vertical-align: top; word-break: break-word; }
 #panel td:first-child { color: #9ca3af; width: 35%; }
@@ -130,7 +149,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel .link { margin: 4px 0 0; padding: 0; background: none; border: 0; color: #93c5fd; cursor: pointer; }
 #panel .link:hover { background: none; text-decoration: underline; }
 #panel #panelBack { display: block; max-width: calc(100% - 36px); margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-#panel .notes.clamp { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+#panel .notes.clamp { max-height: 13em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent); }
 #panel details { margin-top: 16px; }
 #panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
 #panel details table { margin-top: 6px; }
@@ -226,7 +245,13 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
   #print .item .badge.risk { border: 1px solid #b45309; color: #b45309; }
   #print .item .badge.conflict { border: 1px solid #b91c1c; color: #b91c1c; }
   #print .item .tag { display: inline-block; margin: 0 3pt 2pt 0; padding: 0 6pt; border: 1px solid #bbb; border-radius: 8pt; font-size: 8.5pt; }
-  #print .item .notes { white-space: pre-wrap; }
+  #print .item .notes ul, #print .item .notes ol { list-style: revert; padding-left: 16pt; }
+  #print .item .notes li { display: list-item; }
+  #print .item .notes li.task { list-style: none; }
+  #print .item .notes code { font: 9pt ui-monospace, monospace; background: #f1f1f1; padding: 0 3pt; }
+  #print .item .notes pre { background: #f6f6f6; padding: 4pt 6pt; white-space: pre-wrap; }
+  #print .item .notes blockquote { margin: 0 0 6pt; padding-left: 8pt; border-left: 2pt solid #999; color: #333; }
+  #print .item .notes table.md td, #print .item .notes table.md th { border: 1px solid #bbb; width: auto; color: #111; }
   #print .item .lead { margin: 4pt 0 1pt; color: #444; font-size: 9pt; }
   #print .item .muted { color: #444; }
   #print .item a { color: #1d4ed8; }
@@ -1767,15 +1792,126 @@ function shortUrl(u) {
     return s.length > 42 ? s.slice(0, 41) + '…' : s;
   } catch (e) { return u; }
 }
-function linkify(text) {
+// Notes are Markdown, rendered as a safe subset straight to DOM nodes (never an HTML string), so
+// a note can carry headings, lists, checklists, quotes, code, tables and links, while any HTML in
+// it stays visible text and only http(s) and mailto links are followed.
+const SAFE_HREF = /^(https?:|mailto:)/i;
+const INLINE_RE = new RegExp([
+  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/.source,                       // 1-2 code
+  /\[([^\]\n]+)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/.source,       // 3-4 link
+  /<((?:https?:\/\/|mailto:)[^>\s]+)>/.source,                         // 5 autolink
+  /\*\*(?=\S)([\s\S]*?\S)\*\*|(?<!\w)__(?=\S)([\s\S]*?\S)__(?!\w)/.source, // 6-7 bold
+  /~~(?=\S)([\s\S]*?\S)~~/.source,                                    // 8 strike
+  /\*(?=\S)([^*]*?\S)\*|(?<!\w)_(?=\S)([^_]*?\S)_(?!\w)/.source,       // 9-10 italic
+  /(https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'])/.source                   // 11 bare URL
+].join('|'), 'g');
+function mdInline(text) {
   const out = [];
   let at = 0;
-  for (const m of String(text).matchAll(URL_RE)) {
-    out.push(text.slice(at, m.index), anchor(m[0], m[0]));
+  for (const m of String(text).matchAll(INLINE_RE)) {
+    if (m.index > at) out.push(text.slice(at, m.index));
+    if (m[1]) out.push(el('code', { textContent: m[2] }));
+    else if (m[3]) {
+      if (!SAFE_HREF.test(m[4])) out.push(...mdInline(m[3]));
+      else {
+        const a = anchor(m[4], '');
+        a.replaceChildren(...mdInline(m[3]));
+        out.push(a);
+      }
+    } else if (m[5]) out.push(anchor(m[5], m[5].replace(/^mailto:/i, '')));
+    else if (m[6] || m[7]) out.push(el('strong', null, ...mdInline(m[6] || m[7])));
+    else if (m[8]) out.push(el('del', null, ...mdInline(m[8])));
+    else if (m[9] || m[10]) out.push(el('em', null, ...mdInline(m[9] || m[10])));
+    else if (m[11]) out.push(anchor(m[11], m[11]));
     at = m.index + m[0].length;
   }
-  out.push(String(text).slice(at));
-  return out.filter(p => p !== '');
+  if (at < text.length) out.push(text.slice(at));
+  return out;
+}
+const withBreaks = lines => lines.flatMap((l, i) => [...(i ? [el('br')] : []), ...mdInline(l.trim())]);
+const LIST_RE = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+const FENCE_RE = /^\s{0,3}(```+|~~~+)\s*([\w+-]*)\s*$/;
+const HEAD_RE = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
+const RULE_RE = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+const TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+const cellsOf = line => line.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+const isTable = (lines, i) => lines[i].includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1]);
+const startsBlock = (lines, i) => FENCE_RE.test(lines[i]) || HEAD_RE.test(lines[i]) || RULE_RE.test(lines[i]) || /^\s{0,3}>/.test(lines[i]) || LIST_RE.test(lines[i]) || isTable(lines, i);
+
+function mdList(lines, i) {
+  const base = LIST_RE.exec(lines[i]), indent = base[1].length, ordered = /\d/.test(base[2]);
+  const list = el(ordered ? 'ol' : 'ul');
+  if (ordered && parseInt(base[2], 10) !== 1) list.start = parseInt(base[2], 10);
+  while (i < lines.length) {
+    const m = LIST_RE.exec(lines[i]);
+    if (!m || m[1].length !== indent || /\d/.test(m[2]) !== ordered) break;
+    const text = [m[3]];
+    i++;
+    const nested = [];
+    while (i < lines.length && lines[i].trim()) {
+      const n = LIST_RE.exec(lines[i]);
+      if (n && n[1].length > indent) {
+        const [sub, next] = mdList(lines, i);
+        nested.push(sub);
+        i = next;
+      } else if (!n && /^\s/.test(lines[i]) && !startsBlock(lines, i)) text.push(lines[i++]);
+      else break;
+    }
+    const task = /^\[( |x|X)\]\s+/.exec(text[0]);
+    if (task) text[0] = text[0].slice(task[0].length);
+    list.append(el('li', { className: task ? 'task' : '' },
+      task ? el('input', { type: 'checkbox', checked: task[1] !== ' ', disabled: true, ariaLabel: task[1] !== ' ' ? 'done' : 'not done' }) : null,
+      ...withBreaks(text), ...nested));
+    if (i < lines.length && !lines[i].trim()) {
+      let j = i;
+      while (j < lines.length && !lines[j].trim()) j++;
+      const after = j < lines.length && LIST_RE.exec(lines[j]);
+      if (after && after[1].length === indent) i = j;
+    }
+  }
+  return [list, i];
+}
+
+function markdown(src) {
+  const lines = String(src).replace(/\r\n?/g, '\n').replace(/\t/g, '    ').split('\n');
+  const out = [];
+  let i = 0, m;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if ((m = FENCE_RE.exec(line))) {
+      const body = [];
+      for (i++; i < lines.length && !(lines[i].trim().startsWith(m[1]) && /^\s{0,3}(```+|~~~+)\s*$/.test(lines[i])); i++) body.push(lines[i]);
+      i++;
+      out.push(el('pre', null, el('code', { textContent: body.join('\n') })));
+    } else if ((m = HEAD_RE.exec(line))) {
+      out.push(el('h' + Math.min(6, m[1].length + 3), { className: 'md-h' }, ...mdInline(m[2])));
+      i++;
+    } else if (RULE_RE.test(line)) {
+      out.push(el('hr'));
+      i++;
+    } else if (/^\s{0,3}>/.test(line)) {
+      const inner = [];
+      while (i < lines.length && /^\s{0,3}>/.test(lines[i])) inner.push(lines[i++].replace(/^\s{0,3}>\s?/, ''));
+      out.push(el('blockquote', null, ...markdown(inner.join('\n'))));
+    } else if (isTable(lines, i)) {
+      const head = cellsOf(lines[i]), align = cellsOf(lines[i + 1]).map(c => c.endsWith(':') ? (c.startsWith(':') ? 'center' : 'right') : null);
+      const cell = (tag, text, k) => el(tag, { style: align[k] ? 'text-align:' + align[k] : '' }, ...mdInline(text));
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) rows.push(cellsOf(lines[i]));
+      out.push(el('table', { className: 'md' }, el('thead', null, el('tr', null, ...head.map((h, k) => cell('th', h, k)))),
+        el('tbody', null, ...rows.map(r => el('tr', null, ...head.map((_, k) => cell('td', r[k] ?? '', k)))))));
+    } else if (LIST_RE.test(line)) {
+      const [list, next] = mdList(lines, i);
+      out.push(list);
+      i = next;
+    } else {
+      const para = [lines[i++]];
+      while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) para.push(lines[i++]);
+      out.push(el('p', null, ...withBreaks(para)));
+    }
+  }
+  return out;
 }
 const valueNodes = v => {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
@@ -1883,7 +2019,7 @@ function why(n) {
 let notesOpen = null;
 function notesBlock(n) {
   if (!n.notes) return [el('div', { className: 'none', textContent: 'None' })];
-  const box = el('div', { className: 'notes' + (notesOpen === n.id ? '' : ' clamp') }, ...linkify(n.notes));
+  const box = el('div', { className: 'notes' + (notesOpen === n.id ? '' : ' clamp') }, ...markdown(n.notes));
   const more = el('button', { className: 'link', id: 'notesMore', hidden: true, textContent: notesOpen === n.id ? 'Show less' : 'Show more' });
   more.onclick = () => {
     notesOpen = notesOpen === n.id ? null : n.id;

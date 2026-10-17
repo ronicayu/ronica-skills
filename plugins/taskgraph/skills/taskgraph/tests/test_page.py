@@ -1488,3 +1488,49 @@ def test_reduced_motion(browser, page_file):
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
     assert page.evaluate("MOTION") == 0
     context.close()
+
+
+MD_NOTE = """## Plan
+Run **pilot** with [runbook](https://wiki.example/x) and `kubectl`.
+Next line.
+
+1. Freeze
+2. Copy
+   - count rows
+3. Switch
+
+- [x] Comms
+- [ ] Rollback
+
+> Decide at SteerCo.
+
+| Wave | Tenants |
+|------|--------:|
+| 1 | 12 |
+
+```
+select 1;
+```
+<script>alert(1)</script> <img src=x onerror=alert(2)> [bad](javascript:alert(3)) snake_case_name and 2 * 3 * 4."""
+
+
+def test_notes_render_as_safe_markdown(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    dialogs = []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+    page.evaluate(f"applyData({{ ...DATA, nodes: DATA.nodes.map(n => n.id === 3 ? {{ ...n, notes: {MD_NOTE!r} }} : n) }})")
+    page.evaluate("select(3, false)")
+    notes = "#panel .notes"
+    assert page.evaluate(f"Array.from(document.querySelector('{notes}').children, c => c.tagName)") == ["H5", "P", "OL", "UL", "BLOCKQUOTE", "TABLE", "PRE", "P"]
+    assert page.text_content(f"{notes} strong") == "pilot" and page.text_content(f"{notes} p code") == "kubectl"
+    assert page.evaluate(f"document.querySelector('{notes} p').innerHTML.includes('<br>')")
+    assert page.evaluate(f"Array.from(document.querySelectorAll('{notes} a'), a => a.getAttribute('href'))") == ["https://wiki.example/x"]
+    assert page.evaluate(f"document.querySelectorAll('{notes} ol > li > ul > li').length") == 1
+    assert page.evaluate(f"Array.from(document.querySelectorAll('{notes} li.task input'), i => [i.checked, i.disabled])") == [[True, True], [False, True]]
+    assert page.evaluate(f"document.querySelector('{notes} td:last-child').style.textAlign") == "right"
+    assert page.text_content(f"{notes} pre code") == "select 1;"
+    last = page.text_content(f"{notes} > p:last-child")
+    assert "<script>alert(1)</script>" in last and "snake_case_name" in last and "2 * 3 * 4" in last
+    assert page.evaluate(f"document.querySelectorAll('{notes} script, {notes} img, {notes} em').length") == 0
+    assert dialogs == [] and problems == []
+    page.close()
