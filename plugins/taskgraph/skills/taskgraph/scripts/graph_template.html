@@ -7,14 +7,14 @@
 <style>
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-:root { --bar: 48px; --panel-w: 0px; }
-#toolbar { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 14px; min-height: 48px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; overflow: visible; font-size: 13px; }
-#toolbar > * { flex: none; }
+:root { --bar: 80px; --panel-w: 0px; }
+#toolbar { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-direction: column; gap: 4px; padding: 5px 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; font-size: 13px; }
+#toolbar .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-height: 32px; }
+#toolbar .row > * { flex: none; }
 #toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
 #toolbar input::placeholder { color: #9ca3af; opacity: 1; }
 #toolbar button:hover { background: #2d333d; }
-#toolbar label { display: flex; align-items: center; gap: 5px; color: #9ca3af; white-space: nowrap; }
 #toolbar [hidden] { display: none; }
 #toolbar .seg { display: flex; }
 #toolbar .seg button { padding: 5px 6px; }
@@ -22,20 +22,63 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .seg button:first-child { border-radius: 6px 0 0 6px; }
 #toolbar .seg button:last-child { border-radius: 0 6px 6px 0; }
 #toolbar .seg button + button { margin-left: -1px; }
-#toolbar .seg button.on { background: #3b4658; border-color: #566176; color: #fff; }
-#toolbar .spacer { flex: 1 1 0; min-width: 0; }
-#toolbar .typesWrap { position: relative; }
-#toolbar #typesBtn.on { background: #3b4658; border-color: #566176; color: #fff; }
-#toolbar #types { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; padding: 6px; background: #181c22; border: 1px solid #2a2f38; border-radius: 8px; box-shadow: 0 6px 18px #0008; }
-#toolbar .typesWrap.open #types { display: flex; }
-#toolbar #goal { flex: 0 1 auto; max-width: min(260px, 30vw); }
-#toolbar .actions { display: flex; gap: 6px; }
-#toolbar #goal.on { background: #3b4658; border-color: #566176; color: #fff; }
+#toolbar .seg button.on, #toolbar button.on, #toolbar input.on { background: #3b4658; border-color: #566176; color: #fff; }
+#toolbar .row > .spacer { flex: 1 1 0; min-width: 0; }
 #toolbar .goalinfo, #searchCount { color: #9ca3af; font-size: 12px; white-space: nowrap; }
-#toolbar .stamp { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: #9ca3af; font-size: 12px; white-space: nowrap; }
+#toolbar .stamp { color: #9ca3af; font-size: 12px; white-space: nowrap; }
 #toolbar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 #toolbar .dot.on { background: #34d399; }
 #toolbar .dot.off { background: #ef4444; }
+#toolbar .menuWrap { position: relative; }
+#toolbar .menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 220px; max-height: calc(100vh - var(--bar) - 16px); overflow-y: auto; padding: 6px; background: #181c22; border: 1px solid #2a2f38; border-radius: 8px; box-shadow: 0 6px 18px #0008; }
+#toolbar .menu.right { left: auto; right: 0; }
+#toolbar .menuWrap.open > .menu { display: block; }
+#toolbar .menu .item { display: flex; width: 100%; justify-content: space-between; gap: 18px; background: none; border: 0; padding: 6px 8px; border-radius: 6px; text-align: left; }
+#toolbar .menu .item:hover { background: #232830; }
+#toolbar kbd { color: #9ca3af; font: 11px ui-monospace, monospace; border: 1px solid #343a45; border-radius: 4px; padding: 0 4px; }
+#toolbar .grp { padding: 4px 4px 6px; }
+#toolbar .grp + .grp { border-top: 1px solid #2a2f38; padding-top: 8px; }
+#toolbar .grp.off { opacity: .5; }
+#toolbar .h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; color: #9ca3af; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+#toolbar .h .note { text-transform: none; letter-spacing: 0; }
+#toolbar .h .pick { margin-left: auto; text-transform: none; letter-spacing: 0; }
+#toolbar .link { background: none; border: 0; padding: 0 2px; color: #93c5fd; font: inherit; }
+#toolbar .link:hover { background: none; text-decoration: underline; }
+#toolbar .opt { display: flex; align-items: center; gap: 8px; padding: 3px 4px; color: #e5e7eb; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+#toolbar .opt:hover { background: #232830; }
+#toolbar .opt .n { margin-left: auto; padding-left: 12px; color: #9ca3af; font-size: 12px; }
+#toolbar .opt i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#toolbar .list { max-height: 168px; overflow-y: auto; }
+#filters { width: 300px; }
+#toolbar #chips { display: flex; gap: 6px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+#toolbar .chip { display: inline-flex; align-items: center; flex: 0 1 auto; min-width: 48px; max-width: 260px; padding: 1px 2px 1px 10px; border-radius: 12px; background: #2b3442; border: 1px solid #3d4a5e; font-size: 12px; white-space: nowrap; }
+#toolbar .chip span { overflow: hidden; text-overflow: ellipsis; }
+#toolbar .chip button { background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
+#toolbar .chip button:hover { color: #e5e7eb; }
+#toolbar .combo { position: relative; flex: 0 1 280px; min-width: 150px; }
+#toolbar #goal { width: 100%; padding-right: 22px; text-overflow: ellipsis; }
+#toolbar .caret { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: #9ca3af; pointer-events: none; font-size: 11px; }
+#toolbar #goalList { width: max(100%, 380px); max-height: 60vh; }
+#toolbar .choice { display: flex; gap: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#toolbar .choice span:first-child { overflow: hidden; text-overflow: ellipsis; }
+#toolbar .choice .when { margin-left: auto; color: #9ca3af; flex: none; }
+#toolbar .choice.active { background: #2d333d; }
+#toolbar .choice.done { color: #9ca3af; }
+#toolbar .group { padding: 6px 8px 2px; color: #9ca3af; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+#toolbar .menu .none { padding: 5px 8px; color: #9ca3af; }
+#toolbar .box { position: relative; display: flex; }
+#toolbar #search { width: 200px; padding-right: 24px; }
+#toolbar #searchClear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
+#toolbar #searchClear:hover { color: #e5e7eb; }
+#toolbar #results { width: 460px; max-height: 60vh; }
+#toolbar .hit { align-items: center; }
+#toolbar .hit i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#toolbar .hit .when { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+#banner { margin: 0 -14px -5px; padding: 3px 14px; background: #f59e0b; color: #1c1004; font-size: 12px; }
+#banner[hidden] { display: none; }
+#toolbar #banner button { margin-left: 6px; padding: 0 8px; background: #1c1004; color: #fde68a; border-color: #1c1004; }
+#tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: #0b0e12; border: 1px solid #343a45; border-radius: 6px; color: #e5e7eb; font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px #0008; }
+#tip[hidden] { display: none; }
 #cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
 #legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: #181c22cc; border: 1px solid #2a2f38; border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
 #legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
@@ -48,7 +91,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #legend .col div[hidden] { display: none; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
-#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; min-width: 320px; max-width: 520px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
 #panel h2 { margin: 0 0 6px; padding-right: 30px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
@@ -67,7 +110,30 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel li:hover { background: #232830; }
 #panel li.off { opacity: .45; cursor: default; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-#panel .none { color: #9ca3af; }
+#panel .none, #panel .muted { color: #9ca3af; }
+#panel a { color: #93c5fd; }
+#panel .badge + .badge { margin-left: 4px; }
+#panel .badge.risk { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b; }
+#panel .badge.conflict { background: #ef444422; color: #fca5a5; border: 1px solid #ef4444; }
+#panel h3.red { color: #fca5a5; }
+#panel h3.amber { color: #fbbf24; }
+#panel .lead { margin: 8px 0 2px; color: #9ca3af; font-size: 12px; }
+#panel li small { margin-left: auto; padding-left: 8px; color: #9ca3af; font-size: 12px; white-space: nowrap; }
+#panel li.plain { cursor: default; }
+#panel li.plain:hover { background: none; }
+#panel li.plain i { margin-top: 5px; align-self: flex-start; }
+#panel .overdue { color: #fbbf24; }
+#panel .tag { display: inline-block; margin: 0 4px 3px 0; padding: 0 8px; border-radius: 10px; background: #2b3442; border: 1px solid #3d4a5e; font-size: 12px; }
+#panel .actions button { margin-right: 6px; }
+#panel .link { margin: 4px 0 0; padding: 0; background: none; border: 0; color: #93c5fd; cursor: pointer; }
+#panel .link:hover { background: none; text-decoration: underline; }
+#panel #panelBack { display: block; max-width: calc(100% - 36px); margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+#panel .notes.clamp { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+#panel details { margin-top: 16px; }
+#panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
+#panel details table { margin-top: 6px; }
+#panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 3px); width: 6px; cursor: ew-resize; z-index: 3; }
+#panelGrip:hover { background: #3b4658; }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
 #empty[hidden], #empty [hidden] { display: none; }
 #empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
@@ -77,26 +143,50 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 </head>
 <body>
 <div id="toolbar">
-  <select id="project"></select>
-  <select id="goal" title="Show only what one milestone or objective needs"></select>
-  <span class="goalinfo" id="goalInfo" hidden></span>
-  <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
-  <label id="lanesBy" hidden>Lanes by <select id="laneKey"><option>lane</option><option>owner</option><option>tag</option><option>project</option></select></label>
-  <label id="depsBy" hidden>Dependencies <select id="depsMode"><option value="off">Conflicts only</option><option value="critical">Critical path</option><option value="all">All</option></select></label>
-  <label><input type="checkbox" id="hideDone" checked> Hide done</label>
-  <span class="typesWrap"><button id="typesBtn" aria-haspopup="true" aria-expanded="false" title="Choose which node types to show">Types: all ▾</button><span class="seg" id="types"></span></span>
-  <input type="text" id="search" placeholder="Search" size="9">
-  <span id="searchCount" aria-live="polite"></span>
-  <span class="actions">
-    <button id="expandAll" title="Expand all summaries">Expand</button>
-    <button id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse</button>
-    <button id="relayout" title="Lay the view out again">Re-layout</button>
-    <button id="fit" title="Show the whole plan">Fit</button>
-    <button id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
-    <button id="refresh" hidden title="Check for changes now">Refresh</button>
-  </span>
-  <span class="spacer"></span>
-  <span class="stamp" id="stamp"></span>
+  <div class="row" id="row1">
+    <select id="project" title="Project"></select>
+    <span class="combo menuWrap" id="goalWrap">
+      <input type="text" id="goal" placeholder="All goals" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="goalList" title="Show only what one milestone or objective needs">
+      <span class="caret">▾</span>
+      <div class="menu" id="goalList" role="listbox"></div>
+    </span>
+    <span class="goalinfo" id="goalInfo" hidden></span>
+    <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button></span>
+    <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-haspopup="true" aria-expanded="false" title="View options">⚙ ▾</button>
+      <div class="menu" id="opts">
+        <div class="grp" id="lanesBy"><div class="h">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
+        <div class="grp" id="depsBy"><div class="h">Dependencies <span class="note" id="depsNote">Timeline only</span></div></div>
+        <div class="grp"><label class="opt"><input type="checkbox" id="legendOn"> Show legend</label></div>
+      </div>
+    </span>
+    <span class="spacer"></span>
+    <span class="menuWrap" id="searchWrap">
+      <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
+      <div class="menu right" id="results" role="listbox"></div>
+    </span>
+    <span id="searchCount" aria-live="polite"></span>
+    <span class="stamp" id="stamp"></span>
+  </div>
+  <div class="row" id="row2">
+    <span class="menuWrap" id="filterWrap"><button id="filterBtn" aria-haspopup="true" aria-expanded="false" title="Filter by status, flags, type, owner and lane">Filter ▾</button>
+      <div class="menu" id="filters"></div>
+    </span>
+    <span id="chips"></span>
+    <button class="link" id="clearAll" hidden title="Remove every filter">Clear all</button>
+    <span class="spacer"></span>
+    <button id="fit" title="Show the whole plan (F)">Fit</button>
+    <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-haspopup="true" aria-expanded="false" title="More actions">More ▾</button>
+      <div class="menu right" id="more">
+        <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
+        <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
+        <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
+        <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
+        <button class="item" id="refresh" hidden title="Check for changes now">Refresh now</button>
+        <button class="item" id="copyView" title="Copy a link to exactly this view">Copy link to view</button>
+      </div>
+    </span>
+  </div>
+  <div id="banner" hidden></div>
 </div>
 <div id="cy"></div>
 <div id="legend">
@@ -121,6 +211,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
   </div>
 </div>
 <div id="panel"></div>
+<div id="tip" hidden></div>
 <div id="empty" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -188,8 +279,30 @@ let view = VIEWS.find(v => v === (query.get('view') || store.get('taskgraph.view
 const DEPS = { '0': 'off', off: 'off', critical: 'critical', '1': 'all', all: 'all' };
 let depsMode = DEPS[query.get('deps')] || DEPS[store.get('taskgraph.deps')] || 'off';
 let laneKey = [query.get('lanes'), store.get('taskgraph.lanes')].find(k => Object.hasOwn(LANE_KEYS, k)) || 'lane';
-const parseTypes = s => (s || '').split(',').filter(t => TYPES.includes(t));
-let types = new Set([query.get('types'), store.get('taskgraph.types')].map(parseTypes).find(l => l.length) || TYPES);
+// Filters. Types are remembered per browser; the rest live in the URL only. "none" in the URL
+// is an explicit empty choice; an owner or lane filter of null means everyone.
+const STATUSES = ['ready', 'in_progress', 'blocked', 'done'];
+const OPEN_STATUSES = STATUSES.filter(s => s !== 'done');
+const FLAGS = { late: 'Late', atrisk: 'At risk', conflict: 'Conflict', chase: 'Chase due' };
+const parseList = (s, valid) => s === 'none' ? [] : (s || '').split(',').map(v => v.trim()).filter(v => v && (!valid || valid.includes(v)));
+const listParam = (set, order) => set.size ? (order ? order.filter(v => set.has(v)) : [...set]).join(',') : 'none';
+const sameSet = (a, list) => a.size === list.length && list.every(v => a.has(v));
+function pickTypes(q) {
+  for (const s of q ? [q.get('types')] : [query.get('types'), store.get('taskgraph.types')]) {
+    if (s === 'none') return [];
+    if (parseList(s, TYPES).length) return parseList(s, TYPES);
+  }
+  return TYPES;
+}
+let types, statuses, flags, owners, lanes;
+function readFilters(q, first) {
+  types = new Set(pickTypes(first ? null : q));
+  statuses = new Set(q.get('status') != null ? parseList(q.get('status'), STATUSES) : OPEN_STATUSES);
+  flags = new Set(parseList(q.get('flag'), Object.keys(FLAGS)));
+  owners = q.get('owner') != null ? new Set(parseList(q.get('owner'))) : null;
+  lanes = q.get('lane') != null ? new Set(parseList(q.get('lane'))) : null;
+}
+readFilters(query, true);
 const loadExpanded = () => {
   try {
     const v = JSON.parse(store.get('taskgraph.expanded'));
@@ -222,7 +335,9 @@ const inheritedMeta = (n, key) => {
 const descendants = n => n.children.reduce((sum, c) => sum + 1 + descendants(byId.get(c)), 0);
 
 function el(tag, props, ...children) {
-  const e = Object.assign(document.createElement(tag), props || {});
+  const { dataset, ...rest } = props || {};
+  const e = Object.assign(document.createElement(tag), Object.fromEntries(Object.entries(rest).filter(([, v]) => v != null)));
+  if (dataset) Object.assign(e.dataset, dataset);
   e.append(...children.filter(c => c != null));
   return e;
 }
@@ -392,13 +507,59 @@ function goalScope() {
   return ids;
 }
 
+// keeps: what is in the plan being looked at (project, goal, finished work). Anything it drops
+// is gone, links included. passes: what is drawn; links run on through items it hides.
 const keeps = n => {
   const project = $('project').value;
   const scope = goalScope();
   return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id))
-    && !($('hideDone').checked && n.derived_status === 'done');
+    && (statuses.has('done') || n.derived_status !== 'done');
 };
-const passes = n => keeps(n) && types.has(n.type);
+const ownerOf = n => {
+  const v = LANE_KEYS.owner(n);
+  return v == null || String(v).trim() === '' ? UNASSIGNED : String(v).trim();
+};
+const laneName = n => inheritedMeta(n, 'lane') ?? UNASSIGNED;
+const flagList = n => [n.late_days != null && 'late', atRisk(n) && 'atrisk', conflicted(n) && 'conflict', n.chase_due && 'chase'].filter(Boolean);
+const own = n => statuses.has(n.derived_status) && (!flags.size || flagList(n).some(f => flags.has(f)))
+  && (!owners || owners.has(ownerOf(n))) && (!lanes || lanes.has(laneName(n)));
+// A summary stays while anything inside it matches, so the plan keeps its shape and its counts.
+let matchMemo = null;
+function matchSet() {
+  if (matchMemo && matchMemo.data === DATA) return matchMemo.ids;
+  const ids = new Set();
+  DATA.nodes.filter(own).forEach(n => { for (let a = n; a && !ids.has(a.id); a = byId.get(a.parent)) ids.add(a.id); });
+  matchMemo = { data: DATA, ids };
+  return ids;
+}
+const shows = n => types.has(n.type) && matchSet().has(n.id);
+const passes = n => keeps(n) && shows(n);
+
+// Which filters hide n, and the smallest change to each that brings it back.
+function hiddenBy(n) {
+  const project = projectSelect.value, scope = goalScope(), out = [];
+  if (scope && !scope.has(n.id)) out.push('goal');
+  else if (project && n.project !== project) out.push('project');
+  if (!statuses.has(n.derived_status)) out.push('status');
+  if (!types.has(n.type)) out.push('type');
+  if (flags.size && !flagList(n).some(f => flags.has(f))) out.push('flag');
+  if (owners && !owners.has(ownerOf(n))) out.push('owner');
+  if (lanes && !lanes.has(laneName(n))) out.push('lane');
+  return out;
+}
+const HIDDEN_WORDS = { goal: 'outside the goal', project: 'in another project', status: 'by Status', type: 'by Types', flag: 'by Flags', owner: 'by Owner', lane: 'by Lane' };
+function release(nodes) {
+  nodes.forEach(n => hiddenBy(n).forEach(r => {
+    if (r === 'goal') goal = null;
+    else if (r === 'project') projectSelect.value = '';
+    else if (r === 'status') statuses.add(n.derived_status);
+    else if (r === 'type') types.add(n.type);
+    else if (r === 'flag') flags.clear();
+    else if (r === 'owner') owners.add(ownerOf(n));
+    else if (r === 'lane') lanes.add(laneName(n));
+  }));
+  filtersChanged(true);
+}
 
 function topOf(n, open) {
   const chain = [n];
@@ -422,7 +583,7 @@ function visibleData() {
   });
   level.filter(p => p.children.length && open.has(p.id)).forEach(p => p.children.forEach(c => put(mapped, c, p.id, { partof: true })));
   const alive = new Set(level.filter(keeps).map(n => n.id));
-  const shown = new Set(level.filter(n => alive.has(n.id) && types.has(n.type)).map(n => n.id));
+  const shown = new Set(level.filter(n => alive.has(n.id) && shows(n)).map(n => n.id));
   const out = new Map([...alive].map(id => [id, []]));
   [...mapped.values()].filter(e => alive.has(e.s) && alive.has(e.t)).forEach(e => out.get(e.s).push(e));
   const result = new Map();
@@ -512,14 +673,15 @@ const tasks = () => cy.nodes().not('.bg');
 const links = () => cy.edges().not('.bg');
 const conflicted = n => (n.conflicts ?? []).length > 0;
 const atRisk = n => !!(n.outlook && n.outlook.verdict === 'at_risk' && n.derived_status !== 'done');
+// "At risk" names what is late, the item to chase, before the slack figure.
 function outlookText(o) {
-  if (o.verdict === 'on_track') return 'On track' + (o.min_slack != null ? ` · min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d` : '');
+  const slack = o.min_slack != null ? `min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d` : null;
+  if (o.verdict === 'on_track') return 'On track' + (slack ? ' · ' + slack : '');
   if (o.verdict === 'unknown') return 'Unknown · nothing upstream has a date';
-  const parts = [];
-  if (o.late_upstream.length) parts.push(o.late_upstream.length + ' late upstream');
-  if (o.negative_slack) parts.push(o.negative_slack + ' negative slack');
-  if (o.min_slack != null) parts.push(`min slack ${o.min_slack > 0 ? '+' : ''}${o.min_slack}d`);
-  return 'At risk' + (parts.length ? ' · ' + parts.join(' · ') : '');
+  const late = o.late_upstream.filter(i => byId.has(i)).map(i => byId.get(i)).sort((a, b) => b.late_days - a.late_days || a.id - b.id);
+  const lead = late.length ? `#${late[0].id} ${late[0].title} is ${late[0].late_days}d late` + (late.length > 1 ? `, +${late.length - 1} more late` : '')
+    : o.negative_slack ? `${o.negative_slack} ${o.negative_slack === 1 ? 'hop' : 'hops'} with negative slack` : null;
+  return 'At risk' + (lead ? ' — ' + lead : '') + (slack ? ' · ' + slack : '');
 }
 const laneOf = n => {
   const v = LANE_KEYS[laneKey](n);
@@ -969,22 +1131,19 @@ function syncEmpty() {
   if (!candidates.length) {
     text = project ? `No tasks in ${project} yet.` : 'No tasks yet.';
     action.hidden = true;
-  } else if ($('hideDone').checked && candidates.every(n => n.derived_status === 'done')) {
+  } else if (!statuses.has('done') && candidates.every(n => n.derived_status === 'done')) {
     text = candidates.length === 1 ? 'All 1 item is done.' : `All ${candidates.length} items are done.`;
     action.textContent = 'Show done';
     action.onclick = () => {
-      $('hideDone').checked = false;
-      rebuild();
+      statuses.add('done');
+      filtersChanged();
     };
   } else {
     text = 'Nothing matches the current filters.';
     action.textContent = 'Reset filters';
     action.onclick = () => {
-      types = new Set(TYPES);
-      store.set('taskgraph.types', TYPES.join(','));
       $('search').value = '';
-      syncControls();
-      setGoal(null);
+      clearAll();
     };
   }
   $('emptyText').textContent = text;
@@ -1001,16 +1160,8 @@ function sameShape(nodes, edges) {
 
 const GOAL_TYPES = ['milestone', 'objective'];
 function fillGoals() {
-  const select = $('goal');
-  const project = projectSelect.value;
-  const key = n => n.due ?? '9999-12-31';
-  const byDate = (a, b) => (a.derived_status === 'done') - (b.derived_status === 'done') || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
-  const list = DATA.nodes.filter(n => GOAL_TYPES.includes(n.type) && (!project || n.project === project)).sort(byDate);
-  if (goal != null && byId.has(goal) && !list.some(n => n.id === goal)) list.unshift(byId.get(goal));
-  const label = n => `#${n.id} ${n.title}` + (n.type === 'milestone' && n.due ? ` · ${day(n.due)}` : '') + (n.derived_status === 'done' ? ' · done' : '');
-  select.replaceChildren(el('option', { value: '', textContent: 'All goals' }), ...list.map(n => el('option', { value: String(n.id), textContent: label(n) })));
-  select.value = goal != null && byId.has(goal) ? String(goal) : '';
-  select.classList.toggle('on', select.value !== '');
+  showGoal();
+  if (menuOpen('goalWrap')) renderGoalList(false);
   const info = $('goalInfo');
   const scope = goalScope();
   info.hidden = !scope;
@@ -1036,6 +1187,7 @@ function addProjects() {
 }
 
 function applyData(next) {
+  const had = new Set(searchHits(searchQuery()).map(n => n.id));
   DATA = next;
   byId = new Map(DATA.nodes.map(n => [n.id, n]));
   addProjects();
@@ -1046,6 +1198,8 @@ function applyData(next) {
   }
   fillGoals();
   syncLegend();
+  matchMemo = null;
+  autoOpen();
   const { nodes, edges, open } = visibleData();
   if (sameShape(nodes, edges)) {
     const sources = new Set(edges.map(e => e.source));
@@ -1061,12 +1215,21 @@ function applyData(next) {
   } else rebuild(true, true);
   if (!userMoved && hiddenTasks()) fitView(keepWhole);
   if (pinned) openPanel(byId.get(pinned));
+  // A hit that arrives with a refresh flashes and is counted as new for a few seconds.
+  const q = searchQuery(), added = q ? searchHits(q).filter(n => !had.has(n.id)) : [];
+  if (added.length) {
+    fresh = { ids: new Set(added.map(n => n.id)), until: Date.now() + 3000 };
+    const eles = cy.collection(added.map(n => cy.getElementById(String(n.id))).filter(e => e.nonempty()));
+    eles.addClass('new');
+    setTimeout(() => { eles.removeClass('new'); applySearch(); }, 3000);
+  }
   applySearch();
   refocus();
   syncEmpty();
 }
 
 function toggleExpand(id) {
+  autoOpened.delete(id);
   const open = new Set(expandedIds());
   if (!open.delete(id)) open.add(id);
   setExpanded(open);
@@ -1074,15 +1237,19 @@ function toggleExpand(id) {
   if (pinned) openPanel(byId.get(pinned));
 }
 
-function reveal(id) {
+// Open an item from the panel (how = 'ref', remembered for Back), a deep link or a back step.
+function reveal(id, how = 'ref') {
   const open = new Set(expandedIds());
   const size = open.size;
-  for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent);
+  for (let n = byId.get(id); byId.has(n.parent); n = byId.get(n.parent)) {
+    open.add(n.parent);
+    autoOpened.delete(n.parent);
+  }
   if (open.size !== size) {
     setExpanded(open);
     rebuild(true);
   }
-  select(id, true);
+  select(id, true, how);
 }
 
 function focusOn(n, fade) {
@@ -1106,43 +1273,156 @@ function mirrorNames() {
   });
 }
 
+// Search finds what a director types: a title or #id, a person, a lane or team, a tag, a word in
+// the notes. Titles rank first, then people and lanes, then notes. "#12" is that one item;
+// bare digits match ids that start with them.
+const tagsOf = n => Array.isArray(n.meta.tags) ? n.meta.tags.map(String) : n.meta.tags != null ? String(n.meta.tags).split(',').map(t => t.trim()).filter(Boolean) : [];
+const SEARCH_FIELDS = [
+  ['owner', n => n.meta.owner], ['decider', n => n.meta.decider], ['party', n => n.meta.party], ['contact', n => n.meta.contact],
+  ['lane', n => inheritedMeta(n, 'lane')], ['team', n => inheritedMeta(n, 'team')], ['tags', n => tagsOf(n).join(', ')], ['notes', n => n.notes]
+];
+function matchOf(n, q) {
+  if (/^#\d+$/.test(q)) return String(n.id) === q.slice(1) ? { field: 'id', rank: 0 } : null;
+  if (/^\d+$/.test(q) && String(n.id).startsWith(q)) return { field: 'id', rank: 0 };
+  if (n.title.toLowerCase().includes(q)) return { field: 'title', rank: 0 };
+  for (const [field, get] of SEARCH_FIELDS) {
+    const v = get(n);
+    if (v != null && String(v).toLowerCase().includes(q)) return { field, value: String(v), rank: field === 'notes' ? 2 : 1 };
+  }
+  return null;
+}
 const searchQuery = () => $('search').value.trim().toLowerCase();
-const searchHits = q => q ? DATA.nodes.filter(n => passes(n) && (n.title.toLowerCase().includes(q) || ('#' + n.id).includes(q))).sort((a, b) => a.id - b.id) : [];
+const searchMatches = q => q ? DATA.nodes.filter(passes).map(n => ({ n, m: matchOf(n, q) })).filter(h => h.m).sort((a, b) => a.m.rank - b.m.rank || a.n.id - b.n.id) : [];
+const searchHits = q => searchMatches(q).map(h => h.n);
+const hiddenMatches = q => q ? DATA.nodes.filter(n => !passes(n) && matchOf(n, q)) : [];
 
+// A miss that a filter caused says so, with the one click that brings the hits back.
+function hiddenNote(hidden) {
+  const reasons = new Set(hidden.flatMap(hiddenBy));
+  const word = reasons.size === 1 ? [...reasons][0] : null;
+  const text = word === 'goal' || word === 'project' ? `${hidden.length} ${HIDDEN_WORDS[word]}` : `${hidden.length} hidden ${word ? HIDDEN_WORDS[word] : 'by filters'}`;
+  return [' · ' + text + ' ', el('button', { className: 'link', id: 'searchShow', textContent: 'Show', title: 'Loosen just the filters that hide these', onclick: () => { release(hidden); runSearch(); } })];
+}
+
+let fresh = { ids: new Set(), until: 0 };
 function applySearch() {
   const q = searchQuery();
-  const hits = new Set(searchHits(q).map(n => String(n.id)));
-  tasks().forEach(n => n.toggleClass('dim', hits.size > 0 && !hits.has(n.id())));
-  const at = searched.q === q && searched.at >= 0 && hits.size > 1 ? `${searched.at + 1} of ` : '';
-  $('searchCount').textContent = !q ? '' : !hits.size ? 'No matches' : hits.size === 1 ? '1 match' : `${at}${hits.size} matches`;
+  const hits = searchHits(q), ids = new Set(hits.map(n => String(n.id)));
+  tasks().forEach(n => n.toggleClass('dim', ids.size > 0 && !ids.has(n.id())));
+  $('searchClear').hidden = !$('search').value;
+  const count = $('searchCount');
+  const added = Date.now() < fresh.until ? hits.filter(n => fresh.ids.has(n.id)).length : 0;
+  if (!q) count.replaceChildren();
+  else if (hits.length) {
+    const at = searched.q === q && searched.at >= 0 && hits.length > 1 ? `${searched.at + 1} of ` : '';
+    count.replaceChildren((hits.length === 1 ? '1 match' : `${at}${hits.length} matches`) + (added ? ` (${added} new)` : ''));
+  } else {
+    const hidden = hiddenMatches(q);
+    count.replaceChildren('No matches', ...(hidden.length ? hiddenNote(hidden) : []));
+  }
+  renderResults();
   mirrorNames();
 }
 
-// Expand whatever hides a hit, so a match inside a collapsed summary is never just a dimmed screen.
-let searchTimer, searched = { q: null, at: -1 };
+// The results list: up to 12 rows around the current one, what matched when it was not the title.
+const RESULT_ROWS = 12;
+function snippet(text, q) {
+  const flat = text.replace(/\s+/g, ' '), i = flat.toLowerCase().indexOf(q);
+  const from = Math.max(0, i - 24);
+  return (from ? '…' : '') + flat.slice(from, i + q.length + 32) + (i + q.length + 32 < flat.length ? '…' : '');
+}
+function resultNote(n, m, q) {
+  if (m.field === 'notes') return 'notes: ' + snippet(m.value, q);
+  if (m.value) return m.value + ' · ' + m.field;
+  return (SUBTITLE[n.type] || SUBTITLE.task)(n).filter(Boolean).join(' · ');
+}
+function renderResults() {
+  const q = searchQuery(), list = searchMatches(q), box = $('results');
+  if (!q || !list.length) {
+    box.replaceChildren();
+    if (menuOpen('searchWrap')) setMenu('searchWrap', false);
+    return;
+  }
+  const at = searched.q === q ? searched.at : -1;
+  const from = Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS));
+  const rows = list.slice(from, from + RESULT_ROWS).map(({ n, m }, k) => {
+    const c = COLORS[n.derived_status] || COLORS.blocked, i = from + k;
+    return el('div', { className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
+      el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+      el('span', { className: 'when', textContent: resultNote(n, m, q) }));
+  });
+  const rest = list.length - from - rows.length;
+  box.replaceChildren(...(from ? [el('div', { className: 'none', textContent: `${from} more above` })] : []), ...rows,
+    ...(rest > 0 ? [el('div', { className: 'none', textContent: `+${rest} more · Enter steps through all` })] : []));
+  box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+// Expand whatever hides a search hit or an item a narrowing filter picked out (owner, lane,
+// flags, status), so a match inside a collapsed summary is never just a box to open by hand,
+// and fold it again once the search or filter moves on, unless the viewer has used it since.
+let searchTimer, searched = { q: null, at: -1, moved: false };
+const autoOpened = new Set();
+const narrowing = () => flags.size > 0 || owners != null || lanes != null || OPEN_STATUSES.some(s => !statuses.has(s));
+function autoOpen() {
+  const need = new Set(), keep = new Set();
+  const lift = (n, into) => { for (let a = n; byId.has(a.parent); a = byId.get(a.parent)) into.add(a.parent); };
+  searchHits(searchQuery()).forEach(h => lift(h, need));
+  if (narrowing()) DATA.nodes.filter(n => own(n) && passes(n)).forEach(n => lift(n, need));
+  if (pinned && byId.has(pinned)) lift(byId.get(pinned), keep);
+  const open = new Set(expandedIds());
+  let changed = false;
+  [...autoOpened].filter(id => !need.has(id)).forEach(id => {
+    autoOpened.delete(id);
+    if (!keep.has(id) && open.delete(id)) changed = true;
+  });
+  need.forEach(id => {
+    if (open.has(id)) return;
+    open.add(id);
+    autoOpened.add(id);
+    changed = true;
+  });
+  if (changed) setExpanded(open);
+  return changed;
+}
 function runSearch() {
   clearTimeout(searchTimer);
   const q = searchQuery();
-  searched = { q, at: -1 };
-  const open = new Set(expandedIds()), size = open.size;
-  searchHits(q).forEach(h => { for (let n = h; byId.has(n.parent); n = byId.get(n.parent)) open.add(n.parent); });
-  if (open.size !== size) {
-    setExpanded(open);
+  searched = { q, at: -1, moved: false };
+  if (autoOpen()) {
     rebuild(true);
+    if (pinned) openPanel(byId.get(pinned));
   } else applySearch();
+  if (q && document.activeElement === $('search')) setMenu('searchWrap', searchHits(q).length > 0);
 }
 
 function stepSearch(back) {
   if (searched.q !== searchQuery()) runSearch();
   const hits = searchHits(searched.q);
   if (!hits.length) return;
-  searched.at = searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length;
-  select(hits[searched.at].id, true);
+  openHit(searched.at < 0 ? (back ? hits.length - 1 : 0) : (searched.at + (back ? -1 : 1) + hits.length) % hits.length);
+}
+function moveHit(step) {
+  if (searched.q !== searchQuery()) runSearch();
+  const hits = searchHits(searched.q);
+  if (!hits.length) return;
+  searched.at = searched.at < 0 ? (step > 0 ? 0 : hits.length - 1) : (searched.at + step + hits.length) % hits.length;
+  searched.moved = true;
+  setMenu('searchWrap', true);
+  applySearch();
+}
+function openHit(i) {
+  const hits = searchHits(searched.q);
+  if (!hits[i]) return;
+  searched.at = i;
+  searched.moved = false;
+  setMenu('searchWrap', false);
+  select(hits[i].id, true);
   applySearch();
 }
 
 function clearSearch() {
   $('search').value = '';
+  setMenu('searchWrap', false);
   runSearch();
 }
 
@@ -1157,31 +1437,76 @@ function fmt(iso) {
 }
 
 const show = (k, v) => DATE_KEYS.includes(k) ? day(v) : k === 'estimate' ? v + ' h' : typeof v === 'string' ? v : JSON.stringify(v);
-const row = (k, v) => el('tr', null, el('td', { textContent: k }), el('td', { textContent: v }));
+const row = (k, ...v) => el('tr', null, el('td', { textContent: k }), el('td', null, ...v));
+const titleCase = k => k.replace(/[_-]+/g, ' ').replace(/^\w/, c => c.toUpperCase());
+
+// Links become links: URLs in notes and meta open in a new tab, an email address becomes mailto.
+const URL_RE = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/g;
+const EMAIL_RE = /[\w.+-]+@[\w-]+(\.[\w-]+)+/;
+function anchor(href, text) {
+  return el('a', { href, textContent: text, target: href.startsWith('mailto:') ? null : '_blank', rel: 'noopener noreferrer' });
+}
+function shortUrl(u) {
+  try {
+    const x = new URL(u), path = x.pathname.replace(/\/$/, '');
+    const s = x.host + path;
+    return s.length > 42 ? s.slice(0, 41) + '…' : s;
+  } catch (e) { return u; }
+}
+function linkify(text) {
+  const out = [];
+  let at = 0;
+  for (const m of String(text).matchAll(URL_RE)) {
+    out.push(text.slice(at, m.index), anchor(m[0], m[0]));
+    at = m.index + m[0].length;
+  }
+  out.push(String(text).slice(at));
+  return out.filter(p => p !== '');
+}
+const valueNodes = v => {
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  if (/^https?:\/\/\S+$/.test(s)) return [anchor(s, shortUrl(s))];
+  const mail = typeof v === 'string' && EMAIL_RE.exec(s);
+  if (mail) return [s.slice(0, mail.index), anchor('mailto:' + mail[0], mail[0]), s.slice(mail.index + mail[0].length)].filter(p => p !== '');
+  return [s];
+};
 
 // The chain with the least slack into an open milestone or objective, first step first, as `tg.py path` prints it.
 const chainOf = n => n.outlook && n.derived_status !== 'done' ? (n.outlook.driving || []).filter(i => i !== n.id && byId.has(i)) : [];
 
-function refList(ids) {
+// Rows naming other items open them; `note` adds a right-hand word such as "4d late".
+function refList(ids, note) {
+  ids = ids.filter(id => byId.has(id));
   if (!ids.length) return el('div', { className: 'none', textContent: 'None' });
   return el('ul', null, ...ids.map(id => {
     const n = byId.get(id);
     const on = passes(n);
     const c = COLORS[n.derived_status] || COLORS.blocked;
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }));
+    const li = el('li', { className: on ? '' : 'off', title: on ? null : 'Hidden by the current filters' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+      note && note(n) ? el('small', { textContent: note(n) }) : null);
     if (on) li.onclick = () => reveal(id);
     return li;
   }));
 }
+const plain = (text, color) => el('li', { className: 'plain' }, el('i', { style: 'background:' + (color || RED) }), el('span', null, ...[].concat(text)));
+const lateNote = n => n.late_days != null ? n.late_days + 'd late' : null;
 
-function baselineText(n) {
+function baselineNote(n) {
   const b = n.baseline;
+  if (!b || b.due === n.due) return null;
   const delta = b.due && n.due ? Math.round(dnum(n.due) - dnum(b.due)) : null;
-  return (b.due ? day(b.due) : 'none') + (delta ? ` (${delta > 0 ? '+' : ''}${delta}d)` : '') + ' · ' + b.label;
+  const label = String(b.label).replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
+  return b.due ? (delta ? `${delta > 0 ? '+' : ''}${delta}d vs ${day(b.due)} · ${label}` : `was ${day(b.due)} · ${label}`) : `no date in ${label}`;
 }
 
+// A conflict with another item opens it; one about this item alone (promised after needed) is a
+// plain statement, not a greyed-out row.
 function conflictList(list) {
   return el('ul', null, ...list.map(c => {
+    if (c.with == null) {
+      const text = c.kind === 'promised' ? `Promised ${day(c.due)} is after needed ${day(c.need)} (${Math.abs(c.gap)}d)` : c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
+      return el('li', { className: 'plain self' }, el('i', { style: 'background:' + RED }), el('span', { textContent: text }));
+    }
     const on = byId.has(c.with) && passes(byId.get(c.with));
     const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m)) }));
     if (on) li.onclick = () => reveal(c.with);
@@ -1189,99 +1514,265 @@ function conflictList(list) {
   }));
 }
 
+const DUE_META = { task: 'due', objective: 'due', milestone: 'date', decision: 'decide_by', external: 'needed_by', risk: 'review', issue: 'due' };
+const DUE_LABEL = { task: 'Due', objective: 'Due', milestone: 'Date', decision: 'Decide by', external: 'Needed by', risk: 'Review', issue: 'Due' };
+const WHO = { decision: ['decider', 'Decider'], external: ['party', 'Party'] };
+const EXTRA_FACTS = { external: ['contact', 'promised', 'chase'], risk: ['likelihood', 'impact', 'mitigation'], issue: ['severity', 'raised'] };
+const LINK_KEYS = ['link', 'url'];
+
+// The facts a steering meeting asks first: who, when (against the baseline), where, how big.
+function facts(n) {
+  const [whoKey, whoLabel] = WHO[n.type] || ['owner', 'Owner'];
+  const m = n.meta, rows = [];
+  if (m[whoKey]) rows.push(row(whoLabel, m[whoKey]));
+  const base = baselineNote(n);
+  if (n.due || base) rows.push(row(DUE_LABEL[n.type] || 'Due', n.due ? day(n.due) : 'none', base ? el('span', { className: 'muted', textContent: ' · ' + base }) : null));
+  if (isSummary(n) && n.span) rows.push(row('Span', day(n.span.start) + '–' + day(n.span.end)));
+  if (n.start) rows.push(row('Start', day(n.start)));
+  const lane = inheritedMeta(n, 'lane'), team = inheritedMeta(n, 'team');
+  if (lane) rows.push(row('Lane', lane));
+  if (team && team !== lane) rows.push(row('Team', team));
+  if (m.estimate != null && m.estimate !== '') rows.push(row('Estimate', show('estimate', m.estimate)));
+  (EXTRA_FACTS[n.type] || []).filter(k => m[k] != null && m[k] !== '').forEach(k => {
+    if (k === 'chase') rows.push(row('Chase', day(m.chase), n.chase_due ? el('strong', { className: 'overdue', textContent: ' · overdue' }) : null));
+    else rows.push(row(titleCase(k), ...(DATE_KEYS.includes(k) ? [day(m[k])] : valueNodes(m[k]))));
+  });
+  if (n.outlook && n.derived_status !== 'done') rows.push(row('Outlook', outlookText(n.outlook)));
+  if (n.rollup && n.rollup.total) rows.push(row('Progress', `${n.rollup.done}/${n.rollup.total} done`));
+  if (tagsOf(n).length) rows.push(row('Tags', ...tagsOf(n).map(t => el('span', { className: 'tag', textContent: t }))));
+  LINK_KEYS.filter(k => m[k]).forEach(k => rows.push(row(titleCase(k), ...valueNodes(m[k]))));
+  return rows;
+}
+const factKeys = n => new Set(['type', 'start', 'lane', 'team', 'estimate', 'tags', 'owner', ...LINK_KEYS, DUE_META[n.type], (WHO[n.type] || ['owner'])[0], ...(EXTRA_FACTS[n.type] || [])]);
+
+// Why the item is red or amber, in words, naming the items to chase.
+function why(n) {
+  const rows = [];
+  if (n.late_days != null) rows.push(plain(`${DUE_LABEL[n.type] || 'Due'} ${day(n.due)} · ${n.late_days}d late`));
+  const lateInside = collapsed(n) ? beneath(n).filter(k => k.late_days != null && k.derived_status !== 'done' && k.type !== 'risk' && keeps(k)) : [];
+  const late = atRisk(n) ? n.outlook.late_upstream.filter(i => byId.has(i)).sort((a, b) => byId.get(b).late_days - byId.get(a).late_days || a - b) : [];
+  const parts = [];
+  if (rows.length) parts.push(el('ul', null, ...rows));
+  if (lateInside.length) parts.push(el('div', { className: 'lead', textContent: 'Late inside' }), refList(lateInside.map(k => k.id), lateNote));
+  if (late.length) parts.push(el('div', { className: 'lead', textContent: late.length === 1 ? 'Late upstream' : `${late.length} late upstream` }), refList(late, lateNote));
+  if (atRisk(n) && n.outlook.negative_slack) parts.push(el('ul', null, plain(`${n.outlook.negative_slack} ${n.outlook.negative_slack === 1 ? 'hop' : 'hops'} with negative slack` + (n.outlook.min_slack != null ? ` · min slack ${n.outlook.min_slack}d` : ''), AMBER)));
+  if (conflicted(n)) parts.push(el('div', { className: 'lead', textContent: 'Conflicts' }), conflictList(n.conflicts));
+  if (n.chase_due) parts.push(el('ul', null, plain(['Chase was due ' + day(n.meta.chase), n.meta.party ? ' · ' + n.meta.party : '', ...(n.meta.contact ? [' · ', ...valueNodes(n.meta.contact)] : [])], AMBER)));
+  if (!parts.length) return [];
+  const red = n.late_days != null || lateInside.length || conflicted(n);
+  return [el('h3', { id: 'whyHead', className: red ? 'red' : 'amber', textContent: red ? 'Why it is red' : atRisk(n) ? 'Why it is at risk' : 'Chase due' }), ...parts];
+}
+
+// Long notes fold to eight lines; the choice survives the panel redrawing on refresh.
+let notesOpen = null;
+function notesBlock(n) {
+  if (!n.notes) return [el('div', { className: 'none', textContent: 'None' })];
+  const box = el('div', { className: 'notes' + (notesOpen === n.id ? '' : ' clamp') }, ...linkify(n.notes));
+  const more = el('button', { className: 'link', id: 'notesMore', hidden: true, textContent: notesOpen === n.id ? 'Show less' : 'Show more' });
+  more.onclick = () => {
+    notesOpen = notesOpen === n.id ? null : n.id;
+    box.classList.toggle('clamp', notesOpen !== n.id);
+    more.textContent = notesOpen === n.id ? 'Show less' : 'Show more';
+  };
+  return [box, more];
+}
+
+// Panel-local back steps: following a row in the panel remembers where you came from.
+let trail = [];
+const MIN_PANEL = 320, MAX_PANEL = 520;
+let panelW = Math.max(MIN_PANEL, Math.min(MAX_PANEL, Number(store.get('taskgraph.panelW')) || 340));
+function setPanelWidth(w) {
+  panelW = Math.round(Math.max(MIN_PANEL, Math.min(MAX_PANEL, w)));
+  $('panel').style.width = panelW + 'px';
+  document.documentElement.style.setProperty('--panel-w', panelW + 'px');
+  $('cy').style.right = panelW + 'px';
+}
+function grip() {
+  const g = el('div', { id: 'panelGrip', title: 'Drag to resize' });
+  g.onpointerdown = e => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    g.onpointermove = ev => setPanelWidth(innerWidth - ev.clientX);
+    g.onpointerup = () => {
+      g.onpointermove = g.onpointerup = null;
+      store.set('taskgraph.panelW', String(panelW));
+      cy.resize();
+      if (pinned) keepInView(cy.getElementById(String(pinned)));
+    };
+  };
+  return g;
+}
+
+async function copyLink(btn) {
+  const url = location.href, was = btn.textContent;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(url);
+    ok = true;
+  } catch (e) {
+    const t = el('textarea', { value: url });
+    document.body.append(t);
+    t.select();
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    t.remove();
+  }
+  btn.textContent = ok ? 'Copied' : 'Copy failed';
+  setTimeout(() => { btn.textContent = was; }, 1500);
+}
+
 function openPanel(n) {
   const panel = $('panel');
   const top = panel.scrollTop;
-  const fields = FIELDS[n.type] || FIELDS.task;
-  const shown = new Set(['type', 'start', 'due', ...fields.map(([k]) => k)]);
-  const extra = Object.entries(n.meta).filter(([k]) => !shown.has(k));
+  trail = trail.filter(id => byId.has(id));
+  const known = factKeys(n);
+  const extra = Object.entries(n.meta).filter(([k]) => !known.has(k));
   const focus = goal === n.id || n.type !== 'risk';
   const focusText = goal === n.id ? 'Show everything' : GOAL_TYPES.includes(n.type) ? 'Focus on this goal' : 'Show only what this needs';
+  const back = trail.length ? byId.get(trail[trail.length - 1]) : null;
+  const hasParent = n.parent != null && byId.has(n.parent);
   panel.replaceChildren(...[
-    el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close', textContent: '×', onclick: closePanel }),
+    grip(),
+    el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
+    back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
+      atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
+      conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
       n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null),
-    el('table', null,
-      row('Type', n.type),
-      row('Project', n.project),
-      n.start ? row('Start', day(n.start)) : null,
-      n.type === 'task' && n.due ? row('Due', day(n.due)) : null,
-      n.baseline && n.baseline.due !== n.due ? row('Baseline due', baselineText(n)) : null,
-      ...fields.filter(([k]) => n.meta[k] != null && n.meta[k] !== '').map(([k, label]) => row(label, show(k, n.meta[k]))),
-      n.outlook && n.derived_status !== 'done' ? row('Outlook', outlookText(n.outlook)) : null,
-      n.rollup && n.rollup.total ? row('Progress', `${n.rollup.done}/${n.rollup.total} done`) : null,
-      row('Created', fmt(n.created_at)),
-      row('Done', fmt(n.done_at))),
-    n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
-    focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs',
-      style: n.children.length ? 'margin-left:6px' : '', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
+    el('table', { id: 'facts' }, ...facts(n)),
+    el('div', { className: 'actions' },
+      n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
+      focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
+      el('button', { id: 'copyLink', textContent: 'Copy link', title: 'Copy a link that opens this item', onclick: e => copyLink(e.currentTarget) })),
+    ...why(n),
+    el('h3', { textContent: 'Blocks' }),
+    refList(n.blocks),
+    el('h3', { textContent: 'Blocked by' }),
+    refList(n.depends_on, lateNote),
     chainOf(n).length ? el('h3', { id: 'chainHead', textContent: 'Driving chain' }) : null,
     chainOf(n).length ? refList(chainOf(n)) : null,
     (n.threats ?? []).length ? el('h3', { textContent: 'Threatened by' }) : null,
     (n.threats ?? []).length ? refList(n.threats) : null,
-    conflicted(n) ? el('h3', { textContent: 'Conflicts' }) : null,
-    conflicted(n) ? conflictList(n.conflicts) : null,
-    n.parent != null && byId.has(n.parent) ? el('h3', { textContent: 'Parent' }) : null,
-    n.parent != null && byId.has(n.parent) ? refList([n.parent]) : null,
+    hasParent ? el('h3', { textContent: 'Parent' }) : null,
+    hasParent ? refList([n.parent]) : null,
     n.children.length ? el('h3', { textContent: 'Children' }) : null,
-    n.children.length ? refList(n.children) : null,
+    n.children.length ? refList(n.children, lateNote) : null,
     el('h3', { textContent: 'Notes' }),
-    n.notes ? el('div', { className: 'notes', textContent: n.notes }) : el('div', { className: 'none', textContent: 'None' }),
-    el('h3', { textContent: 'Meta' }),
-    extra.length
-      ? el('table', null, ...extra.map(([k, v]) => row(k, typeof v === 'string' ? v : JSON.stringify(v))))
-      : el('div', { className: 'none', textContent: 'None' }),
-    el('h3', { textContent: 'Blocked by' }),
-    refList(n.depends_on),
-    el('h3', { textContent: 'Blocks' }),
-    refList(n.blocks)
+    ...notesBlock(n),
+    el('details', { id: 'details', open: detailsOpen },
+      el('summary', { textContent: 'Details' }),
+      el('table', null,
+        row('Type', n.type),
+        row('Project', n.project),
+        row('Created', fmt(n.created_at)),
+        row('Done', fmt(n.done_at)),
+        ...extra.map(([k, v]) => row(titleCase(k), ...(DATE_KEYS.includes(k) ? [day(v)] : valueNodes(v))))))
   ].filter(c => c != null));
+  $('details').ontoggle = e => { detailsOpen = e.target.open; };
   panel.scrollTop = top;
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
-  document.documentElement.style.setProperty('--panel-w', '340px');
-  $('cy').style.right = '340px';
+  setPanelWidth(panelW);
+  const notes = panel.querySelector('.notes');
+  if (notes) $('notesMore').hidden = !(notes.scrollHeight > notes.clientHeight + 1 || notesOpen === n.id);
   cy.resize();
   if (wasHidden) fitView();
+}
+let detailsOpen = false;
+
+function goBack() {
+  if (!trail.length) return;
+  const id = trail.pop();
+  reveal(id, 'back');
 }
 
 function closePanel() {
   pinned = null;
+  trail = [];
   $('panel').style.display = 'none';
   document.documentElement.style.setProperty('--panel-w', '0px');
   $('cy').style.right = '0';
   cy.resize();
   refocus();
+  syncUrl();
 }
 
-function select(id, center) {
+function select(id, center, how) {
   const node = cy.getElementById(String(id));
   if (node.empty()) return;
+  if (how === 'ref' && pinned != null && pinned !== id) trail = [...trail, pinned].slice(-5);
+  else if (how !== 'back') trail = [];
   pinned = id;
   openPanel(byId.get(id));
   refocus();
-  if (center) {
-    userMoved = true;
-    if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
-    // Timeline: scroll the row to mid-height only. The name column is how a row is recognised,
-    // so it stays in view; the panel carries the dates when the bar itself is off to the right.
-    const z = cy.zoom(), box = $('cy').getBoundingClientRect();
-    cy.animate({ pan: { x: 40 - z * cy.elements().boundingBox().x1, y: box.height / 2 - z * node.position('y') } }, { duration: 250 });
-  }
+  syncUrl();
+  if (!center) return keepInView(node);
+  userMoved = true;
+  if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
+  // Timeline: scroll vertically, and only when the row is off screen. The name column is how a row
+  // is recognised, so it stays in view; the panel carries the dates when the bar is off to the right.
+  const z = cy.zoom(), box = $('cy').getBoundingClientRect(), y = node.renderedPosition('y');
+  const x = 40 - z * cy.elements().boundingBox().x1;
+  if (y >= TL.row && y <= box.height - TL.row && Math.abs(cy.pan('x') - x) < 1) return;
+  cy.animate({ pan: { x, y: y >= TL.row && y <= box.height - TL.row ? cy.pan('y') : box.height / 2 - z * node.position('y') } }, { duration: 250 });
 }
+
+// A click must never make its node vanish: when the panel (or the edge) covers it, pan by the
+// least that shows it again. Timeline never pushes the name column off the left edge.
+function keepInView(node) {
+  const box = $('cy').getBoundingClientRect(), m = 16;
+  const b = node.renderedBoundingBox({ includeLabels: view !== 'timeline' });
+  let dx = 0, dy = 0;
+  if (b.x2 > box.width - m) dx = box.width - m - b.x2;
+  if (b.x1 + dx < m) dx = m - b.x1;
+  if (b.y2 > box.height - m) dy = box.height - m - b.y2;
+  if (b.y1 + dy < m) dy = m - b.y1;
+  if (view === 'timeline' && dx < 0) dx = Math.max(dx, Math.min(0, -cy.nodes('.tl-name').renderedBoundingBox().x1));
+  if (!dx && !dy) return;
+  userMoved = true;
+  cy.stop();
+  cy.animate({ panBy: { x: dx, y: dy } }, { duration: 200 });
+}
+
+// A tooltip of our own: the browser's appears after a second, unstyled, and is easy to miss on a
+// projector. This one follows the pointer after 150 ms.
+let tipTimer, tipAt = { x: 0, y: 0 };
+function placeTip() {
+  const tip = $('tip'), w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.max(8, Math.min(tipAt.x + 14, innerWidth - w - 8)) + 'px';
+  tip.style.top = (tipAt.y + 20 + h > innerHeight - 8 ? tipAt.y - h - 10 : tipAt.y + 20) + 'px';
+}
+function showTip(text) {
+  clearTimeout(tipTimer);
+  tipTimer = setTimeout(() => {
+    $('tip').textContent = text;
+    $('tip').hidden = false;
+    placeTip();
+  }, 150);
+}
+function hideTip() {
+  clearTimeout(tipTimer);
+  $('tip').hidden = true;
+  $('tip').textContent = '';
+}
+$('cy').addEventListener('mousemove', e => {
+  tipAt = { x: e.clientX, y: e.clientY };
+  if (!$('tip').hidden) placeTip();
+});
+$('cy').addEventListener('mouseleave', hideTip);
+cy.on('viewport tapstart', hideTip);
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
 let hoverTimer, hovered = null;
 cy.on('mouseover', 'node', e => {
   clearTimeout(hoverTimer);
   hoverTimer = setTimeout(() => { hovered = focusOn(e.target, false); }, 120);
-  $('cy').title = '#' + e.target.id() + ' ' + e.target.data('title');
+  showTip('#' + e.target.id() + ' ' + e.target.data('title'));
 });
 cy.on('mouseout', 'node', () => {
   clearTimeout(hoverTimer);
-  $('cy').title = '';
+  hideTip();
   if (hovered) hovered.removeClass('hl');
   hovered = null;
   refocus();
@@ -1314,11 +1805,11 @@ function edgeStory(edge) {
 }
 cy.on('mouseover', 'edge', e => {
   if (e.target.hasClass('bg')) return;
-  $('cy').title = edgeStory(e.target);
+  showTip(edgeStory(e.target));
   e.target.addClass('hl');
 });
 cy.on('mouseout', 'edge', e => {
-  $('cy').title = '';
+  hideTip();
   e.target.removeClass('hl');
   refocus();
 });
@@ -1346,7 +1837,12 @@ const params = () => {
   if (view !== 'graph') q.set('view', view);
   if (laneKey !== 'lane') q.set('lanes', laneKey);
   if (view === 'timeline' && depsMode !== 'off') q.set('deps', depsMode === 'all' ? '1' : depsMode);
-  if (types.size < TYPES.length) q.set('types', TYPES.filter(t => types.has(t)).join(','));
+  if (types.size < TYPES.length) q.set('types', listParam(types, TYPES));
+  if (!sameSet(statuses, OPEN_STATUSES)) q.set('status', listParam(statuses, STATUSES));
+  if (flags.size) q.set('flag', listParam(flags, Object.keys(FLAGS)));
+  if (owners) q.set('owner', listParam(owners));
+  if (lanes) q.set('lane', listParam(lanes));
+  if (pinned != null) q.set('task', String(pinned));
   return q.toString().replaceAll('%2C', ',');
 };
 // Navigation (view, goal, project, dependencies, lanes) adds a history entry so Back returns to
@@ -1361,35 +1857,185 @@ window.addEventListener('popstate', () => {
   view = VIEWS.find(v => v === q.get('view')) || 'graph';
   depsMode = DEPS[q.get('deps')] || 'off';
   laneKey = Object.hasOwn(LANE_KEYS, q.get('lanes')) ? q.get('lanes') : 'lane';
-  types = new Set(parseTypes(q.get('types')).length ? parseTypes(q.get('types')) : TYPES);
+  readFilters(q);
+  matchMemo = null;
   const project = q.get('project') || '';
   if (project && !Array.from(projectSelect.options).some(o => o.value === project)) projectSelect.append(el('option', { value: project, textContent: project }));
   projectSelect.value = project;
   goal = byId.has(Number(q.get('goal'))) ? Number(q.get('goal')) : null;
+  autoOpen();
   syncControls();
   fillGoals();
   setTitle();
   rebuild();
-  if (pinned) openPanel(byId.get(pinned));
+  const task = Number(q.get('task'));
+  if (byId.has(task) && cy.getElementById(String(task)).nonempty()) select(task, false, 'back');
+  else if (pinned) closePanel();
 });
+
+// What the viewer has narrowed, one removable chip each; nothing shows on a fresh plan.
+function chipList() {
+  const out = [];
+  const few = (set, word) => set.size ? [...set][0] + (set.size > 1 ? ` +${set.size - 1}` : '') : 'none';
+  const g = goal != null && byId.get(goal);
+  if (g) out.push({ key: 'goal', text: `Goal #${g.id} ${g.title}`, clear: () => { goal = null; } });
+  if (!sameSet(statuses, OPEN_STATUSES)) {
+    const text = sameSet(statuses, STATUSES) ? 'Done shown' : 'Status: ' + (statuses.size ? STATUSES.filter(s => statuses.has(s)).map(s => LABELS[s]).join(', ') : 'none');
+    out.push({ key: 'status', text, clear: () => { statuses = new Set(OPEN_STATUSES); } });
+  }
+  if (types.size < TYPES.length) {
+    const off = TYPES.filter(t => !types.has(t));
+    out.push({ key: 'types', text: 'Types: ' + (off.length <= 2 ? off.map(t => '−' + t).join(', ') : `${types.size}/${TYPES.length}`), clear: () => { types = new Set(TYPES); } });
+  }
+  if (flags.size) out.push({ key: 'flag', text: Object.keys(FLAGS).filter(f => flags.has(f)).map(f => FLAGS[f]).join(' or '), clear: () => flags.clear() });
+  if (owners) out.push({ key: 'owner', text: 'Owner: ' + few(owners), clear: () => { owners = null; } });
+  if (lanes) out.push({ key: 'lane', text: 'Lane: ' + few(lanes), clear: () => { lanes = null; } });
+  return out;
+}
+function syncChips() {
+  const list = chipList();
+  $('chips').replaceChildren(...list.map(c => el('span', { className: 'chip', title: c.text, dataset: { key: c.key } },
+    el('span', { textContent: c.text }),
+    el('button', { title: 'Remove this filter', ariaLabel: 'Remove ' + c.text, textContent: '×', onclick: () => { c.clear(); filtersChanged(true); } }))));
+  $('clearAll').hidden = !list.length;
+  $('filterBtn').classList.toggle('on', list.some(c => c.key !== 'goal'));
+}
+// Every filter change goes through here: chips, URL, the goal picker and the plan follow.
+function filtersChanged(goalToo) {
+  matchMemo = null;
+  if (owners && sameSet(owners, valuesOf(ownerOf))) owners = null;
+  if (lanes && sameSet(lanes, valuesOf(laneName))) lanes = null;
+  autoOpen();
+  store.set('taskgraph.types', types.size ? TYPES.filter(t => types.has(t)).join(',') : '');
+  if (goalToo) {
+    if (goal != null && !byId.has(goal)) goal = null;
+    fillGoals();
+    setTitle();
+  }
+  syncControls();
+  syncUrl();
+  rebuild();
+  if (pinned) openPanel(byId.get(pinned));
+}
+function clearAll() {
+  goal = null;
+  statuses = new Set(OPEN_STATUSES);
+  types = new Set(TYPES);
+  flags.clear();
+  owners = lanes = null;
+  filtersChanged(true);
+}
+
+// The Filter popover: checklists for status, flags, types, owner and lane, with counts from
+// the plan as it stands (project, goal and done filter applied). It stays open while ticking.
+const valuesOf = key => {
+  const project = projectSelect.value;
+  const vals = [...new Set(DATA.nodes.filter(n => !project || n.project === project).map(key))];
+  return vals.sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
+};
+const pickAll = (facet, all) => el('span', { className: 'pick' },
+  el('button', { className: 'link', textContent: 'All', onclick: () => { setFacet(facet, null, all); } }), ' · ',
+  el('button', { className: 'link', textContent: 'None', onclick: () => { setFacet(facet, [], all); } }));
+function setFacet(facet, list, all) {
+  const set = new Set(list ?? all);
+  if (facet === 'status') statuses = set;
+  else if (facet === 'type') types = set;
+  else if (facet === 'flag') flags = new Set(list ?? []);
+  else if (facet === 'owner') owners = list == null ? null : set;
+  else if (facet === 'lane') lanes = list == null ? null : set;
+  filtersChanged();
+}
+function toggleFacet(facet, value, all) {
+  const cur = { status: statuses, type: types, flag: flags, owner: owners, lane: lanes }[facet];
+  const set = new Set(cur ?? all);
+  if (!set.delete(value)) set.add(value);
+  setFacet(facet, [...set], all);
+}
+function fillFilters() {
+  const box = $('filters');
+  const scroll = Array.from(box.querySelectorAll('.list'), l => l.scrollTop);
+  const focused = box.contains(document.activeElement) ? document.activeElement.dataset : null;
+  const base = DATA.nodes.filter(keepsIgnoringDone);
+  const count = test => base.filter(test).length;
+  const opt = (facet, value, label, on, n, swatch, all) => el('label', { className: 'opt' },
+    el('input', { type: 'checkbox', id: facet === 'owner' || facet === 'lane' ? null : facet + '-' + value, checked: on, dataset: { facet, value }, onchange: () => toggleFacet(facet, value, all) }),
+    swatch, el('span', { textContent: label }), n != null ? el('span', { className: 'n', textContent: n }) : null);
+  const group = (title, facet, all, rows, pick) => el('div', { className: 'grp', dataset: { facet } },
+    el('div', { className: 'h' }, title, pick ? pickAll(facet, all) : null), el('div', { className: 'list' }, ...rows));
+  const dot = s => el('i', { style: `background:${COLORS[s].bg};border:1px solid ${COLORS[s].bd}` });
+  const ownersAll = valuesOf(ownerOf), lanesAll = valuesOf(laneName);
+  box.replaceChildren(
+    group('Status', 'status', STATUSES, STATUSES.map(s => opt('status', s, LABELS[s], statuses.has(s), count(n => n.derived_status === s), dot(s), STATUSES))),
+    group('Only items that are', 'flag', [], Object.keys(FLAGS).map(f => opt('flag', f, FLAGS[f], flags.has(f), count(n => keeps(n) && flagList(n).includes(f)), null, []))),
+    group('Types', 'type', TYPES, TYPES.map(t => opt('type', t, t, types.has(t), count(n => keeps(n) && n.type === t), null, TYPES)), true),
+    group('Owner', 'owner', ownersAll, ownersAll.map(v => opt('owner', v, v, !owners || owners.has(v), count(n => keeps(n) && ownerOf(n) === v), null, ownersAll)), true),
+    group('Lane', 'lane', lanesAll, lanesAll.map(v => opt('lane', v, v, !lanes || lanes.has(v), count(n => keeps(n) && laneName(n) === v), null, lanesAll)), true));
+  box.querySelectorAll('.list').forEach((l, i) => { l.scrollTop = scroll[i] || 0; });
+  if (focused && focused.facet) Array.from(box.querySelectorAll('input')).find(i => i.dataset.facet === focused.facet && i.dataset.value === focused.value)?.focus();
+}
+const keepsIgnoringDone = n => {
+  const project = projectSelect.value, scope = goalScope();
+  return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id));
+};
+
+// Popovers: one open at a time, closed by a click elsewhere or Esc. Menus of actions close
+// after a choice; Filter and View options stay open while several boxes are ticked.
+const MENUS = ['goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
+const menuOpen = id => $(id).classList.contains('open');
+function setMenu(id, open) {
+  MENUS.forEach(m => {
+    const on = m === id ? open : false;
+    if (menuOpen(m) === on) return;
+    $(m).classList.toggle('open', on);
+    $(m).querySelector('[aria-expanded]').setAttribute('aria-expanded', String(on));
+    if (m === 'filterWrap' && on) fillFilters();
+    if (m === 'goalWrap' && !on) showGoal();
+  });
+}
+const closeMenus = () => MENUS.some(menuOpen) && (setMenu(null, false), true);
+[['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
+// The path, not the target: a click that re-renders a popover leaves its target detached.
+document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList && n.classList.contains('menuWrap'))) closeMenus(); });
+$('more').addEventListener('click', e => { if (e.target.closest('.item')) setMenu('moreWrap', false); });
+
+// View options: radios for lanes and dependencies; the ones that do nothing in this view say so.
+const LANE_NAMES = { lane: 'Lane', owner: 'Owner', tag: 'Tag', project: 'Project' };
+const DEPS_NAMES = { off: 'Conflicts only', critical: 'Critical path', all: 'All' };
+$('lanesBy').append(...Object.entries(LANE_NAMES).map(([v, t]) => el('label', { className: 'opt' }, el('input', { type: 'radio', name: 'laneKey', value: v, onchange: () => setLaneKey(v) }), t)));
+$('depsBy').append(...Object.entries(DEPS_NAMES).map(([v, t]) => el('label', { className: 'opt' }, el('input', { type: 'radio', name: 'depsMode', value: v, onchange: () => setDeps(v) }), t)));
+const radio = (name, v) => document.querySelector(`input[name="${name}"][value="${v}"]`);
+function setDeps(v) {
+  depsMode = v;
+  store.set('taskgraph.deps', depsMode);
+  syncUrl(true);
+  layout(false);
+  applySearch();
+  refocus();
+}
+function setLaneKey(v) {
+  laneKey = v;
+  store.set('taskgraph.lanes', laneKey);
+  syncUrl(true);
+  if (view !== 'graph') rebuild();
+}
+
 const syncControls = () => {
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('viewTimeline').classList.toggle('on', view === 'timeline');
-  $('lanesBy').hidden = view === 'graph';
-  $('depsBy').hidden = view !== 'timeline';
-  $('depsMode').value = depsMode;
-  $('laneKey').value = laneKey;
-  TYPES.forEach(t => $('type-' + t).classList.toggle('on', types.has(t)));
-  $('typesBtn').textContent = (types.size === TYPES.length ? 'Types: all' : `Types: ${types.size} of ${TYPES.length}`) + ' ▾';
-  $('typesBtn').classList.toggle('on', types.size < TYPES.length);
+  radio('laneKey', laneKey).checked = true;
+  radio('depsMode', depsMode).checked = true;
+  $('lanesBy').classList.toggle('off', view === 'graph');
+  $('depsBy').classList.toggle('off', view !== 'timeline');
+  if (menuOpen('filterWrap')) fillFilters();
+  syncChips();
   syncLegend();
 };
 // Only explain what can appear on screen right now.
 function syncLegend() {
   $('legendBaseline').hidden = !DATA.nodes.some(n => n.baseline && n.baseline.due);
   $('legendRag').hidden = view === 'graph';
-  $('legend-done').hidden = $('hideDone').checked;
+  $('legend-done').hidden = !statuses.has('done');
 }
 const setView = v => {
   if (v === view) return;
@@ -1399,83 +2045,167 @@ const setView = v => {
   syncUrl(true);
   rebuild();
 };
-const toggleType = t => {
-  if (types.has(t) && types.size === 1) return;
-  if (!types.delete(t)) types.add(t);
-  store.set('taskgraph.types', TYPES.filter(x => types.has(x)).join(','));
-  syncControls();
-  syncUrl();
-  rebuild();
-};
 const setTitle = () => {
   document.title = 'taskgraph · ' + (goal != null && byId.has(goal) ? '#' + goal + ' ' + byId.get(goal).title : projectSelect.value || 'all projects');
 };
 setTitle();
 projectSelect.onchange = () => {
   if (goal != null && projectSelect.value && byId.get(goal).project !== projectSelect.value) goal = null;
+  matchMemo = null;
   fillGoals();
   setTitle();
+  syncControls();
   syncUrl(true);
   rebuild();
 };
-$('goal').onchange = e => setGoal(e.target.value ? Number(e.target.value) : null);
+
+// The goal picker is a combobox: type to narrow by #id or title, arrows to move, Enter to pick.
+const goalBox = $('goal');
+let goalChoices = [], goalAt = -1;
+const goalLabel = n => `#${n.id} ${n.title}`;
+function goalOptions() {
+  const project = projectSelect.value;
+  const key = n => n.due ?? '9999-12-31';
+  const byDate = (a, b) => (a.derived_status === 'done') - (b.derived_status === 'done') || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
+  const list = DATA.nodes.filter(n => GOAL_TYPES.includes(n.type) && (!project || n.project === project)).sort(byDate);
+  if (goal != null && byId.has(goal) && !list.some(n => n.id === goal)) list.unshift(byId.get(goal));
+  return list;
+}
+function showGoal() {
+  const g = goal != null && byId.has(goal) ? byId.get(goal) : null;
+  goalBox.value = g ? goalLabel(g) + (g.type === 'milestone' && g.due ? ' · ' + day(g.due) : '') : '';
+  goalBox.classList.toggle('on', !!g);
+  goalBox.title = g ? goalBox.value : 'Show only what one milestone or objective needs';
+}
+function renderGoalList(typed) {
+  const q = typed ? goalBox.value.trim().toLowerCase() : '';
+  const list = goalOptions().filter(n => !q || goalLabel(n).toLowerCase().includes(q));
+  goalChoices = [...(q ? [] : [null]), ...list];
+  goalAt = typed && list.length ? goalChoices.indexOf(list[0]) : goalChoices.findIndex(n => (n ? n.id : null) === goal);
+  const multi = !projectSelect.value && new Set(list.map(n => n.project)).size > 1;
+  const rows = [];
+  let last;
+  goalChoices.forEach((n, i) => {
+    if (multi && n && n.project !== last) rows.push(el('div', { className: 'group', textContent: (last = n.project) }));
+    const when = n ? (n.derived_status === 'done' ? 'done' : n.type === 'milestone' && n.due ? day(n.due) : n.type) : '';
+    rows.push(el('div', { className: 'choice' + (i === goalAt ? ' active' : '') + (n && n.derived_status === 'done' ? ' done' : ''), role: 'option', dataset: { id: n ? String(n.id) : '', i: String(i) } },
+      el('span', { textContent: n ? goalLabel(n) : 'All goals' }), el('span', { className: 'when', textContent: when })));
+  });
+  if (!list.length && q) rows.push(el('div', { className: 'none', textContent: 'No milestone or objective matches' }));
+  $('goalList').replaceChildren(...rows);
+  $('goalList').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+}
+const pickGoal = i => {
+  const n = goalChoices[i];
+  setMenu('goalWrap', false);
+  goalBox.blur();
+  if (i >= 0 && i < goalChoices.length) setGoal(n ? n.id : null);
+};
+goalBox.onfocus = () => {
+  setMenu('goalWrap', true);
+  renderGoalList(false);
+  goalBox.select();
+};
+goalBox.onclick = () => { if (!menuOpen('goalWrap')) goalBox.onfocus(); };
+goalBox.oninput = () => {
+  setMenu('goalWrap', true);
+  renderGoalList(true);
+};
+goalBox.onkeydown = e => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!menuOpen('goalWrap')) return goalBox.onfocus();
+    goalAt = Math.max(0, Math.min(goalChoices.length - 1, goalAt + (e.key === 'ArrowDown' ? 1 : -1)));
+    $('goalList').querySelectorAll('.choice').forEach(c => c.classList.toggle('active', Number(c.dataset.i) === goalAt));
+    $('goalList').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    pickGoal(goalAt);
+  } else if (e.key === 'Escape') {
+    e.stopPropagation();
+    setMenu('goalWrap', false);
+    goalBox.blur();
+  }
+};
+goalBox.onblur = () => setTimeout(() => { if (document.activeElement !== goalBox) setMenu('goalWrap', false); }, 0);
+$('goalList').addEventListener('mousedown', e => e.preventDefault());
+$('goalList').addEventListener('click', e => {
+  const c = e.target.closest('.choice');
+  if (c) pickGoal(Number(c.dataset.i));
+});
+
 $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
-$('depsMode').onchange = e => {
-  depsMode = e.target.value;
-  store.set('taskgraph.deps', depsMode);
-  syncUrl(true);
-  layout(false);
-  applySearch();
-  refocus();
-};
-$('laneKey').onchange = e => {
-  laneKey = e.target.value;
-  store.set('taskgraph.lanes', laneKey);
-  syncUrl(true);
-  if (view !== 'graph') rebuild();
-};
+$('clearAll').onclick = () => clearAll();
 $('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
-$('types').append(...TYPES.map(t => el('button', { id: 'type-' + t, textContent: t, title: 'Show ' + t + ' nodes', onclick: () => toggleType(t) })));
-// The seven type chips live in a dropdown so the toolbar fits a laptop; it stays open while
-// several chips are toggled and closes on a click elsewhere or Esc.
-const setTypesOpen = open => {
-  $('typesBtn').parentElement.classList.toggle('open', open);
-  $('typesBtn').setAttribute('aria-expanded', String(open));
-};
-$('typesBtn').onclick = () => setTypesOpen(!$('typesBtn').parentElement.classList.contains('open'));
-document.addEventListener('click', e => { if (!e.target.closest('.typesWrap')) setTypesOpen(false); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') setTypesOpen(false); });
 syncControls();
-$('hideDone').onchange = () => rebuild();
 $('search').oninput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(runSearch, 150);
 };
 $('search').onkeydown = e => {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-  stepSearch(e.shiftKey);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveHit(e.key === 'ArrowDown' ? 1 : -1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (searched.moved && searched.q === searchQuery()) openHit(searched.at);
+    else stepSearch(e.shiftKey);
+  }
 };
+$('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
+$('search').onblur = () => setTimeout(() => { if (document.activeElement !== $('search')) setMenu('searchWrap', false); }, 0);
+$('searchClear').onclick = () => {
+  clearSearch();
+  $('search').focus();
+};
+$('results').addEventListener('mousedown', e => e.preventDefault());
+$('results').addEventListener('click', e => {
+  const r = e.target.closest('.hit');
+  if (r) openHit(Number(r.dataset.i));
+});
+// Esc closes the innermost thing first: a menu, then the search text, then the panel.
+// Single keys work when no text box has focus: / search, F fit, E expand all, C collapse all.
+const typing = t => t.matches && t.matches('input[type=text], input:not([type]), select, textarea');
 document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  if (document.activeElement === $('search') && $('search').value) clearSearch();
-  else if ($('panel').style.display === 'block') closePanel();
+  if (e.key === 'Escape') {
+    if (document.activeElement === $('search') && $('search').value) clearSearch();
+    else if (closeMenus()) return;
+    else if ($('panel').style.display === 'block') closePanel();
+    return;
+  }
+  const panelOpen = $('panel').style.display === 'block';
+  if (panelOpen && trail.length && ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !typing(e.target)))) {
+    e.preventDefault();
+    return goBack();
+  }
+  if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const key = e.key.toLowerCase();
+  if (e.key === '/') {
+    e.preventDefault();
+    $('search').focus();
+    $('search').select();
+  } else if (key === 'f') $('fit').click();
+  else if (key === 'e') $('expandAll').click();
+  else if (key === 'c') $('collapseAll').click();
 });
 $('expandAll').onclick = () => {
+  autoOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(isSummary).map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 // Collapse all folds the workstreams but keeps objectives open, so the programme's shape stays.
 $('collapseAll').onclick = () => {
+  autoOpened.clear();
   setExpanded(new Set(DATA.nodes.filter(n => n.type === 'objective').map(n => n.id)));
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
 };
 $('relayout').onclick = () => layout();
+$('copyView').onclick = e => copyLink(e.currentTarget);
 $('fit').onclick = () => {
   keepWhole = true;
   fitView(true);
@@ -1488,6 +2218,7 @@ function exportTitle() {
   const g = goal != null && byId.has(goal) ? byId.get(goal) : null;
   return ['taskgraph', projectSelect.value || 'All projects', g && `#${g.id} ${g.title}`, VIEW_NAMES[view]].filter(Boolean).join(' · ');
 }
+const exportFilters = () => [!statuses.has('done') && 'done items hidden', ...chipList().filter(c => c.key !== 'goal').map(c => c.text)].filter(Boolean).map(t => ' · ' + t).join('');
 function exportName() {
   const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'all';
   return ['taskgraph', slug(projectSelect.value || 'all-projects'), goal != null && 'goal-' + goal, view, DATA.today || new Date().toLocaleDateString('sv')].filter(Boolean).join('-') + '.png';
@@ -1546,7 +2277,7 @@ async function exportPng() {
   g.fillText(exportTitle(), pad, head * 0.36);
   g.fillStyle = '#9ca3af';
   g.font = `${Math.round(15 * k)}px ${FONT}`;
-  g.fillText('As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + ($('hideDone').checked ? ' · done items hidden' : ''), pad, head * 0.74);
+  g.fillText('As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + exportFilters(), pad, head * 0.74);
   g.drawImage(img, 0, head);
   g.font = font;
   g.fillStyle = '#9ca3af';
@@ -1574,12 +2305,17 @@ $('exportPng').onclick = () => exportPng();
 const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
+  $('legendOn').checked = open;
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
-const savedLegend = store.get('taskgraph.legend');
-setLegend(savedLegend ? savedLegend !== 'closed' : window.innerWidth >= 1366, false);
+// Closed by default so it never sits on the plan; the PNG export carries it either way.
+setLegend(store.get('taskgraph.legend') === 'open', false);
 $('legendToggle').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
+  fitIfOutside();
+};
+$('legendOn').onchange = e => {
+  setLegend(e.target.checked);
   fitIfOutside();
 };
 
@@ -1595,10 +2331,17 @@ if (DATA.live) {
   let lastVersion = DATA.version;
   let connected = true;
   let busy = false;
+  let lastOk = null;
+  // A dot and the time; the words are in the tooltip, and losing the server gets a banner.
   const setStatus = ok => {
     connected = ok;
     const when = new Date().toLocaleTimeString([], HM);
-    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), (ok ? 'Live · checked ' : 'Disconnected · tried ') + when);
+    if (ok) lastOk = when;
+    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), lastOk || when);
+    $('stamp').title = ok ? 'Live · checked ' + when : `Disconnected · tried ${when} · last good ${lastOk || 'never'}`;
+    $('banner').hidden = ok;
+    if (!ok) $('banner').replaceChildren(`Not live since ${lastOk || 'the page opened'} · the server is not answering, so this may be out of date.`,
+      el('button', { id: 'retry', textContent: 'Retry', onclick: () => poll(true) }));
   };
   const getJson = async path => {
     const r = await fetch(path, { cache: 'no-store' });
@@ -1632,8 +2375,15 @@ if (DATA.live) {
 }
 
 if (goal != null && !byId.has(goal)) goal = null;
+autoOpen();
 fillGoals();
 rebuild();
+// ?task=ID opens that item, loosening whatever filter would hide it: the link asked for it.
+const linked = byId.get(Number(query.get('task')));
+if (linked) {
+  if (!passes(linked)) release([linked]);
+  reveal(linked.id, 'link');
+}
 </script>
 </body>
 </html>
