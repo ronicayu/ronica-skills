@@ -11,9 +11,9 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-direction: column; gap: 4px; padding: 5px 14px; background: #181c22; border-bottom: 1px solid #2a2f38; z-index: 3; font-size: 13px; }
 #toolbar .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-height: 32px; }
 #toolbar .row > * { flex: none; }
-#toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 5px 8px; font: inherit; }
+#toolbar select, #toolbar input[type=text], #toolbar button { background: #232830; color: #e5e7eb; border: 1px solid #6b7280; border-radius: 6px; padding: 5px 8px; font: inherit; }
 #toolbar button { cursor: pointer; white-space: nowrap; }
-#toolbar input[type=number] { width: 64px; margin-left: auto; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 3px 6px; font: inherit; }
+#toolbar input[type=number] { width: 64px; margin-left: auto; background: #232830; color: #e5e7eb; border: 1px solid #6b7280; border-radius: 6px; padding: 3px 6px; font: inherit; }
 #toolbar button:disabled { opacity: .45; cursor: default; }
 #toolbar input::placeholder { color: #9ca3af; opacity: 1; }
 #toolbar button:hover { background: #2d333d; }
@@ -40,7 +40,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar kbd { color: #9ca3af; font: 11px ui-monospace, monospace; border: 1px solid #343a45; border-radius: 4px; padding: 0 4px; }
 #toolbar .grp { padding: 4px 4px 6px; }
 #toolbar .grp + .grp { border-top: 1px solid #2a2f38; padding-top: 8px; }
-#toolbar .grp.off { opacity: .5; }
+#toolbar .grp.off .h { color: #9ca3af; }
+#toolbar .grp.off .opt { color: #9ca3af; cursor: default; }
 #toolbar .h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; color: #9ca3af; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 #toolbar .h .note { text-transform: none; letter-spacing: 0; }
 #toolbar .h .pick { margin-left: auto; text-transform: none; letter-spacing: 0; }
@@ -55,7 +56,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar #chips { display: flex; gap: 6px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
 #toolbar .chip { display: inline-flex; align-items: center; flex: 0 1 auto; min-width: 48px; max-width: 260px; padding: 1px 2px 1px 10px; border-radius: 12px; background: #2b3442; border: 1px solid #3d4a5e; font-size: 12px; white-space: nowrap; }
 #toolbar .chip span { overflow: hidden; text-overflow: ellipsis; }
-#toolbar .chip button { background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
+#toolbar .chip button { min-width: 24px; min-height: 24px; background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
 #toolbar .chip button:hover { color: #e5e7eb; }
 #toolbar .combo { position: relative; flex: 0 1 280px; min-width: 150px; }
 #toolbar #goal { width: 100%; padding-right: 22px; text-overflow: ellipsis; }
@@ -70,7 +71,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #toolbar .menu .none { padding: 5px 8px; color: #9ca3af; }
 #toolbar .box { position: relative; display: flex; }
 #toolbar #search { width: 200px; padding-right: 24px; }
-#toolbar #searchClear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
+#toolbar #searchClear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); min-width: 24px; min-height: 24px; background: none; border: 0; padding: 0 6px; color: #9ca3af; font-size: 15px; line-height: 1; }
 #toolbar #searchClear:hover { color: #e5e7eb; }
 #toolbar #results { width: 460px; max-height: 60vh; }
 #toolbar .hit { align-items: center; }
@@ -87,20 +88,20 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #legend .col { display: contents; }
 #legend.closed { padding-bottom: 4px; }
 #legend.closed #legendBody { display: none; }
-#legendToggle { background: none; border: 0; padding: 0; color: #9ca3af; font: inherit; font-size: 12px; cursor: pointer; }
+#legendToggle { min-height: 24px; background: none; border: 0; padding: 0 2px; color: #9ca3af; font: inherit; font-size: 12px; cursor: pointer; }
 #legendToggle:hover { color: #e5e7eb; }
 #legend .col div { display: flex; align-items: center; gap: 6px; margin: 0; }
 #legend .col div[hidden] { display: none; }
 #legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; box-sizing: border-box; }
 #legend svg { flex: none; overflow: visible; }
-#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; min-width: 320px; max-width: 520px; background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
+#panel { position: fixed; top: var(--bar); right: 0; bottom: 0; width: 340px; min-width: min(320px, 100vw); max-width: min(520px, 100vw); background: #181c22; border-left: 1px solid #2a2f38; padding: 16px; overflow-y: auto; display: none; z-index: 2; }
 #panel h2 { margin: 0 0 6px; padding-right: 30px; font-size: 17px; line-height: 1.3; }
 #panel .sub { color: #9ca3af; margin-bottom: 12px; }
 #panel h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
 #panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 12px; }
 #panel .badge.late { background: #ef4444; color: #fff; border: 1px solid #ef4444; }
 #panel .badge.chase { background: #f59e0b; color: #1c1004; border: 1px solid #f59e0b; }
-#panel button { margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+#panel button { margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #6b7280; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #panel button:hover { background: #2d333d; }
 #panel #panelClose { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; margin-top: 0; padding: 0; font-size: 18px; line-height: 1; }
 #panel .notes { white-space: pre-wrap; background: #1e232b; border-radius: 6px; padding: 8px 10px; }
@@ -108,9 +109,10 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel td { padding: 3px 6px; border-bottom: 1px solid #2a2f38; vertical-align: top; word-break: break-word; }
 #panel td:first-child { color: #9ca3af; width: 35%; }
 #panel ul { list-style: none; margin: 0; padding: 0; }
-#panel li { padding: 5px 8px; border-radius: 6px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
-#panel li:hover { background: #232830; }
-#panel li.off { opacity: .45; cursor: default; }
+#panel li > .row { padding: 5px 8px; border-radius: 6px; display: flex; gap: 8px; align-items: center; }
+#panel li > .row[role=button] { cursor: pointer; }
+#panel li > .row[role=button]:hover { background: #232830; }
+#panel li.off { opacity: .45; }
 #panel li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 #panel .none, #panel .muted { color: #9ca3af; }
 #panel a { color: #93c5fd; }
@@ -121,8 +123,6 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel h3.amber { color: #fbbf24; }
 #panel .lead { margin: 8px 0 2px; color: #9ca3af; font-size: 12px; }
 #panel li small { margin-left: auto; padding-left: 8px; color: #9ca3af; font-size: 12px; white-space: nowrap; }
-#panel li.plain { cursor: default; }
-#panel li.plain:hover { background: none; }
 #panel li.plain i { margin-top: 5px; align-self: flex-start; }
 #panel .overdue { color: #fbbf24; }
 #panel .tag { display: inline-block; margin: 0 4px 3px 0; padding: 0 8px; border-radius: 10px; background: #2b3442; border: 1px solid #3d4a5e; font-size: 12px; }
@@ -134,7 +134,8 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #panel details { margin-top: 16px; }
 #panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; }
 #panel details table { margin-top: 6px; }
-#panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 3px); width: 6px; cursor: ew-resize; z-index: 3; }
+#panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 4px); width: 8px; cursor: ew-resize; z-index: 3; }
+#panelGrip:focus-visible { background: #93c5fd; outline: none; }
 #panelGrip:hover { background: #3b4658; }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
 #empty[hidden], #empty [hidden] { display: none; }
@@ -153,8 +154,8 @@ body[data-view="load"] #legend { display: none; }
 .loadScroll { overflow-x: auto; }
 table.load { border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; }
 table.load th { color: #9ca3af; font-weight: 600; font-size: 12px; padding: 4px 6px; text-align: right; white-space: nowrap; }
-table.load th.name, table.load td.name { position: sticky; left: 0; z-index: 1; background: #111418; text-align: left; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 14px; }
-table.load td.name { color: #e5e7eb; }
+table.load .name { position: sticky; left: 0; z-index: 1; background: #111418; text-align: left; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 14px; }
+table.load tbody .name { color: #e5e7eb; font-weight: 400; font-size: 14px; }
 table.load td.c { min-width: 54px; height: 30px; padding: 0 8px; border-radius: 4px; text-align: right; font-size: 13px; cursor: pointer; }
 table.load td.c.over { font-weight: 700; }
 table.load td.c.zero { color: #6b7280; cursor: default; }
@@ -163,13 +164,23 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
 .loadPick, .loadMissing { margin-top: 16px; max-width: 640px; }
 .loadPick h3 { margin: 0 0 6px; font-size: 13px; }
 .loadPick ul, .loadMissing ul { list-style: none; margin: 0; padding: 0; }
-.loadPick li, .loadMissing li { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
-.loadPick li:hover, .loadMissing li:hover { background: #232830; }
+.loadPick li > .row, .loadMissing li > .row { display: flex; gap: 8px; align-items: center; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.loadPick li > .row:hover, .loadMissing li > .row:hover { background: #232830; }
 .loadPick li i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .loadPick li small { margin-left: auto; color: #9ca3af; white-space: nowrap; }
 .loadMissing summary { cursor: pointer; color: #9ca3af; }
 #loadView .none { color: #9ca3af; }
 #print { display: none; }
+/* Accessibility: text only a screen reader hears, a skip link that shows on focus, one focus ring. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.skip { position: fixed; left: 14px; top: -60px; z-index: 20; padding: 8px 14px; border-radius: 6px; background: #93c5fd; color: #0b0f14; font-weight: 600; text-decoration: none; }
+.skip:focus { top: 8px; }
+:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+#cy:focus-visible, #main:focus-visible { outline-offset: -3px; }
+#panel .row[role=button]:focus-visible, #loadView [role=button]:focus-visible, table.load td.c:focus-visible { outline-offset: -2px; }
+#panel li i.mark, #toolbar .hit i.mark, .loadPick li i.mark { width: 12px; height: auto; border-radius: 0; background: none; box-shadow: none; }
+.mark { display: inline-block; width: 12px; flex: none; text-align: center; font-size: 12px; line-height: 1; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
 /* Printing (or Save as PDF) gives a sheet, not a screenshot of the controls: a title, the whole
    plan as filtered, the legend, and the open item's panel on its own page. */
 @media print {
@@ -188,14 +199,14 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
   #print .item { break-before: page; max-width: 170mm; }
   #print .loadPrint table.load { border-spacing: 1.5pt; font-size: 9pt; }
   #print .loadPrint table.load th { color: #444; padding: 2pt 4pt; }
-  #print .loadPrint table.load td.name, #print .loadPrint table.load th.name { position: static; background: none; color: #111; }
+  #print .loadPrint table.load .name { position: static; background: none; color: #111; }
   #print .loadPrint table.load td.c { height: 18pt; min-width: 0; padding: 0 5pt; border-radius: 2pt; }
   #print .loadPrint table.load td.zero { color: #999; }
   #print .loadPrint table.load td.extra { color: #444; }
   #print .loadPrint .loadHead h2 { display: none; }
   #print .loadPrint .loadKey, #print .loadPrint .muted, #print .loadPrint .none { color: #444; }
   #print .loadPrint details:not([open]) { display: none; }
-  #print .loadPrint li { display: flex; gap: 6pt; padding: 1pt 0; }
+  #print .loadPrint li > .row { display: flex; gap: 6pt; padding: 1pt 0; }
   #print .loadPrint li i { width: 8pt; height: 8pt; border-radius: 50%; box-shadow: 0 0 0 1px #777; }
   #print .loadPrint li small { margin-left: auto; color: #444; }
   #print .item h2 { margin: 0 0 4pt; font-size: 14pt; }
@@ -204,7 +215,8 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
   #print .item td { padding: 2pt 5pt; border-bottom: 1px solid #ddd; vertical-align: top; }
   #print .item td:first-child { width: 30%; color: #444; }
   #print .item ul { list-style: none; margin: 0; padding: 0; }
-  #print .item li { display: flex; gap: 6pt; align-items: center; padding: 1pt 0; break-inside: avoid; }
+  #print .item li { break-inside: avoid; }
+  #print .item li > .row { display: flex; gap: 6pt; align-items: center; padding: 1pt 0; }
   #print .item li i { width: 8pt; height: 8pt; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px #777; }
   #print .item li small { margin-left: auto; color: #444; }
   #print .item .badge { display: inline-block; padding: 0 6pt; border-radius: 8pt; font-size: 8.5pt; font-weight: 600; }
@@ -223,42 +235,44 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
 </style>
 </head>
 <body>
-<div id="toolbar">
+<a class="skip" href="#main" id="skip">Skip to the plan</a>
+<header id="toolbar" aria-label="Plan controls">
+  <h1 class="sr-only" id="pageTitle">taskgraph</h1>
   <div class="row" id="row1">
-    <select id="project" title="Project"></select>
+    <select id="project" title="Project" aria-label="Project"></select>
     <span class="combo menuWrap" id="goalWrap">
-      <input type="text" id="goal" placeholder="All goals" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="goalList" title="Show only what one milestone or objective needs">
-      <span class="caret">▾</span>
-      <div class="menu" id="goalList" role="listbox"></div>
+      <input type="text" id="goal" placeholder="All goals" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="goalList" aria-autocomplete="list" aria-label="Goal: show only what one milestone or objective needs" title="Show only what one milestone or objective needs">
+      <span class="caret" aria-hidden="true">▾</span>
+      <div class="menu" id="goalList" role="listbox" aria-label="Goals"></div>
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
-    <span class="seg"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button><button id="viewLoad" title="Hours per person per week, from estimates">Load</button></span>
-    <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-haspopup="true" aria-expanded="false" title="View options">⚙ ▾</button>
+    <span class="seg" role="group" aria-label="View"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button><button id="viewLoad" title="Hours per person per week, from estimates">Load</button></span>
+    <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-expanded="false" aria-controls="opts" aria-label="View options" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
-        <div class="grp" id="lanesBy"><div class="h">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
-        <div class="grp" id="depsBy"><div class="h">Dependencies <span class="note" id="depsNote">Timeline only</span></div></div>
-        <div class="grp" id="loadBy"><div class="h">Load by <span class="note">Load only</span></div>
+        <div class="grp" id="lanesBy" role="radiogroup" aria-labelledby="lanesHead"><div class="h" id="lanesHead">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
+        <div class="grp" id="depsBy" role="radiogroup" aria-labelledby="depsHead"><div class="h" id="depsHead">Dependencies <span class="note" id="depsNote">Timeline only</span></div></div>
+        <div class="grp" id="loadBy" role="radiogroup" aria-labelledby="loadHead"><div class="h" id="loadHead">Load by <span class="note">Load only</span></div>
           <label class="opt">Hours a week <input type="number" id="weekHours" min="1" max="168" step="1"></label></div>
         <div class="grp"><label class="opt"><input type="checkbox" id="legendOn"> Show legend</label></div>
       </div>
     </span>
     <span class="spacer"></span>
     <span class="menuWrap" id="searchWrap">
-      <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
-      <div class="menu right" id="results" role="listbox"></div>
+      <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" aria-autocomplete="list" aria-label="Search the plan" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
+      <div class="menu right" id="results" role="listbox" aria-label="Search results"></div>
     </span>
     <span id="searchCount" aria-live="polite"></span>
     <span class="stamp" id="stamp"></span>
   </div>
   <div class="row" id="row2">
-    <span class="menuWrap" id="filterWrap"><button id="filterBtn" aria-haspopup="true" aria-expanded="false" title="Filter by status, flags, type, owner and lane">Filter ▾</button>
+    <span class="menuWrap" id="filterWrap"><button id="filterBtn" aria-expanded="false" aria-controls="filters" title="Filter by status, flags, type, owner and lane">Filter ▾</button>
       <div class="menu" id="filters"></div>
     </span>
-    <span id="chips"></span>
+    <span id="chips" aria-label="Active filters"></span>
     <button class="link" id="clearAll" hidden title="Remove every filter">Clear all</button>
     <span class="spacer"></span>
     <button id="fit" title="Show the whole plan (F)">Fit</button>
-    <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-haspopup="true" aria-expanded="false" title="More actions">More ▾</button>
+    <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-expanded="false" aria-controls="more" title="More actions">More ▾</button>
       <div class="menu right" id="more">
         <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
@@ -270,12 +284,16 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
       </div>
     </span>
   </div>
-  <div id="banner" hidden></div>
-</div>
-<div id="cy"></div>
+  <div id="banner" role="alert" hidden></div>
+</header>
+<main id="main" tabindex="-1" aria-label="Plan">
+<div id="cy" tabindex="0" role="application" aria-roledescription="plan" aria-label="Plan" aria-describedby="cyHelp"></div>
+<p id="cyHelp" class="sr-only">Arrow keys move between items, Home and End go to the first and last. Enter opens the item's details, Space expands or collapses a summary, plus and minus zoom.</p>
 <div id="loadView" hidden></div>
-<div id="legend">
-  <button id="legendToggle" title="Show or hide the legend">Legend ▾</button>
+<div id="empty" role="status" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
+</main>
+<section id="legend" aria-label="Legend">
+  <button id="legendToggle" title="Show or hide the legend" aria-expanded="true" aria-controls="legendBody">Legend ▾</button>
   <div id="legendBody">
   <div class="col">
     <div><svg width="28" height="16"><rect x="1" y="2" width="26" height="12" rx="4" fill="#e5e7eb"/></svg>Task</div>
@@ -294,11 +312,11 @@ table.load td.extra { color: #9ca3af; text-align: right; padding: 0 8px; }
     <div id="legendBaseline"><svg width="28" height="16"><rect x="4" y="5" width="16" height="6" rx="2" fill="#6b7280"/><rect x="21" y="1" width="2" height="14" fill="#9ca3af"/></svg>Baseline due</div>
   </div>
   </div>
-</div>
-<div id="panel"></div>
-<div id="tip" hidden></div>
+</section>
+<aside id="panel" aria-labelledby="panelTitle"></aside>
+<div id="tip" aria-hidden="true" hidden></div>
+<div id="announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 <div id="print" aria-hidden="true"></div>
-<div id="empty" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
@@ -311,6 +329,12 @@ const COLORS = {
   done: { bg: '#2563eb', fg: '#ffffff', bd: '#2563eb', op: 0.85 }
 };
 const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' };
+// Status by shape as well as colour: nodes carry a mark (none for ready, the usual state), lists
+// carry one always. The mark's colour is a lighter tone of the status fill so it reads on dark.
+const MARKS = { ready: '○', in_progress: '◔', blocked: '⊘', done: '✓' };
+const MARK_COLORS = { ready: '#e5e7eb', in_progress: '#34d399', blocked: '#9ca3af', done: '#60a5fa' };
+const nodeMark = n => n.derived_status === 'ready' || !MARKS[n.derived_status] ? '' : MARKS[n.derived_status] + ' ';
+const statusMark = status => el('i', { className: 'mark', textContent: MARKS[status] || MARKS.blocked, title: LABELS[status] || status, ariaHidden: 'true', style: 'color:' + (MARK_COLORS[status] || MARK_COLORS.blocked) });
 const GOAL = '#fbbf24';
 const TYPES = ['task', 'milestone', 'decision', 'external', 'objective', 'risk', 'issue'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -430,6 +454,47 @@ function el(tag, props, ...children) {
   e.append(...children.filter(c => c != null));
   return e;
 }
+
+// Keyboard and screen readers. A clickable row or cell becomes a button for both; `keyed` marks an
+// activation from the keyboard, so the panel it opens takes focus. announce() speaks a status
+// message without moving focus.
+let keyed = false;
+function clickable(e, label) {
+  e.tabIndex = 0;
+  e.setAttribute('role', 'button');
+  if (label) e.setAttribute('aria-label', label);
+  e.addEventListener('keydown', ev => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    keyed = true;
+    try { e.click(); } finally { keyed = false; }
+  });
+  return e;
+}
+// List rows keep list semantics: the li stays a list item and an inner .row is the button.
+function asRow(li, onclick, label) {
+  const inner = el('div', { className: 'row' });
+  inner.append(...li.childNodes);
+  if (li.dataset.ref) {
+    inner.dataset.ref = li.dataset.ref;
+    delete li.dataset.ref;
+  }
+  li.append(inner);
+  if (onclick) {
+    inner.onclick = onclick;
+    clickable(inner, label);
+  }
+  return li;
+}
+const filteredNote = () => el('span', { className: 'sr-only', textContent: ' (hidden by the current filters)' });
+let announceTimer;
+function announce(text) {
+  clearTimeout(announceTimer);
+  $('announce').textContent = '';
+  announceTimer = setTimeout(() => { $('announce').textContent = text; }, 60);
+}
+const MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1;
 
 // Cytoscape wraps only at spaces, so CJK and URLs never break and long titles spill out of
 // fixed Swimlane boxes. Wrap here instead, breaking anywhere when a line has no space, and
@@ -567,6 +632,7 @@ const cy = cytoscape({
     { selector: 'node.new', style: { 'underlay-color': '#fbbf24', 'underlay-opacity': 0.45, 'underlay-padding': 8 } },
     { selector: 'node.hl', style: { 'underlay-color': '#f9fafb', 'underlay-opacity': 0.18, 'underlay-padding': 6 } },
     { selector: 'edge.hl', style: { 'line-color': '#e5e7eb', 'target-arrow-color': '#e5e7eb', 'width': 2.5 } },
+    { selector: 'node.kbd', style: { 'underlay-color': '#93c5fd', 'underlay-opacity': 0.7, 'underlay-padding': 7, 'underlay-shape': 'round-rectangle' } },
     { selector: '.faded', style: { 'opacity': 0.35 } },
     { selector: '.dim', style: { 'opacity': 0.2 } }
   ]
@@ -746,7 +812,7 @@ function labelOf(n, open) {
   const sub = parts.filter(Boolean).join(' · ');
   const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
   const [titleLines, subLines] = view === 'lanes' ? [2, 1] : [3, 2];
-  const title = clampLabel('#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
+  const title = clampLabel(nodeMark(n) + '#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
 
@@ -1039,7 +1105,7 @@ function layoutTimeline() {
     ele.removeClass('mk-none mk-pt mk-bar mk-sum').addClass(mark).data({ w, h, pct }).position({ x, y });
     if (baseDue(n)) els.push(bg('tl-base', 'tl:base:' + n.id, { h: TL.bar + 8 }, xOf(baseDue(n)), y));
     if (d) marks.set(String(n.id), { id: String(n.id), x, y, h, x1: x - w / 2, x2: x + w / 2, pt: mark === 'mk-pt', from: mark === 'mk-sum' ? x + w / 2 : x - w / 2 - 4, end: x + w / 2 + 6 + ctx.measureText(ele.data('label')).width });
-    const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + '#' + n.id + ' ' + n.title;
+    const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + nodeMark(n) + '#' + n.id + ' ' + n.title;
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
   });
   const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
@@ -1169,7 +1235,7 @@ function hiddenTasks() {
 function fitIfOutside() {
   if (!userMoved && hiddenTasks()) return fitView(keepWhole);
   const target = covered() && fitTarget();
-  if (target) cy.animate(target, { duration: 300 });
+  if (target) cy.animate(target, { duration: 300 * MOTION });
 }
 
 let resizeTimer;
@@ -1261,6 +1327,7 @@ const hoursText = h => String(round1(h));
 let loadPick = null;
 function renderLoad() {
   const box = $('loadView'), d = computeLoad();
+  const had = box.contains(document.activeElement) ? { ...document.activeElement.dataset } : null;
   const head = el('div', { className: 'loadHead' },
     el('h2', { textContent: `Load by ${loadKey} · ${weekHours}h a week` }),
     el('div', { className: 'loadKey' }, 'Share of capacity  0',
@@ -1273,10 +1340,11 @@ function renderLoad() {
   }
   const md = w => day(isoOf(w));
   const table = el('table', { className: 'load' },
-    el('thead', null, el('tr', null, el('th', { className: 'name', textContent: LOAD_KEYS[loadKey] }),
-      ...d.weeks.map((w, i) => el('th', { textContent: md(w) + (d.capacity[i] < weekHours ? '*' : ''), title: `Week of ${md(w)} · capacity ${d.capacity[i]}h` })),
-      el('th', { textContent: 'Later', title: 'After these weeks' }), el('th', { textContent: 'No dates', title: 'Estimated but not scheduled' }))),
-    el('tbody', null, ...d.rows.map(g => el('tr', null, el('td', { className: 'name', textContent: g.name, title: g.name }),
+    el('caption', { className: 'sr-only', textContent: `Hours a week by ${loadKey}, against ${weekHours} hours of capacity. Over-capacity weeks are marked with an exclamation mark.` }),
+    el('thead', null, el('tr', null, el('th', { className: 'name', scope: 'col', textContent: LOAD_KEYS[loadKey] }),
+      ...d.weeks.map((w, i) => el('th', { scope: 'col', textContent: md(w) + (d.capacity[i] < weekHours ? '*' : ''), title: `Week of ${md(w)} · capacity ${d.capacity[i]}h` })),
+      el('th', { scope: 'col', textContent: 'Later', title: 'After these weeks' }), el('th', { scope: 'col', textContent: 'No dates', title: 'Estimated but not scheduled' }))),
+    el('tbody', null, ...d.rows.map(g => el('tr', null, el('th', { className: 'name', scope: 'row', textContent: g.name, title: g.name }),
       ...g.hours.map((h, i) => {
         const fill = loadFill(h, d.capacity[i]), items = [...g.cells[i].values()];
         const td = el('td', { className: 'c' + (fill ? '' : ' zero') + (g.over[i] ? ' over' : '') + (loadPick && loadPick.g === g.name && loadPick.i === i ? ' on' : ''),
@@ -1284,15 +1352,22 @@ function renderLoad() {
           dataset: { group: g.name, week: isoOf(d.weeks[i]) } });
         if (fill) {
           const pct = d.capacity[i] > 0 ? Math.round(100 * h / d.capacity[i]) + '%' : 'no capacity left';
-          td.onmouseenter = () => showTip(`${g.name} · week of ${md(d.weeks[i])}: ${hoursText(h)}h of ${d.capacity[i]}h (${pct}) · ${items.length} ${items.length === 1 ? 'item' : 'items'}`);
+          const story = `${g.name} · week of ${md(d.weeks[i])}: ${hoursText(h)}h of ${d.capacity[i]}h (${pct}) · ${items.length} ${items.length === 1 ? 'item' : 'items'}`;
+          td.onmouseenter = () => showTip(story);
           td.onmouseleave = hideTip;
-          td.onclick = () => { loadPick = loadPick && loadPick.g === g.name && loadPick.i === i ? null : { g: g.name, i }; renderLoad(); };
+          td.onclick = () => {
+            loadPick = loadPick && loadPick.g === g.name && loadPick.i === i ? null : { g: g.name, i };
+            renderLoad();
+            if (loadPick) announce(`${items.length} ${items.length === 1 ? 'item' : 'items'} listed below the table`);
+          };
+          clickable(td, story.replace(/ · /g, ', ') + (g.over[i] ? ', over capacity' : ''));
         }
         return td;
       }),
       el('td', { className: 'extra', textContent: g.later ? hoursText(g.later) : '·' }),
       el('td', { className: 'extra', textContent: g.unscheduled ? hoursText(g.unscheduled) : '·' })))));
   box.replaceChildren(head, el('div', { className: 'loadScroll' }, table), pickBlock(d), unestimatedBlock(d));
+  if (had && had.group) box.querySelector(`td.c[data-group="${CSS.escape(had.group)}"][data-week="${had.week}"]`)?.focus();
   return d;
 }
 // The items filling the picked cell, biggest first; each opens its panel.
@@ -1303,15 +1378,15 @@ function pickBlock(d) {
   return el('div', { className: 'loadPick' },
     el('h3', { textContent: `${g.name} · week of ${day(isoOf(d.weeks[i]))} · ${hoursText(g.hours[i])}h of ${d.capacity[i]}h` }),
     el('ul', null, ...items.map(c => {
-      const s = COLORS[c.n.derived_status] || COLORS.blocked;
-      return el('li', { onclick: () => select(c.n.id, false) }, el('i', { style: `background:${s.bg};border:1px solid ${s.bd}` }),
-        el('span', { textContent: '#' + c.n.id + ' ' + c.n.title }), el('small', { textContent: hoursText(c.hours) + 'h' + (c.overdue ? ' · late' : '') }));
+      const note = hoursText(c.hours) + 'h' + (c.overdue ? ' · late' : '');
+      return asRow(el('li', null, statusMark(c.n.derived_status), el('span', { textContent: '#' + c.n.id + ' ' + c.n.title }), el('small', { textContent: note })),
+        () => select(c.n.id, false), `#${c.n.id} ${c.n.title}, ${LABELS[c.n.derived_status]}, ${note}`);
     })));
 }
 function unestimatedBlock(d) {
   if (!d.unestimated.length) return null;
   return el('details', { className: 'loadMissing' }, el('summary', { textContent: `No estimate: ${d.unestimated.length} open ${d.unestimated.length === 1 ? 'item' : 'items'}` }),
-    el('ul', null, ...d.unestimated.map(n => el('li', { onclick: () => select(n.id, false) }, el('span', { textContent: '#' + n.id + ' ' + n.title })))));
+    el('ul', null, ...d.unestimated.map(n => asRow(el('li', null, statusMark(n.derived_status), el('span', { textContent: '#' + n.id + ' ' + n.title })), () => select(n.id, false), `#${n.id} ${n.title}, ${LABELS[n.derived_status]}`))));
 }
 
 function rebuild(keepView, flash) {
@@ -1494,6 +1569,7 @@ function refocus() {
   cy.elements().removeClass('faded hl');
   if (pinned) focusOn(cy.getElementById(String(pinned)), true);
   mirrorNames();
+  if (document.activeElement === $('cy') && kbdNode()) kbdNode().addClass('kbd');
 }
 
 function mirrorNames() {
@@ -1566,6 +1642,13 @@ function resultNote(n, m, q) {
   if (m.value) return m.value + ' · ' + m.field;
   return (SUBTITLE[n.type] || SUBTITLE.task)(n).filter(Boolean).join(' · ');
 }
+// Comboboxes keep focus in the text box; aria-activedescendant tells a screen reader which option
+// the arrows are on.
+function syncActive(input, list) {
+  const a = list.querySelector('.active');
+  if (a && list.closest('.menuWrap').classList.contains('open')) input.setAttribute('aria-activedescendant', a.id);
+  else input.removeAttribute('aria-activedescendant');
+}
 function renderResults() {
   const q = searchQuery(), list = searchMatches(q), box = $('results');
   if (!q || !list.length) {
@@ -1577,14 +1660,15 @@ function renderResults() {
   const from = Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS));
   const rows = list.slice(from, from + RESULT_ROWS).map(({ n, m }, k) => {
     const c = COLORS[n.derived_status] || COLORS.blocked, i = from + k;
-    return el('div', { className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
-      el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+    return el('div', { id: 'hit' + i, className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', ariaSelected: String(i === at), ariaLabel: `#${n.id} ${n.title}, ${LABELS[n.derived_status]}, ${resultNote(n, m, q)}`, dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
+      statusMark(n.derived_status), el('span', { textContent: '#' + n.id + ' ' + n.title }),
       el('span', { className: 'when', textContent: resultNote(n, m, q) }));
   });
   const rest = list.length - from - rows.length;
   box.replaceChildren(...(from ? [el('div', { className: 'none', textContent: `${from} more above` })] : []), ...rows,
     ...(rest > 0 ? [el('div', { className: 'none', textContent: `+${rest} more · Enter steps through all` })] : []));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  syncActive($('search'), box);
 }
 
 // Expand whatever hides a search hit or an item a narrowing filter picked out (owner, lane,
@@ -1712,13 +1796,14 @@ function refList(ids, note) {
     const n = byId.get(id);
     const on = passes(n);
     const c = COLORS[n.derived_status] || COLORS.blocked;
-    const li = el('li', { className: on ? '' : 'off', title: on ? null : 'Hidden by the current filters' }, el('i', { style: `background:${c.bg};border:1px solid ${c.bd}` }), el('span', { textContent: '#' + n.id + ' ' + n.title }),
+    const li = el('li', { className: on ? '' : 'off', title: on ? null : 'Hidden by the current filters', dataset: { ref: String(id) } }, statusMark(n.derived_status), el('span', { textContent: '#' + n.id + ' ' + n.title }),
       note && note(n) ? el('small', { textContent: note(n) }) : null);
-    if (on) li.onclick = () => reveal(id);
-    return li;
+    const label = [`#${n.id} ${n.title}`, LABELS[n.derived_status], note && note(n), on ? null : 'hidden by the current filters'].filter(Boolean).join(', ');
+    if (!on) return asRow(Object.assign(li, { title: 'Hidden by the current filters' }), null).appendChild(filteredNote()).closest('li');
+    return asRow(li, () => reveal(id), label);
   }));
 }
-const plain = (text, color) => el('li', { className: 'plain' }, el('i', { style: 'background:' + (color || RED) }), el('span', null, ...[].concat(text)));
+const plain = (text, color) => asRow(el('li', { className: 'plain' }, el('i', { style: 'background:' + (color || RED) }), el('span', null, ...[].concat(text))));
 const lateNote = n => n.late_days != null ? n.late_days + 'd late' : null;
 
 function baselineNote(n) {
@@ -1735,12 +1820,13 @@ function conflictList(list) {
   return el('ul', null, ...list.map(c => {
     if (c.with == null) {
       const text = c.kind === 'promised' ? `Promised ${day(c.due)} is after needed ${day(c.need)} (${Math.abs(c.gap)}d)` : c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
-      return el('li', { className: 'plain self' }, el('i', { style: 'background:' + RED }), el('span', { textContent: text }));
+      return asRow(el('li', { className: 'plain self' }, el('i', { style: 'background:' + RED }), el('span', { textContent: text })));
     }
     const on = byId.has(c.with) && passes(byId.get(c.with));
-    const li = el('li', { className: on ? '' : 'off' }, el('i', { style: 'background:' + RED }), el('span', { textContent: c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m)) }));
-    if (on) li.onclick = () => reveal(c.with);
-    return li;
+    const text = c.message.replace(/\d{4}-\d{2}-\d{2}/g, m => day(m));
+    const li = el('li', { className: on ? '' : 'off', dataset: { ref: 'c' + c.with } }, el('i', { style: 'background:' + RED }), el('span', { textContent: text }));
+    if (!on) return asRow(li).firstChild.appendChild(filteredNote()).closest('li');
+    return asRow(li, () => reveal(c.with), 'Conflict: ' + text);
   }));
 }
 
@@ -1818,7 +1904,17 @@ function setPanelWidth(w) {
   $('cy').style.right = panelW + 'px';
 }
 function grip() {
-  const g = el('div', { id: 'panelGrip', title: 'Drag to resize' });
+  const g = el('div', { id: 'panelGrip', title: 'Drag to resize', tabIndex: 0, role: 'separator', ariaOrientation: 'vertical', ariaLabel: 'Panel width',
+    ariaValueMin: String(MIN_PANEL), ariaValueMax: String(MAX_PANEL), ariaValueNow: String(panelW) });
+  g.onkeydown = e => {
+    const step = { ArrowLeft: 20, ArrowRight: -20, Home: MAX_PANEL, End: -MAX_PANEL }[e.key];
+    if (step == null) return;
+    e.preventDefault();
+    setPanelWidth(panelW + step);
+    g.setAttribute('aria-valuenow', String(panelW));
+    store.set('taskgraph.panelW', String(panelW));
+    cy.resize();
+  };
   g.onpointerdown = e => {
     e.preventDefault();
     g.setPointerCapture(e.pointerId);
@@ -1847,12 +1943,18 @@ async function copyLink(btn) {
     t.remove();
   }
   btn.textContent = ok ? 'Copied' : 'Copy failed';
+  announce(ok ? 'Link copied' : 'Could not copy the link');
   setTimeout(() => { btn.textContent = was; }, 1500);
 }
 
+// Focus follows the panel: opened from the keyboard it takes focus (and gives it back on close);
+// redrawn while focus is inside, focus returns to the same row, or the title.
+let panelReturn = null;
 function openPanel(n) {
   const panel = $('panel');
   const top = panel.scrollTop;
+  const inside = panel.contains(document.activeElement) ? document.activeElement : null;
+  const again = inside && (inside.dataset.ref || inside.id);
   trail = trail.filter(id => byId.has(id));
   const known = factKeys(n);
   const extra = Object.entries(n.meta).filter(([k]) => !known.has(k));
@@ -1864,7 +1966,7 @@ function openPanel(n) {
     grip(),
     el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
     back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
-    el('h2', { textContent: n.title }),
+    el('h2', { id: 'panelTitle', tabIndex: -1, textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
       atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
@@ -1908,6 +2010,13 @@ function openPanel(n) {
   if (notes) $('notesMore').hidden = !(notes.scrollHeight > notes.clientHeight + 1 || notesOpen === n.id);
   cy.resize();
   if (wasHidden) fitView();
+  if (keyed) {
+    if (!panelReturn && !panel.contains(document.activeElement)) panelReturn = document.activeElement;
+    $('panelTitle').focus();
+  } else if (inside && !inside.isConnected) {
+    const same = again && (panel.querySelector(`[data-ref="${again}"]`) || (/^[a-zA-Z]\w*$/.test(again) ? panel.querySelector('#' + again) : null));
+    (same || $('panelTitle')).focus();
+  }
 }
 let detailsOpen = false;
 
@@ -1918,9 +2027,12 @@ function goBack() {
 }
 
 function closePanel() {
+  const had = $('panel').contains(document.activeElement);
   pinned = null;
   trail = [];
   $('panel').style.display = 'none';
+  if (had || panelReturn) (panelReturn && panelReturn.isConnected ? panelReturn : $('cy')).focus();
+  panelReturn = null;
   document.documentElement.style.setProperty('--panel-w', '0px');
   $('cy').style.right = '0';
   cy.resize();
@@ -1940,13 +2052,13 @@ function select(id, center, how) {
   if (node.empty()) return;
   if (!center) return keepInView(node);
   userMoved = true;
-  if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 });
+  if (view !== 'timeline') return cy.animate({ center: { eles: node } }, { duration: 250 * MOTION });
   // Timeline: scroll vertically, and only when the row is off screen. The name column is how a row
   // is recognised, so it stays in view; the panel carries the dates when the bar is off to the right.
   const z = cy.zoom(), box = $('cy').getBoundingClientRect(), y = node.renderedPosition('y');
   const x = 40 - z * cy.elements().boundingBox().x1;
   if (y >= TL.row && y <= box.height - TL.row && Math.abs(cy.pan('x') - x) < 1) return;
-  cy.animate({ pan: { x, y: y >= TL.row && y <= box.height - TL.row ? cy.pan('y') : box.height / 2 - z * node.position('y') } }, { duration: 250 });
+  cy.animate({ pan: { x, y: y >= TL.row && y <= box.height - TL.row ? cy.pan('y') : box.height / 2 - z * node.position('y') } }, { duration: 250 * MOTION });
 }
 
 // A click must never make its node vanish: when the panel (or the edge) covers it, pan by the
@@ -1963,7 +2075,7 @@ function keepInView(node) {
   if (!dx && !dy) return;
   userMoved = true;
   cy.stop();
-  cy.animate({ panBy: { x: dx, y: dy } }, { duration: 200 });
+  cy.animate({ panBy: { x: dx, y: dy } }, { duration: 200 * MOTION });
 }
 
 // A tooltip of our own: the browser's appears after a second, unstyled, and is easy to miss on a
@@ -2003,7 +2115,8 @@ let hoverTimer, hovered = null;
 cy.on('mouseover', 'node', e => {
   clearTimeout(hoverTimer);
   hoverTimer = setTimeout(() => { hovered = focusOn(e.target, false); }, 120);
-  showTip('#' + e.target.id() + ' ' + e.target.data('title'));
+  const n = byId.get(Number(e.target.id()));
+  showTip('#' + n.id + ' ' + n.title + ' · ' + (LABELS[n.derived_status] || n.derived_status));
 });
 cy.on('mouseout', 'node', () => {
   clearTimeout(hoverTimer);
@@ -2015,6 +2128,7 @@ cy.on('mouseout', 'node', () => {
 let pendingSelect;
 cy.on('tap', 'node', e => {
   const n = byId.get(Number(e.target.id()));
+  kbdId = n.id;
   clearTimeout(pendingSelect);
   if (n.children.length && $('panel').style.display !== 'block') pendingSelect = setTimeout(() => select(n.id, false), 300);
   else select(n.id, false);
@@ -2024,6 +2138,91 @@ cy.on('dbltap', 'node', e => {
   clearTimeout(pendingSelect);
   if (n.children.length) toggleExpand(n.id);
 });
+// Keyboard on the plan: the canvas is one tab stop with a current item, ringed while it has focus
+// and spoken through the live region. Arrows move by position (by row in the Timeline), Home and
+// End jump, Enter opens the panel, Space expands or collapses a summary, + and - zoom.
+let kbdId = null;
+const kbdNode = () => {
+  const n = kbdId != null ? cy.getElementById(String(kbdId)) : null;
+  return n && n.nonempty() ? n : null;
+};
+function describe(n) {
+  const parts = [`#${n.id} ${n.title}`, LABELS[n.derived_status] || n.derived_status];
+  if (n.type !== 'task') parts.push(n.type);
+  if (n.late_days != null) parts.push(`${n.late_days} days late`);
+  if (atRisk(n)) parts.push('at risk');
+  if (conflicted(n)) parts.push('date conflict');
+  if (n.chase_due) parts.push(chaseText(n));
+  if (n.due) parts.push(`${(DUE_LABEL[n.type] || 'Due').toLowerCase()} ${day(n.due)}`);
+  const who = n.meta[PERSON[n.type] || 'owner'];
+  if (who) parts.push(String(who));
+  if (n.children.length) parts.push(collapsed(n) ? `summary of ${descendants(n)} items, collapsed, Space expands` : 'summary, expanded, Space collapses');
+  if (troubleText(n)) parts.push(troubleText(n));
+  return parts.join(', ') + '. Enter for details.';
+}
+function setKbd(ele) {
+  cy.nodes('.kbd').removeClass('kbd');
+  if (!ele) return;
+  kbdId = Number(ele.id());
+  if (document.activeElement === $('cy')) ele.addClass('kbd');
+  keepInView(ele);
+  announce(describe(byId.get(kbdId)));
+}
+const ARROWS = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+function stepKbd(key) {
+  const order = tasks().toArray().sort((a, b) => a.position('y') - b.position('y') || a.position('x') - b.position('x'));
+  if (!order.length) return announce('Nothing is shown.');
+  const pin = pinned != null ? cy.getElementById(String(pinned)) : null;
+  const cur = kbdNode() || (pin && pin.nonempty() ? pin : null);
+  if (!cur || key === 'Home') return setKbd(order[0]);
+  if (key === 'End') return setKbd(order[order.length - 1]);
+  if (view === 'timeline') {
+    const i = order.indexOf(cur), next = order[i + (key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 1)];
+    return next ? setKbd(next) : announce(i === 0 ? 'First item.' : 'Last item.');
+  }
+  const [dx, dy] = ARROWS[key], p = cur.position();
+  let best = null, score = Infinity;
+  order.forEach(n => {
+    if (n === cur) return;
+    const q = n.position(), along = (q.x - p.x) * dx + (q.y - p.y) * dy, off = Math.abs((q.x - p.x) * dy - (q.y - p.y) * dx);
+    if (along <= 4) return;
+    const sc = along + 2 * off;
+    if (sc < score) { score = sc; best = n; }
+  });
+  return best ? setKbd(best) : announce('Nothing further that way.');
+}
+$('cy').addEventListener('keydown', e => {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (ARROWS[e.key] || e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    return stepKbd(e.key);
+  }
+  const cur = kbdNode();
+  if (e.key === 'Enter' && cur) {
+    e.preventDefault();
+    keyed = true;
+    try { select(Number(cur.id()), false); } finally { keyed = false; }
+  } else if (e.key === ' ' && cur) {
+    e.preventDefault();
+    e.stopPropagation();
+    const id = Number(cur.id());
+    if (!byId.get(id).children.length) return;
+    toggleExpand(id);
+    setKbd(cy.getElementById(String(id)));
+  } else if (e.key === '+' || e.key === '=' || e.key === '-') {
+    e.preventDefault();
+    const at = cur ? cur.renderedPosition() : { x: cy.width() / 2, y: cy.height() / 2 };
+    cy.zoom({ level: cy.zoom() * (e.key === '-' ? 0.8 : 1.25), renderedPosition: at });
+    userMoved = true;
+  }
+});
+$('cy').addEventListener('focus', () => {
+  const n = kbdNode();
+  if (n) n.addClass('kbd');
+  announce(n ? describe(byId.get(kbdId)) : `${VIEW_NAMES[view]} view, ${tasks().length} ${tasks().length === 1 ? 'item' : 'items'}. Arrow keys move between items.`);
+});
+$('cy').addEventListener('blur', () => cy.nodes('.kbd').removeClass('kbd'));
+
 // A line explains itself: hover says who waits for whom and any date conflict in words;
 // a click opens the late side, whose panel lists the conflict.
 function edgeConflicts(edge) {
@@ -2133,10 +2332,12 @@ function chipList() {
 }
 function syncChips() {
   const list = chipList();
-  $('chips').replaceChildren(...list.map(c => el('span', { className: 'chip', title: c.text, dataset: { key: c.key } },
+  $('chips').replaceChildren(...list.map(c => el('span', { className: 'chip', role: 'listitem', title: c.text, dataset: { key: c.key } },
     el('span', { textContent: c.text }),
     el('button', { title: 'Remove this filter', ariaLabel: 'Remove ' + c.text, textContent: '×', onclick: () => { c.clear(); filtersChanged(true); } }))));
   $('clearAll').hidden = !list.length;
+  if (list.length) $('chips').setAttribute('role', 'list');
+  else $('chips').removeAttribute('role');
   $('filterBtn').classList.toggle('on', list.some(c => c.key !== 'goal'));
 }
 // Every filter change goes through here: chips, URL, the goal picker and the plan follow.
@@ -2155,6 +2356,7 @@ function filtersChanged(goalToo) {
   syncUrl();
   rebuild();
   if (pinned) openPanel(byId.get(pinned));
+  announce(view === 'load' ? `Load for ${document.querySelectorAll('#loadView tbody tr').length} rows` : `${tasks().length} ${tasks().length === 1 ? 'item' : 'items'} shown`);
 }
 function clearAll() {
   goal = null;
@@ -2173,8 +2375,8 @@ const valuesOf = key => {
   return vals.sort((a, b) => (a === UNASSIGNED) - (b === UNASSIGNED) || a.toLowerCase().localeCompare(b.toLowerCase()));
 };
 const pickAll = (facet, all) => el('span', { className: 'pick' },
-  el('button', { className: 'link', textContent: 'All', onclick: () => { setFacet(facet, null, all); } }), ' · ',
-  el('button', { className: 'link', textContent: 'None', onclick: () => { setFacet(facet, [], all); } }));
+  el('button', { className: 'link', textContent: 'All', ariaLabel: 'All ' + facet + 's', onclick: () => { setFacet(facet, null, all); } }), ' · ',
+  el('button', { className: 'link', textContent: 'None', ariaLabel: 'No ' + facet + 's', onclick: () => { setFacet(facet, [], all); } }));
 function setFacet(facet, list, all) {
   const set = new Set(list ?? all);
   if (facet === 'status') statuses = set;
@@ -2199,7 +2401,7 @@ function fillFilters() {
   const opt = (facet, value, label, on, n, swatch, all) => el('label', { className: 'opt' },
     el('input', { type: 'checkbox', id: facet === 'owner' || facet === 'lane' ? null : facet + '-' + value, checked: on, dataset: { facet, value }, onchange: () => toggleFacet(facet, value, all) }),
     swatch, el('span', { textContent: label }), n != null ? el('span', { className: 'n', textContent: n }) : null);
-  const group = (title, facet, all, rows, pick) => el('div', { className: 'grp', dataset: { facet } },
+  const group = (title, facet, all, rows, pick) => el('div', { className: 'grp', role: 'group', ariaLabel: title, dataset: { facet } },
     el('div', { className: 'h' }, title, pick ? pickAll(facet, all) : null), el('div', { className: 'list' }, ...rows));
   const dot = s => el('i', { style: `background:${COLORS[s].bg};border:1px solid ${COLORS[s].bd}` });
   const ownersAll = valuesOf(ownerOf), lanesAll = valuesOf(laneName);
@@ -2231,7 +2433,15 @@ function setMenu(id, open) {
     if (m === 'goalWrap' && !on) showGoal();
   });
 }
-const closeMenus = () => MENUS.some(menuOpen) && (setMenu(null, false), true);
+// Closing a popover from inside it puts focus back on the button that opened it.
+function closeMenus() {
+  const open = MENUS.find(menuOpen);
+  if (!open) return false;
+  const back = $(open).contains(document.activeElement) && $(open).querySelector('[aria-expanded]');
+  setMenu(null, false);
+  if (back && back !== document.activeElement) back.focus();
+  return true;
+}
 [['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
 // The path, not the target: a click that re-renders a popover leaves its target detached.
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList && n.classList.contains('menuWrap'))) closeMenus(); });
@@ -2279,6 +2489,7 @@ const syncControls = () => {
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('viewTimeline').classList.toggle('on', view === 'timeline');
   $('viewLoad').classList.toggle('on', view === 'load');
+  ['viewGraph', 'viewLanes', 'viewTimeline', 'viewLoad'].forEach(b => $(b).setAttribute('aria-pressed', String($(b).classList.contains('on'))));
   document.body.dataset.view = view;
   radio('laneKey', laneKey).checked = true;
   radio('loadKey', loadKey).checked = true;
@@ -2289,6 +2500,7 @@ const syncControls = () => {
   radio('depsMode', depsMode).checked = true;
   $('lanesBy').classList.toggle('off', view === 'graph' || view === 'load');
   $('depsBy').classList.toggle('off', view !== 'timeline');
+  ['lanesBy', 'depsBy', 'loadBy'].forEach(g => $(g).querySelectorAll('input').forEach(i => { i.disabled = $(g).classList.contains('off'); }));
   if (menuOpen('filterWrap')) fillFilters();
   syncChips();
   syncLegend();
@@ -2306,9 +2518,11 @@ const setView = v => {
   syncControls();
   syncUrl(true);
   rebuild();
+  announce(`${VIEW_NAMES[v]} view`);
 };
 const setTitle = () => {
   document.title = 'taskgraph · ' + (goal != null && byId.has(goal) ? '#' + goal + ' ' + byId.get(goal).title : projectSelect.value || 'all projects');
+  $('pageTitle').textContent = document.title;
 };
 setTitle();
 projectSelect.onchange = () => {
@@ -2350,12 +2564,13 @@ function renderGoalList(typed) {
   goalChoices.forEach((n, i) => {
     if (multi && n && n.project !== last) rows.push(el('div', { className: 'group', textContent: (last = n.project) }));
     const when = n ? (n.derived_status === 'done' ? 'done' : n.type === 'milestone' && n.due ? day(n.due) : n.type) : '';
-    rows.push(el('div', { className: 'choice' + (i === goalAt ? ' active' : '') + (n && n.derived_status === 'done' ? ' done' : ''), role: 'option', dataset: { id: n ? String(n.id) : '', i: String(i) } },
+    rows.push(el('div', { id: 'goalOpt' + i, className: 'choice' + (i === goalAt ? ' active' : '') + (n && n.derived_status === 'done' ? ' done' : ''), role: 'option', ariaSelected: String(i === goalAt), dataset: { id: n ? String(n.id) : '', i: String(i) } },
       el('span', { textContent: n ? goalLabel(n) : 'All goals' }), el('span', { className: 'when', textContent: when })));
   });
   if (!list.length && q) rows.push(el('div', { className: 'none', textContent: 'No milestone or objective matches' }));
   $('goalList').replaceChildren(...rows);
   $('goalList').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  syncActive(goalBox, $('goalList'));
 }
 const pickGoal = i => {
   const n = goalChoices[i];
@@ -2378,8 +2593,12 @@ goalBox.onkeydown = e => {
     e.preventDefault();
     if (!menuOpen('goalWrap')) return goalBox.onfocus();
     goalAt = Math.max(0, Math.min(goalChoices.length - 1, goalAt + (e.key === 'ArrowDown' ? 1 : -1)));
-    $('goalList').querySelectorAll('.choice').forEach(c => c.classList.toggle('active', Number(c.dataset.i) === goalAt));
+    $('goalList').querySelectorAll('.choice').forEach(c => {
+      c.classList.toggle('active', Number(c.dataset.i) === goalAt);
+      c.setAttribute('aria-selected', String(Number(c.dataset.i) === goalAt));
+    });
     $('goalList').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+    syncActive(goalBox, $('goalList'));
   } else if (e.key === 'Enter') {
     e.preventDefault();
     pickGoal(goalAt);
@@ -2400,8 +2619,12 @@ $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
 $('viewLoad').onclick = () => setView('load');
+$('skip').onclick = e => {
+  e.preventDefault();
+  (view === 'load' ? $('loadView').querySelector('[role=button], td.c') || $('main') : $('cy')).focus();
+};
 $('clearAll').onclick = () => clearAll();
-$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), LABELS[s])));
+$('legendStatus').append(...Object.keys(LABELS).map(s => el('div', { id: 'legend-' + s }, el('i', { style: `background:${COLORS[s].bg};border:2px solid ${COLORS[s].bd}` }), (s === 'ready' ? '' : MARKS[s] + ' ') + LABELS[s])));
 $('legendMarks').prepend(el('div', null, el('i', { style: 'border:2px solid ' + GOAL }), 'Goal'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #ef4444cc;outline-offset:1px;margin:0 2px' }), 'Late / conflict'), el('div', null, el('i', { style: 'border:2px solid #343b47;outline:2px solid #f59e0bcc;outline-offset:1px;margin:0 2px' }), 'At risk'));
 syncControls();
 $('search').oninput = () => {
@@ -2434,6 +2657,7 @@ $('results').addEventListener('click', e => {
 const typing = t => t.matches && t.matches('input[type=text], input[type=number], input:not([type]), select, textarea');
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (!$('tip').hidden) return hideTip();
     if (document.activeElement === $('search') && $('search').value) clearSearch();
     else if (closeMenus()) return;
     else if ($('panel').style.display === 'block') closePanel();
@@ -2604,6 +2828,7 @@ $('printPage').onclick = () => window.print();
 const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
+  $('legendToggle').setAttribute('aria-expanded', String(open));
   $('legendOn').checked = open;
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
