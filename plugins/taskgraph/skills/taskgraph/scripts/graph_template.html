@@ -139,6 +139,45 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 #empty p { margin: 0; font-size: 16px; color: #e5e7eb; }
 #empty button { pointer-events: auto; margin-top: 10px; background: #232830; color: #e5e7eb; border: 1px solid #343a45; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #empty button:hover { background: #2d333d; }
+#print { display: none; }
+/* Printing (or Save as PDF) gives a sheet, not a screenshot of the controls: a title, the whole
+   plan as filtered, the legend, and the open item's panel on its own page. */
+@media print {
+  @page { size: landscape; margin: 12mm; }
+  html, body { height: auto; background: #fff; color: #111; }
+  body > :not(#print) { display: none !important; }
+  #print { display: block; font: 10pt/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  #print h1 { margin: 0 0 2pt; font-size: 15pt; }
+  #print .sub { margin: 0 0 8pt; color: #444; }
+  #print .plan { display: block; max-width: 100%; max-height: 150mm; margin: 0 auto; border-radius: 4pt; }
+  #print .none { color: #444; }
+  #print .key { display: flex; flex-wrap: wrap; gap: 3pt 14pt; margin-top: 6pt; padding: 5pt 8pt; border-radius: 4pt; background: #111418; color: #e5e7eb; font-size: 9pt; }
+  #print .key div { display: flex; align-items: center; gap: 5pt; }
+  #print .key i { width: 11pt; height: 11pt; border-radius: 3pt; display: inline-block; box-sizing: border-box; }
+  #print .key svg { flex: none; overflow: visible; }
+  #print .item { break-before: page; max-width: 170mm; }
+  #print .item h2 { margin: 0 0 4pt; font-size: 14pt; }
+  #print .item h3 { margin: 10pt 0 3pt; font-size: 9pt; text-transform: uppercase; letter-spacing: .06em; color: #444; break-after: avoid; }
+  #print .item table { width: 100%; border-collapse: collapse; }
+  #print .item td { padding: 2pt 5pt; border-bottom: 1px solid #ddd; vertical-align: top; }
+  #print .item td:first-child { width: 30%; color: #444; }
+  #print .item ul { list-style: none; margin: 0; padding: 0; }
+  #print .item li { display: flex; gap: 6pt; align-items: center; padding: 1pt 0; break-inside: avoid; }
+  #print .item li i { width: 8pt; height: 8pt; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px #777; }
+  #print .item li small { margin-left: auto; color: #444; }
+  #print .item .badge { display: inline-block; padding: 0 6pt; border-radius: 8pt; font-size: 8.5pt; font-weight: 600; }
+  #print .item .badge + .badge { margin-left: 3pt; }
+  #print .item .badge.late { background: #ef4444; color: #fff; }
+  #print .item .badge.chase { background: #f59e0b; color: #1c1004; }
+  #print .item .badge.risk { border: 1px solid #b45309; color: #b45309; }
+  #print .item .badge.conflict { border: 1px solid #b91c1c; color: #b91c1c; }
+  #print .item .tag { display: inline-block; margin: 0 3pt 2pt 0; padding: 0 6pt; border: 1px solid #bbb; border-radius: 8pt; font-size: 8.5pt; }
+  #print .item .notes { white-space: pre-wrap; }
+  #print .item .lead { margin: 4pt 0 1pt; color: #444; font-size: 9pt; }
+  #print .item .muted { color: #444; }
+  #print .item a { color: #1d4ed8; }
+  #print .item summary { list-style: none; font-size: 9pt; text-transform: uppercase; letter-spacing: .06em; color: #444; margin-top: 10pt; }
+}
 </style>
 </head>
 <body>
@@ -181,6 +220,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
         <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
+        <button class="item" id="printPage" title="Print the whole current view, or save it as a PDF">Print…</button>
         <button class="item" id="refresh" hidden title="Check for changes now">Refresh now</button>
         <button class="item" id="copyView" title="Copy a link to exactly this view">Copy link to view</button>
       </div>
@@ -212,6 +252,7 @@ html, body { margin: 0; height: 100%; background: #111418; color: #e5e7eb; font:
 </div>
 <div id="panel"></div>
 <div id="tip" hidden></div>
+<div id="print" aria-hidden="true"></div>
 <div id="empty" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -784,7 +825,7 @@ function routeEdges() {
   });
 }
 
-function layoutLanes(fit) {
+function layoutLanes() {
   const { nodes, edges } = visibleData();
   const back = backEdges(nodes, edges);
   const next = new Map(nodes.map(n => [n.id, []]));
@@ -826,7 +867,6 @@ function layoutLanes(fit) {
   cy.add([...bands, ...stripes]);
   cy.edges().forEach(e => e.toggleClass('back', back.has(e.id())));
   routeEdges();
-  if (fit) fitView();
 }
 
 const dnum = s => {
@@ -932,7 +972,7 @@ function routeDeps(shown, marks, right) {
   });
 }
 
-function layoutTimeline(fit) {
+function layoutTimeline() {
   const { nodes, open } = visibleData();
   if (!nodes.length) return;
   const shown = new Set(nodes.map(n => n.id));
@@ -1010,21 +1050,44 @@ function layoutTimeline(fit) {
   drawn.filter(e => critical.has(e.id())).addClass('tl-critical');
   drawn.filter(e => hot.has(e.id())).addClass('tl-conflict');
   routeDeps(drawn.toArray(), marks, width);
-  if (fit) fitView();
 }
 
 function layout(fit = true) {
   if (fit) keepWhole = false;
   fitBar();
-  cy.elements('.bg').remove();
-  cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
-  cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
-  if (view === 'lanes') layoutLanes(fit);
-  else if (view === 'timeline') layoutTimeline(fit);
-  else {
-    cy.layout({ name: 'dagre', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit: false }).run();
-    if (fit) fitView();
+  // One batch so Cytoscape restyles once, not once per element; Graph lays out after it because
+  // dagre needs the styled node sizes.
+  cy.batch(() => {
+    cy.elements('.bg').remove();
+    cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
+    cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
+    if (view === 'lanes') layoutLanes();
+    else if (view === 'timeline') layoutTimeline();
+  });
+  if (view === 'graph') layoutGraph();
+  if (fit) fitView();
+}
+
+// Dagre's best ranking (network simplex) takes about 1.4 s at 800 nodes; tight-tree draws a
+// near-identical picture in half the time, so big plans use it. Layouts are remembered by shape
+// (nodes, their labels and classes, and links), so returning to a shape already seen, such as
+// clearing a filter or coming back to Graph, puts the nodes back without laying out again.
+const BIG_GRAPH = 250, LAYOUTS_KEPT = 6;
+const layoutMemo = new Map();
+function layoutGraph() {
+  const nodes = tasks();
+  const key = nodes.map(n => n.id() + ':' + n.classes().join('.') + ':' + n.data('label')).join('|') + '#' + links().map(e => e.id() + ':' + e.data('kind')).join('|');
+  const seen = layoutMemo.get(key);
+  if (seen) {
+    layoutMemo.delete(key);
+    layoutMemo.set(key, seen);
+    return cy.batch(() => nodes.forEach(n => { n.position(seen[n.id()]); }));
   }
+  cy.layout({ name: 'dagre', ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit: false }).run();
+  const pos = {};
+  nodes.forEach(n => { pos[n.id()] = { ...n.position() }; });
+  layoutMemo.set(key, pos);
+  if (layoutMemo.size > LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
 }
 
 // Fit like cy.fit, but leave the bottom strip under the legend free so it never covers a node.
@@ -1074,14 +1137,17 @@ function covered() {
   return !!t && t.zoom >= READABLE && hiddenTasks();
 }
 
+// One box around the whole plan answers most calls; nodes are checked one by one only when that
+// box reaches under the legend.
 function hiddenTasks() {
+  const all = tasks();
+  if (all.empty()) return false;
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
-  return tasks().some(n => {
-    const b = n.renderedBoundingBox();
-    const hidden = b.x1 < 0 || b.y1 < 0 || b.x2 > box.width || b.y2 > box.height;
-    return hidden || (b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1);
-  });
+  const under = b => b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1;
+  const u = all.renderedBoundingBox();
+  if (u.x1 < 0 || u.y1 < 0 || u.x2 > box.width || u.y2 > box.height) return true;
+  return under(u) && all.some(n => under(n.renderedBoundingBox()));
 }
 
 function fitIfOutside() {
@@ -1101,9 +1167,11 @@ function rebuild(keepView, flash) {
   const { nodes, edges, open } = visibleData();
   const before = new Set(tasks().map(n => n.id()));
   const sources = new Set(edges.map(e => e.source));
-  cy.elements().remove();
-  cy.add(nodes.map(n => ({ group: 'nodes', classes: classesOf(n, sources), data: nodeData(n, open) })));
-  cy.add(edges.map(e => ({ group: 'edges', classes: e.kind + (byId.get(e.source)?.type === 'risk' ? ' threat' : ''), data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
+  cy.batch(() => {
+    cy.elements().remove();
+    cy.add(nodes.map(n => ({ group: 'nodes', classes: classesOf(n, sources), data: nodeData(n, open) })));
+    cy.add(edges.map(e => ({ group: 'edges', classes: e.kind + (byId.get(e.source)?.type === 'risk' ? ' threat' : ''), data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
+  });
   if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
   layout(!keepView);
   if (keepView) {
@@ -2302,6 +2370,41 @@ async function exportPng() {
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 $('exportPng').onclick = () => exportPng();
+
+// Print builds its sheet just before the browser lays the page out: the plan as one image (drawn
+// synchronously, without hover or selection fading), the legend as text, and the open panel.
+function printSheet() {
+  const faded = cy.elements('.faded'), lit = cy.elements('.hl');
+  faded.union(lit).removeClass('faded hl');
+  mirrorNames();
+  let shot = null;
+  try {
+    if (tasks().nonempty()) shot = cy.png({ output: 'base64uri', full: true, scale: 2, maxWidth: 6000, maxHeight: 6000, bg: '#111418' });
+  } finally {
+    faded.addClass('faded');
+    lit.addClass('hl');
+    mirrorNames();
+  }
+  const key = [...document.querySelectorAll('#legendBody .col > div')].filter(d => !d.hidden).map(d => d.cloneNode(true));
+  const parts = [
+    el('h1', { textContent: exportTitle() }),
+    el('p', { className: 'sub', textContent: 'As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + exportFilters() }),
+    shot ? el('img', { className: 'plan', src: shot, alt: exportTitle() }) : el('p', { className: 'none', textContent: $('emptyText').textContent || 'Nothing to show.' }),
+    shot && key.length ? el('div', { className: 'key' }, ...key) : null
+  ];
+  if ($('panel').style.display === 'block') {
+    const item = el('div', { className: 'item' }, ...Array.from($('panel').children, c => c.cloneNode(true)));
+    item.querySelectorAll('#panelGrip, #panelClose, #panelBack, .actions, #notesMore').forEach(e => e.remove());
+    item.querySelectorAll('details').forEach(d => { d.open = true; });
+    item.querySelectorAll('.clamp').forEach(e => e.classList.remove('clamp'));
+    parts.push(item);
+  }
+  $('print').replaceChildren(...parts.filter(Boolean));
+  $('print').querySelectorAll('[id]').forEach(e => e.removeAttribute('id'));
+}
+window.addEventListener('beforeprint', printSheet);
+window.addEventListener('afterprint', () => $('print').replaceChildren());
+$('printPage').onclick = () => window.print();
 const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';

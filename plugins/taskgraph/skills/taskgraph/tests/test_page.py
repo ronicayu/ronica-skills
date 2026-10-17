@@ -1192,3 +1192,58 @@ def test_filter_opens_summaries_that_hide_matches(browser, programme_file):
     assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "3", "4"]
     assert problems == []
     page.close()
+
+
+def test_graph_layout_is_remembered(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=graph")
+    pos = "() => Object.fromEntries(tasks().map(n => [n.id(), [Math.round(n.position('x')), Math.round(n.position('y'))]]))"
+    first = page.evaluate(pos)
+    page.evaluate("flags.add('atrisk'); filtersChanged()")
+    assert page.evaluate("tasks().map(n => n.id()).sort()") == ["1", "2"]
+    page.evaluate("flags.clear(); filtersChanged()")
+    assert page.evaluate(pos) == first and page.evaluate("layoutMemo.size") == 2
+    page.evaluate("void cy.getElementById('3').position({ x: 9999, y: 9999 })")
+    more(page, "relayout")
+    assert page.evaluate(pos) == first
+    assert problems == []
+    page.close()
+
+
+def test_hidden_tasks_matches_node_by_node(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=lanes")
+    slow = """() => {
+        const box = document.getElementById('cy').getBoundingClientRect(), l = document.getElementById('legend').getBoundingClientRect();
+        const lg = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
+        return tasks().some(n => { const b = n.renderedBoundingBox();
+            return b.x1 < 0 || b.y1 < 0 || b.x2 > box.width || b.y2 > box.height || (b.x1 < lg.x2 && b.x2 > lg.x1 && b.y1 < lg.y2 && b.y2 > lg.y1); });
+    }"""
+    for pan in ({"x": 0, "y": 0}, {"x": -300, "y": 0}, {"x": 0, "y": 600}, {"x": 40, "y": 520}):
+        page.evaluate(f"void cy.panBy({pan})")
+        assert page.evaluate("hiddenTasks()") == page.evaluate(slow), pan
+    page.click("#legendToggle")
+    page.evaluate("fitView(true); void cy.panBy({ x: 0, y: 120 })")
+    assert page.evaluate("hiddenTasks()") == page.evaluate(slow)
+    assert problems == []
+    page.close()
+
+
+def test_print_sheet(browser, page_file, tmp_path):
+    page, problems = open_page(browser, page_file, "?view=timeline&task=3&owner=ann")
+    page.wait_for_function("pinned === 3")
+    page.evaluate("printSheet()")
+    parts = page.evaluate("Array.from(document.getElementById('print').children, c => c.tagName + '.' + c.className)")
+    assert parts == ["H1.", "P.sub", "IMG.plan", "DIV.key", "DIV.item"]
+    assert page.text_content("#print h1") == "taskgraph · demo · Timeline"
+    assert page.text_content("#print .sub") == "As of 13 Oct 2026 · done items hidden · Owner: ann"
+    assert page.evaluate("document.querySelector('#print .plan').src").startswith("data:image/png;base64,")
+    item = page.text_content("#print .item")
+    assert "Build feature" in item and "Copy link" not in item and page.evaluate("document.querySelectorAll('#print [id]').length") == 0
+    page.emulate_media(media="print")
+    assert page.is_hidden("#toolbar") and page.is_hidden("#cy") and page.is_visible("#print .plan") and page.is_visible("#print .item tr")
+    page.emulate_media(media="screen")
+    page.evaluate("dispatchEvent(new Event('afterprint'))")
+    assert page.evaluate("document.getElementById('print').children.length") == 0
+    page.pdf(path=str(tmp_path / "plan.pdf"), landscape=True)
+    assert (tmp_path / "plan.pdf").read_bytes()[:5] == b"%PDF-"
+    assert problems == []
+    page.close()
