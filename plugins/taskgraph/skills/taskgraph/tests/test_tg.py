@@ -1566,3 +1566,55 @@ def test_cross_project_dependency_only_on_milestones(tg, raw, fail):
     assert tg("show", str(load_))["derived_status"] == "ready"
     rows = tg("deps", "--cross", "project", "--all-projects")
     assert [(r["from"]["id"], r["to"]["id"]) for r in rows] == [(gate, load_)]
+
+
+@pytest.fixture
+def loaded(tg):
+    ws = tg("add", "Workstream", "--meta", "owner=ann", "estimate=999", "lane=dev")["id"]
+    a = tg("add", "Build", "--parent", str(ws), "--start", "2026-10-19", "--due", "2026-10-30", "--meta", "owner=ann", "estimate=40")["id"]
+    b = tg("add", "Fix", "--due", "2026-10-16", "--meta", "owner=ann", "estimate=12h", "lane=ops")["id"]
+    late = tg("add", "Overdue", "--due", "2026-10-09", "--meta", "owner=bo", "estimate=10", "lane=ops")["id"]
+    loose = tg("add", "Someday", "--meta", "owner=bo", "estimate=5")["id"]
+    done = tg("add", "Finished", "--due", "2026-10-20", "--meta", "owner=ann", "estimate=50")["id"]
+    tg("done", str(done))
+    none = tg("add", "Unsized", "--due", "2026-10-20", "--meta", "owner=ann")["id"]
+    far = tg("add", "Next year", "--start", "2027-01-04", "--due", "2027-01-08", "--meta", "owner=ann", "estimate=15")["id"]
+    tg("add", "Ship", "--type", "milestone", "--due", "2026-10-30", "--meta", "estimate=8")
+    tg("add", "Vendor", "--type", "external", "--due", "2026-10-30", "--meta", "party=Acme", "estimate=8")
+    return {"build": a, "fix": b, "late": late, "loose": loose, "none": none, "far": far}
+
+
+def test_load_spreads_estimates_over_working_days(tg, loaded):
+    d = tg("load", "--weeks", "4")
+    assert d["weeks"] == [{"start": "2026-10-12", "capacity": 24.0}, {"start": "2026-10-19", "capacity": 30}, {"start": "2026-10-26", "capacity": 30}, {"start": "2026-11-02", "capacity": 30}]
+    rows = {g["name"]: g for g in d["groups"]}
+    assert list(rows) == ["ann", "bo"]
+    assert rows["ann"]["hours"] == [12.0, 20.0, 20.0, 0.0] and rows["ann"]["later"] == 15.0 and rows["ann"]["unscheduled"] == 0
+    assert rows["bo"]["hours"] == [10.0, 0.0, 0.0, 0.0] and rows["bo"]["unscheduled"] == 5.0
+    assert d["unestimated"] == [loaded["none"]] and d["over"] == []
+
+
+def test_load_flags_over_committed_weeks(tg, raw, loaded):
+    d = tg("load", "--weeks", "3", "--week-hours", "15", "--by", "lane")
+    rows = {g["name"]: g for g in d["groups"]}
+    assert list(rows) == ["dev", "ops", "Unassigned"] and rows["Unassigned"]["unscheduled"] == 5.0
+    assert rows["dev"]["hours"] == [0.0, 20.0, 20.0] and rows["dev"]["over"] == [1, 2]
+    assert rows["ops"]["hours"] == [22.0, 0.0, 0.0] and rows["ops"]["over"] == [0]
+    ops = next(o for o in d["over"] if o["group"] == "ops")
+    assert ops == {"group": "ops", "week": "2026-10-12", "hours": 22.0, "capacity": 12.0, "items": [
+        {"id": loaded["fix"], "title": "Fix", "hours": 12.0, "overdue": False}, {"id": loaded["late"], "title": "Overdue", "hours": 10.0, "overdue": True}]}
+    text = raw("--project", "demo", "load", "--weeks", "3", "--week-hours", "15", "--by", "lane").stdout
+    assert "Load by lane · 15h a week · weeks starting 12 Oct" in text
+    assert "ops w/c 12 Oct: 22h of 12h — #%d Fix 12h, #%d Overdue 10h (late)" % (loaded["fix"], loaded["late"]) in text
+    assert "* 12 Oct counts only the working days left this week (12h)." in text
+    assert "No estimate: 1 open items (#%d)" % loaded["none"] in text
+
+
+def test_load_from_a_later_week(tg, loaded):
+    d = tg("load", "--from", "+1w", "--weeks", "2")
+    assert d["weeks"] == [{"start": "2026-10-19", "capacity": 30}, {"start": "2026-10-26", "capacity": 30}]
+    assert {g["name"]: g["hours"] for g in d["groups"]}["ann"] == [20.0, 20.0]
+
+
+def test_load_empty(raw):
+    assert raw("--project", "demo", "load").stdout.strip() == "no open items with an estimate"

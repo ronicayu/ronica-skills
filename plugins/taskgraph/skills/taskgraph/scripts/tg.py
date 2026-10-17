@@ -67,13 +67,14 @@ PARENT_TYPES = ("task", "objective")
 DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised", "review", "raised")
 DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by", "risk": "review", "issue": "due"}
 POINTS = ("milestone", "decision", "risk")
-DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since")
+DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since", "--from")
 PERSON_KEYS = {"decision": "decider", "external": "party"}
 INHERITED = ("lane", "team")
 SORTS = ("id", "due", "late")
 DATE_FIELDS = ("due", "start", "promised")
 SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
 RAG = ("green", "amber", "red")
+MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 LEVELS = {"low": 1, "medium": 2, "high": 3}
 CHANGE_BUCKETS = {
     "new": "New", "started": "Started", "completed": "Completed", "reopened": "Reopened",
@@ -1415,6 +1416,124 @@ def report_md(d):
     return "\n".join(out)
 
 
+# Capacity: who is over-committed, week by week. Each open item's estimate (hours) is spread
+# evenly over the working days (Mon-Fri) still ahead in its window: from its start, or the
+# Monday of its due week when it has no start, to its due date, never before today. Work that
+# is already late lands on today. Summaries, milestones, risks and externals carry no load of
+# ours; an item with an estimate but no dates is unscheduled. The page's Load view uses the
+# same rules.
+LOAD_SKIP = ("milestone", "risk", "external")
+
+
+def estimate_hours(task):
+    raw = task["meta"].get("estimate")
+    try:
+        hours = float(str(raw).strip().removesuffix("h")) if raw is not None and raw != "" else None
+    except ValueError:
+        return None
+    return hours if hours and hours > 0 else None
+
+
+def working_days(first, last):
+    days, d = [], first
+    while d <= last:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def load_spread(task, day):
+    """Hours per date for one item, and whether it is already late; None when unscheduled."""
+    hours = estimate_hours(task)
+    due, start = parse_date(task["due"]), parse_date(task["start"])
+    if not due and not start:
+        return None, False
+    due = due or start + timedelta(days=4 - start.weekday() if start.weekday() < 5 else 0)
+    start = start or due - timedelta(days=due.weekday())
+    if due < day:
+        return {day: hours}, True
+    days = working_days(max(start, day), due) or [max(start, day)]
+    return {d: hours / len(days) for d in days}, False
+
+
+def load_items(tasks):
+    return [t for t in tasks if t["derived_status"] != "done" and not is_summary(t) and t["type"] not in LOAD_SKIP]
+
+
+def cmd_load(conn, args):
+    day = today()
+    tasks = load(conn)
+    first = parse_date(resolve_date(args.start)) if args.start else day
+    first -= timedelta(days=first.weekday())
+    weeks = [first + timedelta(weeks=i) for i in range(args.weeks)]
+    end = weeks[-1] + timedelta(days=7)
+    this_week = day - timedelta(days=day.weekday())
+    left = len(working_days(day, this_week + timedelta(days=4)))
+    capacity = [round(args.week_hours * (left / 5 if w == this_week else 1 if w > this_week else 0), 1) for w in weeks]
+    groups, cells, unestimated = {}, {}, []
+    for t in load_items(scoped(tasks, args)):
+        if estimate_hours(t) is None:
+            unestimated.append(t["id"])
+            continue
+        name = group_name(t, args.by)
+        g = groups.setdefault(name, {"name": name, "hours": [0.0] * len(weeks), "later": 0.0, "unscheduled": 0.0})
+        spread, overdue = load_spread(t, day)
+        if spread is None:
+            g["unscheduled"] += estimate_hours(t)
+            continue
+        for d, h in spread.items():
+            if d >= end:
+                g["later"] += h
+            elif d >= first:
+                i = (d - first).days // 7
+                g["hours"][i] += h
+                cell = cells.setdefault((name, i), {}).setdefault(t["id"], {"id": t["id"], "title": t["title"], "hours": 0.0, "overdue": overdue})
+                cell["hours"] += h
+    rows = sorted(groups.values(), key=lambda g: (g["name"] == "Unassigned", g["name"].lower()))
+    over = []
+    for g in rows:
+        g["over"] = [i for i, h in enumerate(g["hours"]) if round(h, 1) > capacity[i]]
+        for i in g["over"]:
+            items = sorted(cells[(g["name"], i)].values(), key=lambda c: (-c["hours"], c["id"]))
+            over.append({"group": g["name"], "week": weeks[i].isoformat(), "hours": round(g["hours"][i], 1), "capacity": capacity[i],
+                         "items": [dict(c, hours=round(c["hours"], 1)) for c in items]})
+        g["hours"] = [round(h, 1) for h in g["hours"]]
+        g["later"], g["unscheduled"] = round(g["later"], 1), round(g["unscheduled"], 1)
+    data = {"by": args.by, "week_hours": args.week_hours, "today": day.isoformat(),
+            "weeks": [{"start": w.isoformat(), "capacity": c} for w, c in zip(weeks, capacity)],
+            "groups": rows, "over": over, "unestimated": sorted(unestimated)}
+    emit(args, data, load_text(data))
+
+
+def load_text(d):
+    if not d["groups"]:
+        return "no open items with an estimate" + (f" ({len(d['unestimated'])} open items have none)" if d["unestimated"] else "")
+    md = lambda iso: f"{int(iso[8:])} {MONTH_NAMES[int(iso[5:7]) - 1]}"
+    width = max(len(g["name"]) for g in d["groups"]) + 2
+    partial = [w["capacity"] < d["week_hours"] for w in d["weeks"]]
+    head = [md(w["start"]) + ("*" if p else "") for w, p in zip(d["weeks"], partial)] + ["later", "unsched"]
+    out = [f"Load by {d['by']} · {d['week_hours']:g}h a week · weeks starting {md(d['weeks'][0]['start'])}",
+           " " * width + "".join(f"{h:>8}" for h in head)]
+    for g in d["groups"]:
+        cells = [f"{h:g}" + ("!" if i in g["over"] else "") for i, h in enumerate(g["hours"])]
+        out.append(f"{g['name']:<{width}}" + "".join(f"{c if c != '0' else '·':>8}" for c in [*cells, f"{g['later']:g}", f"{g['unscheduled']:g}"]))
+    if any(partial):
+        w = d["weeks"][partial.index(True)]
+        out.append(f"* {md(w['start'])} counts only the working days left this week ({w['capacity']:g}h).")
+    out.append("! over capacity")
+    if d["over"]:
+        out += ["", "Over-committed"]
+        for o in d["over"]:
+            top = ", ".join(f"#{c['id']} {c['title']} {c['hours']:g}h" + (" (late)" if c["overdue"] else "") for c in o["items"][:3])
+            more = f", +{len(o['items']) - 3} more" if len(o["items"]) > 3 else ""
+            out.append(f"  {o['group']} w/c {md(o['week'])}: {o['hours']:g}h of {o['capacity']:g}h — {top}{more}")
+    if d["unestimated"]:
+        ids = ", ".join(f"#{i}" for i in d["unestimated"][:12]) + (" …" if len(d["unestimated"]) > 12 else "")
+        out += ["", f"No estimate: {len(d['unestimated'])} open items ({ids})"]
+    return "\n".join(out)
+
+
 def cmd_export(conn, args):
     keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
     tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
@@ -1603,6 +1722,7 @@ COMMANDS = {
     "path": cmd_path,
     "deps": cmd_deps,
     "report": cmd_report,
+    "load": cmd_load,
     "agenda": cmd_agenda,
     "changes": cmd_changes,
     "export": cmd_export,
@@ -1711,6 +1831,13 @@ def build_parser():
     p.add_argument("--since", default="7d")
     p.add_argument("--risks", type=int, default=5)
     p.add_argument("--md", action="store_true")
+    p.add_argument("--all-projects", action="store_true")
+
+    p = command("load")
+    p.add_argument("--by", choices=("owner", "team", "lane"), default="owner")
+    p.add_argument("--weeks", type=int, default=8)
+    p.add_argument("--from", dest="start")
+    p.add_argument("--week-hours", type=float, default=30)
     p.add_argument("--all-projects", action="store_true")
 
     p = command("changes")

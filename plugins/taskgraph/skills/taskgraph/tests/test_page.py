@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -195,7 +196,9 @@ def test_timeline_dependency_modes_and_pinned_milestones(browser, page_file):
     assert "deps=critical" in page.url
     view_option(page, "depsMode", "all")
     assert "deps=1" in page.url and len(page.evaluate(drawn)) >= 2
-    assert page.evaluate(f"{BY_Y}('.tl-name[of]', 'name')") == ["▾ #1 Launch", "#2 Ship v1", "#3 Build feature", "#5 Vendor key", "#4 Write docs", "#6 Undated chore"]
+    names = page.evaluate(f"{BY_Y}('.tl-name[of]', 'name')")
+    assert names[:2] == ["▾ ⊘ #1 Launch", "⊘ #2 Ship v1"] and names[-1] == "#6 Undated chore"
+    assert [re.sub("[◔⊘✓] ", "", n) for n in names] == ["▾ #1 Launch", "#2 Ship v1", "#3 Build feature", "#5 Vendor key", "#4 Write docs", "#6 Undated chore"]
     assert heads(page, "timeline") == ["Objectives", "dev", "docs", "Undated"]
     assert problems == []
     page.close()
@@ -293,7 +296,7 @@ def test_bands_and_rag_match_across_views(browser, programme_file):
 def test_timeline_nests_only_within_lane(browser, programme_file):
     page, problems = open_page(browser, programme_file, "?view=timeline")
     more(page, "expandAll")
-    rows = page.evaluate(f"{BY_Y}('.tl-name', 'name').map(s => s.replace(/ · (RED|AMBER|GREEN)$/, ''))")
+    rows = page.evaluate(f"{BY_Y}('.tl-name', 'name').map(s => s.replace(/ · (RED|AMBER|GREEN)$/, '').replace(/[◔⊘✓] /g, ''))")
     infra = rows.index("Infra")
     assert rows[infra + 1] == "▾ #3 Build landing zone" and rows[infra + 2] == "#4 Write modules"
     assert not any("#3 Build landing zone" in r for r in rows[rows.index("Objectives"):rows.index("Data")])
@@ -579,26 +582,102 @@ def contrast(a, b):
     return (hi + 0.05) / (lo + 0.05)
 
 
-CONTRAST = [  # foreground, background, is text
-    ("#9ca3af", "#181c22", True),   # stamp, panel "None", search count
-    ("#9ca3af", "#232830", True),   # search placeholder
-    ("#6b7280", "#111418", False),  # dependency and part-of edges
-    ("#6b7280", "#14181e", False),  # AXIS: Timeline bars and grid
-    ("#d1d5db", "#2f3744", True),   # blocked label on blocked fill
-    ("#6b7280", "#111418", False),  # blocked border on canvas
-    ("#ffffff", "#2563eb", True),   # done label on done fill
-    ("#2563eb", "#111418", False),  # done fill on canvas
+CONTRAST = [  # foreground token, background token, is text
+    ("text", "surface", True), ("muted", "surface", True), ("muted", "control", True), ("muted", "bg", True),
+    ("muted", "band-1", True), ("link", "surface", True), ("amber-text", "surface", True), ("red-text", "surface", True),
+    ("on-text", "on", True), ("goal", "bg", True), ("amber", "bg", True), ("red", "bg", True),
+    ("edge", "surface", False), ("edge", "control", False), ("axis", "bg", False), ("axis", "band-1", False),
+    *[(f"st-{s}-fg", f"st-{s}-bg", True) for s in ("ready", "in_progress", "blocked", "done")],
+    ("st-blocked-bd", "bg", False), ("st-done-bg", "bg", False), ("st-ready-bd", "bg", False),
+    *[(f"mark-{s}", "surface", True) for s in ("ready", "in_progress", "blocked", "done")],
+    *[(f"load-{i}-ink", f"load-{i}", True) for i in (1, 2, 3, 4)], ("over-ink", "over", True),
 ]
+TOKENS = "Object.fromEntries([...new Set(%s.flat())].map(k => [k, getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim()]))"
 
 
-def test_contrast_tokens(browser, page_file):
+def hex6(value):
+    value = value.lstrip("#")
+    return "#" + ("".join(c * 2 for c in value) if len(value) == 3 else value[:6])
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_contrast_tokens(browser, page_file, theme):
+    page, problems = open_page(browser, page_file, f"?theme={theme}")
+    names = [[fg, bg] for fg, bg, _ in CONTRAST]
+    tokens = page.evaluate(TOKENS % json.dumps(names))
     for fg, bg, text in CONTRAST:
-        assert contrast(fg, bg) >= (4.5 if text else 3.0), (fg, bg, contrast(fg, bg))
-    page, problems = open_page(browser, page_file)
-    assert page.evaluate("getComputedStyle(document.getElementById('stamp')).color") == "rgb(156, 163, 175)"
+        ratio = contrast(hex6(tokens[fg]), hex6(tokens[bg]))
+        assert ratio >= (4.5 if text else 3.0), (theme, fg, bg, round(ratio, 2))
+    # The canvas draws from the same tokens.
     assert page.evaluate("cy.getElementById('2').data('derived_status')") == "blocked"
-    assert page.evaluate("cy.getElementById('2').style('background-color')") == "rgb(47,55,68)"
-    assert page.evaluate("cy.edges()[0].style('line-color')") == "rgb(107,114,128)"
+    rgb = page.evaluate("cy.getElementById('2').style('background-color')")
+    assert rgb == "rgb(%d,%d,%d)" % tuple(int(hex6(tokens["st-blocked-bg"])[i:i + 2], 16) for i in (1, 3, 5))
+    assert problems == []
+    page.close()
+
+
+def theme_of(page):
+    return page.evaluate("[document.documentElement.dataset.theme, getComputedStyle(document.body).backgroundColor, cy.getElementById('3').style('background-color')]")
+
+
+def test_theme_follows_system_and_remembers_a_pick(browser, page_file):
+    seen = {}
+    for scheme in ("dark", "light"):
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, color_scheme=scheme)
+        page = context.new_page()
+        page.goto(page_file.as_uri())
+        page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+        seen[scheme] = theme_of(page)
+        assert seen[scheme][0] == scheme
+        context.close()
+    assert seen["dark"][1] != seen["light"][1] and seen["dark"][2] != seen["light"][2]
+
+    context = browser.new_context(viewport={"width": 1400, "height": 900}, color_scheme="dark")
+    page = context.new_page()
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    # A ?theme= link wins over the system and stays in the URL.
+    page.goto(page_file.as_uri() + "?view=timeline&theme=light")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert theme_of(page) == seen["light"]
+    page.click("#viewLanes")
+    assert "theme=light" in page.url
+    page.click("#optsBtn")
+    assert page.is_checked('input[name="theme"][value="light"]')
+    # Picking one switches at once, is remembered, and drops the link's choice.
+    page.check('input[name="theme"][value="dark"]')
+    assert theme_of(page)[0] == "dark" and theme_of(page)[2] == seen["dark"][2]
+    assert "theme=" not in page.url
+    page.check('input[name="theme"][value="light"]')
+    page.reload()
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert theme_of(page)[0] == "light"
+    page.click("#optsBtn")
+    page.check('input[name="theme"][value="auto"]')
+    assert theme_of(page)[0] == "dark"
+    assert problems == []
+    context.close()
+
+
+def test_print_is_light_from_dark(browser, page_file):
+    page, problems = open_page(browser, page_file, "?theme=dark&task=3")
+    dark = page.evaluate("cy.getElementById('3').style('background-color')")
+    page.evaluate("printSheet()")
+    # The sheet carries the light tokens and a light plan image; the screen stays dark.
+    assert page.evaluate("getComputedStyle(document.getElementById('print')).getPropertyValue('--bg').trim()") == "#f5f6f8"
+    corner = page.evaluate("""new Promise(done => {
+        const img = new Image();
+        img.onload = () => {
+            const c = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height }).getContext('2d');
+            c.drawImage(img, 0, 0);
+            done([...c.getImageData(1, 1, 1, 1).data].slice(0, 3));
+        };
+        img.src = document.querySelector('#print .plan').src;
+    })""")
+    assert corner == [245, 246, 248]
+    assert page.evaluate("[...document.querySelectorAll('#print .badge')].some(b => getComputedStyle(b).backgroundColor === 'rgb(227, 230, 234)')")
+    assert page.evaluate("document.documentElement.dataset.theme") == "dark"
+    assert page.evaluate("cy.getElementById('3').style('background-color')") == dark
     assert problems == []
     page.close()
 
@@ -638,7 +717,7 @@ def test_panel_close_and_esc(browser, page_file, raid_file):
     page.close()
 
 
-LEGEND_SHOWN = "Array.from(document.querySelectorAll('#legendBody .col > div'), d => [d.textContent.trim(), !d.hidden])"
+LEGEND_SHOWN = "Array.from(document.querySelectorAll('#legendBody .col > div'), d => [d.textContent.trim().replace(/^[◔⊘✓] /, ''), !d.hidden])"
 
 
 def legend_shown(page):
@@ -670,9 +749,9 @@ def test_legend_defaults_and_rows(browser, page_file, raid_file):
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.goto(f"{page_file.as_uri()}?view={view}")
         page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
-        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 28
+        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 36
         page.click("#legendToggle")
-        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 64
+        assert page.evaluate("document.getElementById('legend').getBoundingClientRect().height") <= 72
         page.close()
 
 
@@ -1098,7 +1177,7 @@ def test_panel_leads_with_why_it_is_red(browser, programme_file):
     outlook = page.evaluate("Array.from(document.querySelectorAll('#facts tr'), r => r.textContent).find(t => t.startsWith('Outlook'))")
     assert outlook.startswith("OutlookAt risk — #4 Write modules is 3d late")
     late = page.evaluate("Array.from(document.querySelectorAll('#whyHead ~ ul li'), li => li.textContent)")
-    assert "#4 Write modules3d late" in late
+    assert "○#4 Write modules3d late" in late
     assert page.text_content("#facts").startswith("Date15 Dec")
     assert page.is_hidden("#details tr") and page.text_content("#details").startswith("DetailsTypemilestone")
     page.evaluate("select(4, false)")
@@ -1161,7 +1240,7 @@ def test_panel_meta_links_notes_and_width(browser, page_file):
     assert not page.evaluate("document.querySelector('#panel .notes').classList.contains('clamp')")
     assert "Priority" in page.text_content("#details") and "priority" not in page.text_content("#facts")
     box = page.evaluate("document.getElementById('panelGrip').getBoundingClientRect().toJSON()")
-    x, y = box["x"] + 3, box["y"] + 200
+    x, y = box["x"] + 4, box["y"] + 200
     page.mouse.move(x, y)
     page.mouse.down()
     page.mouse.move(x - 100, y, steps=5)
@@ -1246,4 +1325,290 @@ def test_print_sheet(browser, page_file, tmp_path):
     page.pdf(path=str(tmp_path / "plan.pdf"), landscape=True)
     assert (tmp_path / "plan.pdf").read_bytes()[:5] == b"%PDF-"
     assert problems == []
+    page.close()
+
+
+ROUTES = """() => cy.edges('.tl-dep').map(e => {
+    const s = e.source(), t = e.target(), left = t.position('x') - t.width() / 2, te = e.targetEndpoint();
+    const pts = [e.sourceEndpoint(), ...(e.segmentPoints() || []), te];
+    const lo = Math.min(s.position('y'), t.position('y')) - TL.row, hi = Math.max(s.position('y'), t.position('y')) + TL.row;
+    return { id: e.id(), entersLeft: Math.abs(te.x - left) < 1 && Math.abs(te.y - t.position('y')) < 1,
+             staysRight: pts.every(p => p.x >= TL.names + 8), staysNear: pts.every(p => p.y >= lo && p.y <= hi),
+             lastLeg: Math.abs(pts[pts.length - 2].y - te.y) < 1 };
+})"""
+
+
+@pytest.mark.parametrize("fixture", ["page_file", "programme_file"])
+def test_timeline_lines_enter_the_left_end(browser, request, fixture):
+    page, problems = open_page(browser, request.getfixturevalue(fixture), "?view=timeline&deps=1")
+    more(page, "expandAll")
+    routes = page.evaluate(ROUTES)
+    assert routes and all(r["entersLeft"] and r["staysRight"] and r["staysNear"] and r["lastLeg"] for r in routes), routes
+    view_option(page, "depsMode", "off")
+    conflict = page.evaluate(ROUTES)
+    assert conflict and all(r["entersLeft"] for r in conflict)
+    assert problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def load_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("load")
+    db = tmp / "t.db"
+    tg = runner(db)
+    tg("add", "Workstream", "--meta", "owner=ann", "estimate=999", "lane=dev", "team=core")
+    tg("add", "Build", "--parent", "1", "--start", "2026-10-19", "--due", "2026-10-30", "--meta", "owner=ann", "estimate=40")
+    tg("add", "Fix", "--due", "2026-10-16", "--meta", "owner=ann", "estimate=12h", "lane=ops")
+    tg("add", "Overdue", "--due", "2026-10-09", "--meta", "owner=bo", "estimate=10", "lane=ops")
+    tg("add", "Someday", "--meta", "owner=bo", "estimate=5")
+    tg("add", "Unsized", "--due", "2026-10-20", "--meta", "owner=ann")
+    tg("add", "Next year", "--start", "2027-01-04", "--due", "2027-01-08", "--meta", "owner=ann", "estimate=15")
+    tg("add", "Weekend", "--start", "2026-10-24", "--meta", "owner=cy", "estimate=6", "lane=ops")
+    tg("add", "Decide", "--type", "decision", "--due", "2026-10-22", "--meta", "decider=ann", "estimate=3")
+    tg("add", "Ship", "--type", "milestone", "--due", "2026-10-30", "--depends", "2")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out, db
+
+
+def cli_load(db, *args):
+    env = {**os.environ, "TASKGRAPH_TODAY": "2026-10-13"}
+    import json
+    p = subprocess.run([sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", "--json", "load", "--weeks", "12", *args], check=True, capture_output=True, text=True, env=env)
+    return json.loads(p.stdout)
+
+
+PAGE_LOAD = """() => { const d = computeLoad(); return {
+    weeks: d.weeks.map((w, i) => ({ start: isoOf(w), capacity: d.capacity[i] })),
+    groups: d.rows.map(g => ({ name: g.name, hours: g.hours.map(round1), later: round1(g.later), unscheduled: round1(g.unscheduled), over: g.over.flatMap((o, i) => o ? [i] : []) })),
+    unestimated: d.unestimated.map(n => n.id).sort((a, b) => a - b) }; }"""
+
+
+@pytest.mark.parametrize("by,hours", [("owner", 30), ("lane", 15), ("team", 8)])
+def test_load_view_matches_the_cli(browser, load_file, by, hours):
+    path, db = load_file
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}?view=load&loadby={by}&hours={hours}")
+    page.wait_for_function("typeof cy !== 'undefined' && document.querySelector('#loadView table.load')")
+    cli = cli_load(db, "--by", by, "--week-hours", str(hours))
+    mine = page.evaluate(PAGE_LOAD)
+    assert mine["weeks"] == cli["weeks"]
+    assert mine["unestimated"] == cli["unestimated"]
+    assert mine["groups"] == [{k: g[k] for k in ("name", "hours", "later", "unscheduled", "over")} for g in cli["groups"]]
+    assert problems == []
+    page.close()
+
+
+def test_load_view_cells_filters_and_print(browser, load_file):
+    path, db = load_file
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}?view=lanes")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    page.click("#viewLoad")
+    assert "view=load" in page.url and page.is_hidden("#cy") and page.is_visible("#loadView") and page.is_hidden("#legend")
+    rows = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody th.name'), t => t.textContent)")
+    assert rows == ["ann", "bo", "cy"]
+    assert "null" not in page.text_content("#loadView")  # a block with nothing to say is left out
+    first = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody tr:first-child td.c'), t => t.textContent).slice(0, 3)")
+    assert first == ["12", "23", "20"]
+    page.click('#loadView td.c[data-group="ann"][data-week="2026-10-19"]')
+    assert page.text_content("#loadView .loadPick h3") == "ann · week of 19 Oct · 23h of 30h"
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView .loadPick li span'), s => s.textContent)") == ["#2 Build", "#9 Decide"]
+    page.click("#loadView .loadPick li >> nth=0")
+    assert page.evaluate("pinned") == 2 and page.evaluate(PANEL_OPEN) and "task=2" in page.url
+    page.keyboard.press("Escape")
+    page.click("#optsBtn")
+    page.fill("#weekHours", "10")
+    page.press("#weekHours", "Enter")
+    assert "hours=10" in page.url and page.evaluate("weekHours") == 10
+    assert page.text_content('#loadView td.c[data-group="ann"][data-week="2026-10-19"]') == "23!"
+    page.check('input[name="loadKey"][value="lane"]')
+    page.keyboard.press("Escape")
+    assert "loadby=lane" in page.url
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView tbody th.name'), t => t.textContent)") == ["dev", "ops", "Unassigned"]
+    tick(page, "#filters [data-facet=owner] .link:text('None')")
+    page.click('#filters [data-facet=owner][data-value="bo"]')
+    page.keyboard.press("Escape")
+    assert page.evaluate("Array.from(document.querySelectorAll('#loadView tbody th.name'), t => t.textContent)") == ["ops", "Unassigned"]
+    assert page.is_disabled("#exportPng")
+    page.evaluate("printSheet()")
+    assert page.evaluate("Array.from(document.getElementById('print').children, c => c.className)")[:3] == ["", "sub", "loadPrint"]
+    assert page.evaluate("document.querySelectorAll('#print table.load tbody tr').length") == 2
+    page.go_back()
+    page.wait_for_function("loadKey === 'owner'")
+    assert page.evaluate("view") == "load"
+    page.go_back()
+    page.wait_for_function("view === 'lanes'")
+    assert page.is_visible("#cy") and page.is_hidden("#loadView") and page.evaluate("tasks().length") > 0
+    assert problems == []
+    page.close()
+
+
+def test_keyboard_reaches_and_opens_items(browser, programme_file):
+    page, problems = open_page(browser, programme_file)
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement.id") == "skip" and page.is_visible("#skip")
+    page.keyboard.press("Enter")
+    assert page.evaluate("document.activeElement.id") == "cy"
+    page.wait_for_timeout(100)
+    assert "items. Arrow keys move between items." in page.text_content("#announce")
+    page.keyboard.press("Home")
+    first = page.evaluate("kbdId")
+    assert page.evaluate("cy.nodes('.kbd').map(n => Number(n.id()))") == [first]
+    page.wait_for_timeout(100)
+    assert page.text_content("#announce").startswith(f"#{first} ") and page.text_content("#announce").endswith("Enter for details.")
+    page.keyboard.press("ArrowDown")
+    assert page.evaluate("kbdId") != first
+    page.keyboard.press("Enter")
+    assert page.evaluate(PANEL_OPEN) and page.evaluate("pinned") == page.evaluate("kbdId")
+    assert page.evaluate("document.activeElement.id") == "panelTitle"
+    page.keyboard.press("Escape")
+    assert not page.evaluate(PANEL_OPEN) and page.evaluate("document.activeElement.id") == "cy"
+    page.evaluate("setKbd(cy.getElementById('3'))")
+    expanded = page.evaluate("expandedIds().has(3)")
+    page.keyboard.press(" ")
+    assert page.evaluate("expandedIds().has(3)") != expanded and page.evaluate("kbdId") == 3
+    page.click("#cy", position={"x": 5, "y": 5})
+    page.keyboard.press("Tab")
+    assert page.evaluate("cy.nodes('.kbd').length") == 0
+    assert problems == []
+    page.close()
+
+
+def test_timeline_arrows_step_by_row(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=timeline")
+    page.focus("#cy")
+    order = page.evaluate("tasks().toArray().sort((a, b) => a.position('y') - b.position('y')).map(n => Number(n.id()))")
+    page.keyboard.press("Home")
+    seen = [page.evaluate("kbdId")]
+    for _ in order[1:]:
+        page.keyboard.press("ArrowDown")
+        seen.append(page.evaluate("kbdId"))
+    assert seen == order
+    page.keyboard.press("ArrowUp")
+    assert page.evaluate("kbdId") == order[-2]
+    assert problems == []
+    page.close()
+
+
+def test_panel_rows_are_buttons_and_focus_follows(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.evaluate("select(3, false)")
+    row = "h3:text('Blocks') + ul li > .row"
+    assert page.get_attribute(row, "role") == "button" and page.get_attribute(row, "tabindex") == "0"
+    assert page.get_attribute(row, "aria-label") == "#2 Ship v1, Blocked"
+    assert page.evaluate("document.querySelector(\"h3 + ul > li\").getAttribute('role')") is None
+    page.focus(row)
+    page.keyboard.press("Enter")
+    assert page.evaluate("pinned") == 2 and page.evaluate("document.activeElement.id") == "panelTitle"
+    page.focus("#panelGrip")
+    page.keyboard.press("ArrowLeft")
+    assert page.evaluate("panelW") == 360 and page.get_attribute("#panelGrip", "aria-valuenow") == "360"
+    page.focus("h3:text('Blocked by') + ul li > .row")
+    page.evaluate("applyData({ ...DATA })")
+    assert page.evaluate("document.activeElement.dataset.ref") == "3"
+    assert problems == []
+    page.close()
+
+
+def test_names_states_and_marks(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    for sel, name in (("#project", "Project"), ("#search", "Search the plan"), ("#optsBtn", "View options")):
+        assert page.get_attribute(sel, "aria-label") == name
+    assert page.evaluate("['viewGraph', 'viewLanes', 'viewTimeline', 'viewLoad'].map(b => document.getElementById(b).getAttribute('aria-pressed'))") == ["true", "false", "false", "false"]
+    assert page.evaluate("document.querySelector('main').contains(document.getElementById('cy'))") and page.evaluate("document.querySelector('header h1').textContent") == "taskgraph · demo"
+    assert page.evaluate("cy.getElementById('2').data('label')").startswith("⊘ #2 Ship v1") and page.evaluate("cy.getElementById('4').data('label')").startswith("#4 ")
+    page.click("#goal")
+    page.keyboard.press("ArrowDown")
+    active = page.get_attribute("#goal", "aria-activedescendant")
+    assert active and page.get_attribute(f"#{active}", "aria-selected") == "true"
+    page.keyboard.press("Escape")
+    page.click("#filterBtn")
+    page.focus("#type-task")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#filters") and page.evaluate("document.activeElement.id") == "filterBtn"
+    page.click("#optsBtn")
+    assert page.is_disabled('input[name="depsMode"][value="all"]') and page.is_disabled('input[name="laneKey"][value="owner"]')
+    assert page.evaluate("getComputedStyle(document.querySelector('#depsBy .h')).color") == page.evaluate("getComputedStyle(document.getElementById('stamp')).color")
+    page.keyboard.press("Escape")
+    tick(page, "#type-task")
+    page.wait_for_timeout(120)
+    assert page.text_content("#announce").endswith("items shown") and page.get_attribute("#chips", "role") == "list"
+    assert problems == []
+    page.close()
+
+
+def test_load_cells_work_from_the_keyboard(browser, load_file):
+    path, db = load_file
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    page.goto(f"{path.as_uri()}?view=load")
+    page.wait_for_selector("#loadView table.load")
+    cell = '#loadView td.c[data-group="ann"][data-week="2026-10-19"]'
+    assert page.get_attribute(cell, "role") == "button" and page.get_attribute(cell, "aria-label").startswith("ann, week of 19 Oct: 23h of 30h")
+    assert page.evaluate("document.querySelectorAll('#loadView th[scope=row]').length") == 3
+    page.focus(cell)
+    page.keyboard.press("Enter")
+    assert page.is_visible("#loadView .loadPick") and page.evaluate("document.activeElement.dataset.week") == "2026-10-19"
+    page.focus("#loadView .loadPick li > .row")
+    page.keyboard.press(" ")
+    assert page.evaluate("pinned") == 2 and page.evaluate("document.activeElement.id") == "panelTitle"
+    page.close()
+
+
+def test_reduced_motion(browser, page_file):
+    context = browser.new_context(reduced_motion="reduce")
+    page = context.new_page()
+    page.goto(page_file.as_uri())
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("MOTION") == 0
+    context.close()
+
+
+MD_NOTE = """## Plan
+Run **pilot** with [runbook](https://wiki.example/x) and `kubectl`.
+Next line.
+
+1. Freeze
+2. Copy
+   - count rows
+3. Switch
+
+- [x] Comms
+- [ ] Rollback
+
+> Decide at SteerCo.
+
+| Wave | Tenants |
+|------|--------:|
+| 1 | 12 |
+
+```
+select 1;
+```
+<script>alert(1)</script> <img src=x onerror=alert(2)> [bad](javascript:alert(3)) snake_case_name and 2 * 3 * 4."""
+
+
+def test_notes_render_as_safe_markdown(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    dialogs = []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+    page.evaluate(f"applyData({{ ...DATA, nodes: DATA.nodes.map(n => n.id === 3 ? {{ ...n, notes: {MD_NOTE!r} }} : n) }})")
+    page.evaluate("select(3, false)")
+    notes = "#panel .notes"
+    assert page.evaluate(f"Array.from(document.querySelector('{notes}').children, c => c.tagName)") == ["H5", "P", "OL", "UL", "BLOCKQUOTE", "TABLE", "PRE", "P"]
+    assert page.text_content(f"{notes} strong") == "pilot" and page.text_content(f"{notes} p code") == "kubectl"
+    assert page.evaluate(f"document.querySelector('{notes} p').innerHTML.includes('<br>')")
+    assert page.evaluate(f"Array.from(document.querySelectorAll('{notes} a'), a => a.getAttribute('href'))") == ["https://wiki.example/x"]
+    assert page.evaluate(f"document.querySelectorAll('{notes} ol > li > ul > li').length") == 1
+    assert page.evaluate(f"Array.from(document.querySelectorAll('{notes} li.task input'), i => [i.checked, i.disabled])") == [[True, True], [False, True]]
+    assert page.evaluate(f"document.querySelector('{notes} td:last-child').style.textAlign") == "right"
+    assert page.text_content(f"{notes} pre code") == "select 1;"
+    last = page.text_content(f"{notes} > p:last-child")
+    assert "<script>alert(1)</script>" in last and "snake_case_name" in last and "2 * 3 * 4" in last
+    assert page.evaluate(f"document.querySelectorAll('{notes} script, {notes} img, {notes} em').length") == 0
+    assert dialogs == [] and problems == []
     page.close()
