@@ -89,3 +89,6 @@ All 21 findings are fixed in the same change. The axe-core 4.10 scan (WCAG 2.0/2
 At 200% zoom (640 px wide) nothing scrolls sideways, and the panel never exceeds the viewport. Page tests cover each behaviour: keyboard path, Timeline row steps, panel buttons and focus restore, names and states, Load cells, and reduced motion.
 
 Still for a person to do: a pass with VoiceOver and NVDA to hear how each item is announced. The text is set in `describe()`; adjust there.
+
+### Light theme
+A light theme was added after the audit (View options → Theme; Auto follows the system). Every colour on the page and the canvas now comes from one token set per theme, and a page test checks the same pairs as the table above in both themes: body, muted, link and flag text at 4.5:1 or better on every surface they sit on, status labels on their fills, marks, Load cell ink on each bucket, and control edges, plan lines and status borders at 3:1 or better. The lowest light-theme ratios are the goal label (4.6:1), at-risk amber (4.6:1) and the control edge on a control (4.3:1, non-text). Print always uses the light set. The late badge moved from `#ef4444` to `#c81e1e` in both themes: white on the old red was 3.8:1.

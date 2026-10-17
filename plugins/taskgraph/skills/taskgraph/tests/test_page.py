@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -581,26 +582,102 @@ def contrast(a, b):
     return (hi + 0.05) / (lo + 0.05)
 
 
-CONTRAST = [  # foreground, background, is text
-    ("#9ca3af", "#181c22", True),   # stamp, panel "None", search count
-    ("#9ca3af", "#232830", True),   # search placeholder
-    ("#6b7280", "#111418", False),  # dependency and part-of edges
-    ("#6b7280", "#14181e", False),  # AXIS: Timeline bars and grid
-    ("#d1d5db", "#2f3744", True),   # blocked label on blocked fill
-    ("#6b7280", "#111418", False),  # blocked border on canvas
-    ("#ffffff", "#2563eb", True),   # done label on done fill
-    ("#2563eb", "#111418", False),  # done fill on canvas
+CONTRAST = [  # foreground token, background token, is text
+    ("text", "surface", True), ("muted", "surface", True), ("muted", "control", True), ("muted", "bg", True),
+    ("muted", "band-1", True), ("link", "surface", True), ("amber-text", "surface", True), ("red-text", "surface", True),
+    ("on-text", "on", True), ("goal", "bg", True), ("amber", "bg", True), ("red", "bg", True),
+    ("edge", "surface", False), ("edge", "control", False), ("axis", "bg", False), ("axis", "band-1", False),
+    *[(f"st-{s}-fg", f"st-{s}-bg", True) for s in ("ready", "in_progress", "blocked", "done")],
+    ("st-blocked-bd", "bg", False), ("st-done-bg", "bg", False), ("st-ready-bd", "bg", False),
+    *[(f"mark-{s}", "surface", True) for s in ("ready", "in_progress", "blocked", "done")],
+    *[(f"load-{i}-ink", f"load-{i}", True) for i in (1, 2, 3, 4)], ("over-ink", "over", True),
 ]
+TOKENS = "Object.fromEntries([...new Set(%s.flat())].map(k => [k, getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim()]))"
 
 
-def test_contrast_tokens(browser, page_file):
+def hex6(value):
+    value = value.lstrip("#")
+    return "#" + ("".join(c * 2 for c in value) if len(value) == 3 else value[:6])
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_contrast_tokens(browser, page_file, theme):
+    page, problems = open_page(browser, page_file, f"?theme={theme}")
+    names = [[fg, bg] for fg, bg, _ in CONTRAST]
+    tokens = page.evaluate(TOKENS % json.dumps(names))
     for fg, bg, text in CONTRAST:
-        assert contrast(fg, bg) >= (4.5 if text else 3.0), (fg, bg, contrast(fg, bg))
-    page, problems = open_page(browser, page_file)
-    assert page.evaluate("getComputedStyle(document.getElementById('stamp')).color") == "rgb(156, 163, 175)"
+        ratio = contrast(hex6(tokens[fg]), hex6(tokens[bg]))
+        assert ratio >= (4.5 if text else 3.0), (theme, fg, bg, round(ratio, 2))
+    # The canvas draws from the same tokens.
     assert page.evaluate("cy.getElementById('2').data('derived_status')") == "blocked"
-    assert page.evaluate("cy.getElementById('2').style('background-color')") == "rgb(47,55,68)"
-    assert page.evaluate("cy.edges()[0].style('line-color')") == "rgb(107,114,128)"
+    rgb = page.evaluate("cy.getElementById('2').style('background-color')")
+    assert rgb == "rgb(%d,%d,%d)" % tuple(int(hex6(tokens["st-blocked-bg"])[i:i + 2], 16) for i in (1, 3, 5))
+    assert problems == []
+    page.close()
+
+
+def theme_of(page):
+    return page.evaluate("[document.documentElement.dataset.theme, getComputedStyle(document.body).backgroundColor, cy.getElementById('3').style('background-color')]")
+
+
+def test_theme_follows_system_and_remembers_a_pick(browser, page_file):
+    seen = {}
+    for scheme in ("dark", "light"):
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, color_scheme=scheme)
+        page = context.new_page()
+        page.goto(page_file.as_uri())
+        page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+        seen[scheme] = theme_of(page)
+        assert seen[scheme][0] == scheme
+        context.close()
+    assert seen["dark"][1] != seen["light"][1] and seen["dark"][2] != seen["light"][2]
+
+    context = browser.new_context(viewport={"width": 1400, "height": 900}, color_scheme="dark")
+    page = context.new_page()
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    # A ?theme= link wins over the system and stays in the URL.
+    page.goto(page_file.as_uri() + "?view=timeline&theme=light")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert theme_of(page) == seen["light"]
+    page.click("#viewLanes")
+    assert "theme=light" in page.url
+    page.click("#optsBtn")
+    assert page.is_checked('input[name="theme"][value="light"]')
+    # Picking one switches at once, is remembered, and drops the link's choice.
+    page.check('input[name="theme"][value="dark"]')
+    assert theme_of(page)[0] == "dark" and theme_of(page)[2] == seen["dark"][2]
+    assert "theme=" not in page.url
+    page.check('input[name="theme"][value="light"]')
+    page.reload()
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert theme_of(page)[0] == "light"
+    page.click("#optsBtn")
+    page.check('input[name="theme"][value="auto"]')
+    assert theme_of(page)[0] == "dark"
+    assert problems == []
+    context.close()
+
+
+def test_print_is_light_from_dark(browser, page_file):
+    page, problems = open_page(browser, page_file, "?theme=dark&task=3")
+    dark = page.evaluate("cy.getElementById('3').style('background-color')")
+    page.evaluate("printSheet()")
+    # The sheet carries the light tokens and a light plan image; the screen stays dark.
+    assert page.evaluate("getComputedStyle(document.getElementById('print')).getPropertyValue('--bg').trim()") == "#f5f6f8"
+    corner = page.evaluate("""new Promise(done => {
+        const img = new Image();
+        img.onload = () => {
+            const c = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height }).getContext('2d');
+            c.drawImage(img, 0, 0);
+            done([...c.getImageData(1, 1, 1, 1).data].slice(0, 3));
+        };
+        img.src = document.querySelector('#print .plan').src;
+    })""")
+    assert corner == [245, 246, 248]
+    assert page.evaluate("[...document.querySelectorAll('#print .badge')].some(b => getComputedStyle(b).backgroundColor === 'rgb(227, 230, 234)')")
+    assert page.evaluate("document.documentElement.dataset.theme") == "dark"
+    assert page.evaluate("cy.getElementById('3').style('background-color')") == dark
     assert problems == []
     page.close()
 
@@ -1335,6 +1412,7 @@ def test_load_view_cells_filters_and_print(browser, load_file):
     assert "view=load" in page.url and page.is_hidden("#cy") and page.is_visible("#loadView") and page.is_hidden("#legend")
     rows = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody th.name'), t => t.textContent)")
     assert rows == ["ann", "bo", "cy"]
+    assert "null" not in page.text_content("#loadView")  # a block with nothing to say is left out
     first = page.evaluate("Array.from(document.querySelectorAll('#loadView tbody tr:first-child td.c'), t => t.textContent).slice(0, 3)")
     assert first == ["12", "23", "20"]
     page.click('#loadView td.c[data-group="ann"][data-week="2026-10-19"]')
@@ -1455,7 +1533,7 @@ def test_names_states_and_marks(browser, page_file):
     assert page.is_hidden("#filters") and page.evaluate("document.activeElement.id") == "filterBtn"
     page.click("#optsBtn")
     assert page.is_disabled('input[name="depsMode"][value="all"]') and page.is_disabled('input[name="laneKey"][value="owner"]')
-    assert page.evaluate("getComputedStyle(document.querySelector('#depsBy .h')).color") == "rgb(156, 163, 175)"
+    assert page.evaluate("getComputedStyle(document.querySelector('#depsBy .h')).color") == page.evaluate("getComputedStyle(document.getElementById('stamp')).color")
     page.keyboard.press("Escape")
     tick(page, "#type-task")
     page.wait_for_timeout(120)
