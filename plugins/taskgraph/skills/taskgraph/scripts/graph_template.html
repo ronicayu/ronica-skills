@@ -470,7 +470,8 @@ const cy = cytoscape({
     { selector: 'node.tl', style: {
       'width': 'data(w)', 'height': 'data(h)', 'padding': 0, 'shape': 'round-rectangle', 'border-width': 0, 'border-style': 'solid',
       'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 6, 'text-margin-y': 0, 'text-wrap': 'none',
-      'font-size': 12, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2
+      'font-size': 12, 'font-weight': 'normal', 'color': '#9ca3af', 'z-index-compare': 'manual', 'z-index': 2,
+      'text-background-color': '#15191f', 'text-background-opacity': 0.85, 'text-background-padding': 1
     } },
     { selector: 'node.tl.mk-pt', style: { 'shape': 'ellipse' } },
     { selector: 'node.tl.mk-sum', style: {
@@ -915,60 +916,26 @@ function conflictEdges(open) {
   return ids;
 }
 
-function routeDeps(shown, marks, right) {
-  const rs = shown.map(edge => {
+// Gantt-style dependency lines: out of the bottom (or top) of the predecessor's finishing end,
+// into the dependent's left end, where its work starts. When the dependent starts before the
+// predecessor ends (the conflict case) the line turns back along the gap above the dependent's
+// row rather than looping round the chart. Lines into one item meet at one arrowhead.
+const STUB = 8;
+function routeDeps(shown, marks) {
+  shown.forEach(edge => {
     const s = marks.get(edge.source().id()), t = marks.get(edge.target().id());
     const dir = t.y > s.y ? 1 : -1;
-    return { edge, s, t, dir, y1: s.y + dir * TL.row / 2, y2: t.y - dir * TL.row / 2 };
-  });
-  const ports = new Map();
-  const dock = (m, side, r, end, far) => {
-    const key = m.id + side;
-    ports.set(key, [...(ports.get(key) || []), { m, r, end, far }]);
-  };
-  rs.forEach(r => {
-    dock(r.s, r.dir, r, 'ex', r.t);
-    dock(r.t, -r.dir, r, 'nx', r.s);
-  });
-  ports.forEach(g => {
-    g.sort((p, q) => p.far.x - q.far.x);
-    g.forEach((p, i) => { p.r[p.end] = p.m.x + (i + 0.5 - g.length / 2) * Math.min(4, (p.m.x2 - p.m.x1 - 2) / g.length); });
-  });
-  rs.filter(r => r.y1 !== r.y2).forEach(r => {
-    const lo = Math.min(r.s.y, r.t.y), hi = Math.max(r.s.y, r.t.y);
-    const between = [...marks.values()].filter(m => m.y > lo && m.y < hi);
-    const free = x => !between.some(m => m.from < x && x < m.end + 4);
-    const cost = x => Math.abs(r.ex - x) + Math.abs(x - r.nx);
-    let best = TL.names + 8;
-    for (let x = best; x <= right; x += 6) if (free(x) && cost(x) < cost(best)) best = x;
-    r.xc = best;
-  });
-  groupBy(rs.filter(r => r.xc != null), r => r.xc).forEach(g => {
-    const items = g.map(r => ({ r, lo: Math.min(r.y1, r.y2), hi: Math.max(r.y1, r.y2) }));
-    assignTracks(items);
-    items.forEach(it => { it.r.xc -= it.slot * 3; });
-  });
-  const runs = rs.flatMap(r => {
-    const mid = r.xc ?? r.nx;
-    r.h1 = { lo: Math.min(r.ex, mid), hi: Math.max(r.ex, mid), y: r.y1 };
-    r.h2 = r.xc == null ? r.h1 : { lo: Math.min(mid, r.nx), hi: Math.max(mid, r.nx), y: r.y2 };
-    return r.h1 === r.h2 ? [r.h1] : [r.h1, r.h2];
-  });
-  groupBy(runs, h => h.y).forEach(g => {
-    const step = Math.min(2, 4 / assignTracks(g));
-    g.forEach(h => { h.off = trackUnit(h.slot) * step; });
-  });
-  rs.forEach(r => {
-    const ya = r.y1 + r.h1.off, yd = r.y2 + r.h2.off;
-    const raw = r.xc == null ? [[r.ex, ya], [r.nx, ya]] : [[r.ex, ya], [r.xc, ya], [r.xc, yd], [r.nx, yd]];
-    const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
-    const style = {
-      'source-endpoint': `${r.ex - r.s.x}px ${r.dir * r.s.h / 2}px`,
-      'target-endpoint': `${r.nx - r.t.x}px ${-r.dir * r.t.h / 2}px`
-    };
-    if (points.length === 2 && points[0][0] === points[1][0]) style['curve-style'] = 'straight';
-    else Object.assign(style, elbow(r.s, r.t, points));
-    r.edge.style(style);
+    const sx = s.pt ? s.x : Math.max(s.x1 + 1, s.x2 - 3), sy = s.y + dir * s.h / 2;
+    const tx = t.x1, ty = t.y;
+    const corners = sx <= tx - STUB
+      ? [[sx, ty]]
+      : [[sx, ty - dir * TL.row / 2], [tx - STUB, ty - dir * TL.row / 2], [tx - STUB, ty]];
+    edge.style({
+      'curve-style': 'segments',
+      'source-endpoint': `${sx - s.x}px ${sy - s.y}px`,
+      'target-endpoint': `${tx - t.x}px 0px`,
+      ...elbow(s, t, corners)
+    });
   });
 }
 
@@ -1049,7 +1016,7 @@ function layoutTimeline() {
   drawn.addClass('tl-dep');
   drawn.filter(e => critical.has(e.id())).addClass('tl-critical');
   drawn.filter(e => hot.has(e.id())).addClass('tl-conflict');
-  routeDeps(drawn.toArray(), marks, width);
+  routeDeps(drawn.toArray(), marks);
 }
 
 function layout(fit = true) {

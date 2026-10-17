@@ -1247,3 +1247,26 @@ def test_print_sheet(browser, page_file, tmp_path):
     assert (tmp_path / "plan.pdf").read_bytes()[:5] == b"%PDF-"
     assert problems == []
     page.close()
+
+
+ROUTES = """() => cy.edges('.tl-dep').map(e => {
+    const s = e.source(), t = e.target(), left = t.position('x') - t.width() / 2, te = e.targetEndpoint();
+    const pts = [e.sourceEndpoint(), ...(e.segmentPoints() || []), te];
+    const lo = Math.min(s.position('y'), t.position('y')) - TL.row, hi = Math.max(s.position('y'), t.position('y')) + TL.row;
+    return { id: e.id(), entersLeft: Math.abs(te.x - left) < 1 && Math.abs(te.y - t.position('y')) < 1,
+             staysRight: pts.every(p => p.x >= TL.names + 8), staysNear: pts.every(p => p.y >= lo && p.y <= hi),
+             lastLeg: Math.abs(pts[pts.length - 2].y - te.y) < 1 };
+})"""
+
+
+@pytest.mark.parametrize("fixture", ["page_file", "programme_file"])
+def test_timeline_lines_enter_the_left_end(browser, request, fixture):
+    page, problems = open_page(browser, request.getfixturevalue(fixture), "?view=timeline&deps=1")
+    more(page, "expandAll")
+    routes = page.evaluate(ROUTES)
+    assert routes and all(r["entersLeft"] and r["staysRight"] and r["staysNear"] and r["lastLeg"] for r in routes), routes
+    view_option(page, "depsMode", "off")
+    conflict = page.evaluate(ROUTES)
+    assert conflict and all(r["entersLeft"] for r in conflict)
+    assert problems == []
+    page.close()
