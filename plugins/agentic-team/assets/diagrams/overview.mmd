@@ -1,0 +1,29 @@
+flowchart TD
+  OP([Operator])
+  M[Manager<br/>playbooks + principles]
+  TG[(Taskgraph<br/>plan, tasks, metadata)]
+  CFG[config.py<br/>reads .agentic-team.toml]
+  B[brief.py<br/>renders one brief per task]
+  RUN[(.agentic-team/<br/>standing orders, gates,<br/>briefs, reports)]
+  W[Worker sessions<br/>one per task, up to max_parallel]
+  V[Verifier session<br/>high-risk tasks only]
+  S[status.py]
+  CON([Consultants])
+
+  OP -->|"requests, standing orders"| M
+  M -->|"batched reports, gates"| OP
+  M <-->|"plan, start, meta, done"| TG
+  M -->|"check, get, model"| CFG
+  M -->|"render"| B
+  TG -->|"task content"| B
+  CFG -->|"constraints, autonomy"| B
+  RUN -->|"standing orders, upstream reports"| B
+  M -->|"claude --bg with brief"| W
+  M -->|"verifier brief"| V
+  W -->|"one report: PASS, ISSUES, BLOCKED"| M
+  V -->|"verdict"| M
+  M -->|"save reports, gates"| RUN
+  W -.->|"questions"| CON
+  TG --> S
+  RUN --> S
+  S -->|"status tables"| M

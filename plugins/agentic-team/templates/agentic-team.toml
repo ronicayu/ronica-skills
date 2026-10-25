@@ -1,0 +1,50 @@
+# Agentic Team project config. Copy to .agentic-team.toml in the repository
+# root, or run /agentic-team:setup. Replace every "TODO". Omit a key to use
+# its default. Never put credentials or secrets here. Private or
+# machine-specific values go in .agentic-team.local.toml (gitignored); its
+# keys override these. Field reference: plugins/agentic-team/README.md.
+
+[taskgraph]
+project = "TODO"            # required; `tg projects` lists names
+# plan = "PLAN.md"          # supplemental plan, context only
+
+[consultants]
+sessions = []               # bare session names
+restart = ""                # how to restart a missing consultant
+
+[constraints]               # become FORBIDDEN in every brief
+read_only = "TODO"          # "" when none applies
+pinned_versions = "TODO"
+do_not_send = "TODO"
+do_not_modify = "TODO"
+other = []
+
+[serialization]
+rules = []                  # "path or area: ordering rule"
+
+[progress]
+tool = ""                   # read-only progress command, if any
+
+[autonomy]
+grant = ""                  # "" means no standing full-autonomy grant
+always_pause = []           # gates that always need the operator
+
+[sessions]
+# brief_template = ".agentic-team/brief.md"
+# max_parallel = 4
+# permission_mode = "auto"
+# launch_outside_sandbox = false
+# timezone = "Asia/Singapore"
+# timezone_label = "SGT"
+
+[models]
+# mechanical = "haiku"
+# implementation = { model = "sonnet", effort = "high" }
+# judgement = "opus"
+# verifier = "opus"         # default: a different model from the worker's
+
+# [models.overrides]
+# "data migration" = { model = "opus", effort = "high" }
+
+[notifications]
+# skill = "telegram-send:telegram-send"

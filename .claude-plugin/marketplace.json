@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "ronica-skills",
-  "description": "Writing, documentation, notification, and planning skills for Claude Code and OpenClaw.",
+  "description": "Writing, documentation, notification, planning, and developer-tool plugins for Claude Code.",
   "version": "1.0.0",
   "owner": {
     "name": "Yu Rong",
@@ -73,6 +73,26 @@
         "technical-docs"
       ],
       "category": "documentation"
+    },
+    {
+      "name": "agentic-team",
+      "source": "agentic-team",
+      "description": "A project manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/agentic-team",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "agents",
+        "project-management",
+        "taskgraph",
+        "delegation"
+      ],
+      "category": "productivity"
     },
     {
       "name": "telegram-send",
