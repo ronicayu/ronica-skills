@@ -1,0 +1,31 @@
+sequenceDiagram
+  autonumber
+  actor OP as Operator
+  participant M as Manager
+  participant C as config.py
+  participant TG as Taskgraph
+  participant B as brief.py
+  participant W as Worker
+  participant V as Verifier
+
+  M->>C: check
+  C-->>M: ok
+  M->>TG: ready, show 41
+  M->>B: --task 41 --session mgr
+  B->>TG: show 41 (notes, scope, verify)
+  B->>C: load config
+  B-->>M: .agentic-team/briefs/task-41-1.md
+  M->>C: model implementation
+  C-->>M: sonnet, effort high
+  M->>W: claude --bg --agent agentic-team:worker
+  M->>TG: start 41, meta session, model, attempt
+  Note over M: Manager launches other tasks meanwhile
+  W-->>M: Report: PASS, checkpoint
+  M->>TG: meta report_status=PASS, state_at
+  Note over M: Next drain point
+  M->>V: verifier brief pinned to commit SHA
+  V-->>M: Verdict: test-verified
+  M->>TG: meta verdict, verdict_ref, tokens
+  M->>TG: done 41
+  M->>W: claude stop
+  M->>OP: Status report and open gates

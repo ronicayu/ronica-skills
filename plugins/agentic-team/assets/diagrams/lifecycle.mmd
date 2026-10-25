@@ -1,0 +1,20 @@
+flowchart TD
+  READY([Ready task in Taskgraph]) --> RENDER{brief.py}
+  RENDER -->|"exit 2: unscoped task<br/>or config problem"| FIX[Fix it in Taskgraph<br/>or the config]
+  FIX --> RENDER
+  RENDER -->|"exit 3: STOP order"| HALT([Launch nothing])
+  RENDER -->|"brief saved"| LAUNCH[Launch a fresh worker<br/>model from config.py model]
+  LAUNCH --> FLIGHT[In flight]
+  FLIGHT -->|"report arrives:<br/>queue it, keep working"| DRAIN{Drain point}
+  FLIGHT -->|"died, no report"| RETRY{Retries left?}
+  DRAIN -->|"PASS"| VERIFY{Verify, pinned to<br/>SHA or checksums}
+  DRAIN -->|"ISSUES: defects, or<br/>BLOCKED that evidence answers"| AGAIN[Fix round:<br/>next attempt]
+  DRAIN -->|"ISSUES: ran out of time"| SPLIT[Split the work<br/>in Taskgraph]
+  DRAIN -->|"BLOCKED: product call"| GATE[Gate for the operator]
+  RETRY -->|"yes"| AGAIN
+  RETRY -->|"no, after 2"| GATE
+  VERIFY -->|"verify-failed"| AGAIN
+  VERIFY -->|"artifact- or test-verified"| DONE([tg done, record tokens])
+  AGAIN --> RENDER
+  SPLIT --> READY
+  DONE -->|"unblocks"| READY
