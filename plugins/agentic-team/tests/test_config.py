@@ -44,25 +44,26 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL)
         cfg = config.load(self.root)
         self.assertEqual(config.problems(cfg), [])
-        self.assertEqual(cfg["taskgraph"], {"project": "demo", "plan": ""})
-        self.assertEqual(cfg["sessions"]["max_parallel"], 4)
+        self.assertEqual(cfg["taskgraph"], {"project": "demo"})
+        self.assertEqual(cfg["sessions"]["max_parallel"], 2)
         self.assertEqual(cfg["sessions"]["permission_mode"], "auto")
-        self.assertIs(cfg["sessions"]["launch_outside_sandbox"], False)
+        self.assertEqual(set(cfg["sessions"]),
+                         {"max_parallel", "permission_mode", "timezone", "timezone_label"})
         self.assertTrue(cfg["sessions"]["timezone"])
-        self.assertTrue(os.path.isabs(cfg["sessions"]["brief_template"]))
-        self.assertTrue(cfg["sessions"]["brief_template"].endswith("templates/task-brief.md"))
         self.assertEqual(cfg["models"]["mechanical"], {"model": "haiku", "effort": None})
         self.assertEqual(cfg["models"]["implementation"], {"model": "sonnet", "effort": "high"})
         self.assertIsNone(cfg["models"]["verifier"])
-        self.assertEqual(cfg["constraints"]["other"], [])
+        self.assertEqual(cfg["constraints"]["forbidden"], [])
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):
         with open(os.path.join(config.PLUGIN_ROOT, "templates", "agentic-team.toml")) as fh:
             self.write(fh.read())
         found = config.problems(config.load(self.root))
-        self.assertEqual(len(found), 5, found)
+        self.assertEqual(len(found), 2, found)
         self.assertTrue(all("is TODO" in p for p in found))
+        self.assertIn("taskgraph.project", found[0])
+        self.assertIn("constraints.forbidden", found[1])
 
     def test_local_overrides_scalar_table_and_list(self):
         self.write("""\
@@ -74,7 +75,7 @@ class ConfigTest(unittest.TestCase):
             [models]
             implementation = { model = "sonnet", effort = "high" }
             [constraints]
-            other = ["a", "b"]
+            forbidden = ["a", "b"]
         """)
         self.write("""\
             [sessions]
@@ -82,28 +83,26 @@ class ConfigTest(unittest.TestCase):
             [models.implementation]
             effort = "low"
             [constraints]
-            other = ["c"]
+            forbidden = ["c"]
         """, local=True)
         cfg = config.load(self.root)
         self.assertEqual(config.problems(cfg), [])
         self.assertEqual(cfg["sessions"]["max_parallel"], 6)
         self.assertEqual(cfg["sessions"]["permission_mode"], "acceptEdits")
         self.assertEqual(cfg["models"]["implementation"], {"model": "sonnet", "effort": "low"})
-        self.assertEqual(cfg["constraints"]["other"], ["c"])
+        self.assertEqual(cfg["constraints"]["forbidden"], ["c"])
 
     def test_todo_detected(self):
         self.write("""\
             taskgraph.project = "demo"
-            constraints.do_not_send = "TODO"
-            serialization.rules = ["TODO"]
+            constraints.forbidden = ["TODO"]
         """)
         found = config.problems(config.load(self.root))
-        self.assertEqual(len(found), 2, found)
-        self.assertIn("constraints.do_not_send is TODO", found[0])
-        self.assertIn("serialization.rules is TODO", found[1])
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("constraints.forbidden is TODO", found[0])
         code, out, _ = self.run_cli("check")
         self.assertEqual(code, 2)
-        self.assertIn("do_not_send", out)
+        self.assertIn("forbidden", out)
 
     def test_empty_project(self):
         self.write('taskgraph.project = ""\n')
@@ -126,16 +125,14 @@ class ConfigTest(unittest.TestCase):
     def test_wrong_types(self):
         self.write(MINIMAL + """\
             sessions.max_parallel = 0
-            sessions.launch_outside_sandbox = "yes"
             sessions.timezone = "Mars/Olympus"
-            consultants.sessions = "alpha"
+            constraints.forbidden = "x"
             models.judgement = { effort = "high" }
         """)
         found = "\n".join(config.problems(config.load(self.root)))
         self.assertIn("sessions.max_parallel must be a positive integer", found)
-        self.assertIn("sessions.launch_outside_sandbox must be true or false", found)
         self.assertIn("not an IANA time zone", found)
-        self.assertIn("consultants.sessions must be a list of strings", found)
+        self.assertIn("constraints.forbidden must be a list of strings", found)
         self.assertIn("models.judgement must be a model id", found)
 
     def test_toml_syntax_error(self):
@@ -162,23 +159,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((code, json.loads(out)), (0, {"model": None, "effort": None}))
 
     def test_get(self):
-        self.write(MINIMAL + 'consultants.sessions = ["alpha"]\n')
+        self.write(MINIMAL + 'constraints.forbidden = ["alpha"]\n')
         self.assertEqual(self.run_cli("get", "taskgraph.project")[:2], (0, "demo\n"))
-        self.assertEqual(self.run_cli("get", "consultants.sessions")[:2], (0, '["alpha"]\n'))
-        self.assertEqual(self.run_cli("get", "sessions.launch_outside_sandbox")[:2], (0, "false\n"))
+        self.assertEqual(self.run_cli("get", "constraints.forbidden")[:2], (0, '["alpha"]\n'))
+        self.assertEqual(self.run_cli("get", "sessions.max_parallel")[:2], (0, "2\n"))
         self.assertEqual(self.run_cli("get", "taskgraph.project", "--json")[:2], (0, '"demo"\n'))
         code, _, err = self.run_cli("get", "taskgraph.projet")
         self.assertEqual(code, 2)
         self.assertIn("did you mean taskgraph.project?", err)
-
-    def test_relative_brief_template(self):
-        os.makedirs(os.path.join(self.root, "t"))
-        open(os.path.join(self.root, "t", "brief.md"), "w").close()
-        self.write(MINIMAL + 'sessions.brief_template = "t/brief.md"\n')
-        cfg = config.load(self.root)
-        self.assertEqual(config.problems(cfg), [])
-        self.assertEqual(cfg["sessions"]["brief_template"],
-                         os.path.join(os.path.abspath(self.root), "t", "brief.md"))
 
 
 if __name__ == "__main__":

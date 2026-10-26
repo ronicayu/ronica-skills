@@ -1,23 +1,23 @@
 flowchart TD
-  READY([Ready task in Taskgraph]) --> RENDER{brief.py}
-  RENDER -->|"exit 2: unscoped task<br/>or config problem"| FIX[Fix it in Taskgraph<br/>or the config]
-  FIX --> RENDER
-  RENDER -->|"exit 3: STOP order"| HALT([Launch nothing])
-  RENDER -->|"brief saved"| LAUNCH[Launch a fresh worker<br/>in its own worktree]
-  LAUNCH --> FLIGHT[In flight]
-  FLIGHT -->|"worker files its result:<br/>queue it, keep working"| DRAIN{Drain point}
-  FLIGHT -->|"ended, no result:<br/>record DIED"| RETRY{Attempt 3 failed?}
-  DRAIN -->|"PASS"| VERIFY{Verify, pinned to<br/>the Head SHA}
-  DRAIN -->|"ISSUES: defects, or<br/>BLOCKED that evidence answers"| AGAIN[Fix round:<br/>next attempt]
-  DRAIN -->|"ISSUES: ran out of time"| SPLIT[Split the work<br/>in Taskgraph]
-  DRAIN -->|"BLOCKED: product call"| GATE[Gate for the operator]
+  READY([Ready task in Taskgraph]) --> LAUNCH{run.py launch}
+  LAUNCH -->|"exit 2: unscoped task,<br/>config problem, live session"| FIX[Fix it in Taskgraph<br/>or the config]
+  FIX --> LAUNCH
+  LAUNCH -->|"exit 3: STOP order"| HALT([Launch nothing])
+  LAUNCH -->|"brief saved,<br/>worker started"| FLIGHT[In flight]
+  FLIGHT --> RECORD{run.py record}
+  RECORD -->|"arrived PASS"| VERIFY{Verify: Manager rerun<br/>or run.py verify}
+  RECORD -->|"ISSUES: defects, or<br/>BLOCKED that evidence answers"| AGAIN[Fix round:<br/>next attempt]
+  RECORD -->|"ISSUES: ran out of time"| SPLIT[Split the work<br/>in Taskgraph]
+  RECORD -->|"BLOCKED: product call"| DECIDE[Decision node<br/>for the operator]
+  RECORD -->|"died"| RETRY{Attempt 3 failed?}
   RETRY -->|"no"| AGAIN
-  RETRY -->|"yes: abandoned"| GATE
-  VERIFY -->|"verify-failed"| AGAIN
-  VERIFY -->|"artifact- or test-verified"| TOKENS[Record time and tokens]
-  TOKENS --> MERGE[Integrate: list branch as ready to merge,<br/>merge only if standing orders allow]
-  MERGE --> DONE([tg done])
-  AGAIN --> RENDER
+  RETRY -->|"yes: run.py abandon"| DECIDE
+  VERIFY --> CLOSE{run.py close}
+  CLOSE -->|"verify-failed"| AGAIN
+  CLOSE -->|"artifact- or test-verified:<br/>tokens, tg done"| MERGE{MERGE: line in<br/>standing orders?}
+  MERGE -->|"yes: merge,<br/>then claude rm"| DONE([Done])
+  MERGE -->|"no: ready to merge"| OPMERGE[Operator merges]
+  OPMERGE -->|"run.py merged,<br/>then claude rm"| DONE
+  AGAIN --> LAUNCH
   SPLIT --> READY
-  DONE -->|"after the merge: claude rm"| CLEAN([Sessions and worktrees removed])
   DONE -->|"unblocks"| READY

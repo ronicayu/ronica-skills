@@ -5,7 +5,7 @@ Usage:
     config.py [--root DIR] get <dotted.key> [--json]
     config.py [--root DIR] show [--json]
     config.py [--root DIR] check
-    config.py [--root DIR] model <tier|work type>
+    config.py [--root DIR] model <tier|override key>
 
 Merges <root>/.agentic-team.toml with the optional, gitignored
 <root>/.agentic-team.local.toml (local keys win; local lists replace tracked
@@ -14,12 +14,14 @@ lists), fills in defaults from SCHEMA, and validates the result.
     get     print one value: a scalar plainly, a table or list as JSON
     show    print the merged config with defaults, as TOML-like text or JSON
     check   list every problem, or print `ok`
-    model   resolve a tier or work type to {"model": ..., "effort": ...}
+    model   resolve a tier or a models.overrides key to
+            {"model": ..., "effort": ...}
 
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
 
-Python callers may import load(root) and problems(config).
+Python callers (run.py) may import load(root), problems(config) and
+resolve_model(config, name).
 """
 
 import argparse
@@ -61,36 +63,15 @@ def system_timezone():
 # validation, defaults, and `show` all read this table; add new keys here.
 # A default of None means "unset"; callables are evaluated at load time.
 SCHEMA = {
-    "taskgraph": {
-        "project": ("str", ""),
-        "plan": ("str", ""),
-    },
-    "consultants": {
-        "sessions": ("list", []),
-        "restart": ("str", ""),
-    },
-    "constraints": {
-        "read_only": ("str", ""),
-        "pinned_versions": ("str", ""),
-        "do_not_send": ("str", ""),
-        "do_not_modify": ("str", ""),
-        "other": ("list", []),
-    },
-    "serialization": {
-        "rules": ("list", []),
-    },
-    "progress": {
-        "tool": ("str", ""),
-    },
+    "taskgraph": {"project": ("str", "")},
+    "constraints": {"forbidden": ("list", [])},
     "autonomy": {
         "grant": ("str", ""),
         "always_pause": ("list", []),
     },
     "sessions": {
-        "brief_template": ("path", "${CLAUDE_PLUGIN_ROOT}/templates/task-brief.md"),
-        "max_parallel": ("posint", 4),
+        "max_parallel": ("posint", 2),
         "permission_mode": ("nonempty", "auto"),
-        "launch_outside_sandbox": ("bool", False),
         "timezone": ("timezone", system_timezone),
         "timezone_label": ("str", ""),
     },
@@ -101,17 +82,13 @@ SCHEMA = {
         "verifier": ("model?", None),
         "overrides": ("overrides", {}),
     },
-    "notifications": {
-        "skill": ("str", ""),
-    },
+    "notifications": {"skill": ("str", "")},
 }
 
 TYPE_NAMES = {
     "str": "a string",
     "nonempty": "a non-empty string",
-    "path": "a path string",
     "list": "a list of strings",
-    "bool": "true or false",
     "posint": "a positive integer",
     "timezone": "an IANA time zone name",
     "model": 'a model id or { model = "...", effort = "..." }',
@@ -202,12 +179,6 @@ def zone_label(zone):
         return ""
 
 
-def resolve_path(value, root):
-    value = value.replace("${CLAUDE_PLUGIN_ROOT}", PLUGIN_ROOT)
-    value = os.path.expanduser(value)
-    return value if os.path.isabs(value) else os.path.abspath(os.path.join(root, value))
-
-
 def load(root="."):
     """Return the merged Config with defaults filled in. Never raises for a
     bad config; problems(config) reports what is wrong."""
@@ -238,8 +209,6 @@ def load(root="."):
                 value = normalize_model(value) or value
             elif kind == "overrides" and isinstance(value, dict):
                 value = {k: normalize_model(v) or v for k, v in value.items()}
-            elif kind == "path" and isinstance(value, str) and value != TODO:
-                value = resolve_path(value or default, root)
             data[section][key] = value
 
     sessions = data["sessions"]
@@ -263,14 +232,12 @@ def is_todo(value):
 
 
 def type_ok(kind, value):
-    if kind in ("str", "path"):
+    if kind == "str":
         return isinstance(value, str)
     if kind == "nonempty":
         return isinstance(value, str) and bool(value.strip())
     if kind == "list":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
-    if kind == "bool":
-        return isinstance(value, bool)
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "timezone":
@@ -302,8 +269,6 @@ def problems(config):
                     ZoneInfo(value)
                 except (ValueError, ZoneInfoNotFoundError):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
-            if kind == "path" and value and not os.path.isfile(value):
-                found.append(f"{dotted}: {value} not found")
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")
@@ -410,7 +375,7 @@ def main(argv=None):
     show = sub.add_parser("show", help="print the merged config with defaults")
     show.add_argument("--json", action="store_true")
     sub.add_parser("check", help="list problems, or print ok")
-    model = sub.add_parser("model", help="resolve a tier or work type")
+    model = sub.add_parser("model", help="resolve a tier or a models.overrides key")
     model.add_argument("name", help="mechanical, implementation, judgement, verifier, or a models.overrides key")
     args = parser.parse_args(argv)
 

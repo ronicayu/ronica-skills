@@ -1,7 +1,6 @@
 # Task {{TASK_ID}} — {{TASK_TITLE}}
 
 Project: {{PROJECT}}
-Session: {{SESSION_NAME}}
 Time zone: {{TIMEZONE}}
 
 ## GOAL
@@ -15,11 +14,8 @@ Time zone: {{TIMEZONE}}
 ## CONTEXT
 
 - Task: `{{TASKGRAPH_COMMAND}} show {{TASK_ID}}` (read only)
-- Supplemental plan: {{PLAN_FILE}}
-- Base commit: {{BASE}}. Your worktree starts from the default branch.
-  Before anything else, run `git reset --keep {{BASE}}` in your worktree.
+- {{SETUP}}
 - Last checkpoint: {{CHECKPOINT}}
-- Consultants: {{CONSULTANTS}}
 
 {{UPSTREAM}}
 
@@ -51,8 +47,8 @@ Time zone: {{TIMEZONE}}
 
 Your last action is this one command, run once. Replace `<STATUS>` with
 `PASS`, `ISSUES`, or `BLOCKED`, and replace `<your report>` with your report
-in the format in your agent instructions. Keep the quoted heredoc as it is.
-Do not pipe the report in, and do not write it to a file.
+in the format in your agent instructions. {{REPORT_NOTE}} Keep the quoted
+heredoc as it is. Do not pipe the report in, and do not write it to a file.
 
 ```sh
 {{RESULT_COMMAND}}
