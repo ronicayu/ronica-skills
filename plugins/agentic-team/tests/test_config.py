@@ -1,4 +1,4 @@
-"""Tests for scripts/config.py. Run: python3 -m unittest discover plugins/agentic-team/tests"""
+"""Tests for scripts/config.py. Run: "$PY" -m unittest discover plugins/agentic-team/tests"""
 
 import contextlib
 import io

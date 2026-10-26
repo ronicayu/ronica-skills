@@ -24,8 +24,8 @@ adds what Taskgraph cannot decide.
    `serialization.rules` (`config.py get serialization.rules`) and record
    each order as a Taskgraph dependency.
 4. **Relay context through dependencies.** When a task needs an upstream
-   task's result, record the dependency. The launch playbook pastes the
-   upstream report into the brief.
+   task's result, record the dependency. `brief.py` pastes the upstream
+   task's latest result into the brief.
 5. **Size the plan.** Show the operator a short plan before you add more than
    three tasks. For work the operator already asked for, add one or two tasks
    without asking again.
