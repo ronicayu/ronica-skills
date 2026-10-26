@@ -34,7 +34,11 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 | `deps [--cross lane\|team\|owner\|project] [--open] [--all-projects]` | List dependency links with people, lanes, statuses, and slack. Use `--cross` to show only cross-group links and `--open` to hide completed work. |
 | `report [--by lane\|team\|owner\|project] [--within DAYS] [--since 7d\|DATE] [--risks N] [--md] [--all-projects]` | Create a one-page status report. |
 | `load [--by owner\|team\|lane] [--weeks N] [--from DATE] [--week-hours H] [--all-projects]` | Show estimated hours, over-committed weeks, unscheduled work, and work without estimates. |
-| `export [--all-projects] [--out PATH]` | Export tasks, metadata, and links as JSON. Taskgraph has no import command. |
+| `result add ID --status S [--kind K] [--attempt N] [--by NAME] [--body TEXT \| --body-file PATH]` | Add one entry to a task's result log. `S` and `K` are one word of letters, digits, `_`, or `-`. `K` defaults to `task`. Use `--body-file -` to read the body from stdin. |
+| `result ls [ID] [--kind K] [--attempt N] [--status S] [--latest] [--all-projects]` | List result entries, oldest first. Without `ID`, list the project's entries with each task's project and title. `--latest` keeps the newest match for each task. `--brief` leaves out the bodies. |
+| `export [--all-projects] [--out PATH]` | Export tasks, metadata, links, and results as JSON. Taskgraph has no import command. |
 | `projects` | Show each project's RAG status, totals, done, ready, blocked, late, conflicts, at-risk milestones, and next milestone. |
+
+The result log is append-only. `result add` is one insert, so several writers can add to the same task at once. It does not change the task: not its status, notes, metadata, or `updated_at`, and it writes no history. Taskgraph has no command to edit or delete a single entry. Removing the task removes its entries. `show --json` lists the entries without bodies, `show --brief` leaves them out, and `result ls` reads them. Use this command as the one write that a background agent may make. A permission rule that allows it still lets the agent read any file it can open into the log through `--body-file PATH`, and create a database anywhere through `--db`. To narrow it, pin `--db` and allow only `--body` or `--body-file -`.
 
 Stored statuses are `open`, `in_progress`, and `done`. Taskgraph derives `blocked` and `ready`. Exit code 1 and an `error:` message on stderr indicate an error.

@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS baselines (
   due TEXT,
   PRIMARY KEY (project, label, task_id)
 );
+CREATE TABLE IF NOT EXISTS results (
+  id INTEGER PRIMARY KEY,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'task',
+  attempt INTEGER,
+  author TEXT,
+  body TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_results_task ON results(task_id, id);
 """
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
@@ -82,6 +93,8 @@ CHANGE_BUCKETS = {
 }
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
+DB_TIMEOUT = 30  # seconds a writer waits for the lock; background agents add results concurrently
+RESULT_COLUMNS = ("id", "task_id", "at", "status", "kind", "attempt", "author", "body")
 
 
 class Fail(Exception):
@@ -121,7 +134,7 @@ def default_project():
 def connect(path):
     path = Path(path or os.environ.get("TASKGRAPH_DB") or Path.home() / ".taskgraph" / "tasks.db")
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
@@ -689,7 +702,8 @@ def cmd_show(conn, args):
         return {k: tasks[i][k] for k in ("id", "title", "status", "derived_status")}
 
     base = latest_baselines(conn, [task["project"]]).get(task["id"])
-    data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]], baseline=base)
+    found = [without_body({k: r[k] for k in RESULT_COLUMNS}) for r in result_rows(conn, "WHERE r.task_id=?", (task["id"],))]
+    data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]], baseline=base, results=found)
     if args.brief:
         data = dict(brief_task(task), depends_on=task["depends_on"], blocks=task["blocks"])
     out = [
@@ -733,6 +747,9 @@ def cmd_show(conn, args):
     for label, key in (("depends on", "depends_on"), ("blocks", "blocks")):
         out.append(f"{label}:")
         out.extend(f"  #{r['id']} [{r['derived_status']}] {r['title']}" for r in (tasks[i] for i in task[key]))
+    if found:
+        out.append("results:")
+        out.extend(f"  {result_line(r, with_task=False)}" for r in found)
     emit(args, data, "\n".join(out))
 
 
@@ -1211,6 +1228,91 @@ def cmd_baseline_diff(conn, args):
     emit(args, {"label": label, "at": at, "moved": moved, "added": added, "removed": removed, "lanes": lane_rows}, "\n".join(out))
 
 
+
+def without_body(row):
+    return {k: v for k, v in row.items() if k != "body"}
+
+
+def result_word(name, value):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise Fail(f"{name} must be one word of letters, digits, _ or -: {value!r}")
+    return value
+
+
+def read_body(args):
+    if args.body is not None and args.body_file is not None:
+        raise Fail("--body and --body-file cannot be combined")
+    if args.body_file is None:
+        return args.body or ""
+    try:
+        if args.body_file == "-":
+            return sys.stdin.buffer.read().decode("utf-8")
+        return Path(args.body_file).expanduser().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read body from {args.body_file}: {e}")
+
+
+def result_line(row, with_task=True):
+    parts = [f"#{row['id']}", f"#{row['task_id']}" if with_task else None, row["at"], row["kind"], row["status"]]
+    if row["attempt"] is not None:
+        parts.append(f"attempt {row['attempt']}")
+    if row["author"]:
+        parts.append(f"by {row['author']}")
+    return " ".join(p for p in parts if p)
+
+
+def result_rows(conn, where="", params=()):
+    sql = f"SELECT r.*, t.project, t.title FROM results r JOIN tasks t ON t.id = r.task_id {where} ORDER BY r.id"
+    return [dict(r) for r in conn.execute(sql, params)]
+
+
+def cmd_result_add(conn, args):
+    status = result_word("--status", args.status)
+    kind = result_word("--kind", args.kind)
+    if args.attempt is not None and args.attempt < 1:
+        raise Fail(f"--attempt must be a positive integer: {args.attempt}")
+    body = read_body(args)
+    # One statement: it checks the task and inserts in the same transaction, and reads nothing it later writes.
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO results (task_id, at, status, kind, attempt, author, body) SELECT id, ?, ?, ?, ?, ?, ? FROM tasks WHERE id=?",
+            (now(), status, kind, args.attempt, args.by, body, args.id),
+        )
+        if cur.rowcount == 0:
+            raise Fail(f"no such task: {args.id}")
+        row = dict(conn.execute("SELECT * FROM results WHERE id=?", (cur.lastrowid,)).fetchone())
+    suffix = f", attempt {row['attempt']}" if row["attempt"] is not None else ""
+    emit(args, without_body(row) if args.brief else row, f"result #{row['id']} added to #{args.id} ({kind} {status}{suffix})")
+
+
+def cmd_result_ls(conn, args):
+    where, params = [], []
+    if args.id is not None:
+        if conn.execute("SELECT 1 FROM tasks WHERE id=?", (args.id,)).fetchone() is None:
+            raise Fail(f"no such task: {args.id}")
+        where.append("r.task_id=?")
+        params.append(args.id)
+    elif not args.all_projects:
+        where.append("t.project=?")
+        params.append(args.project)
+    for column, wanted in (("kind", args.kind), ("attempt", args.attempt), ("status", args.status)):
+        if wanted is not None:
+            where.append(f"r.{column}=?")
+            params.append(wanted)
+    rows = result_rows(conn, ("WHERE " + " AND ".join(where)) if where else "", params)
+    if args.latest:
+        rows = sorted({r["task_id"]: r for r in rows}.values(), key=lambda r: r["id"])
+    if args.id is not None:
+        rows = [{k: r[k] for k in RESULT_COLUMNS} for r in rows]
+    if args.brief:
+        rows = [without_body(r) for r in rows]
+    out = []
+    for r in rows:
+        out.append(result_line(r))
+        out.extend(f"    {l}" for l in r.get("body", "").splitlines())
+    emit(args, rows, "\n".join(out) or "(no results)")
+
+
 def level(value):
     if isinstance(value, (int, float)):
         return value
@@ -1537,7 +1639,10 @@ def load_text(d):
 def cmd_export(conn, args):
     keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
     tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
-    text = json.dumps({"version": 1, "exported_at": now(), "tasks": tasks}, ensure_ascii=False, indent=2)
+    ids = {t["id"] for t in tasks}
+    found = result_rows(conn, f"WHERE r.task_id IN ({','.join('?' * len(ids))})", sorted(ids)) if ids else []
+    results = [{k: r[k] for k in RESULT_COLUMNS} for r in found]
+    text = json.dumps({"version": 1, "exported_at": now(), "tasks": tasks, "results": results}, ensure_ascii=False, indent=2)
     if args.out is None:
         print(text)
         return
@@ -1709,6 +1814,8 @@ COMMANDS = {
     "baseline ls": cmd_baseline_ls,
     "baseline diff": cmd_baseline_diff,
     "baseline rm": cmd_baseline_rm,
+    "result add": cmd_result_add,
+    "result ls": cmd_result_ls,
     "ls": cmd_ls,
     "ready": cmd_ready,
     "show": cmd_show,
@@ -1775,6 +1882,24 @@ def build_parser():
     p.add_argument("--label")
     p = command("rm", base_sub)
     p.add_argument("label")
+
+    res = command("result")
+    res_sub = res.add_subparsers(dest="result_command", required=True)
+    p = command("add", res_sub)
+    p.add_argument("id", type=int)
+    p.add_argument("--status", required=True)
+    p.add_argument("--kind", default="task")
+    p.add_argument("--attempt", type=int)
+    p.add_argument("--by")
+    p.add_argument("--body")
+    p.add_argument("--body-file")
+    p = command("ls", res_sub)
+    p.add_argument("id", type=int, nargs="?")
+    p.add_argument("--kind")
+    p.add_argument("--attempt", type=int)
+    p.add_argument("--status")
+    p.add_argument("--latest", action="store_true")
+    p.add_argument("--all-projects", action="store_true")
 
     p = command("ls")
     p.add_argument("--status", choices=FILTERS, nargs="+", action="extend")
@@ -1881,7 +2006,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False))
     args.json = args.json or args.brief
     args.project = args.project or default_project()
-    key = f"{args.command} {getattr(args, args.command + '_command')}" if args.command in ("dep", "baseline") else args.command
+    key = f"{args.command} {getattr(args, args.command + '_command')}" if args.command in ("dep", "baseline", "result") else args.command
     try:
         COMMANDS[key](connect(args.db), args)
     except (Fail, sqlite3.Error) as e:
