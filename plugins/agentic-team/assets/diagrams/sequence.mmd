@@ -11,21 +11,21 @@ sequenceDiagram
   M->>C: check
   C-->>M: ok
   M->>TG: ready, show 41
-  M->>B: --task 41 --session mgr
+  M->>B: --task 41 --keyword sweep
   B->>TG: show 41 (notes, scope, verify)
   B->>C: load config
-  B-->>M: .agentic-team/briefs/task-41-1.md
+  B-->>M: .agentic-team/briefs/task-41-1.md (with the result add command)
   M->>C: model implementation
   C-->>M: sonnet, effort high
-  M->>W: claude --bg --agent agentic-team:worker
+  M->>W: claude --bg --worktree task-41-1 --name task-41-1-sweep --agent agentic-team:worker
   M->>TG: start 41, meta session, model, attempt
   Note over M: Manager launches other tasks meanwhile
-  W-->>M: Report: PASS, checkpoint
-  M->>TG: meta report_status=PASS, state_at
+  W->>TG: commit, then result add 41 PASS (Branch, Head, Worktree)
   Note over M: Next drain point
-  M->>V: verifier brief pinned to commit SHA
-  V-->>M: Verdict: test-verified
+  M->>TG: result ls 41
+  M->>V: claude --bg --worktree verify-41-1, brief pinned to Head SHA
+  V->>TG: result add 41 --kind verify, Verdict: test-verified
   M->>TG: meta verdict, verdict_ref, tokens
   M->>TG: done 41
-  M->>W: claude stop
-  M->>OP: Status report and open gates
+  Note over M: After the merge: tg edit merged_at, then claude rm
+  M->>OP: Status report, open gates, branch ready to merge

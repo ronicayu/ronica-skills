@@ -1,6 +1,7 @@
 .DS_Store
 .claude/.cc-writes/
 .worktrees/
+.claude/worktrees/
 .agentic-team.local.toml
 node_modules/
 __pycache__/

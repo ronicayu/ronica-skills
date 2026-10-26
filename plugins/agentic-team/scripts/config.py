@@ -32,7 +32,8 @@ import sys
 try:
     import tomllib
 except ImportError:  # Python < 3.11
-    print("config.py: needs Python 3.11 or later", file=sys.stderr)
+    print("config.py: needs Python 3.11 or later. Run scripts/python-path.sh to find one, "
+          "or set AGENTIC_TEAM_PYTHON to its path.", file=sys.stderr)
     sys.exit(2)
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError

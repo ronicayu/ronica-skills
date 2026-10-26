@@ -8,7 +8,8 @@
 #      preferring user scope, then project, then any other scope.
 #   3. A sibling taskgraph plugin next to this plugin (source checkout).
 #
-# Usage: TG=$(tg-path.sh) && python3 "$TG" --project <name> <cmd>
+# Usage: TG=$(tg-path.sh) && "$PY" "$TG" --project <name> <cmd>
+# ($PY comes from python-path.sh.)
 
 set -euo pipefail
 
@@ -19,7 +20,8 @@ fi
 
 registry="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
 if [[ -f $registry ]]; then
-  path=$(python3 - "$registry" 2>/dev/null <<'PY'
+  # Reading the registry needs only the json module, so any python3 will do.
+  path=$("${AGENTIC_TEAM_PYTHON:-python3}" - "$registry" 2>/dev/null <<'PY'
 import json, os, sys
 
 with open(sys.argv[1]) as fh:

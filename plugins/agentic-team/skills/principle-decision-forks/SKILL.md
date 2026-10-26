@@ -22,7 +22,7 @@ the question.
 ## Apply the autonomy grant
 
 Read `autonomy.grant` and `autonomy.always_pause` with
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" get <key>`. An empty grant
+`"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" get <key>`. An empty grant
 means there is no standing grant.
 Follow the grant only within its stated scope.
 

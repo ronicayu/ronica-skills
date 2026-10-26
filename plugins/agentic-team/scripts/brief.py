@@ -3,21 +3,45 @@
 of task content; this script copies it and never invents it.
 
 Usage:
-    brief.py --tg PATH --task ID --session NAME [--kind task|verify]
-             [--report FILE --verdict-ref REF] [--attempt N]
-             [--root .] [--run-dir <root>/.agentic-team]
+    brief.py --tg PATH --task ID --keyword WORDS [--kind task|verify]
+             [--report RESULT_ID] --verdict-ref REF (verify only) [--attempt N]
+             [--session NAME] [--root .] [--run-dir <root>/.agentic-team]
+
+The worker's own session name, which the Manager launches it under, is
+task-<id>-<attempt>-<keyword>, or verify-<id>-<attempt> for a verifier.
+brief.py builds it from --keyword and the attempt it picks, writes it into the
+worker's result command, and prints `session=` and `attempt=` on stderr.
+--session overrides the name. A task brief refuses a next attempt beyond 3
+(exit 2) unless --attempt is given.
 
 Sources:
-    GOAL        task title, plus the prose in its notes ("why it is needed")
+    GOAL        task title, plus the prose in its notes ("why it is needed").
+                A `Word: text` line stays in the prose unless it is an
+                `Exit test:` or `Acceptance:` line.
     ACCEPTANCE  `- [ ]` checklist items and `Exit test:` lines in the notes
     SCOPE       `scope` metadata, plus `serialization.rules` from the config
     VERIFY      `verify` metadata
     TIMEBOX     twice the `estimate` metadata (hours); 2 hours without one
-    STATE_AT    `state_at` metadata, else a legacy `State at` line
+    CHECKPOINT  the `Checkpoint:` line of this task's latest task result
     UPSTREAM    this task's previous report (fix rounds), then the latest
-                saved report of each task this one depends on
+                task result of each task this one depends on. Both come
+                from the Taskgraph result log. Notes the Manager wrote itself
+                are skipped: DIED, and BLOCKED written --by manager. A worker
+                report the Manager filed from the logs counts.
+    REPORT      the exact `tg result add` command the worker runs last, with
+                the report on stdin in a quoted heredoc. It pins the
+                interpreter, tg.py, and the database ($TASKGRAPH_DB, else
+                ~/.taskgraph/tasks.db) by absolute path.
+    BASE        the commit the worker's worktree must start from. A worktree
+                starts from the default branch, so the brief tells the worker
+                to run `git reset --keep <BASE>`. BASE is the `Head:` commit of
+                this task's previous worker result (a fix round builds on it),
+                else the Manager's `git rev-parse HEAD` in <root>.
     other       project config (read through config.py from <root>),
                 standing orders, and the arguments
+
+For --kind verify, --report is the id of the worker's result (default: the
+latest task result for the current attempt). Its body goes into the brief.
 
 Writes <run-dir>/briefs/task-<id>-<attempt>[-verify].md and prints its path.
 Exit 2 lists what to fix in Taskgraph or the config (see `config.py check`). Exit 3 means the
@@ -25,20 +49,24 @@ standing orders start with STOP. Exit 1 means Taskgraph failed.
 """
 
 import argparse
-import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load, problems as config_problems  # noqa: E402
-FIELD_LINE = re.compile(r"^([A-Z][A-Za-z ]{1,24}):\s*(.*)$")
+
+# Only these labels are fields. Any other `Word: text` line is goal prose.
+FIELD_LINE = re.compile(r"^(exit tests?|acceptance):\s*(.*)$", re.I)
 CHECK_ITEM = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.*)$")
-LEGACY_STATE = re.compile(r"^State at\b[^:]*:\s*(.*)$")
+CHECKPOINT_LINE = re.compile(r"(?m)^Checkpoint:\s*(.*)$")
+HEAD_LINE = re.compile(r"(?m)^Head:\s*([0-9a-f]{7,40})\s*$")
 DEFAULT_TIMEBOX_HOURS = 2
+MAX_ATTEMPTS = 3
 CONSTRAINT_LABELS = [
     ("read_only", "Read-only sources"),
     ("pinned_versions", "Pinned versions"),
@@ -62,45 +90,84 @@ def read(path):
 
 
 def parse_notes(notes):
-    goal, acceptance, legacy_state = [], [], None
+    goal, acceptance = [], []
     for line in (notes or "").splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         if m := CHECK_ITEM.match(line):
             acceptance.append(m.group(1).strip())
-        elif m := LEGACY_STATE.match(stripped):
-            legacy_state = stripped
         elif m := FIELD_LINE.match(stripped):
-            if m.group(1).lower() in ("exit test", "exit tests", "acceptance"):
+            if m.group(2).strip():
                 acceptance.append(m.group(2).strip())
         elif not stripped.startswith("#"):
             goal.append(stripped)
-    return " ".join(goal), acceptance, legacy_state
+    return " ".join(goal), acceptance
 
 
-def latest_report(run_dir, task_id):
-    reports = [p for p in glob.glob(os.path.join(run_dir, "reports", f"task-{task_id}-*.md"))
-               if not p.endswith("-verify.md")]
-    attempt = lambda p: int(re.search(r"-(\d+)\.md$", p).group(1)) if re.search(r"-(\d+)\.md$", p) else 0
-    return max(reports, key=attempt) if reports else None
+def quote(value):
+    """Double-quote a path for a shell command, as the brief shows it."""
+    return '"' + re.sub(r'([\\"$`])', r"\\\1", str(value)) + '"'
+
+
+def database_path():
+    """The database tg.py uses: $TASKGRAPH_DB, else ~/.taskgraph/tasks.db."""
+    return os.path.abspath(os.path.expanduser(os.environ.get("TASKGRAPH_DB") or "~/.taskgraph/tasks.db"))
+
+
+def run_tg(tg, db, project, *cmd):
+    out = subprocess.run([sys.executable, tg, "--db", db, "--project", project, "--json", *cmd],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        fail(f"tg {' '.join(cmd)} failed: {out.stderr.strip()}", 1)
+    return json.loads(out.stdout or "null")
+
+
+def task_results(tg, db, project, task_id):
+    """A task's worker results, oldest first, without the Manager's own notes.
+
+    Those are DIED, and BLOCKED written by the Manager for a stuck session. A
+    report the Manager salvaged from the logs keeps its real status and counts."""
+    found = run_tg(tg, db, project, "result", "ls", str(task_id), "--kind", "task") or []
+    return [r for r in found
+            if r["status"] != "DIED" and not (r["status"] == "BLOCKED" and r.get("author") == "manager")]
+
+
+def describe(result):
+    attempt = f", attempt {result['attempt']}" if result.get("attempt") is not None else ""
+    return f"result #{result['id']}, {result['status']}{attempt}"
+
+
+def head_of(root):
+    out = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True)
+    if out.returncode != 0:
+        fail(f"cannot read HEAD in {root}: {out.stderr.strip()}; run from the repository root", 1)
+    return out.stdout.strip()
+
+
+def result_command(py, tg, db, project, task_id, kind, attempt, session):
+    """The command the worker runs last. The worker fills in only the status and the body."""
+    return (f"{quote(py)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)} "
+            f"result add {task_id} --kind {kind} --attempt {attempt} --by {shlex.quote(session)} "
+            f"--status <STATUS> --body-file - <<'REPORT'\n<your report>\nREPORT")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tg", required=True, help="path to tg.py (from scripts/tg-path.sh)")
     parser.add_argument("--task", required=True, type=int)
-    parser.add_argument("--session", required=True, help="Manager session name for the report")
+    parser.add_argument("--keyword", help="one or two words naming the work; builds task-<id>-<attempt>-<keyword>")
+    parser.add_argument("--session", help="override the session name (default: built from --keyword and the attempt)")
     parser.add_argument("--kind", choices=["task", "verify"], default="task")
-    parser.add_argument("--report", help="worker report file (verify only)")
-    parser.add_argument("--verdict-ref", help="commit SHA or output checksums (verify only)")
+    parser.add_argument("--report", type=int, help="id of the worker's result (verify only; default: latest for the current attempt)")
+    parser.add_argument("--verdict-ref", help="the worker's Head: commit SHA, or output checksums (verify only)")
     parser.add_argument("--attempt", type=int, help="default: next attempt for task, current for verify")
     parser.add_argument("--root", default=".", help="repository root holding .agentic-team.toml (default: .)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     args = parser.parse_args()
 
-    if args.kind == "verify" and not (args.report and args.verdict_ref):
-        fail("--kind verify needs --report and --verdict-ref")
+    if args.kind == "verify" and not args.verdict_ref:
+        fail("--kind verify needs --verdict-ref")
     config = load(args.root)
     problems = [f"config: {p}" for p in config_problems(config)]
     if problems:
@@ -115,14 +182,12 @@ def main():
     if args.kind == "task" and re.match(r"^(\d+\.\s*)?STOP\b", first):
         fail(f"standing orders say {first!r}; launch nothing", 3)
 
-    out = subprocess.run(["python3", args.tg, "--project", project, "--json", "show", str(args.task)],
-                         capture_output=True, text=True)
-    if out.returncode != 0:
-        fail(f"tg show {args.task} failed: {out.stderr.strip()}", 1)
-    task = json.loads(out.stdout)
+    tg = os.path.abspath(args.tg)
+    db = database_path()
+    task = run_tg(tg, db, project, "show", str(args.task))
     meta = task.get("meta") or {}
-    why, acceptance, legacy_state = parse_notes(task.get("notes"))
-    tg_cmd = f"python3 {args.tg} --project {project}"
+    why, acceptance = parse_notes(task.get("notes"))
+    tg_cmd = f"{quote(sys.executable)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)}"
     edit = f"{tg_cmd} edit {args.task}"
 
     missing = []
@@ -147,25 +212,50 @@ def main():
     except (KeyError, TypeError, ValueError):
         timebox = f"{DEFAULT_TIMEBOX_HOURS} hours (no estimate set)"
 
-    state_at = meta.get("state_at") or legacy_state or "None"
     plan = config["taskgraph"]["plan"]
-    plan_path = os.path.join(args.root, plan) if plan else ""
-    if state_at == "None" and plan_path and os.path.isfile(plan_path):
-        for line in read(plan_path).splitlines():
-            if re.search(rf"#?\b{args.task}\b", line) and "State at" in line:
-                state_at = line.strip()
-                break
+    own = task_results(tg, db, project, args.task)
+    current = int(meta.get("attempt") or 0)
+    attempt = args.attempt or (current if args.kind == "verify" else current + 1) or 1
+    if args.kind == "task" and not args.attempt and attempt > MAX_ATTEMPTS:
+        fail(f"task {args.task} has used attempts 1 to {MAX_ATTEMPTS}; abandon it "
+             f"(drain playbook, step 4) or pass --attempt to override")
+    if args.session:
+        session = args.session
+    elif args.kind == "verify":
+        session = f"verify-{args.task}-{attempt}"
+    elif args.keyword and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", args.keyword):
+        session = f"task-{args.task}-{attempt}-{args.keyword}"
+    else:
+        fail("a task brief needs --keyword (letters, digits, and hyphens) or --session")
 
-    upstream = []
-    previous = latest_report(args.run_dir, args.task) if args.kind == "task" else None
+    upstream, checkpoint, base = [], "None", ""
+    previous = own[-1] if own and args.kind == "task" else None
+    if args.kind == "task":
+        base = head_of(args.root)
     if previous:
-        upstream.append(f"### Previous attempt ({os.path.basename(previous)})\n\n"
+        if m := CHECKPOINT_LINE.search(previous["body"]):
+            checkpoint = m.group(1).strip() or "None"
+        if m := HEAD_LINE.search(previous["body"]):
+            base = m.group(1)
+        upstream.append(f"### Previous attempt ({describe(previous)})\n\n"
                         f"Start from this report. Fix what it lists; do not redo what passed.\n\n"
-                        f"{strip_comments(read(previous)).strip()}")
+                        f"{strip_comments(previous['body']).strip()}")
     for dep in task.get("depends_on") or []:
-        report = latest_report(args.run_dir, dep["id"])
-        body = strip_comments(read(report)).strip() if report else "No report on file."
+        found = task_results(tg, db, project, dep["id"])
+        body = (f"{describe(found[-1])}\n\n{strip_comments(found[-1]['body']).strip()}"
+                if found else "No report on file.")
         upstream.append(f"### Upstream #{dep['id']}: {dep['title']} ({dep['status']})\n\n{body}")
+
+    worker_report = ""
+    if args.kind == "verify":
+        if args.report is not None:
+            chosen = [r for r in own if r["id"] == args.report]
+        else:
+            chosen = [r for r in own if r.get("attempt") == current][-1:]
+        if not chosen:
+            fail(f"task {args.task} has no worker result to verify"
+                 + (f" with id {args.report}" if args.report is not None else f" for attempt {current}"), 1)
+        worker_report = f"{describe(chosen[0])}\n\n{strip_comments(chosen[0]['body']).strip()}"
 
     constraints = config["constraints"]
     forbidden = [f"- {label}: {constraints[key]}" for key, label in CONSTRAINT_LABELS
@@ -176,19 +266,18 @@ def main():
                 f"- Always pause for: {'; '.join(autonomy_cfg['always_pause']) or 'None'}"]
     consultants = ", ".join(config["consultants"]["sessions"])
 
-    current = int(meta.get("attempt") or 0)
-    attempt = args.attempt or (current if args.kind == "verify" else current + 1) or 1
     values = {
         "TASK_ID": str(args.task),
         "TASK_TITLE": task["title"],
         "PROJECT": project,
-        "SESSION_NAME": args.session,
+        "SESSION_NAME": session,
         "TIMEZONE": config["sessions"]["timezone_label"] or config["sessions"]["timezone"],
         "GOAL": f"{task['title']}. {why}",
         "SCOPE": scope,
         "TASKGRAPH_COMMAND": tg_cmd,
         "PLAN_FILE": plan or "None",
-        "STATE_AT": state_at,
+        "CHECKPOINT": checkpoint,
+        "BASE": base,
         "CONSULTANTS": consultants or "None. Do not contact a consultant.",
         "UPSTREAM": "\n\n".join(upstream),
         "ACCEPTANCE": "\n".join(f"- {item}" for item in acceptance),
@@ -197,7 +286,8 @@ def main():
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
         "AUTONOMY": "\n".join(autonomy),
         "STANDING_ORDERS": orders or "None yet.",
-        "REPORT_FILE": args.report or "",
+        "WORKER_REPORT": worker_report,
+        "RESULT_COMMAND": result_command(sys.executable, tg, db, project, args.task, args.kind, attempt, session),
         "VERDICT_REF": args.verdict_ref or "",
     }
 
@@ -205,6 +295,8 @@ def main():
         template = os.path.join(PLUGIN_ROOT, "templates", "verifier-brief.md")
     else:
         template = config["sessions"]["brief_template"]
+    if "{{RESULT_COMMAND}}" not in read(template):
+        fail(f"{template} has no {{{{RESULT_COMMAND}}}}; the worker could not report")
     text = re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), read(template))
     unknown = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", text)))
     if unknown:
@@ -216,7 +308,7 @@ def main():
     with open(path, "w") as fh:
         fh.write(re.sub(r"\n{3,}", "\n\n", text))
     print(path)
-    print(f"attempt={attempt}", file=sys.stderr)
+    print(f"attempt={attempt}\nsession={session}", file=sys.stderr)
 
 
 if __name__ == "__main__":

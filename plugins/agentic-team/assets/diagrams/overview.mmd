@@ -1,11 +1,11 @@
 flowchart TD
   OP([Operator])
   M[Manager<br/>playbooks + principles]
-  TG[(Taskgraph<br/>plan, tasks, metadata)]
+  TG[(Taskgraph<br/>plan, tasks, metadata, results)]
   CFG[config.py<br/>reads .agentic-team.toml]
   B[brief.py<br/>renders one brief per task]
-  RUN[(.agentic-team/<br/>standing orders, gates,<br/>briefs, reports)]
-  W[Worker sessions<br/>one per task, up to max_parallel]
+  RUN[(.agentic-team/<br/>standing orders, gates, briefs)]
+  W[Worker sessions<br/>one worktree per task, up to max_parallel]
   V[Verifier session<br/>high-risk tasks only]
   S[status.py]
   CON([Consultants])
@@ -15,14 +15,15 @@ flowchart TD
   M <-->|"plan, start, meta, done"| TG
   M -->|"check, get, model"| CFG
   M -->|"render"| B
-  TG -->|"task content"| B
+  TG -->|"task content, upstream results"| B
   CFG -->|"constraints, autonomy"| B
-  RUN -->|"standing orders, upstream reports"| B
+  RUN -->|"standing orders"| B
   M -->|"claude --bg with brief"| W
   M -->|"verifier brief"| V
-  W -->|"one report: PASS, ISSUES, BLOCKED"| M
-  V -->|"verdict"| M
-  M -->|"save reports, gates"| RUN
+  W -->|"tg result add: PASS, ISSUES, BLOCKED"| TG
+  V -->|"tg result add: verdict"| TG
+  TG -->|"results, read at drain points"| M
+  M -->|"gates"| RUN
   W -.->|"questions"| CON
   TG --> S
   RUN --> S
