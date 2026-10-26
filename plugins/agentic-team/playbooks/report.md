@@ -3,8 +3,8 @@
 **Numbers come from Taskgraph, not from memory.** Build every report from the
 data, then add only the judgement the data cannot give.
 
-1. **Drain first.** Run `run.py record` so the data is current.
-2. **Generate the facts.** Run `run.py status --mark`. It prints:
+1. **Drain first.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record` so the data is current.
+2. **Generate the facts.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" status --mark`. It prints:
    - the overall status and plan changes since the last report;
    - closed tasks, with the done time, tokens, verdict, and verifier;
    - work in flight, with each task's latest result status and checkpoint;

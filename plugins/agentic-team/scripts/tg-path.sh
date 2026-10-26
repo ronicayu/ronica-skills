@@ -8,8 +8,8 @@
 #      preferring user scope, then project, then any other scope.
 #   3. A sibling taskgraph plugin next to this plugin (source checkout).
 #
-# Usage: TG=$(tg-path.sh) && "$PY" "$TG" --project <name> <cmd>
-# ($PY comes from python-path.sh.)
+# Usage: tg-path.sh. The scripts/tg wrapper calls it and runs the result with
+# the interpreter from python-path.sh.
 
 set -euo pipefail
 

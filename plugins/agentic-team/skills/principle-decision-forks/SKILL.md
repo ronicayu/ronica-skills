@@ -22,7 +22,7 @@ the question.
 ## Apply the autonomy grant
 
 Read `autonomy.grant` and `autonomy.always_pause` with
-`"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" get <key>`. An empty grant
+`"${CLAUDE_PLUGIN_ROOT}/scripts/config" get <key>`. An empty grant
 means there is no standing grant.
 Follow the grant only within its stated scope.
 
@@ -39,7 +39,9 @@ Follow the grant only within its stated scope.
 ## Who applies it
 
 - The Manager asks through a Taskgraph decision node, batched into its report, and
-  routes other work around it (blocked tasks leave `ready` by themselves).
+  routes other work around it (blocked tasks leave `ready` by themselves). It
+  never runs an experiment or an investigation itself: it writes and launches a
+  task, or starts a verifier, and reads the result.
 - A worker never asks the operator. It runs an experiment only when its brief
   allows one, and reports anything else as `BLOCKED` with the question.
 

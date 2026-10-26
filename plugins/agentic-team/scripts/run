@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# Run run.py, the Agentic Team run script, with Python 3.11 or later.
+#
+# It finds its own directory, even through a symlink, so it runs from any
+# working directory and needs no environment variable. It gets the
+# interpreter from python-path.sh. Arguments and the exit code pass through
+# unchanged. It exits 2 with the python-path.sh message when no Python 3.11
+# or later is installed.
+#
+# Usage: "${CLAUDE_PLUGIN_ROOT}/scripts/run" <command> [args]
+
+set -euo pipefail
+
+# here PATH: print the physical directory that holds PATH.
+here() {
+  local dir=$1
+  if [[ $dir == */* ]]; then dir=${dir%/*}; else dir=.; fi
+  (CDPATH= cd -P "${dir:-/}" && pwd)
+}
+
+# Follow symlinks to the real file. macOS has no readlink -f.
+self=${BASH_SOURCE[0]}
+while [[ -L $self ]]; do
+  target=$(readlink "$self")
+  if [[ $target == /* ]]; then self=$target; else self="$(here "$self")/$target"; fi
+done
+script_dir=$(here "$self")
+
+py=$("$script_dir/python-path.sh") || exit 2
+exec "$py" "$script_dir/run.py" "$@"

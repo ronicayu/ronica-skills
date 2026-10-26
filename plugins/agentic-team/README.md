@@ -19,13 +19,29 @@ The design adapts the playbook, and principle structure of
 /plugin install agentic-team@ronica-skills
 ```
 
-This also installs its dependency, `taskgraph`. Select `agentic-team:manager`
-in the agent picker, or mention `@agent-agentic-team:manager`.
+This also installs its dependency, `taskgraph`.
 
 The scripts need Python 3.11 or later.
 [scripts/python-path.sh](scripts/python-path.sh) finds one (`python3.13`,
 `python3.12`, `python3.11`, then `python3`). Set `AGENTIC_TEAM_PYTHON` to an
-interpreter path to choose one yourself.
+interpreter path to choose one yourself. The wrappers `scripts/run`,
+`scripts/config`, and `scripts/tg` call it for you, from any directory, so no
+prompt builds a command from a variable.
+
+## Start a Manager
+
+- As the session's agent type: `claude --agent agentic-team:manager`. Or select
+  `agentic-team:manager` in the agent picker, or mention
+  `@agent-agentic-team:manager`.
+- In a session that is already running: type `/agentic-team:manager`, or ask
+  the session to switch to the Manager role. A session cannot change its agent
+  type, so the skill makes it act as the Manager. It first hands over the work
+  the session had started, as Taskgraph tasks or integration steps, and then
+  runs the Manager's Start steps. The role ends when you say so.
+
+The Manager keeps the plan, launches and verifies work, and reports. It does
+not diagnose failures, edit the repository, review diffs, or run tests itself;
+each of those becomes a Taskgraph task for a worker or a verifier.
 
 ## Set up a project
 
@@ -38,6 +54,14 @@ directory `.agentic-team/`, and the worktree directory `.claude/worktrees/`. It 
 `claude --bg` refuses to start in a workspace that is not trusted. A trusted
 parent folder does not count. Run `claude` once in the repository and accept
 the trust prompt before the Manager launches its first worker.
+
+## Skills
+
+| Skill | Use |
+|-------|-----|
+| `/agentic-team:manager` | Make a running session act as the Manager. Model-invocable, so "switch to the Manager role" also works. |
+| `/agentic-team:setup` | Create or complete `.agentic-team.toml`. |
+| `principle-<name>` | One rule each, such as `principle-decision-forks`. Hidden from automatic invocation; the Manager reads them by path. |
 
 ## How it works
 
@@ -132,8 +156,9 @@ run `npm install -g pele` once, then
 ## `run.py`
 
 [scripts/run.py](scripts/run.py) is the only writer of run state. The Manager
-runs it from the repository root, with `PY` from `python-path.sh`:
-`"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/run.py" [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command>`.
+runs it from the repository root through the wrapper:
+`"${CLAUDE_PLUGIN_ROOT}/scripts/run" [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command>`.
+A `next:` hint that says `run.py <cmd>` means that wrapper with `<cmd>`.
 Nothing in it waits, sleeps, or polls: `claude --bg` returns at once, and the
 Manager runs `record` later.
 
@@ -235,27 +260,25 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 
 ### Reading config
 
-Agents read config only through [scripts/config.py](scripts/config.py), run
-from the repository root (or pass `--root DIR`). Workers never read it; their
+Agents read config only through [scripts/config.py](scripts/config.py), by
+the `config` wrapper, run from the repository root (or pass `--root DIR`). Workers never read it; their
 brief carries what they need.
 
 ```sh
-PY=$("${CLAUDE_PLUGIN_ROOT}/scripts/python-path.sh")
-C="$PY ${CLAUDE_PLUGIN_ROOT}/scripts/config.py"
-$C check                          # every problem, one per line; else "ok"
-$C get sessions.max_parallel      # one value; tables and lists print as JSON
-$C get models --json              # always JSON
-$C show                           # the merged config with defaults filled in
-$C model implementation           # {"model": "sonnet", "effort": "high"}
-$C model "data migration"         # a models.overrides key, else a tier
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" check                      # every problem, one per line; else "ok"
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" get sessions.max_parallel  # one value; tables and lists print as JSON
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" get models --json          # always JSON
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" show                       # the merged config with defaults filled in
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" model implementation       # {"model": "sonnet", "effort": "high"}
+"${CLAUDE_PLUGIN_ROOT}/scripts/config" model "data migration"     # a models.overrides key, else a tier
 ```
 
 `check` reports a missing file, TOML syntax errors with their line, `"TODO"`
 values, an empty `taskgraph.project`, unknown sections or keys (with the
 closest known key), wrong types, and invalid time zones. `get` and `model`
 refuse to answer while `check` fails. Exit codes: 0 OK, 2 config problem, 1
-unexpected error. It needs Python 3.11 or later; `scripts/python-path.sh` finds
-one.
+unexpected error. It needs Python 3.11 or later; the `config` wrapper finds
+one through `scripts/python-path.sh`.
 
 ## Briefs
 
@@ -332,14 +355,16 @@ skill. Metadata holds everything else, 15 keys:
 | `agents/worker.md` | The worker agent used for every task and verifier session |
 | `playbooks/` | Step-by-step procedures the Manager follows |
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
+| `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |
 | `skills/setup/` | `/agentic-team:setup`, which creates the project config |
 | `templates/` | Project config (`agentic-team.toml`), the brief, and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
+| `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
 | `scripts/python-path.sh` | Finds a Python 3.11 or later. `AGENTIC_TEAM_PYTHON` overrides it. |
 | `scripts/config.py` | Reads, merges, and validates the project config; holds every default |
 | `scripts/run.py` | Launches, drains, verifies, closes, merges, stops, abandons, and reports |
-| `tests/` | Tests for the scripts. Run `"$PY" -m unittest discover plugins/agentic-team/tests`, with `PY` from `python-path.sh`. |
+| `tests/` | Tests for the scripts. Run `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |
 
 ## Extending
 
