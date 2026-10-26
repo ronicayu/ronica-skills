@@ -1,11 +1,13 @@
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -26,13 +28,14 @@ def db(tmp_path):
 
 @pytest.fixture
 def raw(db):
-    def run(*args, cwd=None, env=None):
+    def run(*args, cwd=None, env=None, input=None):
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--db", str(db), *args],
             capture_output=True,
             text=True,
             cwd=cwd,
             env=env,
+            input=input,
         )
 
     return run
@@ -1618,3 +1621,234 @@ def test_load_from_a_later_week(tg, loaded):
 
 def test_load_empty(raw):
     assert raw("--project", "demo", "load").stdout.strip() == "no open items with an estimate"
+
+
+def task_state(db):
+    with closing(sqlite3.connect(db)) as conn:
+        return conn.execute("SELECT * FROM tasks ORDER BY id").fetchall(), conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+
+def test_result_add_reads_each_body_source(tg, raw, tmp_path):
+    t = add(tg, "A")
+    first = tg("result", "add", str(t), "--status", "PASS", "--body", "from flag")
+    assert first["body"] == "from flag" and first["task_id"] == t and first["id"] == 1
+    note = tmp_path / "report.md"
+    note.write_text("# Report\nnaïve café ✓\n", encoding="utf-8")
+    tg("result", "add", str(t), "--status", "ISSUES", "--body-file", str(note))
+    p = raw("--project", "demo", "--json", "result", "add", str(t), "--status", "BLOCKED", "--body-file", "-", input="from stdin\n")
+    assert p.returncode == 0, p.stderr
+    tg("result", "add", str(t), "--status", "DIED")
+    rows = tg("result", "ls", str(t))
+    assert [r["body"] for r in rows] == ["from flag", "# Report\nnaïve café ✓\n", "from stdin\n", ""]
+    assert [r["status"] for r in rows] == ["PASS", "ISSUES", "BLOCKED", "DIED"]
+    assert json.loads(p.stdout) == rows[2]
+    assert set(rows[0]) == {"id", "task_id", "at", "status", "kind", "attempt", "author", "body"}
+    assert rows[0]["kind"] == "task" and rows[0]["attempt"] is None and rows[0]["author"] is None
+    assert len(rows[0]["at"]) == 20 and rows[0]["at"].endswith("Z") and rows[0]["at"][10] == "T"
+
+
+def test_result_add_options_and_output(tg, raw):
+    t = add(tg, "A")
+    row = tg("result", "add", str(t), "--status", "PASS", "--kind", "verify", "--attempt", "3", "--by", "worker 1", "--body", "ok")
+    assert (row["kind"], row["attempt"], row["author"]) == ("verify", 3, "worker 1")
+    text = raw("--project", "demo", "result", "add", str(t), "--status", "ISSUES", "--kind", "verify", "--attempt", "4")
+    assert text.stdout.strip() == f"result #2 added to #{t} (verify ISSUES, attempt 4)"
+    plain = raw("--project", "demo", "result", "add", str(t), "--status", "PASS")
+    assert plain.stdout.strip() == f"result #3 added to #{t} (task PASS)"
+    brief = json.loads(raw("--project", "demo", "--brief", "result", "add", str(t), "--status", "PASS", "--body", "long").stdout)
+    assert "body" not in brief and brief["id"] == 4
+
+
+def test_result_add_does_not_touch_the_task(tg, db):
+    t = add(tg, "A", "--notes", "the spec", "--meta", "owner=x")
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET updated_at='2026-01-01T00:00:00Z'")
+    before = task_state(db)
+    changes = tg("changes", "--since", "30d")
+    tg("result", "add", str(t), "--status", "PASS", "--body", "report")
+    tg("result", "add", str(t), "--status", "ISSUES", "--attempt", "2")
+    assert task_state(db) == before
+    shown = tg("show", str(t))
+    assert shown["notes"] == "the spec" and shown["meta"] == {"owner": "x"} and shown["status"] == "open"
+    assert tg("changes", "--since", "30d") == changes
+
+
+def test_result_add_rejects_bad_input(tg, fail, raw, tmp_path):
+    t = add(tg, "A")
+    fail("result", "add", "99", "--status", "PASS")
+    for bad in ("two words", "PASS!", "", "a.b"):
+        fail("result", "add", str(t), "--status", bad)
+        fail("result", "add", str(t), "--status", "PASS", "--kind", bad)
+    fail("result", "add", str(t), "--status", "PASS", "--body", "x", "--body-file", "-")
+    fail("result", "add", str(t), "--status", "PASS", "--body", "", "--body-file", "-")
+    fail("result", "add", str(t), "--status", "PASS", "--attempt", "0")
+    fail("result", "add", str(t), "--status", "PASS", "--attempt", "-2")
+    fail("result", "add", str(t), "--status", "PASS", "--body-file", str(tmp_path / "missing.md"))
+    binary = tmp_path / "bad.bin"
+    binary.write_bytes(b"\xff\xfe\x00")
+    fail("result", "add", str(t), "--status", "PASS", "--body-file", str(binary))
+    assert raw("--project", "demo", "result", "add", str(t)).returncode == 2
+    assert tg("result", "ls", str(t)) == []
+    ok = tg("result", "add", str(t), "--status", "needs-review_2", "--kind", "Verify-1")
+    assert ok["status"] == "needs-review_2" and ok["kind"] == "Verify-1"
+
+
+@pytest.fixture
+def logged(tg):
+    a, b = add(tg, "A"), add(tg, "B")
+    log = [
+        tg("result", "add", str(a), "--status", "ISSUES", "--attempt", "1", "--by", "w1", "--body", "a1")["id"],
+        tg("result", "add", str(b), "--status", "PASS", "--kind", "verify", "--body", "b1")["id"],
+        tg("result", "add", str(a), "--status", "PASS", "--attempt", "2", "--body", "a2")["id"],
+        tg("result", "add", str(a), "--status", "PASS", "--kind", "verify", "--attempt", "2", "--body", "a3")["id"],
+    ]
+    return a, b, log
+
+
+def test_result_ls_order_and_filters(tg, logged):
+    a, b, log = logged
+    assert ids(tg("result", "ls", str(a))) == [log[0], log[2], log[3]]
+    assert ids(tg("result", "ls", str(b))) == [log[1]]
+    assert ids(tg("result", "ls", str(a), "--kind", "verify")) == [log[3]]
+    assert ids(tg("result", "ls", str(a), "--attempt", "2")) == [log[2], log[3]]
+    assert ids(tg("result", "ls", str(a), "--status", "PASS")) == [log[2], log[3]]
+    assert ids(tg("result", "ls", str(a), "--status", "pass")) == []
+    assert ids(tg("result", "ls", str(a), "--status", "PASS", "--attempt", "2", "--kind", "task")) == [log[2]]
+    assert ids(tg("result", "ls", str(a), "--latest")) == [log[3]]
+    assert ids(tg("result", "ls", str(a), "--latest", "--kind", "task")) == [log[2]]
+    assert ids(tg("result", "ls", str(a), "--latest", "--status", "ISSUES")) == [log[0]]
+
+
+def test_result_ls_without_id_covers_the_project(tg, raw, logged):
+    a, b, log = logged
+    rows = tg("result", "ls")
+    assert ids(rows) == log
+    assert [(r["task_id"], r["project"], r["title"]) for r in rows] == [(a, "demo", "A"), (b, "demo", "B"), (a, "demo", "A"), (a, "demo", "A")]
+    assert ids(tg("result", "ls", "--latest")) == [log[1], log[3]]
+    assert ids(tg("result", "ls", "--kind", "verify")) == [log[1], log[3]]
+    elsewhere = json.loads(raw("--project", "other", "--json", "add", "Far").stdout)["id"]
+    far = json.loads(raw("--project", "other", "--json", "result", "add", str(elsewhere), "--status", "DIED").stdout)["id"]
+    assert ids(tg("result", "ls")) == log
+    assert ids(json.loads(raw("--project", "other", "--json", "result", "ls").stdout)) == [far]
+    both = tg("result", "ls", "--all-projects")
+    assert ids(both) == [*log, far] and both[-1]["project"] == "other" and both[-1]["title"] == "Far"
+    assert ids(tg("result", "ls", str(elsewhere))) == [far]
+    assert ids(tg("result", "ls", "--all-projects", "--latest")) == [log[1], log[3], far]
+
+
+def test_result_ls_human_and_brief(tg, raw, logged, fail):
+    a, b, log = logged
+    text = raw("--project", "demo", "result", "ls", str(a), "--attempt", "1").stdout.splitlines()
+    assert len(text) == 2
+    assert re.match(rf"#{log[0]} #{a} \d{{4}}-\d\d-\d\dT", text[0]) and text[0].endswith(" task ISSUES attempt 1 by w1")
+    assert text[1] == "    a1"
+    multi = raw("--project", "demo", "result", "add", str(b), "--status", "PASS", "--body", "one\n\ntwo")
+    assert multi.returncode == 0
+    last = raw("--project", "demo", "result", "ls", str(b), "--latest").stdout.splitlines()
+    assert last[1:] == ["    one", "    ", "    two"]
+    assert raw("--project", "demo", "result", "ls", str(b), "--kind", "none").stdout.strip() == "(no results)"
+    assert raw("--project", "demo", "--json", "result", "ls", str(b), "--kind", "none").stdout.strip() == "[]"
+    brief = json.loads(raw("--project", "demo", "--brief", "result", "ls").stdout)
+    assert ids(brief)[:4] == log and all("body" not in r for r in brief) and brief[0]["title"] == "A"
+    fail("result", "ls", "99")
+
+
+def test_show_lists_results_without_bodies(tg, raw, logged):
+    a, b, log = logged
+    shown = tg("show", str(a))
+    assert ids(shown["results"]) == [log[0], log[2], log[3]]
+    assert all("body" not in r for r in shown["results"]) and shown["results"][0]["author"] == "w1"
+    assert tg("show", str(b))["results"][0]["kind"] == "verify"
+    text = raw("--project", "demo", "show", str(a)).stdout
+    head, _, tail = text.partition("results:\n")
+    assert head.rstrip().endswith("blocks:")
+    rows = tail.splitlines()
+    assert len(rows) == 3 and re.match(rf"  #{log[0]} \d{{4}}-\d\d-\d\dT", rows[0]) and rows[0].endswith("task ISSUES attempt 1 by w1")
+    assert rows[2].endswith("verify PASS attempt 2") and "a3" not in text
+    quiet = add(tg, "Quiet")
+    assert tg("show", str(quiet))["results"] == []
+    assert "results:" not in raw("--project", "demo", "show", str(quiet)).stdout
+
+
+def test_rm_removes_results(tg, db, logged):
+    a, b, log = logged
+    tg("rm", str(a))
+    with closing(sqlite3.connect(db)) as conn:
+        assert [r[0] for r in conn.execute("SELECT id FROM results")] == [log[1]]
+    assert ids(tg("result", "ls", "--all-projects")) == [log[1]]
+
+
+def test_rm_recursive_removes_results_below(tg, db):
+    parent = add(tg, "P")
+    kid = add(tg, "K", "--parent", str(parent))
+    keep = add(tg, "Keep")
+    for task in (parent, kid, keep):
+        tg("result", "add", str(task), "--status", "PASS")
+    tg("rm", str(parent), "--recursive")
+    with closing(sqlite3.connect(db)) as conn:
+        assert [r[0] for r in conn.execute("SELECT task_id FROM results")] == [keep]
+
+
+def test_export_includes_results(tg, raw, logged, tmp_path):
+    a, b, log = logged
+    raw("--project", "other", "--json", "add", "elsewhere")
+    raw("--project", "other", "--json", "result", "add", "3", "--status", "DIED")
+    data = json.loads(raw("--project", "demo", "export").stdout)
+    assert ids(data["results"]) == log
+    assert data["results"][0] == {"id": log[0], "task_id": a, "at": data["results"][0]["at"], "status": "ISSUES", "kind": "task", "attempt": 1, "author": "w1", "body": "a1"}
+    assert len(json.loads(raw("--project", "demo", "export", "--all-projects").stdout)["results"]) == 5
+    out = tmp_path / "backup.json"
+    tg("export", "--out", str(out))
+    assert ids(json.loads(out.read_text())["results"]) == log
+
+
+def test_results_table_is_added_to_an_old_database(db, raw, tg):
+    old = sqlite3.connect(db)
+    old.executescript(
+        """
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY,
+          project TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','done')),
+          notes TEXT NOT NULL DEFAULT '',
+          meta TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(meta)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          done_at TEXT,
+          parent_id INTEGER REFERENCES tasks(id)
+        );
+        CREATE TABLE deps (
+          task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          depends_on INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          PRIMARY KEY (task_id, depends_on)
+        );
+        INSERT INTO tasks (id, project, title, created_at, updated_at) VALUES (1, 'demo', 'Legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        """
+    )
+    old.commit()
+    old.close()
+    assert "results" not in {r[0] for r in sqlite3.connect(db).execute("SELECT name FROM sqlite_master")}
+    assert tg("result", "ls") == []
+    row = tg("result", "add", "1", "--status", "PASS", "--body", "late")
+    assert row["id"] == 1
+    assert [r["body"] for r in tg("result", "ls", "1")] == ["late"]
+    cols = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(results)")]
+    assert cols == ["id", "task_id", "at", "status", "kind", "attempt", "author", "body"]
+
+
+def test_concurrent_writers_all_land(tg, raw, db):
+    t = add(tg, "A")
+    count = 12
+
+    def write(n):
+        return raw("--project", "demo", "--json", "result", "add", str(t), "--status", "PASS", "--attempt", str(n + 1), "--body", f"writer {n}")
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        done = list(pool.map(write, range(count)))
+    assert [p.returncode for p in done] == [0] * count, [p.stderr for p in done]
+    rows = tg("result", "ls", str(t))
+    assert len(rows) == count and len({r["id"] for r in rows}) == count
+    assert sorted(r["attempt"] for r in rows) == list(range(1, count + 1))
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM results").fetchone()[0] == count
