@@ -35,6 +35,8 @@ python3 scripts/tg.py --project NAME --json done ID
 
 `--depends ID` means the new task waits for `ID`. `--blocks ID` means `ID` waits for the new task. A parent means “part of,” not “must finish before.” Do not mark blocked work done without telling the user which dependencies remain unfinished. After bulk changes, offer to show the graph.
 
+To record what happened on a task, run `result add ID --status S --body TEXT`. It appends to the task's result log and changes nothing else. `edit --notes` replaces the task's spec. See [the CLI reference](./references/cli.md).
+
 ## Read and present project status
 
 - Run `ready` to find work that can start now. Run `agenda` to find items that need attention. Run `path ID` to inspect upstream work and schedule outlook.
