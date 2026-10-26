@@ -33,18 +33,17 @@ to install Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
      `TG=$("${CLAUDE_PLUGIN_ROOT}/scripts/tg-path.sh")` and then
      `"$PY" "$TG" projects`. If one project matches this repository,
      suggest it. Otherwise ask the user.
-   - `taskgraph.plan`: suggest a plan file only if the repository has an
-     obvious one, such as `PLAN.md`. Otherwise leave it commented out.
-   - `constraints.pinned_versions`: suggest values from lockfiles or version
-     files the repository already has, then ask the user to confirm them.
-4. **Ask for the rest.** Ask the user, one question at a time, for each
-   remaining `"TODO"`. The `constraints` keys affect safety, so do not set
-   one to `""` unless the user confirms that nothing applies.
+   - `constraints.forbidden`: suggest items from lockfiles and version files
+     the repository already has ("do not change the pinned versions in ..."),
+     then ask the user to confirm them.
+4. **Ask for the rest.** Ask the user one question for the remaining `"TODO"`,
+   `forbidden`. It affects safety, so do not set it to `[]` unless the user
+   confirms that nothing applies.
 5. **Keep private values and run state out of git.** Put machine-specific or
    private values in `.agentic-team.local.toml`, with the same tables and
    only the keys that override. Its keys win; a list there replaces the
    tracked list. Add `.agentic-team.local.toml`, `.agentic-team/` (the
-   Manager's run directory for briefs, standing orders, and gates), and
+   Manager's run directory for briefs and standing orders), and
    `.claude/worktrees/` (where each worker's git worktree lives) to
    `.gitignore` if they are not already ignored.
 6. **Trust the workspace.** `claude --bg` refuses to start in a workspace that

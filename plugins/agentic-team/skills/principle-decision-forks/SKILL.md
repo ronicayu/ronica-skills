@@ -1,6 +1,6 @@
 ---
 name: principle-decision-forks
-description: "Apply when about to ask the operator a 'which approach', 'how should I', or 'what should this do' question, or when applying the autonomy grant (autonomy.grant) or an autonomy.always_pause gate. Classify the fork first: observe, investigate, or ask."
+description: "Apply when about to ask the operator a 'which approach', 'how should I', or 'what should this do' question, or when applying the autonomy grant (autonomy.grant) or an autonomy.always_pause decision. Classify the fork first: observe, investigate, or ask."
 disable-model-invocation: true
 ---
 
@@ -33,13 +33,13 @@ Follow the grant only within its stated scope.
   operator could tell you to do instead.
 - **Not covered.** Ask. Let the operator answer in their own words. Never give
   a shorthand token to type back.
-- **Gates.** Every gate in `autonomy.always_pause`, and every gate the operator named, needs
-  the operator, even under the grant.
+- **Decisions.** Every decision in `autonomy.always_pause`, and every decision the operator
+  named, needs the operator, even under the grant.
 
 ## Who applies it
 
-- The Manager asks through a gate entry, batched into its report, and routes
-  other work around the open gate.
+- The Manager asks through a Taskgraph decision node, batched into its report, and
+  routes other work around it (blocked tasks leave `ready` by themselves).
 - A worker never asks the operator. It runs an experiment only when its brief
   allows one, and reports anything else as `BLOCKED` with the question.
 

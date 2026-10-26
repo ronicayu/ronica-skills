@@ -1,30 +1,24 @@
 flowchart TD
   OP([Operator])
   M[Manager<br/>playbooks + principles]
-  TG[(Taskgraph<br/>plan, tasks, metadata, results)]
+  TG[(Taskgraph<br/>plan, tasks, decisions, metadata, results)]
   CFG[config.py<br/>reads .agentic-team.toml]
-  B[brief.py<br/>renders one brief per task]
-  RUN[(.agentic-team/<br/>standing orders, gates, briefs)]
+  RUN[run.py<br/>launch, record, verify, close,<br/>merged, stop, abandon, status]
+  DIR[(.agentic-team/<br/>standing orders, briefs)]
   W[Worker sessions<br/>one worktree per task, up to max_parallel]
   V[Verifier session<br/>high-risk tasks only]
-  S[status.py]
-  CON([Consultants])
 
   OP -->|"requests, standing orders"| M
-  M -->|"batched reports, gates"| OP
-  M <-->|"plan, start, meta, done"| TG
-  M -->|"check, get, model"| CFG
-  M -->|"render"| B
-  TG -->|"task content, upstream results"| B
-  CFG -->|"constraints, autonomy"| B
-  RUN -->|"standing orders"| B
-  M -->|"claude --bg with brief"| W
-  M -->|"verifier brief"| V
+  M -->|"batched reports, decisions"| OP
+  M <-->|"plan, decisions"| TG
+  M -->|"check, get"| CFG
+  M -->|"standing orders"| DIR
+  M -->|"one command per step"| RUN
+  RUN <-->|"start, meta, results, done"| TG
+  CFG -->|"constraints, autonomy, models"| RUN
+  DIR -->|"standing orders"| RUN
+  RUN -->|"claude --bg with brief"| W
+  RUN -->|"claude --bg with brief"| V
   W -->|"tg result add: PASS, ISSUES, BLOCKED"| TG
   V -->|"tg result add: verdict"| TG
-  TG -->|"results, read at drain points"| M
-  M -->|"gates"| RUN
-  W -.->|"questions"| CON
-  TG --> S
-  RUN --> S
-  S -->|"status tables"| M
+  RUN -->|"one line per event"| M

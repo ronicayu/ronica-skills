@@ -1,0 +1,75 @@
+# Run
+
+**Completions are queue events, not interrupts.** A worker's last action is one
+`tg result add`. `run.py record` finds results, dead and stuck sessions, merges,
+and decisions, one line each. Drain after every critical section (a launch, a
+verification, a decision, a plan change) and before every report.
+
+1. **Drain.** Run `run.py record`. Read every line.
+2. **Act on each line.**
+   - `arrived PASS`: go to step 3.
+   - `arrived ISSUES` with proven defects: start a fix round. Add any new
+     directive to the standing orders, then run `run.py launch <id>`. The brief
+     carries the previous report, and the cap is enforced.
+   - `arrived ISSUES` because the timebox or context ran out: split the work
+     in Taskgraph and launch the smaller task.
+   - `arrived BLOCKED` or `gated`: apply the decision-forks principle. When
+     evidence can answer it, answer in the task notes or the standing orders
+     and relaunch. Otherwise add a decision with `--blocks <id>`. A done
+     decision's notes are pasted into the next brief.
+   - `died`: retry by failure mode. Infrastructure failures retry as they are.
+     A tool error or a stuck model retries one `--tier` higher. An unknown
+     cause retries once.
+   - `stuck`: the session waited on a prompt nobody answers. Relaunch with
+     `--model sonnet`. `stopped`: after the pause, `run.py launch <id>`.
+   - `unknown`: read `claude logs <sid>` and run `record` again later. If the
+     session is gone, run `run.py stop <id>`, then `record`.
+   - `attempt 3 failed`: run `run.py abandon <id> <mode>`, add a decision if
+     the operator must decide, and re-plan around the task.
+   - `conflict`: add the decision the line names. `decision`: carry it into
+     the report with your recommendation.
+   - `unmerged` and `waits`: say plainly which branch the operator should
+     merge and which tasks wait on it.
+
+   A result whose attempt is not the task's current attempt is superseded.
+   Check it against the current state before you use anything in it, and
+   salvage through a fresh attempt.
+3. **Verify.** A worker's PASS is a claim, not a verdict.
+   - `risk=low` with a cheap VERIFY: rerun the VERIFY commands yourself, or in
+     a subagent, inside the result's `Worktree:`. Check that
+     `git -C <worktree> rev-parse HEAD` equals its `Head:`, spot-check the
+     output, and delete only the files your rerun created
+     (`git -C <worktree> status --porcelain`). Then run
+     `run.py close <id> --verdict <level> --ran "<what you ran and saw>"`.
+   - `risk=high`, or a check that is expensive or needs judgement: run
+     `run.py verify <id>`; a later `verified` line means `run.py close <id>`.
+   - Verdict levels: `artifact-verified` (the real output was exercised or
+     read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
+     `check-only` (static checks only, not enough for behavior);
+     `verify-blocked` (the check could not run; retry when fixed);
+     `verify-failed` (start a fix round, do not just re-verify).
+   - Before `close`, the operator must have confirmed every step that needs a
+     person. A request a person must send is not done until they send it.
+   - `close` refuses a changed output, records the verdict and tokens, runs
+     `tg done`, and merges only on a `MERGE:` line into a clean checkout.
+     Otherwise it lists the branch as ready to merge. When the operator says a
+     branch is merged, by any method, run `run.py merged <id> --by operator`.
+     After a `kept` line about untracked files, delete only files your rerun
+     created, then run `run.py merged <id>`. Rerun a `close` that stopped.
+4. **Launch.** For each task `record` lists under `ready`, while `slots` has
+   room: skip a task whose work needs a person or an outside party (a drafting
+   task may prepare a request but never send it). Run `run.py launch <id>`.
+   - Exit 2: fix what the message names (the task, the config, or the state),
+     then rerun. Exit 3: `STOP`; launch nothing.
+   - "Workspace not trusted": tell the operator to run `claude` once there and
+     accept the trust prompt.
+   - If the sandbox blocks `claude --bg`, ask the operator once, record the
+     answer in the standing orders, and rerun with `dangerouslyDisableSandbox`
+     only if they agreed. Never edit a rendered brief.
+   - Refill after every drain; never wait for a whole batch.
+5. **Fresh, not resumed.** Every attempt is a fresh session with a fresh brief,
+   including work after a pause. A stopped attempt's WIP commit is its base.
+
+**Reply** at the end of each drain: counts by state, what changed, open
+decisions, branches ready to merge and the tasks that wait on them, and
+worktrees kept. Use the report playbook for anything longer.

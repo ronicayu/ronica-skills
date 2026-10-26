@@ -2,30 +2,30 @@ sequenceDiagram
   autonumber
   actor OP as Operator
   participant M as Manager
-  participant C as config.py
+  participant R as run.py
   participant TG as Taskgraph
-  participant B as brief.py
   participant W as Worker
   participant V as Verifier
 
-  M->>C: check
-  C-->>M: ok
-  M->>TG: ready, show 41
-  M->>B: --task 41 --keyword sweep
-  B->>TG: show 41 (notes, scope, verify)
-  B->>C: load config
-  B-->>M: .agentic-team/briefs/task-41-1.md (with the result add command)
-  M->>C: model implementation
-  C-->>M: sonnet, effort high
-  M->>W: claude --bg --worktree task-41-1 --name task-41-1-sweep --agent agentic-team:worker
-  M->>TG: start 41, meta session, model, attempt
+  M->>M: config.py check
+  M->>R: launch 41
+  R->>TG: show 41 (notes, scope, verify)
+  R->>W: render brief, claude --bg --worktree task-41-1
+  R->>TG: start 41, meta session, model, attempt
+  R-->>M: launched #41 attempt 1
   Note over M: Manager launches other tasks meanwhile
   W->>TG: commit, then result add 41 PASS (Branch, Head, Worktree)
   Note over M: Next drain point
-  M->>TG: result ls 41
-  M->>V: claude --bg --worktree verify-41-1, brief pinned to Head SHA
-  V->>TG: result add 41 --kind verify, Verdict: test-verified
-  M->>TG: meta verdict, verdict_ref, tokens
-  M->>TG: done 41
-  Note over M: After the merge: tg edit merged_at, then claude rm
-  M->>OP: Status report, open gates, branch ready to merge
+  M->>R: record
+  R->>TG: result ls, ls, ready
+  R-->>M: arrived #41 attempt 1: PASS
+  M->>R: verify 41
+  R->>V: claude --bg --worktree verify-41-1, brief pinned to Head SHA
+  V->>TG: result add --kind verify, Verdict: test-verified
+  M->>R: record
+  R-->>M: verified #41 attempt 1: Verdict test-verified
+  M->>R: close 41
+  R->>TG: meta verdict, verdict_ref, tokens, then done 41
+  R->>R: merge if a MERGE: line allows it, then claude rm
+  R-->>M: closed #41, then merged or ready-to-merge
+  M->>OP: Status report, open decisions, branches ready to merge

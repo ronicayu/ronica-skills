@@ -6,34 +6,17 @@
 
 [taskgraph]
 project = "TODO"            # required; `tg projects` lists names
-# plan = "PLAN.md"          # supplemental plan, context only
 
-[consultants]
-sessions = []               # bare session names
-restart = ""                # how to restart a missing consultant
-
-[constraints]               # become FORBIDDEN in every brief
-read_only = "TODO"          # "" when none applies
-pinned_versions = "TODO"
-do_not_send = "TODO"
-do_not_modify = "TODO"
-other = []
-
-[serialization]
-rules = []                  # "path or area: ordering rule"
-
-[progress]
-tool = ""                   # read-only progress command, if any
+[constraints]
+forbidden = ["TODO"]        # one item per rule; [] when none applies. They become FORBIDDEN in every brief.
 
 [autonomy]
 grant = ""                  # "" means no standing full-autonomy grant
-always_pause = []           # gates that always need the operator
+always_pause = []           # decisions that always need the operator
 
 [sessions]
-# brief_template = ".agentic-team/brief.md"
-# max_parallel = 4
+# max_parallel = 2
 # permission_mode = "auto"
-# launch_outside_sandbox = false
 # timezone = "Asia/Singapore"
 # timezone_label = "SGT"
 
@@ -44,7 +27,7 @@ always_pause = []           # gates that always need the operator
 # verifier = "opus"         # default: a different model from the worker's
 
 # [models.overrides]
-# "data migration" = { model = "opus", effort = "high" }
+# "data migration" = { model = "opus", effort = "high" }   # use as a task's `tier`
 
 [notifications]
 # skill = "telegram-send:telegram-send"
