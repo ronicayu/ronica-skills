@@ -5,11 +5,11 @@
 and decisions, one line each. Drain after every critical section (a launch, a
 verification, a decision, a plan change) and before every report.
 
-1. **Drain.** Run `run.py record`. Read every line.
+1. **Drain.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`. Read every line.
 2. **Act on each line.**
    - `arrived PASS`: go to step 3.
    - `arrived ISSUES` with proven defects: start a fix round. Add any new
-     directive to the standing orders, then run `run.py launch <id>`. The brief
+     directive to the standing orders, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. The brief
      carries the previous report, and the cap is enforced.
    - `arrived ISSUES` because the timebox or context ran out: split the work
      in Taskgraph and launch the smaller task.
@@ -21,10 +21,10 @@ verification, a decision, a plan change) and before every report.
      A tool error or a stuck model retries one `--tier` higher. An unknown
      cause retries once.
    - `stuck`: the session waited on a prompt nobody answers. Relaunch with
-     `--model sonnet`. `stopped`: after the pause, `run.py launch <id>`.
-   - `unknown`: read `claude logs <sid>` and run `record` again later. If the
-     session is gone, run `run.py stop <id>`, then `record`.
-   - `attempt 3 failed`: run `run.py abandon <id> <mode>`, add a decision if
+     `--model sonnet`. `stopped`: after the pause, `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
+   - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
+     session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.
+   - `attempt 3 failed`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`, add a decision if
      the operator must decide, and re-plan around the task.
    - `conflict`: add the decision the line names. `decision`: carry it into
      the report with your recommendation.
@@ -40,9 +40,9 @@ verification, a decision, a plan change) and before every report.
      `git -C <worktree> rev-parse HEAD` equals its `Head:`, spot-check the
      output, and delete only the files your rerun created
      (`git -C <worktree> status --porcelain`). Then run
-     `run.py close <id> --verdict <level> --ran "<what you ran and saw>"`.
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --ran "<what you ran and saw>"`.
    - `risk=high`, or a check that is expensive or needs judgement: run
-     `run.py verify <id>`; a later `verified` line means `run.py close <id>`.
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; a later `verified` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
    - Verdict levels: `artifact-verified` (the real output was exercised or
      read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
      `check-only` (static checks only, not enough for behavior);
@@ -52,13 +52,16 @@ verification, a decision, a plan change) and before every report.
      person. A request a person must send is not done until they send it.
    - `close` refuses a changed output, records the verdict and tokens, runs
      `tg done`, and merges only on a `MERGE:` line into a clean checkout.
-     Otherwise it lists the branch as ready to merge. When the operator says a
-     branch is merged, by any method, run `run.py merged <id> --by operator`.
+     Otherwise it lists the branch as ready to merge. A merge through the code
+     host, such as a PR the standing orders or the autonomy grant allow, is not
+     recorded by `close`: after it, run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by manager`. When the operator says a
+     branch is merged, by any method, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
      After a `kept` line about untracked files, delete only files your rerun
-     created, then run `run.py merged <id>`. Rerun a `close` that stopped.
+     created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. Rerun a `close` that stopped.
 4. **Launch.** For each task `record` lists under `ready`, while `slots` has
    room: skip a task whose work needs a person or an outside party (a drafting
-   task may prepare a request but never send it). Run `run.py launch <id>`.
+   task may prepare a request but never send it). Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - Exit 2: fix what the message names (the task, the config, or the state),
      then rerun. Exit 3: `STOP`; launch nothing.
    - "Workspace not trusted": tell the operator to run `claude` once there and

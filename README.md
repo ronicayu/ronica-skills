@@ -30,7 +30,8 @@ A marketplace of Claude Code plugins.
 Skills then trigger on their own descriptions, or explicitly via `/write-doc`,
 `/writing-editor`, `/technical-writing`, `/telegram-send`, and `/taskgraph`.
 After installing `agentic-team`, select `agentic-team:manager` in the agent
-picker, or invoke it with `@agent-agentic-team:manager`. In each repository
+picker, invoke it with `@agent-agentic-team:manager`, or type
+`/agentic-team:manager` in an existing session. In each repository
 where you use the Manager, run `/agentic-team:setup` to create its
 `.agentic-team.toml` project config. See the
 [agentic-team README](plugins/agentic-team/README.md) for configuration,

@@ -11,7 +11,11 @@
 #      configuration files contain valid JSON.
 #   6. Every directory under plugins/ is registered in marketplace.json.
 #   7. No file in plugins/agentic-team/ runs a hardcoded `python3 "..."`
-#      command. Prompts and scripts use "$PY" from scripts/python-path.sh.
+#      command. The wrappers scripts/run, scripts/config, and scripts/tg get
+#      the interpreter from scripts/python-path.sh.
+#   8. No prompt file in plugins/agentic-team/ (agents, playbooks, skills,
+#      templates) builds a command from $PY, $TG, or R=. The three wrappers
+#      exist and are executable.
 #
 # Dependencies: bash, jq, awk. Runs every check and exits non-zero if any failed.
 
@@ -313,15 +317,38 @@ done
 # --------------------------------------- agentic-team: no hardcoded python3
 
 # The macOS default python3 is older than 3.11, so every command in the plugin
-# runs "$PY" (see scripts/python-path.sh). Only python-path.sh may name python3.
+# runs through a wrapper (see scripts/python-path.sh). Only python-path.sh may
+# name python3.
 if [[ -d plugins/agentic-team ]]; then
   literal_python=$(grep -rnIF --exclude=python-path.sh --exclude-dir=__pycache__ \
     'python3 "' plugins/agentic-team || true)
   if [[ -n $literal_python ]]; then
     printf '%s\n' "$literal_python" >&2
-    err "agentic-team: literal python3 command found; use \"\$PY\" from scripts/python-path.sh"
+    err "agentic-team: literal python3 command found; use the scripts/run, scripts/config, or scripts/tg wrapper"
   else
     ok "agentic-team: no hardcoded python3 commands"
+  fi
+
+  # A command built from a variable cannot be checked before it runs, which
+  # the auto permission mode refuses. Prompts call the wrappers by path.
+  variable_commands=$(grep -rnIE '"\$PY"|\$PY |"\$TG"|R="' \
+    plugins/agentic-team/agents plugins/agentic-team/playbooks \
+    plugins/agentic-team/skills plugins/agentic-team/templates || true)
+  if [[ -n $variable_commands ]]; then
+    printf '%s\n' "$variable_commands" >&2
+    err "agentic-team: a prompt builds a command from \$PY, \$TG, or R=; call the wrappers instead"
+  else
+    ok "agentic-team: no prompt builds a command from a variable"
+  fi
+
+  missing_wrappers=""
+  for wrapper in run config tg; do
+    [[ -x plugins/agentic-team/scripts/$wrapper ]] || missing_wrappers="$missing_wrappers $wrapper"
+  done
+  if [[ -n $missing_wrappers ]]; then
+    err "agentic-team: wrapper script missing or not executable:$missing_wrappers"
+  else
+    ok "agentic-team: wrappers run, config, and tg exist and are executable"
   fi
 fi
 

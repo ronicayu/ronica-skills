@@ -10,7 +10,8 @@
 #
 # Exits 2 with the fix when none qualifies.
 #
-# Usage: PY=$(python-path.sh) && "$PY" config.py check
+# Usage: python-path.sh. The scripts/run, scripts/config, and scripts/tg
+# wrappers call it and run their script with the result.
 
 set -euo pipefail
 
