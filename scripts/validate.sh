@@ -10,8 +10,10 @@
 #   5. Skills and agents have the required frontmatter; hook, MCP, and LSP
 #      configuration files contain valid JSON.
 #   6. Every directory under plugins/ is registered in marketplace.json.
+#   7. No file in plugins/agentic-team/ runs a hardcoded `python3 "..."`
+#      command. Prompts and scripts use "$PY" from scripts/python-path.sh.
 #
-# Dependencies: bash, jq, awk. Exits non-zero on the first failing category.
+# Dependencies: bash, jq, awk. Runs every check and exits non-zero if any failed.
 
 set -uo pipefail
 
@@ -307,6 +309,21 @@ for dir in "$plugin_root"/*/; do
     *) err "$dir is not registered in $marketplace" ;;
   esac
 done
+
+# --------------------------------------- agentic-team: no hardcoded python3
+
+# The macOS default python3 is older than 3.11, so every command in the plugin
+# runs "$PY" (see scripts/python-path.sh). Only python-path.sh may name python3.
+if [[ -d plugins/agentic-team ]]; then
+  literal_python=$(grep -rnIF --exclude=python-path.sh --exclude-dir=__pycache__ \
+    'python3 "' plugins/agentic-team || true)
+  if [[ -n $literal_python ]]; then
+    printf '%s\n' "$literal_python" >&2
+    err "agentic-team: literal python3 command found; use \"\$PY\" from scripts/python-path.sh"
+  else
+    ok "agentic-team: no hardcoded python3 commands"
+  fi
+fi
 
 # ------------------------------------------------- official schema validation
 

@@ -7,14 +7,15 @@ data, then add only the judgement the data cannot give.
 2. **Generate the facts.** Run:
 
    ```sh
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/status.py" --tg "$TG" --mark
+   "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/status.py" --tg "$TG" --mark
    ```
 
    It prints, from Taskgraph and `.agentic-team/`:
    - the overall status and plan changes since the last report;
    - closed tasks, with times, tokens, and verdicts;
-   - work in flight, with checkpoints;
-   - work waiting for verification;
+   - work in flight, with the latest result status and checkpoint of each task;
+   - work waiting for verification, and tasks with a verdict that are not closed;
+   - done tasks whose branch is not merged;
    - failed or abandoned tasks;
    - open gates;
    - ready tasks.
@@ -28,8 +29,11 @@ data, then add only the judgement the data cannot give.
 4. **Report in this order:**
    1. what is done, with the times, tokens, and verdict of each closed task;
    2. what changed in the plan, and what is next on the critical path;
-   3. what waits for the operator: open gates and files to send. These are
-      the only questions you ask;
+   3. what waits for the operator: open gates, files to send, and branches
+      ready to merge ("Done, branch not merged"). Say plainly which tasks wait on an unmerged dependency
+      branch, and name it. For each abandoned task, list its sessions and
+      worktrees (`claude agents --json --all`, names `task-<id>-*`) for the
+      operator to remove. These are the only questions you ask;
    4. what is unmet or stuck.
 
 Copy the figures from the script output. Say that token counts cover only

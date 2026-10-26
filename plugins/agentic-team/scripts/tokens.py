@@ -2,7 +2,12 @@
 """Print Taskgraph meta for a finished Claude session from its transcript.
 
 Usage:
-    tokens.py <session-id-prefix> [--tz Asia/Singapore] [--label SGT] [--cwd DIR]
+    tokens.py <session-id-prefix> --cwd DIR [--tz Asia/Singapore] [--label SGT]
+
+--cwd is the directory the session ran in: the worker's worktree, from the
+`Worktree:` line of its result. The transcript is looked up only under that
+directory's project folder. If it is not there, the script exits with a
+message and prints nothing; record no tokens.
 
 Prints one line of `tg edit --meta` arguments:
     ended_at="YYYY-MM-DD HH:MM SGT" tokens_output=N tokens_input=N
@@ -35,9 +40,8 @@ def find_transcript(prefix, cwd):
     project_dir = os.path.join(root, re.sub(r"[^A-Za-z0-9]", "-", cwd))
     matches = glob.glob(os.path.join(project_dir, prefix + "*.jsonl"))
     if not matches:
-        matches = glob.glob(os.path.join(root, "*", prefix + "*.jsonl"))
-    if not matches:
-        sys.exit(f"tokens.py: no transcript matches session id '{prefix}' under {root}")
+        sys.exit(f"tokens.py: no transcript matches session id '{prefix}' in {project_dir}. "
+                 "Check --cwd (the worker's Worktree: path). Record no tokens for this task.")
     if len(matches) > 1:
         sys.exit("tokens.py: session id prefix is ambiguous:\n  " + "\n  ".join(sorted(matches)))
     return matches[0]
@@ -48,7 +52,7 @@ def main():
     parser.add_argument("session", help="session id or unique prefix (from `claude agents --json`)")
     parser.add_argument("--tz", help="IANA time zone, e.g. Asia/Singapore (default: system zone)")
     parser.add_argument("--label", help="zone label to print, e.g. SGT (default: the zone's abbreviation)")
-    parser.add_argument("--cwd", default=os.getcwd(), help="project directory the session ran in (default: current)")
+    parser.add_argument("--cwd", required=True, help="directory the session ran in: the worker's worktree path")
     args = parser.parse_args()
 
     if args.tz and ZoneInfo is None:

@@ -10,8 +10,12 @@ can run. Key meanings are in the plugin README under Configuration:
 `${CLAUDE_PLUGIN_ROOT}/README.md`. Check the config at any point with:
 
 ```sh
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" check
+PY=$("${CLAUDE_PLUGIN_ROOT}/scripts/python-path.sh")
+"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" check
 ```
+
+`python-path.sh` prints a Python 3.11 or later. If it exits 2, tell the user
+to install Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
 
 ## Steps
 
@@ -27,7 +31,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" check
 3. **Fill what the repository shows.** Do not guess.
    - `taskgraph.project`: run
      `TG=$("${CLAUDE_PLUGIN_ROOT}/scripts/tg-path.sh")` and then
-     `python3 "$TG" projects`. If one project matches this repository,
+     `"$PY" "$TG" projects`. If one project matches this repository,
      suggest it. Otherwise ask the user.
    - `taskgraph.plan`: suggest a plan file only if the repository has an
      obvious one, such as `PLAN.md`. Otherwise leave it commented out.
@@ -39,10 +43,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config.py" check
 5. **Keep private values and run state out of git.** Put machine-specific or
    private values in `.agentic-team.local.toml`, with the same tables and
    only the keys that override. Its keys win; a list there replaces the
-   tracked list. Add `.agentic-team.local.toml` and `.agentic-team/` (the
-   Manager's run directory for briefs, reports, standing orders, and gates)
-   to `.gitignore` if they are not already ignored.
-6. **Check the result.** Run `config.py check`. Setup is done only when it
+   tracked list. Add `.agentic-team.local.toml`, `.agentic-team/` (the
+   Manager's run directory for briefs, standing orders, and gates), and
+   `.claude/worktrees/` (where each worker's git worktree lives) to
+   `.gitignore` if they are not already ignored.
+6. **Trust the workspace.** `claude --bg` refuses to start in a workspace that
+   is not trusted. A trusted parent folder does not count. Tell the user to
+   run `claude` once in the repository and accept the trust prompt.
+7. **Check the result.** Run `config.py check`. Setup is done only when it
    prints `ok`; otherwise fix each problem it lists and run it again. Make
    sure neither file holds a credential or secret. Show the user the final
    file and `config.py show`, and say which keys use their defaults.

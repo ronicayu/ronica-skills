@@ -8,8 +8,17 @@ Usage:
 --project defaults to `taskgraph.project` from the config in --root, read
 through config.py.
 
-Reads tasks, metadata, and the Taskgraph report, plus open gates from
-<run-dir>/gates.md. Prints Markdown tables; every number comes from the data.
+Reads tasks, metadata, the Taskgraph result log, and the Taskgraph report,
+plus open gates from <run-dir>/gates.md. Prints Markdown tables; every number
+comes from the data.
+
+A task is "waiting" when a result exists for its current `attempt` and it has
+no `verdict`. An in-progress task that has a `verdict` is "Verdict recorded,
+not closed". Otherwise an in-progress task is "in flight", whatever its
+history. Only an `abandoned` marker puts a task under "Failed or abandoned".
+A done task whose `verdict_ref` is a commit SHA and that has no `merged_at`
+is listed under "Done, branch not merged", whatever the --since date.
+A result's Checkpoint line gives the checkpoint column.
 --since defaults to the time saved by the last --mark run, else 7 days.
 --mark saves the current time to <run-dir>/last-report.
 """
@@ -27,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def tg(args, *cmd):
     out = subprocess.run(
-        ["python3", args.tg, "--project", args.project, *cmd, "--json"],
+        [sys.executable, args.tg, "--project", args.project, *cmd, "--json"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -70,6 +79,30 @@ def table(headers, rows, limit):
     if len(rows) > limit:
         lines.append(f"\n…and {len(rows) - limit} more.")
     return "\n".join(lines) + "\n"
+
+
+CHECKPOINT_LINE = re.compile(r"(?m)^Checkpoint:\s*(.*)$")
+COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+
+def group_results(results):
+    """{task id: its results, oldest first}."""
+    by_task = {}
+    for row in results:
+        by_task.setdefault(row["task_id"], []).append(row)
+    return by_task
+
+
+def result_label(row):
+    """`PASS`, or `verify PASS` for a verifier's result."""
+    return row["status"] if row["kind"] == "task" else f"{row['kind']} {row['status']}"
+
+
+def last_checkpoint(rows):
+    for row in reversed(rows):
+        if m := CHECKPOINT_LINE.search(row.get("body") or ""):
+            return m.group(1).strip()
+    return None
 
 
 def open_gates(run_dir):
@@ -115,8 +148,9 @@ def main():
         sys.exit(f"status.py: project '{args.project}' has no tasks (check the name with `tg projects`)")
     summary = tg(args, "report", "--since", since.date().isoformat())
     ready = tg(args, "ready")
+    results = group_results(tg(args, "result", "ls") or [])
 
-    done, in_flight, waiting, failed = [], [], [], []
+    done, in_flight, waiting, failed, unclosed, unmerged = [], [], [], [], [], []
     for task in tasks:
         meta = task.get("meta") or {}
         tid = f"#{task['id']}"
@@ -128,14 +162,23 @@ def main():
                     tokens = f"{meta.get('tokens_output')} / {meta.get('tokens_input')}"
                 done.append((tid, task["title"], meta.get("started_at"), meta.get("ended_at"),
                              tokens, meta.get("verdict")))
+            if COMMIT_SHA.fullmatch(str(meta.get("verdict_ref") or "")) and not meta.get("merged_at"):
+                unmerged.append((tid, task["title"], meta.get("verdict_ref"), meta.get("verdict")))
             continue
-        if meta.get("failure"):
-            failed.append((tid, task["title"], meta.get("failure"), meta.get("attempt"), meta.get("state_at")))
-        elif meta.get("report_status") and not meta.get("verdict"):
-            waiting.append((tid, task["title"], meta.get("report_status"), meta.get("session"), meta.get("state_at")))
+        rows = results.get(task["id"], [])
+        last = result_label(rows[-1]) if rows else None
+        checkpoint = last_checkpoint(rows)
+        attempt = meta.get("attempt")
+        arrived = attempt is not None and any(str(row["attempt"]) == str(attempt) for row in rows)
+        if meta.get("abandoned"):
+            failed.append((tid, task["title"], meta.get("abandoned"), attempt, last, checkpoint))
+        elif task["status"] == "in_progress" and meta.get("verdict"):
+            unclosed.append((tid, task["title"], meta.get("verdict"), attempt, last))
+        elif task["status"] == "in_progress" and arrived:
+            waiting.append((tid, task["title"], last, meta.get("session"), checkpoint))
         elif task["status"] == "in_progress":
             in_flight.append((tid, task["title"], meta.get("session"), meta.get("model"),
-                              meta.get("attempt"), meta.get("state_at")))
+                              attempt, last, checkpoint))
 
     changes = summary.get("changes") or {}
     change_text = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in changes.items() if v) or "no changes"
@@ -147,11 +190,15 @@ def main():
     print(f"## Done since last report ({len(done)})\n")
     print(table(["Task", "Title", "Started", "Ended", "Tokens out / in", "Verdict"], done, args.limit))
     print(f"## In flight ({len(in_flight)})\n")
-    print(table(["Task", "Title", "Session", "Model", "Attempt", "Checkpoint"], in_flight, args.limit))
+    print(table(["Task", "Title", "Session", "Model", "Attempt", "Last result", "Checkpoint"], in_flight, args.limit))
     print(f"## Waiting for verification or triage ({len(waiting)})\n")
-    print(table(["Task", "Title", "Report", "Session", "Checkpoint"], waiting, args.limit))
+    print(table(["Task", "Title", "Result", "Session", "Checkpoint"], waiting, args.limit))
+    print(f"## Verdict recorded, not closed ({len(unclosed)})\n")
+    print(table(["Task", "Title", "Verdict", "Attempt", "Last result"], unclosed, args.limit))
     print(f"## Failed or abandoned ({len(failed)})\n")
-    print(table(["Task", "Title", "Failure", "Attempt", "Checkpoint"], failed, args.limit))
+    print(table(["Task", "Title", "Abandoned", "Attempt", "Last result", "Checkpoint"], failed, args.limit))
+    print(f"## Done, branch not merged ({len(unmerged)})\n")
+    print(table(["Task", "Title", "Commit", "Verdict"], unmerged, args.limit))
     print(f"## Open gates ({len(gates)})\n")
     print(table(["Gate", "Blocks", "Default"], gates, args.limit))
     print(f"## Ready ({len(ready or [])})\n")
