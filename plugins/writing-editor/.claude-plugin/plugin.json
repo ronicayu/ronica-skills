@@ -1,7 +1,7 @@
 {
   "name": "writing-editor",
   "description": "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use to review, edit, proofread, tighten or critique any text, including text you drafted, and to draft a new document through gated stages: purpose, sources, an approved outline, then content.",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "author": {
     "name": "Yu Rong",
     "url": "https://github.com/ronicayu"
