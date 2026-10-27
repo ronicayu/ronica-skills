@@ -12,32 +12,10 @@
   },
   "plugins": [
     {
-      "name": "write-doc",
-      "source": "write-doc",
-      "description": "Author a document through four gated stages — purpose and audience, sources, a stress-tested Minto pyramid outline, then content. Body prose is never written before the outline is signed off.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Yu Rong",
-        "url": "https://github.com/ronicayu"
-      },
-      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/write-doc",
-      "repository": "https://github.com/ronicayu/ronica-skills",
-      "license": "MIT",
-      "keywords": [
-        "writing",
-        "authoring",
-        "outline",
-        "pyramid-principle",
-        "mece",
-        "documentation"
-      ],
-      "category": "documentation"
-    },
-    {
       "name": "writing-editor",
       "source": "writing-editor",
-      "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
-      "version": "1.0.0",
+      "description": "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use to review, edit, proofread, tighten or critique any text, including text you drafted, and to draft a new document through gated stages: purpose, sources, an approved outline, then content.",
+      "version": "2.0.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -51,26 +29,11 @@
         "review",
         "pyramid-principle",
         "prose",
-        "documentation"
-      ],
-      "category": "documentation"
-    },
-    {
-      "name": "technical-writing",
-      "source": "technical-writing",
-      "description": "Layered technical-writing standard: Diátaxis structure, Google developer style sentences, STE instruction rules, Global English syntax. Use for /technical-writing or when writing or reviewing docs, RFCs, readmes, PR descriptions, or commit messages.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Yu Rong",
-        "url": "https://github.com/ronicayu"
-      },
-      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/technical-writing",
-      "repository": "https://github.com/ronicayu/ronica-skills",
-      "license": "MIT",
-      "keywords": [
-        "technical-writing",
         "documentation",
-        "technical-docs"
+        "technical-writing",
+        "diataxis",
+        "style-guide",
+        "drafting"
       ],
       "category": "documentation"
     },

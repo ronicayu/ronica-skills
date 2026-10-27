@@ -2,7 +2,7 @@
 
 The sentence-and-word pass, once the structure is sound. Each entry names a fault a reviewer can point at and the fix for it.
 
-Contents: [Clarity and precision](#clarity-and-precision) · [Concision](#concision) · [Sentence structure](#sentence-structure) · [Flow and rhythm](#flow-and-rhythm) · [Structure and narrative](#structure-and-narrative) · [Language quality](#language-quality) · [Audience awareness](#audience-awareness) · [Tells of machine-drafted prose](#tells-of-machine-drafted-prose) · [Swap tables](#swap-tables)
+Contents: [Clarity and precision](#clarity-and-precision) · [Concision](#concision) · [Sentence structure](#sentence-structure) · [Flow and rhythm](#flow-and-rhythm) · [Language quality](#language-quality) · [Audience awareness](#audience-awareness) · [Tells of machine-drafted prose](#tells-of-machine-drafted-prose) · [Swap tables](#swap-tables)
 
 ## Clarity and precision
 
@@ -44,6 +44,8 @@ A participle attaches to the subject that follows it:
 **Redundancy and implied words.** *Advance planning*, *end result*, *completely eliminate*, *future plans*, *currently ongoing*, *each and every*, *first and foremost*, *close proximity*, *actual fact*, *very unique*. One word survives.
 
 **Repeated ideas.** The same point restated in a heading, a table, and the paragraph beneath. Pick the one place the reader will look and delete the others. Duplicated content drifts apart on the next edit, and then the reader cannot tell which copy is current.
+
+**Buried lead.** A key idea surrounded by qualifications, provenance and asides gets missed. Give it its own sentence and its own line.
 
 **Excess evidence.** Three examples where one carries it. A caveat already implied by the sentence. A restatement after the point is clear. Stop when the reader is convinced.
 
@@ -96,16 +98,6 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 **Word echoes.** The same distinctive word twice in a sentence or three times in a paragraph is a stumble. *Use*, *provide*, *ensure*, *support*, *leverage*, *process* are the usual repeat offenders. Fix by cutting one occurrence, not by reaching for a thesaurus — a forced synonym implies a distinction that is not there. Deliberate repetition of a key term for clarity is fine; technical terms must stay consistent even when they echo.
 
 **Sound.** Watch for accidental rhyme, three stressed syllables in a row, and unintended alliteration. If a phrase draws attention to itself rather than its meaning, it is in the way.
-
-## Structure and narrative
-
-The full treatment is in `pyramid-principle.md`; at the paragraph level:
-
-- **Topic sentence first.** State the point, then support it. A paragraph that builds to its point makes the reader hold everything in suspense.
-- **One point per paragraph.** Two points means two paragraphs, or one point and one deletion.
-- **Order for the reader, not the author.** Chronology of the investigation is almost never the right order for the finding.
-- **Sections must earn their place.** A section that answers no question the reader has is clutter, however good the prose.
-- **Clutter buries the lead.** When a key idea is surrounded by qualifications, provenance, and asides, the reader misses it. Give it its own sentence and its own line.
 
 ## Language quality
 
