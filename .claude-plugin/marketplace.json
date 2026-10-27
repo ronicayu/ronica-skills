@@ -36,8 +36,8 @@
     {
       "name": "writing-editor",
       "source": "writing-editor",
-      "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
-      "version": "1.0.0",
+      "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text. Also applies technical-documentation standards (Diátaxis, Google developer style, STE, Global English) to docs, READMEs, RFCs, PR descriptions, commit messages, and issues.",
+      "version": "1.1.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -51,26 +51,10 @@
         "review",
         "pyramid-principle",
         "prose",
-        "documentation"
-      ],
-      "category": "documentation"
-    },
-    {
-      "name": "technical-writing",
-      "source": "technical-writing",
-      "description": "Layered technical-writing standard: Diátaxis structure, Google developer style sentences, STE instruction rules, Global English syntax. Use for /technical-writing or when writing or reviewing docs, RFCs, readmes, PR descriptions, or commit messages.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Yu Rong",
-        "url": "https://github.com/ronicayu"
-      },
-      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/technical-writing",
-      "repository": "https://github.com/ronicayu/ronica-skills",
-      "license": "MIT",
-      "keywords": [
-        "technical-writing",
         "documentation",
-        "technical-docs"
+        "technical-writing",
+        "diataxis",
+        "style-guide"
       ],
       "category": "documentation"
     },

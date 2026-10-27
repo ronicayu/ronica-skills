@@ -1,6 +1,6 @@
 ---
 name: writing-editor
-description: Act as an expert writing editor — diagnose and fix prose against Barbara Minto's Pyramid Principle (structure) plus a line-editing checklist (clarity, concision, sentence structure, flow, language, audience). Use this whenever the user asks to review, edit, critique, proofread, tighten, sharpen, simplify, polish, or improve any writing, or says a draft is unclear, too long, rambling, repetitive, hard to follow, or buries the point. Also use it when deciding how to open a document or order an argument, and use it proactively on substantial prose you have drafted yourself — reports, design docs, ADRs, assessments, summaries, emails, proposals, PR and release descriptions — before handing it over.
+description: Act as an expert writing editor — diagnose and fix prose against Barbara Minto's Pyramid Principle (structure) plus a line-editing checklist (clarity, concision, sentence structure, flow, language, audience). Use this whenever the user asks to review, edit, critique, proofread, tighten, sharpen, simplify, polish, or improve any writing, or says a draft is unclear, too long, rambling, repetitive, hard to follow, or buries the point. Also use it when deciding how to open a document or order an argument, and use it proactively on substantial prose you have drafted yourself — reports, design docs, ADRs, assessments, summaries, emails, proposals, PR and release descriptions — before handing it over. For technical text it also applies technical-documentation standards (Diátaxis, Google developer style, STE, Global English) to docs, READMEs, RFCs, commit messages, and issues.
 ---
 
 # Writing Editor
@@ -20,7 +20,7 @@ Two bodies of craft drive the work:
 - **Structure** — Barbara Minto's Pyramid Principle. A document is a single answer supported by a pyramid of ideas, and every level exists to answer the question the level above provokes. Depth in `references/pyramid-principle.md`.
 - **Line quality** — clarity, concision, sentence structure, flow, language, audience fit. Depth, with fix patterns and swap tables, in `references/line-editing-checklist.md`.
 
-Read the reference files when the pass needs them: the pyramid file when the draft's order or opening is in doubt, the checklist file when you are working through line-level fixes and want the specific tests and replacements. Both are short.
+Read the reference files when the pass needs them: the pyramid file when the draft's order or opening is in doubt, the checklist file when you are working through line-level fixes and want the specific tests and replacements, and `references/technical-docs.md` when the text is technical (documentation, READMEs, RFCs, PR descriptions, commit messages, issues). All three are short.
 
 ## Pick a mode before touching anything
 
@@ -38,7 +38,7 @@ When the request is ambiguous, ask which they want if the text is long, and othe
 
 Read the entire piece before changing a word. A local fix made blind to the ending is usually wrong.
 
-Then answer four questions, out loud if the user is present:
+Then answer these questions, out loud if the user is present:
 
 - **Who reads this, and what do they already know?** Editing for the wrong reader produces confident nonsense.
 - **What should happen after they read it** — a decision, an approval, a change of belief, an action?
@@ -51,6 +51,8 @@ Then answer four questions, out loud if the user is present:
   - **Orienting** — a map before any detail: the parts, how they connect, and where to go next.
 
 When one document serves two of these, write the body for the primary reader and give the other their own section. Prose that serves both at once serves neither.
+
+- **Is the text technical?** If it is product or developer documentation, a README, an RFC, a PR description, a commit message, or an issue, read `references/technical-docs.md`, pick the Diátaxis mode for documentation, apply its shape and heading rules in pass 1, and apply its sentence rules in passes 4 and 5.
 
 ### 1. Structure
 
@@ -143,7 +145,7 @@ If the draft is good, say so plainly and give only what would still help. Manufa
 
 The failure mode of an eager editor is a competent draft rewritten into anonymous corporate prose. Guard against it:
 
-- **Preserve voice.** Distinctive phrasing that works is not an error. Edit for the reader's comprehension, not toward a house average.
+- **Preserve voice.** Distinctive phrasing that works is not an error. Edit for the reader's comprehension, not toward a house average. For technical text, the rules in `references/technical-docs.md` take precedence over voice.
 - **Cut repetition before meaning.** When asked to shorten, compress in this order: duplication, then long-windedness, then examples, then explanation. Losing content is the last resort, and worth flagging when it happens.
 - **Do not bullet by reflex.** Bullets lose the connectives — *because*, *therefore*, *but* — that carry reasoning. Use them for genuinely parallel items, and prose for an argument.
 - **Invent nothing.** Editing does not add facts, figures, citations, or claims. If a claim needs support it does not have, flag it as a gap.
