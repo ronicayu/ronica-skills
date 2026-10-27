@@ -1,3 +1,5 @@
+Note (2026-10-27): technical-writing and write-doc were folded into writing-editor 2.0.0. Derive the plugin list from `.claude-plugin/marketplace.json`, not from this plan.
+
 # Codex and GitHub Copilot Installation Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

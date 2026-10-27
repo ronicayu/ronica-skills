@@ -44,7 +44,7 @@ The four elements can be ordered for effect:
 
 Everything the reader must accept before the answer belongs in the introduction. Nothing arguable does: the introduction reminds, it does not persuade.
 
-**Answer-first has one common exception.** A technical reader evaluating a design must be able to reach the conclusion independently, so a design document often runs problem → options → comparison → recommendation. That is still a pyramid; the governing thought is still stated early, in a summary, and the body earns it. For the document-type split (Diátaxis), see `references/technical-docs.md`.
+**Answer-first has one common exception.** A technical reader evaluating a design must be able to reach the conclusion independently, so a design document often runs problem → options → comparison → recommendation. That is still a pyramid; the governing thought is still stated early, in a summary, and the body earns it. For the document-type split (Diátaxis), see `technical-docs.md`.
 
 ## Grouping: inductive and deductive
 

@@ -6,8 +6,7 @@ A marketplace of Claude Code plugins.
 
 | Plugin | What it does |
 | --- | --- |
-| [`write-doc`](plugins/write-doc) | Authors a document through four gated stages — purpose and audience, sources, a stress-tested Minto pyramid outline, then content. Body prose is never written before the outline is signed off. |
-| [`writing-editor`](plugins/writing-editor) | Edits and reviews prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text. Also covers technical documentation: docs, READMEs, RFCs, PR descriptions, commit messages, and issues, using Diátaxis, Google developer style, STE, and Global English. |
+| [`writing-editor`](plugins/writing-editor) | Writes, reviews and edits prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text. New documents are drafted through gated stages: purpose, sources, an approved outline, then content. Also covers technical documentation: docs, READMEs, RFCs, PR descriptions, commit messages, and issues, using Diátaxis, Google developer style, STE, and Global English. |
 | [`taskgraph`](plugins/taskgraph) | Tracks project tasks and dependencies in a SQLite DAG. Plan backwards from a goal, `ready` shows what can start now, and `graph` opens an interactive view with hover path highlighting and task details. |
 | [`agentic-team`](plugins/agentic-team) | Provides a manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results. |
 | [`telegram-send`](plugins/telegram-send) | Sends a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that reads credentials from a mode-600 file, keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean. |
@@ -18,14 +17,13 @@ A marketplace of Claude Code plugins.
 
 ```text
 /plugin marketplace add ronicayu/ronica-skills
-/plugin install write-doc@ronica-skills
 /plugin install writing-editor@ronica-skills
 /plugin install agentic-team@ronica-skills
 /plugin install telegram-send@ronica-skills
 /plugin install taskgraph@ronica-skills
 ```
 
-Skills then trigger on their own descriptions, or explicitly via `/write-doc`,
+Skills then trigger on their own descriptions, or explicitly via
 `/writing-editor`, `/telegram-send`, and `/taskgraph`.
 After installing `agentic-team`, select `agentic-team:manager` in the agent
 picker, invoke it with `@agent-agentic-team:manager`, or type
