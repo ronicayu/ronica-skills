@@ -4,8 +4,8 @@
 Usage:
     run.py [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command> ...
 
-    launch <id>    render the brief, create the worktree at the base, start the
-                   worker, record the start
+    launch <id>    render the brief, create the task worktree at the base (or
+                   continue in it), start the worker, record the start
     adopt <id>     bring a branch started outside run.py under the Manager
     verify <id>    start a verifier session, in a worktree at the commit, for a
                    PASS result, or find the CI run on the pushed branch
@@ -38,14 +38,20 @@ Exit codes: 0 the command ran (an event may still say `died` or `kept`);
 1 a tool failed (tg, git, claude); 2 refused, the message names the fix;
 3 the standing orders say STOP (launch only).
 
-A live session row belongs to a task by its working directory, which ends
-`.claude/worktrees/<task|verify>-<id>-<attempt>` inside this repository. Names
-are never used: `claude agents --all` lists every project on the machine. A
-session that `claude stop` ended shows `state` "stopped", no status, and an
-unrelated directory. It belongs to the task whose result carries its
-`Session: <id>` line, which run.py files whenever it stops a session. A stopped
-row with no such line belongs to nobody. The worktree path is always derived
-from the task and attempt, never read from a stopped row.
+A session row belongs to a task by its session id. run.py records the id in the
+task's `sessions` meta when it starts the session (the `<id>` that `claude --bg`
+prints, checked against `claude agents --json --all`). A live or finished row
+whose id is not recorded, and whose working directory is a worktree folder of
+this repository (`.claude/worktrees/task-<id>` or `verify-<id>-<attempt>`),
+belongs to the task of that folder, current attempt. A session that `claude stop`
+ended shows `state` "stopped", no status, and the repository root as its
+directory; only its recorded id ties it to a task. A stopped row that is not
+recorded belongs to nobody. Names are never used: `claude agents --all` lists
+every project on the machine. A task has one worktree and one branch for its
+whole life (`.claude/worktrees/task-<id>`, `worktree-task-<id>`); every attempt
+runs in it, on top of the earlier attempts' commits. The worktree path is always
+derived from the task, never read from a row. The `Session:` lines in result
+bodies are a record, not the match.
 """
 
 import argparse
@@ -72,7 +78,10 @@ DEFAULT_TIMEBOX_HOURS = 2
 VERDICTS = ("artifact-verified", "test-verified", "check-only", "verify-blocked", "verify-failed")
 CLOSING = ("artifact-verified", "test-verified")
 ABANDON_MODES = ("died", "tool-error", "stuck", "unknown")
-WT_NAME = re.compile(r"^(task|verify)-(\d+)-(\d+)(-\d+)?$")
+TASK_WT = re.compile(r"^task-(\d+)$")
+VERIFY_WT = re.compile(r"^verify-(\d+)-(\d+)(?:-(\d+))?$")
+LEGACY_WT = re.compile(r"^task-(\d+)-(\d+)$")  # a worktree of agentic-team 0.6.0
+BACKGROUNDED = re.compile(r"backgrounded\s*\u00b7\s*([0-9A-Za-z-]+)")
 COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}")
 FIELD_LINE = re.compile(r"^(exit tests?|acceptance):\s*(.*)$", re.I)  # only these labels are fields
 CHECK_ITEM = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.*)$")
@@ -142,6 +151,24 @@ first_line = codehost.first_line
 def tail_or_none(match):
     value = match.group(1).strip() if match else ""
     return None if value in ("", "None") else value
+
+
+def task_worktree(run, tid):
+    """The one worktree of a task: <root>/.claude/worktrees/task-<tid>."""
+    return os.path.join(run.root, ".claude", "worktrees", f"task-{tid}")
+
+
+def task_branch(tid):
+    return f"worktree-task-{tid}"
+
+
+def wt_kind(name):
+    """("task", id) or ("verify", id) for a worktree folder name, else None."""
+    if m := TASK_WT.match(name):
+        return "task", int(m.group(1))
+    if m := VERIFY_WT.match(name):
+        return "verify", int(m.group(1))
+    return None
 
 
 class Run:
@@ -278,15 +305,14 @@ class Run:
                 raise Refused("claude agents failed: output is not JSON", 1)
             if not isinstance(rows, list):
                 raise Refused("claude agents failed: output is not a list", 1)
-            stopped = {}  # session id -> worktree name, from the Session: lines run.py filed
-            for row in self.tg("result", "ls") or []:
-                sid = tail_or_none(SESSION_LINE.search(row.get("body") or ""))
-                wt = os.path.basename(tail_or_none(WORKTREE_LINE.search(row.get("body") or "")) or "")
-                if not WT_NAME.match(wt) and row["kind"] == "task" and row.get("attempt"):
-                    wt = f"task-{row['task_id']}-{row['attempt']}"
-                if sid and WT_NAME.match(wt):
-                    stopped[sid] = wt
-            self._sessions = [Session(r, self.wt_dir, stopped) for r in rows if isinstance(r, dict)]
+            index = {}  # session id -> (task id, kind, attempt, worktree name), from the `sessions` meta run.py wrote
+            for task in self.tg("ls", "--status", "open", "in_progress", "done") or []:
+                entries = (task.get("meta") or {}).get("sessions")
+                for entry in entries if isinstance(entries, list) else []:
+                    if isinstance(entry, dict) and entry.get("id"):
+                        index[str(entry["id"])] = (task["id"], entry.get("kind"), entry.get("attempt"),
+                                                   entry.get("worktree") or f"task-{task['id']}")
+            self._sessions = [Session(r, self.wt_dir, index) for r in rows if isinstance(r, dict)]
         return self._sessions
 
     def orders(self):
@@ -341,12 +367,14 @@ class Orders:
 class Session:
     """One row of `claude agents --json --all`, tied to a task.
 
-    A live row is tied by its working directory, inside this repository's
-    .claude/worktrees/. A row with state "stopped" (what `claude stop` leaves) has
-    no status and an unrelated directory; `stopped` maps its id to the worktree
-    name that run.py recorded when it stopped the session. Names never count."""
+    A row is tied by its session id when run.py recorded the id in the task's
+    `sessions` meta (`index`). A live or finished row that is not recorded is tied
+    by its working directory, a worktree folder inside this repository's
+    .claude/worktrees/; a task folder is shared by every attempt, so its attempt is
+    None. A stopped row (what `claude stop` leaves) has no status and the
+    repository root as its directory: only a recorded id ties it. Names never count."""
 
-    def __init__(self, row, wt_dir, stopped):
+    def __init__(self, row, wt_dir, index):
         self.row = row
         self.sid = str(row.get("id") or "")
         self.name = row.get("name") or ""
@@ -355,22 +383,25 @@ class Session:
         self.state = row.get("state")
         self.waiting = row.get("waitingFor")
         self.kind = self.task_id = self.attempt = self.wtname = None
-        if self.state == "stopped":
-            self.wtname = stopped.get(self.sid)
-        elif self.cwd:
+        known = index.get(self.sid) if self.sid else None
+        self.recorded = known is not None
+        if known:
+            self.task_id, self.kind, self.attempt, self.wtname = known
+        elif self.state != "stopped" and self.cwd:
             real = os.path.realpath(self.cwd)
-            if os.path.dirname(real) == wt_dir and WT_NAME.match(os.path.basename(real)):
-                self.wtname = os.path.basename(real)
-        if self.wtname:
-            match = WT_NAME.match(self.wtname)
-            self.kind, self.task_id, self.attempt = match.group(1), int(match.group(2)), int(match.group(3))
+            folder = os.path.basename(real)
+            if os.path.dirname(real) == wt_dir:
+                if m := TASK_WT.match(folder):
+                    self.kind, self.task_id, self.wtname = "task", int(m.group(1)), folder
+                elif m := VERIFY_WT.match(folder):
+                    self.kind, self.task_id, self.attempt, self.wtname = "verify", int(m.group(1)), int(m.group(2)), folder
         self.finished = (self.status == "idle" and self.state == "done") or self.state == "stopped"
         self.live = not self.finished
         self.stuck = self.live and (bool(self.waiting) or self.state == "blocked")
         self.unknown = self.live and not self.stuck and self.status != "busy"
 
     def worktree(self, root):
-        """The worktree path, derived from the task and attempt, never from the row."""
+        """The worktree path, derived from the folder name, never from the row."""
         return os.path.join(root, ".claude", "worktrees", self.wtname)
 
     def describe(self):
@@ -378,8 +409,10 @@ class Session:
 
 
 def own_sessions(run, tid, kind=None, attempt=None):
+    """The task's session rows. A row with no attempt (an unrecorded one in the shared task folder) is the
+    current attempt's, so it matches any attempt."""
     return [s for s in run.sessions() if s.task_id == tid and (kind is None or s.kind == kind)
-            and (attempt is None or s.attempt == attempt)]
+            and (attempt is None or s.attempt is None or s.attempt == attempt)]
 
 
 def live_count(run):
@@ -392,6 +425,28 @@ def wanted_attempt(task):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def is_legacy(task):
+    """A task in progress with an attempt and no `sessions` meta was started under agentic-team 0.6.0."""
+    return (task["status"] == "in_progress" and (wanted_attempt(task) or 0) >= 1
+            and "sessions" not in (task.get("meta") or {}))
+
+
+LEGACY_NEXT = ("finish it with 0.6.0 before you upgrade; or, once its session has ended and its result is filed, "
+               "tg edit {tid} --meta sessions='[]' and run.py record")
+
+
+def legacy_detail(task):
+    n = wanted_attempt(task)
+    return (f"started under agentic-team 0.6.0 (worktree .claude/worktrees/task-{task['id']}-{n}); "
+            "run.py 0.7.0 does not manage it")
+
+
+def refuse_legacy(task):
+    if is_legacy(task):
+        raise Refused(f"#{task['id']} attempt {wanted_attempt(task)}: {legacy_detail(task)}; "
+                      + LEGACY_NEXT.format(tid=task["id"]))
 
 
 # ------------------------------------------------- shared result predicates
@@ -517,7 +572,7 @@ def result_command(py, tg, db, project, task_id, kind, attempt, session):
             f"--status <STATUS> --body-file - <<'REPORT'\n<your report>\nREPORT")
 
 
-def render(run, task, kind, attempt, session, ref=None, worker=None, base=None):
+def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False):
     """The brief text. Taskgraph is the only source of task content."""
     tid = task["id"]
     meta = task.get("meta") or {}
@@ -598,8 +653,13 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None):
         values.update({
             "GOAL": f"{task['title']}. {why}",
             "SCOPE": str(meta["scope"]).strip(),
-            "SETUP": (f"Base commit: {base}. Your worktree is already at the base commit `{base}`, on branch "
-                      f"`worktree-task-{tid}-{attempt}`. Do not reset it or check out another commit. If "
+            "SETUP": (f"Attempt {attempt}. Your worktree is at `{base}` on branch `{task_branch(tid)}`. It holds the "
+                      "commits of the earlier attempts of this task. Read the previous report under UPSTREAM and build "
+                      "on it; do not redo what passed. Do not reset the worktree or check out another commit. If "
+                      f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."
+                      if retry else
+                      f"Base commit: {base}. Your worktree is already at the base commit `{base}`, on branch "
+                      f"`{task_branch(tid)}`. Do not reset it or check out another commit. If "
                       f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."),
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
@@ -654,10 +714,9 @@ def commit_of(run, ref):
     return out.stdout.strip() if out.returncode == 0 else None
 
 
-def add_worktree(run, name, ref, retry=""):
+def add_worktree(run, name, ref):
     """Create .claude/worktrees/<name> on branch worktree-<name> at ref, where `claude --bg --worktree <name>`
-    reuses it. An existing branch or folder is refused, never reused or reset. `retry` is a hint that gives a
-    way out without removing anything."""
+    reuses it. An existing branch or folder is refused, never reused or reset."""
     path, branch = os.path.join(run.wt_dir, name), f"worktree-{name}"
     rel, facts, steps = f".claude/worktrees/{name}", [], []
     registered = path in registered_worktrees(run)
@@ -689,8 +748,8 @@ def add_worktree(run, name, ref, retry=""):
         if not (registered and not os.path.lexists(path)):  # `branch -D` fails until the stale registration is pruned
             steps.append(f"`git branch -D {branch}`")
     if facts:
-        raise Refused("; ".join(facts) + ". Nothing was created." + (f" {retry}." if retry else "")
-                      + " To reuse this name: " + ", then ".join(steps) + ", then rerun.")
+        raise Refused("; ".join(facts) + ". Nothing was created. To reuse this name: "
+                      + ", then ".join(steps) + ", then rerun.")
     out = run.git("worktree", "add", "-q", "-b", branch, path, ref, check=False)
     if out.returncode != 0:
         raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
@@ -707,7 +766,8 @@ def remove_worktree(run, name, ref):
         return "it has uncommitted changes"
     run._sessions = None  # the failed start may have left a row
     try:
-        if any(s.wtname == name for s in run.sessions()):
+        real = os.path.realpath(path)
+        if any(s.cwd and os.path.realpath(s.cwd) == real for s in run.sessions()):
             return "a session row uses it"
     except Refused:
         pass  # claude may be what failed; the checks above still held
@@ -716,9 +776,12 @@ def remove_worktree(run, name, ref):
     return None
 
 
-def started_or_cleaned(run, name, ref, exc):
-    """Called when the brief or `claude --bg` failed after add_worktree. Removes the worktree when safe,
-    then raises the original error, with a note when the worktree stays."""
+def started_or_cleaned(run, name, ref, exc, created=True):
+    """Called when the brief or `claude --bg` failed. When this launch created the worktree it removes it if
+    that is safe, then raises the original error, with a note when the worktree stays. A worktree this launch
+    only reused holds earlier attempts: nothing is removed."""
+    if not created:
+        raise exc
     kept = remove_worktree(run, name, ref)
     if kept is None:
         raise exc
@@ -735,29 +798,18 @@ def drift_warning(run, name, ref, branch=True):
     return f"the session's worktree is not at {ref[:7]}; claude may no longer reuse a prepared worktree"
 
 
-def previous_head(run, rows, base, nxt):
-    """(commit, note) from the latest worker result or stopped attempt, else (None, None). Its Head: is the
-    new base only when `base`, the base recorded for the previous attempt, is an ancestor of it. Otherwise
-    the recorded base is, with a note; a Head that is not in this repository does the same."""
-    found = [r for r in rows if is_worker_result(r) or (r["status"] == "STOPPED" and r["kind"] == "task")]
-    match = HEAD_LINE.search(found[-1]["body"]) if found else None
-    if not match:
-        return None, None
-    head, n = match.group(1), found[-1].get("attempt") or nxt - 1
-    if not is_sha(base):
-        return head, None
-    code = run.git("merge-base", "--is-ancestor", base, head, check=False).returncode
-    if code == 0:
-        return head, None
-    if code == 1:
-        return base, (f"Head {head[:7]} of attempt {n} is not built on the recorded base {base[:7]}; "
-                      f"starting from {base[:7]}")
-    if commit_of(run, base):
-        return base, f"attempt {n} Head {head[:7]} is not in this repository; starting from the recorded base {base[:7]}"
-    if commit_of(run, head):
-        return head, None  # only the base is gone: the lineage cannot be checked
-    raise Refused(f"attempt {n} Head {head[:7]} and the recorded base {base[:7]} are not in this repository; "
-                  "pass --base <sha|branch>")
+def last_head(run, rows, attempt=None):
+    """(commit, attempt) of the latest worker or STOPPED result whose Head: is a commit in this repository."""
+    for r in reversed(rows):
+        if r["kind"] != "task" or not (is_worker_result(r) or r["status"] == "STOPPED"):
+            continue
+        if attempt is not None and r.get("attempt") != attempt:
+            continue
+        match = HEAD_LINE.search(r.get("body") or "")
+        full = commit_of(run, match.group(1)) if match else None
+        if full:
+            return full, r.get("attempt")
+    return None
 
 
 def resolve_base(run, ref):
@@ -867,6 +919,35 @@ def decision_text(text, task, snap=None, extra=""):
 
 # ------------------------------------------------------------------ launch
 
+def session_entry(run, tid, kind, attempt, name, worktree, said):
+    """(entry, note) for the session `claude --bg` just started. The entry is what goes into the task's
+    `sessions` meta, or None when claude printed no id. It never fails the launch: the session runs."""
+    run._sessions = None
+    try:
+        rows = run.sessions()
+    except Refused:
+        rows = []
+    match = BACKGROUNDED.search(said or "")
+    if not match:
+        return None, "no session id printed; the row is matched by its folder"
+    printed = match.group(1)
+    unrecorded = [s for s in rows if not s.recorded and s.state != "stopped" and s.task_id == tid
+                  and s.kind == kind and s.wtname == worktree]
+    if any(s.sid == printed for s in rows):
+        sid, note = printed, ""
+    elif len(unrecorded) == 1:
+        sid = unrecorded[0].sid
+        note = f"claude printed {printed}; recorded the row {sid} found in the worktree"
+    else:
+        sid, note = printed, f"claude agents does not list {printed} yet"
+    return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree}, note
+
+
+def recorded_sessions(task):
+    found = (task.get("meta") or {}).get("sessions")
+    return [e for e in found if isinstance(e, dict)] if isinstance(found, list) else []
+
+
 def cmd_launch(run, args):
     tid = args.id
     orders = run.orders()
@@ -881,6 +962,7 @@ def cmd_launch(run, args):
                       f'tg edit {tid} --notes "<answer>", then tg done {tid}')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
+    refuse_legacy(task)
     verify_mode(run, task)
     blockers = waiting_for(run, task)
     if blockers:
@@ -889,15 +971,22 @@ def cmd_launch(run, args):
     if meta.get("abandoned") and not args.attempt:
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']}); pass --attempt {current + 1} to try again")
     given, given_target = resolve_base(run, args.base) if args.base else (None, None)
+    retry = current >= 1  # the task has a worktree, or had one
+    wt, branch = task_worktree(run, tid), task_branch(tid)
+    rel = f".claude/worktrees/task-{tid}"
+    wt_there = retry and os.path.lexists(wt)
+    wt_head = (run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+               if wt_there and os.path.isdir(wt) else "")
+    holds = wt_head or given  # the commit the worker builds on
     for dep in task.get("depends_on") or []:
         if dep["derived_status"] == "done" or dep["status"] == "done":
             found = run.show(dep["id"])
             dmeta = found.get("meta") or {}
             if is_sha(dmeta.get("verdict_ref")) and not dmeta.get("merged_at"):
-                if given and run.git("merge-base", "--is-ancestor", str(dmeta["verdict_ref"]), given, check=False).returncode == 0:
+                if holds and run.git("merge-base", "--is-ancestor", str(dmeta["verdict_ref"]), holds, check=False).returncode == 0:
                     continue  # the worker builds on the dependency's branch
-                branch = (dmeta.get("pr_branch") if run.pr_mode else None) or f"worktree-task-{dep['id']}-{wanted_attempt(found) or 1}"
-                raise Refused(f"#{tid} depends on #{dep['id']}, whose branch {branch} is not merged; merge it and run "
+                dep_branch = (dmeta.get("pr_branch") if run.pr_mode else None) or task_branch(dep["id"])
+                raise Refused(f"#{tid} depends on #{dep['id']}, whose branch {dep_branch} is not merged; merge it and run "
                               f"run.py merged {dep['id']} --by operator, wait, or pass --base <its branch>")
     live = [s for s in own_sessions(run, tid, "task") if s.live]
     if live and task["status"] == "open":
@@ -905,28 +994,65 @@ def cmd_launch(run, args):
         s = live[0]
         if not args.dry_run:
             run.tg("start", str(tid))
-            run.tg("edit", str(tid), "--meta", meta_arg("session", s.name or s.wtname), meta_arg("attempt", s.attempt),
-                   meta_arg("started_at", run.now()))
-        run.emit("repaired", tid, s.attempt, s.sid, f"live session {s.sid} found for an open task; "
+            sessions = recorded_sessions(task)
+            if not any(e.get("id") == s.sid for e in sessions):
+                sessions.append({"id": s.sid, "kind": "task", "attempt": 1, "name": s.name or s.wtname,
+                                 "worktree": f"task-{tid}"})
+            run.tg("edit", str(tid), "--meta", meta_arg("session", s.name or s.wtname), meta_arg("attempt", s.attempt or 1),
+                   meta_arg("started_at", run.now()), meta_arg("sessions", sessions))
+        run.emit("repaired", tid, s.attempt or 1, s.sid, f"live session {s.sid} found for an open task; "
                  f"recorded the start", "run.py record")
         return
+    live = [s for s in run.sessions() if s.task_id == tid and s.live]
+    if live:
+        raise Refused(f"#{tid} has a live session {live[0].describe()}; run run.py record, or run.py stop {tid}")
     rows = run.results_for(tid)
     latest = task_rows(rows, current)
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
         raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
     refuse_past_cap(tid, nxt, latest, args.attempt)
-    # BASE: --base, else the previous attempt's Head: (when it is built on that attempt's base), else the
-    # fetched target branch (pr) or HEAD (local).
-    base, note = (given, None) if given else previous_head(run, rows, meta.get("base"), nxt)
-    if base is None:
-        base = run.git("rev-parse", "--verify", f"{run.target_ref(task)}^{{commit}}").stdout.strip()
+    # THE WORKTREE. A first attempt creates it at the base: --base, else the fetched target branch (pr) or HEAD
+    # (local). A retry continues in it, at its HEAD. `mode` says which, and what a failed start may undo.
+    notes = []
+    if not retry:
+        mode = "first"
+        base = given or run.git("rev-parse", "--verify", f"{run.target_ref(task)}^{{commit}}").stdout.strip()
+    elif wt_there:
+        if os.path.realpath(wt) not in registered_worktrees(run):
+            raise Refused(f"folder {rel} is a plain folder, not a git worktree; move or delete it yourself")
+        on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+        if on != branch:
+            raise Refused(f"{rel} is on {on or 'a detached HEAD'}, not {branch}; run git -C {rel} switch {branch}")
+        if not wt_head:
+            raise Refused(f"cannot read HEAD of {rel}; check it with git -C {rel} status")
+        if given:
+            raise Refused(f"#{tid} continues in {rel} at {wt_head[:7]}; --base applies to a first attempt. To restart from "
+                          f"{args.base}: git worktree remove -f -f {rel} && git branch -D {branch}, then rerun with --base.")
+        mode, base = "continue", wt_head
+        reported = last_head(run, rows, current)
+        if reported and reported[0] != wt_head:
+            notes.append(f"worktree HEAD {wt_head[:7]} is not the last report's Head {reported[0][:7]}")
+    else:
+        tip = commit_of(run, f"refs/heads/{branch}")
+        reported = last_head(run, rows)
+        if tip:
+            if given:
+                raise Refused(f"#{tid} continues on branch {branch} at {tip[:7]}; --base applies to a first attempt. To "
+                              f"restart from {args.base}: git branch -D {branch}, then rerun with --base.")
+            mode, base = "reattach", tip
+        elif given:
+            mode, base = "base", given
+        elif reported:
+            mode, base = "head", reported[0]
+            notes.append(f"created at Head {base[:7]} of attempt {reported[1] or current}")
+        else:
+            raise Refused(f"#{tid} attempt {current} left no worktree, branch or Head in this repository; "
+                          "pass --base <sha|branch>")
     base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
+    continuing = mode in ("continue", "reattach", "head")
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
-    text = render(run, task, "task", nxt, session, base=base)
-    live = [s for s in run.sessions() if s.task_id == tid and s.live]
-    if live:
-        raise Refused(f"#{tid} has a live session {live[0].describe()}; run run.py record, or run.py stop {tid}")
+    text = render(run, task, "task", nxt, session, base=base, retry=continuing)
     check_cap(run)
     if args.model:
         model, effort = args.model, args.effort
@@ -939,7 +1065,7 @@ def cmd_launch(run, args):
             raise Refused("tier 'verifier' has no model; use mechanical, implementation, judgement "
                           "or a models.overrides key")
         model, effort = chosen["model"], args.effort or chosen["effort"]
-    worktree = f"task-{tid}-{nxt}"
+    worktree = f"task-{tid}"
     if args.dry_run:
         print("claude " + " ".join(session_args(run, worktree, session, model, effort)) + " <brief>", file=sys.stderr)
         if run.json:
@@ -947,23 +1073,48 @@ def cmd_launch(run, args):
         else:
             print(text, end="")
         return
-    add_worktree(run, worktree, base, f"Pass --attempt {nxt + 1} to start under a new name")
+    if mode == "continue":
+        # A dirty worktree never reaches a worker silently: commit what the last attempt left.
+        porcelain = run.git("status", "--porcelain", cwd=wt).stdout.splitlines()
+        if porcelain:
+            status = latest[-1]["status"] if latest else "uncommitted"
+            run.git("add", "-A", cwd=wt)
+            run.git("commit", "-q", "-m", f"WIP task {tid} attempt {current}: {status}", cwd=wt)
+            base = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+            notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]}")
+            text = render(run, task, "task", nxt, session, base=base, retry=True)
+    elif mode == "reattach":
+        run.git("worktree", "prune")
+        out = run.git("worktree", "add", "-q", os.path.join(run.wt_dir, worktree), branch, check=False)
+        if out.returncode != 0:
+            raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
+        notes.append(f"reattached {branch} at {base[:7]}")
+    else:
+        add_worktree(run, worktree, base)
+    created = mode in ("first", "base", "head")
     try:
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         said = start_session(run, worktree, session, model, effort, text)
     except Exception as exc:
-        started_or_cleaned(run, worktree, base, exc)
+        started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
+    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said)
+    sessions = recorded_sessions(task) + ([entry] if entry else [])
     if task["status"] == "open":
         run.tg("start", str(tid))
-    # Never unset pr, pr_branch, pushed or target: one request per task across attempts.
+    # Never unset pr, pr_branch, pushed or target: one request per task across attempts. `base` is the commit the
+    # task branch forked from: the first launch writes it, a retry keeps it.
     keep = [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
+    if not meta.get("base") and mode in ("first", "base", "head"):
+        keep.append(meta_arg("base", base))
     run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
-           meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("base", base), *keep,
+           meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), *keep,
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
-    detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree .claude/worktrees/{worktree} "
-              f"base {base[:7]} brief {path}" + (f"; {note}" if note else "")
-              + (f"; claude said: {said}" if said else "") + (f"; {drift}" if drift else ""))
+    where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
+    detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree {rel} {where} brief {path}"
+              + "".join(f"; {n}" for n in notes)
+              + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
+              + (f"; {drift}" if drift else ""))
     run.emit("launched", tid, nxt, session, detail)
 
 
@@ -1025,8 +1176,9 @@ def cmd_adopt(run, args):
     nxt, now = current + 1, run.now()
     if task["status"] == "open":
         run.tg("start", str(tid))
+    fresh = {} if "sessions" in meta else {"sessions": []}
     run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in {"attempt": nxt, "session": "adopted", "started_at": now,
-           "base": base, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
+           "base": base, **fresh, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
     run.add_result(tid, "task", nxt, "manager", "PASS",
                    f"Task: {tid}\nStatus: PASS\nBranch: {branch}\nHead: {head}\nWorktree: None\nRan: not stated (adopted)\n"
                    f"Files: None\nIssues: None\nDeviations: adopted by the Manager at {now}; the work was done outside run.py\n"
@@ -1065,6 +1217,7 @@ def worker_for(run, tid, attempt, result_id=None):
 def cmd_verify(run, args):
     tid = args.id
     task = run.show(tid)
+    refuse_legacy(task)
     mode = verify_mode(run, task)
     if mode != "session":
         return verify_ci(run, args, task, mode[3:])
@@ -1085,8 +1238,8 @@ def cmd_verify(run, args):
     names = {s.wtname for s in own_sessions(run, tid, "verify", attempt)}
     if os.path.isdir(run.wt_dir):
         for entry in os.listdir(run.wt_dir):
-            m = WT_NAME.match(entry)
-            if m and m.group(1) == "verify" and int(m.group(2)) == tid and int(m.group(3)) == attempt:
+            m = VERIFY_WT.match(entry)
+            if m and int(m.group(1)) == tid and int(m.group(2)) == attempt:
                 names.add(entry)
     stale = run.git("branch", "--list", "--format=%(refname:short)", f"worktree-verify-{tid}-{attempt}",
                     f"worktree-verify-{tid}-{attempt}-*", check=False).stdout.split()
@@ -1120,13 +1273,17 @@ def cmd_verify(run, args):
         add_worktree(run, name, ref)
     try:
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
-        start_session(run, name, name, model, effort, text)
+        said = start_session(run, name, name, model, effort, text)
     except Exception as exc:
         if is_sha(ref):
             started_or_cleaned(run, name, ref, exc)
         raise
     drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}" + (f"; {drift}" if drift else ""))
+    entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said)
+    if entry:  # the only meta verify writes
+        run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
+    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}"
+             + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else ""))
 
 
 def verify_ci(run, args, task, name):
@@ -1264,7 +1421,7 @@ def commit_stopped(run, tid, attempt, rows, sessions):
         run.emit("stopping", tid, attempt, None, f"session {sessions[0].sid} has not exited yet")
         return
     sid = sessions[0].sid if sessions else (tail_or_none(SESSION_LINE.search(stopped[-1]["body"])) or "none")
-    wt = os.path.join(run.root, ".claude", "worktrees", f"task-{tid}-{attempt}")
+    wt = task_worktree(run, tid)
     if not os.path.isdir(wt):
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
                        f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\nFiles: None")
@@ -1290,6 +1447,9 @@ def record_in_progress(run, snap, task, unmanaged):
         return
     if attempt is None:
         unmanaged.append(tid)
+        return
+    if is_legacy(task):
+        run.emit("legacy", tid, attempt, None, legacy_detail(task), LEGACY_NEXT.format(tid=tid))
         return
     rows = snap.rows(tid)
     verifiers = own_sessions(run, tid, "verify", attempt)
@@ -1361,7 +1521,7 @@ def record_in_progress(run, snap, task, unmanaged):
                 record_arrived(run, snap, task, attempt, added)
             else:
                 where = (f"session {s.sid} {s.status}/{s.state}" if s
-                         else f"no session for .claude/worktrees/task-{tid}-{attempt}")
+                         else f"no session recorded for attempt {attempt}")
                 run.add_result(tid, "task", attempt, "manager", "DIED", f"{where}, no result")
                 nxt = (f"run.py launch {tid}" if attempt < MAX_ATTEMPTS
                        else f"attempt {MAX_ATTEMPTS} failed: run.py abandon {tid} died")
@@ -1400,7 +1560,7 @@ def record_done(run, snap, task):
         else:
             waits = [b for b in task.get("blocks") or [] if b in snap.by_id and snap.by_id[b]["status"] != "done"]
             run.emit("unmerged", tid, None, None,
-                     f"branch worktree-task-{tid}-{wanted_attempt(task) or 1} at {sha} is ready to merge; blocks {ids_text(waits)}")
+                     f"branch {task_branch(tid)} at {sha} is ready to merge; blocks {ids_text(waits)}")
     elif meta.get("merged_at"):
         cleanup(run, task)
 
@@ -1444,31 +1604,75 @@ def cmd_record(run, args):
 
 # ----------------------------------------------------------------- cleanup
 
+def worktree_locks(run):
+    """{real path: lock reason} for the locked worktrees git lists. The reason is "" for a lock without one."""
+    out = run.git("worktree", "list", "--porcelain", check=False).stdout
+    locks, path = {}, None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = os.path.realpath(line[len("worktree "):])
+        elif line == "locked" or line.startswith("locked "):
+            locks[path] = line[len("locked"):].strip()
+    return locks
+
+
+def task_folders(run, tid):
+    """(task and verifier folders of this task, 0.6.0 folders of this task) that exist under .claude/worktrees."""
+    entries = sorted(os.listdir(run.wt_dir)) if os.path.isdir(run.wt_dir) else []
+    current = [e for e in entries if (wt_kind(e) or (None, None))[1] == tid]
+    legacy = [e for e in entries if (m := LEGACY_WT.match(e)) and int(m.group(1)) == tid]
+    return current, legacy
+
+
 def cleanup(run, task):
-    """Remove the sessions and worktrees of a merged task. Never deletes a file."""
+    """Remove the sessions and worktrees of a merged task. Never deletes a file, never forces.
+
+    `claude rm` locks in the first session that used a worktree (even after it stopped). `claude rm` of any later
+    session removes only its row; `claude rm` of the first session removes the folder, when the tree is clean
+    and pushed. So the sessions go newest first and the task's first session goes last."""
     tid = task["id"]
     if (task.get("meta") or {}).get("abandoned"):
         return
-    rows = own_sessions(run, tid)
-    leftover = [e for e in sorted(os.listdir(run.wt_dir))
-                if (m := WT_NAME.match(e)) and int(m.group(2)) == tid] if os.path.isdir(run.wt_dir) else []
-    if not rows and not leftover:
+    folders, legacy = task_folders(run, tid)
+    if "sessions" not in (task.get("meta") or {}) and (wanted_attempt(task) or 0) >= 1:
+        # Started under 0.6.0: its rows are not recorded, so run.py removes nothing and lists the folders.
+        for folder in folders + legacy:
+            run.emit("kept", tid, None, None, f"{folder}: no session; remove it by hand if you want")
         return
-    known = set()
-    for s in rows:
-        known.add(s.wtname)
+    rows = own_sessions(run, tid)
+    if not rows and not folders and not legacy:
+        return
+    entries = recorded_sessions(task)
+    order = [e["id"] for e in entries if e.get("id")]
+    first = next((e["id"] for e in entries if e.get("kind") == "task" and e.get("id")), None)
+    recorded = sorted((s for s in rows if s.recorded and s.sid in order),
+                      key=lambda s: (s.sid == first, -order.index(s.sid)))
+    sessions = [s for s in rows if s not in recorded] + recorded
+    in_use = {s.wtname for s in rows if s.live}
+    dirty, noted, kept = {}, set(), set()  # folders: has changes, already reported, with a kept line
+    for s in sessions:
         wt = s.worktree(run.root)
         if s.live:
             run.emit("kept", tid, None, s.sid, f"{s.wtname}: still running")
+            kept.add(s.wtname)
+            continue
+        if s.wtname in in_use:  # claude rm refuses while another live session uses the worktree
+            kept.add(s.wtname)
             continue
         if os.path.isdir(wt):
-            if run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip():
-                run.emit("kept", tid, None, s.sid, f"{s.wtname}: uncommitted changes")
+            if s.wtname not in dirty:
+                dirty[s.wtname] = bool(run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip())
+            if dirty[s.wtname]:
+                if s.wtname not in noted:
+                    run.emit("kept", tid, None, s.sid, f"{s.wtname}: uncommitted changes")
+                    noted.add(s.wtname)
+                kept.add(s.wtname)
                 continue
         out = run.claude("rm", s.sid, check=False)
         if out.returncode == 0:
             run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}")
             continue
+        kept.add(s.wtname)
         message = (out.stderr + "\n" + out.stdout).strip()
         m = re.search(r"--discard-unpushed\s+([0-9A-Za-z]+)@(\S+)", message)
         if m:
@@ -1478,6 +1682,7 @@ def cleanup(run, task):
                    for into in ["HEAD"] + ([pushed] if pushed else [])):
                 again = run.claude("rm", s.sid, "--discard-unpushed", f"{commit}@{wtid}", check=False)
                 if again.returncode == 0:
+                    kept.discard(s.wtname)
                     run.emit("removed", tid, None, s.sid,
                              f"session {s.sid} worktree {s.wtname} (discarded {commit}, which is merged)")
                 else:
@@ -1494,9 +1699,17 @@ def cleanup(run, task):
                      f"{s.wtname}: untracked files{files}; delete only files you created, then run run.py merged {tid}")
         else:
             run.emit("kept", tid, None, s.sid, f"{s.wtname}: claude rm said: {first_line(message)}")
-    for entry in leftover:
-        if entry not in known:
-            run.emit("kept", tid, None, None, f"{entry}: no session; remove it by hand if you want")
+    locks = worktree_locks(run)
+    for folder in task_folders(run, tid)[0]:
+        if folder in kept:
+            continue
+        reason = locks.get(os.path.realpath(os.path.join(run.wt_dir, folder)))
+        why = "not locked" if reason is None else (reason or "locked")
+        run.emit("kept", tid, None, None,
+                 f"{folder}: still present ({why}); remove it by hand: "
+                 f"git worktree remove -f -f .claude/worktrees/{folder} && git branch -D worktree-{folder}")
+    for folder in legacy:
+        run.emit("kept", tid, None, None, f"{folder}: no session; remove it by hand if you want")
 
 
 # ---------------------------------------------------- pull and merge requests
@@ -1578,11 +1791,11 @@ def rebase_branch(run, task, branch, head, p):
     tid, meta = task["id"], task["meta"]
     attempt, host, remote = wanted_attempt(task) or 1, run.host(), run.config["merge"]["remote"]
     label, target = host.label(p.number), p.base_branch
-    wt = os.path.join(run.root, ".claude", "worktrees", f"task-{tid}-{attempt}")
+    wt = task_worktree(run, tid)
     why = None
     if not os.path.isdir(wt):
         why = "worktree missing"
-    elif any(s.live for s in own_sessions(run, tid, "task", attempt)):
+    elif any(s.live for s in own_sessions(run, tid, "task")):
         why = "session live"
     elif run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip():
         why = "worktree dirty"
@@ -1682,12 +1895,14 @@ def transcript_usage(path):
                  ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
-def find_tokens(run, session):
-    """(out, in, cache-read, cache-write), or the reason there is none."""
-    cwd = os.path.abspath(session.worktree(run.root))
+def find_tokens(run, tid, sid, row):
+    """(out, in, cache-read, cache-write), or the reason there is none. Every session of a task shares its
+    worktree, so they share one transcript folder; the id prefix tells them apart."""
+    cwd = os.path.abspath(task_worktree(run, tid))
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     folder = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
-    ids = [str(i) for i in dict.fromkeys(filter(None, (session.row.get("sessionId"), session.row.get("id"))))
+    row = row or {}
+    ids = [str(i) for i in dict.fromkeys(filter(None, (row.get("sessionId"), row.get("id"), sid)))
            if re.fullmatch(r"[0-9A-Za-z-]+", str(i))]
     if not ids:
         return "no session id recorded"
@@ -1711,8 +1926,8 @@ def find_tokens(run, session):
 
 
 def stop_live(run, tid, attempt, branch):
-    """Stop the task's live worker session. A failure is housekeeping: report it and go on."""
-    for s in own_sessions(run, tid, "task", attempt):
+    """Stop the task's live worker sessions, of any attempt. A failure is housekeeping: report it and go on."""
+    for s in own_sessions(run, tid, "task"):
         if not s.live:
             continue
         out = run.claude("stop", s.sid, check=False)
@@ -1729,7 +1944,7 @@ def stop_live(run, tid, attempt, branch):
 def branch_at(run, tid, attempt, worker, ref, task=None):
     """(branch, ref): the task branch, checked to still be at `ref`. With `task`, a branch at another
     head is accepted when it carries the same change, and the new head is returned."""
-    branch = (tail_or_none(BRANCH_LINE.search(worker["body"])) if worker else None) or f"worktree-task-{tid}-{attempt}"
+    branch = (tail_or_none(BRANCH_LINE.search(worker["body"])) if worker else None) or task_branch(tid)
     out = run.git("rev-parse", "--verify", f"refs/heads/{branch}", check=False)
     if out.returncode != 0:
         raise Refused(f"branch {branch} not found; the output is gone, re-verify or pass --ref with checksums")
@@ -1797,6 +2012,7 @@ def cmd_close(run, args):
     if (task["status"] == "done" and is_sha(meta.get("verdict_ref")) and not meta.get("merged_at")
             and not meta.get("abandoned")):
         return resume_close(run, task)
+    refuse_legacy(task)
     attempt = refuse_unless_running(task)
     rows, worker = worker_for(run, tid, attempt)
     branch_line = tail_or_none(BRANCH_LINE.search(worker["body"]))
@@ -1804,7 +2020,7 @@ def cmd_close(run, args):
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
     if not ref:
         raise Refused(f"no Head: in result #{worker['id']}; pass --ref")
-    branch = branch_line or f"worktree-task-{tid}-{attempt}"
+    branch = branch_line or task_branch(tid)
     if is_sha(ref):
         branch, new = branch_at(run, tid, attempt, worker, ref, task)
         if new != ref:
@@ -1823,16 +2039,22 @@ def cmd_close(run, args):
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
     run.edit_meta(tid, verdict=level, verdict_ref=ref)
-    own = own_sessions(run, tid, "task", attempt)
-    if not own:
-        run.emit("tokens", tid, None, None, "no session row; none recorded")
+    entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt), None)
+    if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
+        sid, row = entry["id"], next((s for s in run.sessions() if s.sid == entry["id"]), None)
+    else:  # an unrecorded row in the task folder is the current attempt's
+        own = own_sessions(run, tid, "task", attempt)
+        row = own[-1] if own else None
+        sid = row.sid if row else ""
+    if not entry and not row:
+        run.emit("tokens", tid, None, None, "no session recorded; none recorded")
     else:
-        found = find_tokens(run, own[-1])
+        found = find_tokens(run, tid, sid, row.row if row else None)
         if isinstance(found, str):
-            run.emit("tokens", tid, None, own[-1].sid, f"{found}; none recorded")
+            run.emit("tokens", tid, None, sid or None, f"{found}; none recorded")
         else:
             run.edit_meta(tid, tokens=f"{found[0]}/{found[1]}")
-            run.emit("tokens", tid, None, own[-1].sid,
+            run.emit("tokens", tid, None, sid or None,
                      f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
     if level not in CLOSING:
         run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level))
@@ -1899,6 +2121,7 @@ def cmd_merged(run, args):
 def cmd_stop(run, args):
     tid = args.id
     task = run.show(tid)
+    refuse_legacy(task)
     attempt = wanted_attempt(task)
     live = [s for s in own_sessions(run, tid, "task", attempt) if s.live] if attempt is not None else []
     if not live:
@@ -1918,9 +2141,10 @@ def cmd_abandon(run, args):
     task = run.show(tid)
     if task["status"] != "in_progress":
         raise Refused(f"#{tid} is not in progress")
+    refuse_legacy(task)
     meta = task.get("meta") or {}
     attempt = wanted_attempt(task)
-    for s in own_sessions(run, tid, "task", attempt):
+    for s in own_sessions(run, tid, "task"):
         if s.live:
             run.claude("stop", s.sid)
             run.add_result(tid, "task", attempt, "manager", "ABANDONED",
@@ -1928,7 +2152,8 @@ def cmd_abandon(run, args):
     run.edit_meta(tid, abandoned=args.mode)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
-        names |= {e for e in os.listdir(run.wt_dir) if (m := WT_NAME.match(e)) and int(m.group(2)) == tid}
+        names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
+                  ((m := LEGACY_WT.match(e)) and int(m.group(1)) == tid)}
     request = (f"; request {run.label(int(meta['pr']))} stays open, close it on the host by hand"
                if run.pr_mode and meta.get("pr") else "")
     run.emit("abandoned", tid, attempt, None,

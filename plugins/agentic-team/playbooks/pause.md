@@ -17,8 +17,7 @@
    irreversible action to pause.
 
 To resume, remove the `STOP:` line, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then follow the run
-playbook. Each stopped task relaunches as a fresh attempt that builds on its
-WIP commit.
+playbook. Each stopped task relaunches as a fresh attempt in the same worktree, on top of its WIP commit.
 
 **Reply:** what stopped where, what is on disk, and the first action on
 resume. This is a pause, not a final report.

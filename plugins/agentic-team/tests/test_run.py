@@ -29,7 +29,7 @@ import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 
 argv = sys.argv[1:]
 with open(os.environ["FAKE_CLAUDE_LOG"], "a") as fh:
@@ -59,7 +59,12 @@ elif cmd == "--bg":
     if os.environ.get("FAKE_CLAUDE_BG_ERROR"):
         sys.stderr.write(os.environ["FAKE_CLAUDE_BG_ERROR"] + "\n")
         sys.exit(1)
-    print("fake-session-id")
+    said = os.environ.get("FAKE_CLAUDE_BG_SAID")
+    if said is None:  # what claude 2.1.311 prints: the short id and the name, then help lines
+        name = argv[argv.index("--name") + 1]
+        said = ("backgrounded \u00b7 sess-%s \u00b7 %s\n  claude stop sess-%s      stop this session\n"
+                % (name, name, name))
+    sys.stdout.write(said)
 elif cmd == "stop":
     if os.environ.get("FAKE_CLAUDE_STOP_FAIL"):
         sys.stderr.write("boom\n")
@@ -75,6 +80,13 @@ elif cmd == "rm":
     if entry.get("exit") and "--discard-unpushed" not in argv:
         sys.stderr.write(entry.get("stderr", "") + "\n")
         sys.exit(entry["exit"])
+    if not entry.get("row_only"):  # like the real claude rm: the worktree goes with the session that owns it
+        folder = argv[1][len("sess-"):] if argv[1].startswith("sess-") else argv[1]
+        if re.fullmatch(r"task-\d+-\d+", folder):  # sess-task-<id>-<attempt>: the folder is task-<id>
+            folder = folder.rsplit("-", 1)[0]
+        for cmd_ in (["worktree", "remove", "-f", "-f", os.path.join(".claude", "worktrees", folder)],
+                     ["branch", "-D", "worktree-" + folder]):
+            subprocess.run(["git"] + cmd_, capture_output=True)
 '''
 
 # One template, written under two names. It logs argv to $FAKE_<NAME>_LOG, then answers from the JSON table
@@ -247,13 +259,27 @@ class Base(unittest.TestCase):
         self.git("commit", "-q", "-m", f"work on {name}", cwd=wt)
         return self.git("rev-parse", "HEAD", cwd=wt)
 
-    def row(self, wtname, status="busy", state="working", name=None, **extra):
+    def row(self, wtname, attempt=1, status="busy", state="working", name=None, **extra):
+        """A row of `claude agents --json`. A task folder is shared by its attempts, so the id carries the
+        attempt (sess-task-1-1, the id a real launch records); a verifier folder has one session."""
         cwd = os.path.join(self.root, ".claude", "worktrees", wtname)
-        return {"id": f"sess-{wtname}", "name": name or wtname, "cwd": cwd, "status": status,
-                "state": state, **extra}
+        sid = f"sess-{wtname}-{attempt}" if re.fullmatch(r"task-\d+", wtname) else f"sess-{wtname}"
+        return {"id": sid, "name": name or wtname, "cwd": cwd, "status": status, "state": state, **extra}
 
-    def finished(self, wtname, **extra):
-        return self.row(wtname, status="idle", state="done", **extra)
+    def finished(self, wtname, attempt=1, **extra):
+        return self.row(wtname, attempt, status="idle", state="done", **extra)
+
+    def entry(self, task, attempt=1, kind="task", worktree=None, name=None):
+        """The `sessions` meta entry run.py records for a session it started."""
+        if kind == "verify":
+            worktree = worktree or f"verify-{task}-{attempt}"
+            return {"id": f"sess-{worktree}", "kind": kind, "attempt": attempt, "name": name or worktree,
+                    "worktree": worktree}
+        return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
+                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}"}
+
+    def record_sessions(self, task, *entries):
+        self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
 
     def agents(self, *rows):
         with open(self.agents_file, "w") as fh:
@@ -305,16 +331,25 @@ class Base(unittest.TestCase):
     def brief(self, task_id, *extra, **kw):
         return self.ok("launch", str(task_id), "--dry-run", *extra, **kw).stdout
 
+    def task_wt(self, task_id=1):
+        """The task's one worktree, created on first use."""
+        path = self.wt_path(f"task-{task_id}")
+        return path if os.path.isdir(path) else self.worktree(f"task-{task_id}")
+
     def pass_report(self, task_id=1, attempt=1, wt=None, head=None, branch=None):
-        wt = wt or self.worktree(f"task-{task_id}-{attempt}")
+        wt = wt or self.task_wt(task_id)
         head = head or self.wt_commit(wt)
-        self.add_result(task_id, "PASS", f"Task: {task_id}\nStatus: PASS\nBranch: {branch or f'worktree-task-{task_id}-{attempt}'}\n"
+        self.add_result(task_id, "PASS", f"Task: {task_id}\nStatus: PASS\nBranch: {branch or f'worktree-task-{task_id}'}\n"
                         f"Head: {head}\nWorktree: {wt}\nCheckpoint: {CHECKPOINT}\n", attempt=attempt)
         return wt, head
 
-    def running_task(self, attempt=1, **meta):
-        return self.add_task(start=True, attempt=attempt, **meta)
-
+    def running_task(self, attempt=1, sessions=None, **meta):
+        """A started task. It has the session run.py would have recorded for `attempt`, unless a test passes
+        `sessions` (a list of entries; [] for an unrecorded row)."""
+        task = self.add_task(start=True, attempt=attempt, **meta)
+        entries = [self.entry(task, attempt)] if sessions is None else sessions
+        self.record_sessions(task, *entries)
+        return task
 
     def make_runner(self):
         return types.SimpleNamespace(root=self.root)
@@ -345,7 +380,7 @@ class Base(unittest.TestCase):
 
     def verified_by(self, verdict, task=None):
         task = task or self.running_task()
-        self.pass_report(task, wt=self.worktree(f"task-{task}-1"))
+        self.pass_report(task)
         status = {"verify-failed": "ISSUES", "verify-blocked": "BLOCKED"}.get(verdict, "PASS")
         self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n", kind="verify", by=f"verify-{task}-1")
         return task
@@ -495,14 +530,21 @@ class Base(unittest.TestCase):
         """A running task whose worker passed, in pr mode. Returns (task, worktree, head)."""
         self.pr_config()
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")), **meta)
-        wt = self.worktree(f"task-{task}-1")
+        wt = self.task_wt(task)
         wt, head = self.pass_report(task, wt=wt, head=self.wt_commit(wt, *files))
-        self.agents(self.finished(f"task-{task}-1"))
+        self.agents(self.finished(f"task-{task}"))
         return task, wt, head
 
     def fresh(self):
         self.tearDown()
         self.setUp()
+
+    def worktree_state(self):
+        """(registered worktrees, worktree-* branches, folders under .claude/worktrees)"""
+        folder = os.path.join(self.root, ".claude", "worktrees")
+        return (len(re.findall(r"(?m)^worktree ", self.git("worktree", "list", "--porcelain"))),
+                self.git("branch", "--list", "worktree-*"),
+                sorted(os.listdir(folder)) if os.path.isdir(folder) else [])
 
 
 class RunTest(Base):
@@ -612,6 +654,7 @@ class RunTest(Base):
         self.add_result(task, "BLOCKED", "permission prompt", attempt=2, by="manager")
         self.add_result(task, "PASS", "verifier said fine", kind="verify", attempt=1, by="verify-2-1")
         self.tg("done", str(up))
+        self.worktree("task-2")
         text = self.brief(task)
         context = self.section(text, "CONTEXT")
         self.assertIn("### Previous attempt (result #3, ISSUES, attempt 1)", context)
@@ -632,19 +675,25 @@ class RunTest(Base):
         self.assertIn("No report on file.", self.brief(task))
 
     def test_10_base_commit_sources(self):
-        task = self.add_task(attempt=1)
+        task = self.add_task()
         head = self.git("rev-parse", "HEAD")
         text = self.brief(task)
         self.assertIn(f"Base commit: {head}", text)
         self.assert_base(text, head)
-        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1-1\nHead: {SHA_A}\n")
-        text = self.brief(task, "--attempt", "2")
-        self.assert_base(text, SHA_A)
-        self.assertNotIn(head, text)
+        self.ok("launch", str(task))
+        wt = self.wt_path("task-1")
+        built = self.wt_commit(wt)
+        # A retry builds on the worktree's HEAD, not on a commit a report names.
+        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1\nHead: {SHA_A}\n")
+        text = self.brief(task)
+        self.assertIn(f"Attempt 2. Your worktree is at `{built}` on branch `worktree-task-1`.", text)
+        self.assertIn(f"If `git rev-parse HEAD` is not `{built}`, report BLOCKED and change nothing.", text)
+        self.assertNotIn("Base commit:", text)
+        self.assertNotRegex(text, r"git (reset|checkout|switch)")
         later = "b" * 40
         self.add_result(task, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {later}\nFiles: None\n",
-                        attempt=2, by="manager")
-        self.assert_base(self.brief(task, "--attempt", "3"), later)
+                        attempt=1, by="manager")
+        self.assertIn(f"Your worktree is at `{built}`", self.brief(task))
 
     def test_11_report_command_runs_in_bash(self):
         odd = os.path.join(self.dir, "we ird $dir")
@@ -716,16 +765,19 @@ class RunTest(Base):
         events = self.events("launch", str(task))
         launched = self.one(events, "launched")
         self.assertEqual((launched["task"], launched["attempt"], launched["session"]), (1, 1, "task-1-1"))
-        self.assertIn("claude said: fake-session-id", launched["detail"])
+        self.assertIn("claude said: backgrounded \u00b7 sess-task-1-1 \u00b7 task-1-1", launched["detail"])
+        self.assertNotIn("stop this session", launched["detail"])
+        self.assertIn("worktree .claude/worktrees/task-1 base ", launched["detail"])
         brief_path = os.path.join(self.root, ".agentic-team", "briefs", "task-1-1.md")
         with open(brief_path) as fh:
             text = fh.read()
         self.assertEqual(self.calls("--bg"), [[
-            "--bg", "--worktree", "task-1-1", "--agent", "agentic-team:worker", "--model", "sonnet",
+            "--bg", "--worktree", "task-1", "--agent", "agentic-team:worker", "--model", "sonnet",
             "--effort", "high", "--permission-mode", "auto", "--name", "task-1-1", text]])
         self.assertEqual(self.status_of(task), "in_progress")
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
+        self.assertEqual(meta["sessions"], [self.entry(task)])
         self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
         self.assertNotIn("verdict", meta)
         self.assertNotIn("verdict_ref", meta)
@@ -783,6 +835,7 @@ class RunTest(Base):
         self.assertEqual(self.calls("--bg"), [])
         self.tg("edit", str(gate), "--notes", "go left")
         self.tg("done", str(gate))
+        self.worktree("task-1")
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 0)
 
     def test_17_abandoned_task_needs_an_attempt(self):
@@ -791,6 +844,7 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("is abandoned (died)", out.stderr)
         self.assertIn("--attempt 4", out.stderr)
+        self.worktree("task-1")
         self.ok("launch", str(task), "--attempt", "4")
         meta = self.meta(task)
         self.assertEqual(meta["attempt"], 4)
@@ -799,8 +853,8 @@ class RunTest(Base):
 
     def test_17a_stopped_attempt_needs_record_first(self):
         task = self.running_task()
-        wt = self.worktree("task-1-1")
-        self.add_result(task, "STOPPED", f"Session: sess-task-1-1\nWorktree: {wt}\nBranch: worktree-task-1-1\n"
+        wt = self.worktree("task-1")
+        self.add_result(task, "STOPPED", f"Session: sess-task-1-1\nWorktree: {wt}\nBranch: worktree-task-1\n"
                         "Stopped: now\nFiles: wip.txt\n", by="manager")
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
@@ -811,8 +865,8 @@ class RunTest(Base):
         self.ok("record")
         head = self.git("rev-parse", "HEAD", cwd=wt)
         text = self.brief(task)
-        self.assert_base(text, head)
-        self.assertIn("--worktree task-1-2", self.run_cmd("launch", str(task), "--dry-run").stderr)
+        self.assertIn(f"Attempt 2. Your worktree is at `{head}` on branch `worktree-task-1`.", text)
+        self.assertIn("--worktree task-1 ", self.run_cmd("launch", str(task), "--dry-run").stderr)
 
     def test_17b_verifier_tier_without_a_model(self):
         task = self.add_task(tier="verifier")
@@ -828,7 +882,7 @@ class RunTest(Base):
         self.tg("done", str(up))
         out = self.run_cmd("launch", str(task), "--dry-run")
         self.assertEqual(out.returncode, 2)
-        self.assertIn("worktree-task-1-1 is not merged", out.stderr)
+        self.assertIn("worktree-task-1 is not merged", out.stderr)
         self.assertIn("run.py merged 1 --by operator", out.stderr)
         self.tg("edit", str(up), "--meta", 'merged_at="2026-10-26 10:00 UTC"')
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
@@ -842,31 +896,37 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("attempt 3 has failed", out.stderr)
         self.assertIn("run.py abandon 1", out.stderr)
-        self.assertIn("--worktree task-1-4", self.run_cmd("launch", str(failed), "--dry-run", "--attempt", "4").stderr)
+        self.worktree("task-1")
+        override = self.run_cmd("launch", str(failed), "--dry-run", "--attempt", "4")
+        self.assertIn("--worktree task-1 ", override.stderr)
+        self.assertIn("--attempt 4 --by task-1-4", override.stdout)
         paused = self.running_task(attempt=3)
+        self.worktree("task-2")
         self.add_result(paused, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {SHA_A}\nFiles: None\n",
                         attempt=3, by="manager")
-        self.assertIn("--worktree task-2-4", self.run_cmd("launch", str(paused), "--dry-run").stderr)
+        self.assertIn("--attempt 4 --by task-2-4", self.run_cmd("launch", str(paused), "--dry-run").stdout)
         retry = self.running_task(attempt=2)
-        self.assertIn("--worktree task-3-3", self.run_cmd("launch", str(retry), "--dry-run").stderr)
+        self.worktree("task-3")
+        self.assertIn("--attempt 3 --by task-3-3", self.run_cmd("launch", str(retry), "--dry-run").stdout)
 
     def test_20_live_session_blocks_launch(self):
         task = self.running_task()
-        self.agents(self.row("task-1-1", name="task-1-1-sweep"))
+        self.worktree("task-1")
+        self.agents(self.row("task-1", name="task-1-1-sweep"))
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
         self.assertIn("has a live session sess-task-1-1", out.stderr)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 0)
 
     def test_21_cap_counts_live_workers_and_verifiers(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
-        self.agents(self.row("task-9-1"))
+        self.agents(self.row("task-9"))
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
         self.assertIn("cap full: 1/1 sessions live", out.stderr)
-        self.agents(self.finished("task-9-1"))
+        self.agents(self.finished("task-9"))
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
         self.agents(self.row("verify-9-1"))
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 2)
@@ -884,67 +944,69 @@ class RunTest(Base):
     def test_23_second_launch_is_attempt_two(self):
         task = self.add_task()
         self.ok("launch", str(task))
+        first = self.meta(task)
+        self.agents(self.finished("task-1"))
         self.ok("launch", str(task))
-        self.assertEqual([c[2] for c in self.calls("--bg")], ["task-1-1", "task-1-2"])
-        self.assertEqual(self.meta(task)["session"], "task-1-2")
+        calls = self.calls("--bg")
+        self.assertEqual([c[c.index("--worktree") + 1] for c in calls], ["task-1", "task-1"])
+        self.assertEqual([c[c.index("--name") + 1] for c in calls], ["task-1-1", "task-1-2"])
+        meta = self.meta(task)
+        self.assertEqual(meta["session"], "task-1-2")
+        self.assertEqual(meta["base"], first["base"])
+        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual(self.worktree_state()[2], ["task-1"])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), first["base"])
 
-
-    def worktree_state(self):
-        """(registered worktrees, worktree-* branches, folders under .claude/worktrees)"""
-        folder = os.path.join(self.root, ".claude", "worktrees")
-        return (len(re.findall(r"(?m)^worktree ", self.git("worktree", "list", "--porcelain"))),
-                self.git("branch", "--list", "worktree-*"),
-                sorted(os.listdir(folder)) if os.path.isdir(folder) else [])
 
     def test_23_launch_creates_the_worktree_at_the_base(self):
         tip = self.feature_branch()
         self.assertNotEqual(tip, self.git("rev-parse", "HEAD"))
         task = self.add_task()
         self.ok("launch", str(task), "--base", tip)
-        wt = self.wt_path("task-1-1")
+        wt = self.wt_path("task-1")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), tip)
-        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1-1")
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
         self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
-        self.assertEqual(self.calls("--bg")[0][2], "task-1-1")
+        self.assertEqual(self.calls("--bg")[0][2], "task-1")
         other = self.add_task()
         self.ok("launch", str(other))
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-2-1")), self.git("rev-parse", "HEAD"))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-2")), self.git("rev-parse", "HEAD"))
 
     def clash(self, case):
-        """Leave a branch, folder or registration at task-1-1 for `case`."""
+        """Leave a branch, folder or registration at task-1 for `case`."""
         if case == "branch at base":
-            self.git("branch", "worktree-task-1-1")
+            self.git("branch", "worktree-task-1")
         elif case == "branch ahead":
-            self.git("checkout", "-q", "-b", "worktree-task-1-1")
+            self.git("checkout", "-q", "-b", "worktree-task-1")
             self.commit_file("a.txt", "a\n")
             self.commit_file("b.txt", "b\n")
             self.git("checkout", "-q", "main")
         elif case == "plain folder":
-            os.makedirs(self.wt_path("task-1-1"))
-            with open(os.path.join(self.wt_path("task-1-1"), "keep.txt"), "w") as fh:
+            os.makedirs(self.wt_path("task-1"))
+            with open(os.path.join(self.wt_path("task-1"), "keep.txt"), "w") as fh:
                 fh.write("mine\n")
         elif case == "registered worktree":
-            self.worktree("task-1-1")
+            self.worktree("task-1")
         else:  # a stale registration: the folder is gone
-            shutil.rmtree(self.worktree("task-1-1"))
+            shutil.rmtree(self.worktree("task-1"))
 
     def clear_clash(self):
-        shutil.rmtree(self.wt_path("task-1-1"), ignore_errors=True)
+        shutil.rmtree(self.wt_path("task-1"), ignore_errors=True)
         self.git("worktree", "prune")
-        if self.git("branch", "--list", "worktree-task-1-1"):
-            self.git("branch", "-D", "worktree-task-1-1")
+        if self.git("branch", "--list", "worktree-task-1"):
+            self.git("branch", "-D", "worktree-task-1")
 
     def test_23_launch_refuses_an_existing_branch_or_folder_and_creates_nothing(self):
         task = self.add_task()
         short = self.git("rev-parse", "--short=7", "HEAD")
         cases = {
-            "branch at base": ([f"branch worktree-task-1-1 is at {short}; nothing is on it", "`git branch -D worktree-task-1-1`"],
+            "branch at base": ([f"branch worktree-task-1 is at {short}; nothing is on it", "`git branch -D worktree-task-1`"],
                                ["git worktree"]),
             "branch ahead": ([f"holds 2 commits beyond {short}; remove it only if you do not need them"], ["git worktree"]),
-            "plain folder": (["folder .claude/worktrees/task-1-1 is a plain folder, not a git worktree",
-                              "move or delete .claude/worktrees/task-1-1 yourself"], ["git worktree remove", "--force"]),
-            "registered worktree": (["is a git worktree", "`git worktree remove .claude/worktrees/task-1-1`",
-                                     "`git branch -D worktree-task-1-1`"], ["--force"]),
+            "plain folder": (["folder .claude/worktrees/task-1 is a plain folder, not a git worktree",
+                              "move or delete .claude/worktrees/task-1 yourself"], ["git worktree remove", "--force"]),
+            "registered worktree": (["is a git worktree", "`git worktree remove .claude/worktrees/task-1`",
+                                     "`git branch -D worktree-task-1`"], ["--force"]),
             "stale registration": (["stale worktree registration", "`git worktree prune`"], ["git branch -D", "--force"]),
         }
         for case, (present, absent) in cases.items():
@@ -957,19 +1019,18 @@ class RunTest(Base):
                     self.assertIn(text, out.stderr)
                 for text in absent:
                     self.assertNotIn(text, out.stderr)
-                # The way out that removes nothing comes first.
-                self.assertIn("Pass --attempt 2 to start under a new name", out.stderr)
-                self.assertLess(out.stderr.index("--attempt 2"), out.stderr.index("To reuse this name"))
+                self.assertIn("Nothing was created. To reuse this name: ", out.stderr)
+                self.assertNotIn("--attempt", out.stderr)
                 self.assertEqual(self.calls("--bg"), [])
                 self.assertEqual(self.worktree_state(), before)
                 self.assertEqual(self.status_of(task), "open")
                 self.assertFalse(os.path.exists(os.path.join(self.root, ".agentic-team", "briefs", "task-1-1.md")))
                 if case == "plain folder":
-                    with open(os.path.join(self.wt_path("task-1-1"), "keep.txt")) as fh:
+                    with open(os.path.join(self.wt_path("task-1"), "keep.txt")) as fh:
                         self.assertEqual(fh.read(), "mine\n")
                 self.clear_clash()
-        self.ok("launch", str(task), "--attempt", "2")
-        self.assertTrue(os.path.isdir(self.wt_path("task-1-2")))
+        self.ok("launch", str(task))
+        self.assertTrue(os.path.isdir(self.wt_path("task-1")))
 
     def test_23_launch_removes_what_it_created_when_claude_fails(self):
         task = self.add_task()
@@ -1008,45 +1069,193 @@ class RunTest(Base):
 
     def test_23_a_live_session_repair_creates_no_worktree(self):
         task = self.add_task()
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         self.assertEqual(self.one(self.events("launch", str(task)), "repaired")["task"], task)
         self.assertEqual(self.worktree_state()[1:], ("", []))
 
-    def test_23_a_retry_ignores_a_head_that_is_not_built_on_its_base(self):
-        first = self.git("rev-parse", "HEAD")
-        moved = self.commit_file("main.txt", "main moved\n")
-        orphan = self.git("commit-tree", "-m", "unrelated", f"{first}^{{tree}}")
-        task = self.add_task(start=True, attempt=1, base=json.dumps(first))
-        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1-1\nHead: {orphan}\n")
-        self.assertNotEqual(first, moved)
-        self.assert_base(self.brief(task), first)
-        self.assert_base(self.brief(task, "--base", moved), moved)  # --base wins
-        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
-        self.assertIn(f"Head {orphan[:7]} of attempt 1 is not built on the recorded base {first[:7]}; "
-                      f"starting from {first[:7]}", detail)
-        self.assertNotIn("its base", detail)
-        self.assertIn(f"base {first[:7]}", detail)
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1-2")), first)
-        self.assertEqual(self.meta(task)["base"], first)
+    def retry_ready(self, status="ISSUES"):
+        """A task whose attempt 1 ran in task-1, committed once, and filed `status`. Returns (task, wt, head)."""
+        task = self.add_task()
+        self.ok("launch", str(task))
+        wt = self.wt_path("task-1")
+        head = self.wt_commit(wt)
+        self.agents(self.finished("task-1"))
+        self.add_result(task, status, f"Task: 1\nStatus: {status}\nBranch: worktree-task-1\nHead: {head}\n")
+        return task, wt, head
 
-    def test_23_a_retry_keeps_a_head_built_on_its_base(self):
-        first = self.git("rev-parse", "HEAD")
-        self.commit_file("main.txt", "main moved\n")
-        built = self.feature_branch()
-        task = self.add_task(start=True, attempt=1, base=json.dumps(first))
-        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1-1\nHead: {built}\n")
-        self.assert_base(self.brief(task), built)
+    def test_23_a_retry_continues_in_the_same_worktree(self):
+        task, wt, head = self.retry_ready()
+        first = self.meta(task)
+        events = self.events("launch", str(task))
+        detail = self.one(events, "launched")["detail"]
+        self.assertIn("worktree .claude/worktrees/task-1 ", detail)
+        self.assertIn(f"continues at {head[:7]}", detail)
+        self.assertNotIn(" base ", detail)
+        self.assertEqual(self.worktree_state()[2], ["task-1"])
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        calls = self.calls("--bg")
+        self.assertEqual([c[c.index("--worktree") + 1] for c in calls], ["task-1", "task-1"])
+        text = calls[-1][-1]
+        self.assertIn(f"Attempt 2. Your worktree is at `{head}` on branch `worktree-task-1`.", text)
+        self.assertIn("It holds the commits of the earlier attempts of this task.", text)
+        self.assertNotIn("Base commit:", text)
+        meta = self.meta(task)
+        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual((meta["attempt"], meta["base"]), (2, first["base"]))
+
+    def test_23_base_on_a_retry_is_refused_and_creates_nothing(self):
+        task, wt, head = self.retry_ready()
+        before = self.worktree_state()
+        out = self.run_cmd("launch", str(task), "--base", "main")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#1 continues in .claude/worktrees/task-1 at {head[:7]}; --base applies to a first attempt. "
+                      "To restart from main: git worktree remove -f -f .claude/worktrees/task-1 && "
+                      "git branch -D worktree-task-1, then rerun with --base.", out.stderr)
+        self.assertEqual(len(self.calls("--bg")), 1)
+        self.assertEqual(self.worktree_state(), before)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.meta(task)["attempt"], 1)
+
+    def test_23_a_dirty_worktree_is_committed_before_the_retry(self):
+        task, wt, head = self.retry_ready("DIED")
+        with open(os.path.join(wt, "left.txt"), "w") as fh:
+            fh.write("half\n")
+        dry = self.brief(task)  # a dry run commits nothing
+        self.assertIn(f"Your worktree is at `{head}`", dry)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? left.txt")
         detail = self.one(self.events("launch", str(task)), "launched")["detail"]
-        self.assertNotIn("is not built on", detail)
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1-2")), built)
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertNotEqual(new, head)
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt), "WIP task 1 attempt 1: DIED")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertIn(f"committed 1 uncommitted files of attempt 1 as {new[:7]}", detail)
+        self.assertIn(f"continues at {new[:7]}", detail)
+        self.assertIn(f"Attempt 2. Your worktree is at `{new}`", self.calls("--bg")[-1][-1])
+        self.assertIn("left.txt", self.git("show", "--stat", "--format=", "HEAD", cwd=wt))
+
+    def test_23_a_clean_retry_commits_nothing_and_a_stopped_attempt_needs_record_first(self):
+        task, wt, head = self.retry_ready("STOPPED")
+        self.ok("launch", str(task))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        other = self.add_task(attempt=1)
+        self.worktree("task-2")
+        self.add_result(other, "STOPPED", "Session: s\nWorktree: w\nBranch: b\nStopped: now\nFiles: x\n", by="manager")
+        out = self.run_cmd("launch", str(other))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("run run.py record first", out.stderr)
+
+    def test_23_a_worktree_on_another_branch_or_a_plain_folder_is_refused(self):
+        task, wt, head = self.retry_ready()
+        self.git("switch", "-q", "-c", "elsewhere", cwd=wt)
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(".claude/worktrees/task-1 is on elsewhere, not worktree-task-1; "
+                      "run git -C .claude/worktrees/task-1 switch worktree-task-1", out.stderr)
+        self.git("checkout", "-q", "--detach", cwd=wt)
+        out = self.run_cmd("launch", str(task))
+        self.assertIn("is on a detached HEAD, not worktree-task-1", out.stderr)
+        self.assertEqual(len(self.calls("--bg")), 1)
+        self.git("worktree", "remove", "-f", wt)
+        os.makedirs(wt)
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("folder .claude/worktrees/task-1 is a plain folder, not a git worktree; "
+                      "move or delete it yourself", out.stderr)
+        self.assertEqual(len(self.calls("--bg")), 1)
+        self.assertEqual(os.listdir(wt), [])
+
+    def test_23_a_missing_worktree_is_reattached_from_its_branch(self):
+        task, wt, head = self.retry_ready()
+        self.git("worktree", "remove", "-f", wt)
+        before = self.worktree_state()
+        self.brief(task)  # a dry run creates nothing
+        self.assertEqual(self.worktree_state(), before)
+        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
+        self.assertIn(f"reattached worktree-task-1 at {head[:7]}", detail)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
+        self.assertIn(f"Your worktree is at `{head}`", self.calls("--bg")[-1][-1])
+
+    def test_23_a_missing_worktree_and_branch_start_again_at_the_last_head(self):
+        tip = self.feature_branch("feat")
+        task = self.add_task()
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        base = self.meta(task)["base"]
+        self.assertEqual(self.worktree_state()[2], [])
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: feat\nHead: {tip}\n", attempt=1)
+        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
+        self.assertIn(f"created at Head {tip[:7]} of attempt 1", detail)
+        wt = self.wt_path("task-1")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), tip)
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
+        meta = self.meta(task)
+        self.assertEqual((meta["attempt"], meta["base"]), (2, base))
+        self.assertEqual(len(meta["sessions"]), 1)
+        self.assertEqual(meta["sessions"][0]["attempt"], 2)
+
+    def test_23_nothing_to_continue_from_asks_for_a_base(self):
+        task = self.running_task()
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: b\nHead: {SHA_A}\n")  # not in this repository
+        for extra in ((), ("--dry-run",)):
+            out = self.run_cmd("launch", str(task), *extra)
+            self.assertEqual(out.returncode, 2)
+            self.assertIn("#1 attempt 1 left no worktree, branch or Head in this repository; pass --base <sha|branch>",
+                          out.stderr)
+        self.assertEqual(self.worktree_state(), (1, "", []))
+        tip = self.feature_branch()
+        self.ok("launch", str(task), "--base", tip)
+        wt = self.wt_path("task-1")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), tip)
+        self.assertEqual(self.meta(task)["attempt"], 2)
+        self.assertIn(f"Base commit: {tip}.", self.calls("--bg")[-1][-1])
+
+    def test_23_a_failed_start_of_a_retry_removes_nothing(self):
+        task, wt, head = self.retry_ready()
+        with open(os.path.join(wt, "left.txt"), "w") as fh:
+            fh.write("half\n")
+        before = self.worktree_state()
+        out = self.run_cmd("launch", str(task), env=dict(self.env, FAKE_CLAUDE_BG_ERROR="unexpected failure"))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("unexpected failure", out.stderr)
+        self.assertNotIn("kept .claude", out.stderr)
+        self.assertEqual(self.worktree_state(), before)
+        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")  # the WIP commit stays
+        self.assertEqual(self.meta(task)["attempt"], 1)
+        self.assertEqual(len(self.meta(task)["sessions"]), 1)
+        self.git("worktree", "remove", "-f", wt)
+        out = self.run_cmd("launch", str(task), env=dict(self.env, FAKE_CLAUDE_BG_ERROR="unexpected failure"))
+        self.assertEqual(out.returncode, 1)
+        self.assertTrue(os.path.isdir(wt))  # reattached from the branch, then kept
+
+    def test_23_a_retry_reports_a_worktree_that_moved_since_the_last_report(self):
+        task, wt, head = self.retry_ready()
+        moved = self.wt_commit(wt, "more.txt")
+        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
+        self.assertIn(f"worktree HEAD {moved[:7]} is not the last report's Head {head[:7]}", detail)
+        self.assertIn(f"continues at {moved[:7]}", detail)
+
+    def test_23_a_retry_of_a_stacked_task_that_holds_its_dependency_is_not_refused(self):
+        dep = self.feature_branch("dep")
+        up = self.add_task("Build base", "Why: base.\n- [ ] built", attempt=1, verdict_ref=dep)
+        task = self.add_task("Use base", "Why: needs base.\n- [ ] used", depends=(up,))
+        self.tg("done", str(up))
+        self.ok("launch", str(task), "--base", "dep")
+        self.agents(self.finished("task-2"))
+        self.add_result(task, "ISSUES", "Task: 2\nStatus: ISSUES\n")
+        self.ok("launch", str(task))  # no --base: the worktree already holds the dependency's commit
+        self.assertEqual(self.meta(task)["attempt"], 2)
+        self.assertEqual(self.meta(task)["base"], dep)
 
     def test_23_a_session_that_started_keeps_its_worktree(self):
         task = self.add_task()
         base = self.git("rev-parse", "HEAD")
         cases = {
             "uncommitted changes": (dict(FAKE_CLAUDE_DIRTY="1"), (), "it has uncommitted changes"),
-            "a moved branch": (dict(FAKE_CLAUDE_COMMIT="1"), (), f"branch worktree-task-1-1 is no longer at {base[:7]}"),
-            "a session row": ({}, (self.finished("task-1-1"),), "a session row uses it"),
+            "a moved branch": (dict(FAKE_CLAUDE_COMMIT="1"), (), f"branch worktree-task-1 is no longer at {base[:7]}"),
+            "a session row": ({}, (self.finished("task-1"),), "a session row uses it"),
         }
         for case, (extra_env, rows, why) in cases.items():
             with self.subTest(case):
@@ -1055,13 +1264,13 @@ class RunTest(Base):
                 out = self.run_cmd("launch", str(task), env=env)
                 self.assertEqual(out.returncode, 1)
                 self.assertIn("exited after it detached", out.stderr)
-                self.assertIn(f"kept .claude/worktrees/task-1-1: {why}", out.stderr)
-                self.assertTrue(os.path.isdir(self.wt_path("task-1-1")))
-                self.assertTrue(self.git("branch", "--list", "worktree-task-1-1"))
+                self.assertIn(f"kept .claude/worktrees/task-1: {why}", out.stderr)
+                self.assertTrue(os.path.isdir(self.wt_path("task-1")))
+                self.assertTrue(self.git("branch", "--list", "worktree-task-1"))
                 self.assertEqual(self.status_of(task), "open")
-                shutil.rmtree(self.wt_path("task-1-1"))
+                shutil.rmtree(self.wt_path("task-1"))
                 self.git("worktree", "prune")
-                self.git("branch", "-D", "worktree-task-1-1")
+                self.git("branch", "-D", "worktree-task-1")
 
     def test_23_a_worktree_that_claude_did_not_reuse_is_a_warning_not_a_failure(self):
         earlier = self.git("rev-parse", "HEAD")
@@ -1077,33 +1286,11 @@ class RunTest(Base):
                 self.assertEqual(self.status_of(other), "in_progress")
 
     def test_23_the_base_is_a_full_sha_in_the_brief_and_the_meta(self):
-        task = self.add_task(attempt=1)
+        task = self.add_task()
         full = self.git("rev-parse", "HEAD")
-        self.add_result(task, "ISSUES", f"Task: 1\nBranch: worktree-task-1-1\nHead: {full[:9]}\n")
-        self.assert_base(self.brief(task), full)
-        self.ok("launch", str(task))
+        self.assert_base(self.brief(task, "--base", full[:9]), full)
+        self.ok("launch", str(task), "--base", full[:9])
         self.assertEqual(self.meta(task)["base"], full)
-
-    def test_23_a_head_that_is_gone_falls_back_to_the_recorded_base_or_asks_for_one(self):
-        first = self.git("rev-parse", "HEAD")
-        self.commit_file("main.txt", "main moved\n")
-        task = self.add_task(start=True, attempt=1, base=json.dumps(first))
-        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1-1\nHead: {SHA_A}\n")
-        self.assert_base(self.brief(task), first)
-        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
-        self.assertIn(f"attempt 1 Head {SHA_A[:7]} is not in this repository; starting from the recorded base {first[:7]}",
-                      detail)
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1-2")), first)
-        gone = self.add_task(start=True, attempt=1, base=json.dumps("b" * 40))
-        self.add_result(gone, "ISSUES", f"Task: {gone}\nStatus: ISSUES\nBranch: b\nHead: {SHA_A}\n")
-        out = self.run_cmd("launch", str(gone), "--dry-run")
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("are not in this repository; pass --base <sha|branch>", out.stderr)
-        self.assert_base(self.brief(gone, "--base", first), first)
-        # Only the base is gone: the Head is used, as before.
-        head_only = self.add_task(start=True, attempt=1, base=json.dumps("b" * 40))
-        self.add_result(head_only, "ISSUES", f"Task: {head_only}\nStatus: ISSUES\nBranch: b\nHead: {first}\n")
-        self.assert_base(self.brief(head_only), first)
 
     # --- verify
 
@@ -1136,7 +1323,7 @@ class RunTest(Base):
                                      "--model", "opus", "--permission-mode", "auto", "--name", "verify-1-1"])
         with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-1-verify.md")) as fh:
             self.assertEqual(fh.read(), argv[-1])
-        self.assertEqual(self.meta(task), before)
+        self.assertEqual(self.meta(task), {**before, "sessions": before["sessions"] + [self.entry(task, 1, "verify")]})
         self.assertEqual(self.status_of(task), "in_progress")
 
     def test_25_verifier_model_choice(self):
@@ -1338,7 +1525,7 @@ class RunTest(Base):
 
     def test_32_stuck_worker_is_stopped_and_filed(self):
         task = self.running_task()
-        self.agents(self.row("task-1-1", status="waiting", state="working", waitingFor="Bash permission"))
+        self.agents(self.row("task-1", status="waiting", state="working", waitingFor="Bash permission"))
         stuck = self.one(self.events("record"), "stuck")
         self.assertIn("Bash permission", stuck["detail"])
         self.assertIn("claude logs sess-task-1-1", stuck["next"])
@@ -1348,7 +1535,7 @@ class RunTest(Base):
         self.assertIn("Bash permission", filed[0]["body"])
         self.assertIn("Session: sess-task-1-1", filed[0]["body"])
         self.running_task()
-        self.agents(self.row("task-2-1", status="idle", state="blocked"))
+        self.agents(self.row("task-2", status="idle", state="blocked"))
         again = {e["task"]: e for e in self.named(self.events("record"), "stuck")}
         self.assertEqual(again[1]["detail"], "filed earlier")
         self.assertIn("stopped sess-task-2-1", again[2]["detail"])
@@ -1356,7 +1543,7 @@ class RunTest(Base):
     def test_33_busy_and_unknown_rows(self):
         busy = self.running_task()
         odd = self.running_task()
-        self.agents(self.row("task-1-1"), self.row("task-2-1", status="idle", state="foo"))
+        self.agents(self.row("task-1"), self.row("task-2", status="idle", state="foo"))
         events = self.events("record")
         self.assertEqual(self.one(events, "running")["task"], busy)
         unknown = self.one(events, "unknown")
@@ -1366,8 +1553,8 @@ class RunTest(Base):
 
     def test_34_finished_session_with_a_complete_report_is_salvaged(self):
         task = self.running_task()
-        self.agents(self.finished("task-1-1"))
-        report = (f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1-1\nHead: {SHA_A}\n"
+        self.agents(self.finished("task-1"))
+        report = (f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {SHA_A}\n"
                   f"Issues: one\nCheckpoint: {CHECKPOINT}\n")
         with open(os.path.join(self.logs, "sess-task-1-1.txt"), "w") as fh:
             fh.write("tool output\nTask: 1 started\nTask: 1\n" + "old\n" + "Task: 1\n" + report[len("Task: 1\n"):]
@@ -1385,7 +1572,7 @@ class RunTest(Base):
         task = self.running_task(attempt=3)
         early = self.running_task(attempt=1)
         gone = self.running_task(attempt=2)
-        self.agents(self.finished("task-1-3"), self.finished("task-2-1"))
+        self.agents(self.finished("task-1", 3), self.finished("task-2"))
         with open(os.path.join(self.logs, "sess-task-1-3.txt"), "w") as fh:
             fh.write("Task: 1\nStatus: PASS\n")  # no Checkpoint line: incomplete
         events = {e["task"]: e for e in self.named(self.events("record"), "died")}
@@ -1393,18 +1580,18 @@ class RunTest(Base):
         self.assertEqual(events[early]["next"], f"run.py launch {early}")
         self.assertIn("no result", self.results(early)[0]["body"])
         self.assertIn("status", self.results(early)[0]["body"].replace("idle/done", "status"))
-        self.assertIn("no session for .claude/worktrees/task-3-2", self.results(gone)[0]["body"])
+        self.assertIn("no session recorded for attempt 2", self.results(gone)[0]["body"])
         self.assertEqual([r["status"] for r in self.results(task)], ["DIED"])
 
     def test_36_pause_phase_one_commits_the_wip(self):
         task = self.running_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         base = self.git("rev-parse", "HEAD", cwd=wt)
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
             fh.write("half\n")
-        self.add_result(task, "STOPPED", f"Session: sess-task-1-1\nWorktree: {wt}\nBranch: worktree-task-1-1\n"
+        self.add_result(task, "STOPPED", f"Session: sess-task-1-1\nWorktree: {wt}\nBranch: worktree-task-1\n"
                         "Stopped: now\nFiles: ?? wip.txt\n", by="manager")
-        self.agents(self.row("task-1-1", status="busy"))
+        self.agents(self.row("task-1", status="busy"))
         busy = self.events("record")
         self.assertEqual(len(self.named(busy, "stopping")), 1)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), base)
@@ -1414,7 +1601,7 @@ class RunTest(Base):
         head = self.git("rev-parse", "HEAD", cwd=wt)
         self.assertNotEqual(head, base)
         self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt), "WIP task 1 attempt 1: stopped by pause")
-        self.assertIn(f"WIP committed {head} on worktree-task-1-1", stopped["detail"])
+        self.assertIn(f"WIP committed {head} on worktree-task-1", stopped["detail"])
         latest = self.results(task)[-1]
         self.assertEqual((latest["status"], latest["author"]), ("STOPPED", "manager"))
         self.assertIn(f"Head: {head}", latest["body"])
@@ -1422,7 +1609,7 @@ class RunTest(Base):
 
     def test_36_clean_worktree_is_not_committed(self):
         task = self.running_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         base = self.git("rev-parse", "HEAD", cwd=wt)
         self.add_result(task, "STOPPED", f"Session: s\nWorktree: {wt}\nBranch: b\nStopped: now\nFiles: None\n", by="manager")
         self.ok("record")
@@ -1446,9 +1633,9 @@ class RunTest(Base):
 
     def test_36_stopped_session_is_matched_by_its_recorded_id_and_its_wip_committed(self):
         task = self.running_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         base = self.git("rev-parse", "HEAD", cwd=wt)
-        self.agents(self.row("task-1-1", name="task-1-1-smoke"))
+        self.agents(self.row("task-1", name="task-1-1-smoke"))
         self.ok("stop", str(task))
         self.assertIn(f"Worktree: {wt}", self.results(task)[0]["body"])
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
@@ -1468,7 +1655,7 @@ class RunTest(Base):
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
-        running = self.running_task(attempt=1)
+        running = self.running_task(attempt=1, sessions=[{**self.entry(2), "id": "e6ebab39"}])
         self.add_result(running, "STOPPED", "Session: e6ebab39\nWorktree: x/task-2-1\nFiles: None\n", by="manager")
         self.agents(self.stopped_row("task-2-1-smoke"), self.stopped_row("task-9-1-smoke", sid="f00d"))
         self.assertEqual(self.one(self.events("record"), "slots")["detail"], "0/1 live")
@@ -1495,7 +1682,7 @@ class RunTest(Base):
         self.assertEqual(self.run_cmd("verify", str(verify), "--dry-run").returncode, 0)
 
     def test_36_foreign_stopped_rows_are_never_stopped_or_removed(self):
-        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator")
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions="[]")
         self.tg("done", str(task))
         self.agents(self.stopped_row("task-1-1-smoke", sid="foreign-stopped"),
                     self.stopped_row("verify-1-1", sid="foreign-verify"))
@@ -1511,10 +1698,10 @@ class RunTest(Base):
         died = self.one(self.events("record"), "died")
         self.assertEqual(died["task"], task)
         self.assertIsNone(died["session"])
-        self.assertIn("no session for .claude/worktrees/task-1-1", self.results(task)[0]["body"])
+        self.assertIn("no session recorded for attempt 1", self.results(task)[0]["body"])
 
     def test_36_stopped_session_tokens_use_the_derived_worktree(self):
-        task = self.running_task()
+        task = self.running_task(sessions=[{**self.entry(1), "id": "e6ebab39"}])
         wt, _ = self.pass_report(task)
         self.add_result(task, "STOPPED", f"Session: e6ebab39\nWorktree: {wt}\nFiles: None\n", by="manager")
         self.agents(self.stopped_row("task-1-1-smoke"))
@@ -1540,16 +1727,16 @@ class RunTest(Base):
 
     def test_39_merged_branch_is_recorded_and_unmerged_is_listed(self):
         task = self.add_task(attempt=1)
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         head = self.wt_commit(wt)
         later = self.add_task("Use base", depends=(task,))
         self.tg("edit", str(task), "--meta", f"verdict_ref={head}", "verdict=test-verified")
         self.tg("done", str(task))
         unmerged = self.one(self.events("record"), "unmerged")
-        self.assertIn("worktree-task-1-1", unmerged["detail"])
+        self.assertIn("worktree-task-1", unmerged["detail"])
         self.assertIn(f"blocks #{later}", unmerged["detail"])
         self.assertNotIn("merged_at", self.meta(task))
-        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1-1")
+        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1")
         merged = self.one(self.events("record"), "merged")
         self.assertIn("recorded merged_by=operator", merged["detail"])
         meta = self.meta(task)
@@ -1557,22 +1744,22 @@ class RunTest(Base):
         self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
 
     def test_39_recorded_merge_runs_cleanup(self):
-        task = self.add_task(attempt=1)
-        wt = self.worktree("task-1-1")
+        task = self.add_task(attempt=1, sessions="[]")
+        wt = self.worktree("task-1")
         head = self.wt_commit(wt)
-        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1-1")
+        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1")
         self.tg("edit", str(task), "--meta", f"verdict_ref={head}")
         self.tg("done", str(task))
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         events = self.events("record")
         self.assertEqual(len(self.named(events, "merged")), 1)
         self.assertEqual(self.one(events, "removed")["session"], "sess-task-1-1")
         self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
 
     def test_40_leftover_rows_of_a_merged_task_are_removed(self):
-        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator")
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions="[]")
         self.tg("done", str(task))
-        self.agents(self.finished("task-1-1"), self.finished("verify-1-1"))
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))
         events = self.events("record")
         self.assertEqual(sorted(e["session"] for e in self.named(events, "removed")),
                          ["sess-task-1-1", "sess-verify-1-1"])
@@ -1602,14 +1789,14 @@ class RunTest(Base):
         self.assertEqual(self.one(self.events("record"), "ready")["detail"], "none")
 
     def test_42_slots_count_live_rows_only(self):
-        self.agents(self.row("task-5-1"), self.finished("task-6-1"), self.row("verify-7-1", status="waiting"))
+        self.agents(self.row("task-5"), self.finished("task-6"), self.row("verify-7-1", status="waiting"))
         self.assertEqual(self.one(self.events("record"), "slots")["detail"], "2/2 live")
 
     def test_43_abandoned_tasks_are_skipped(self):
         task = self.running_task(attempt=3, abandoned="died")
         done = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", abandoned="died")
         self.tg("done", str(done))
-        self.agents(self.finished("task-1-3"), self.finished("task-2-1"))
+        self.agents(self.finished("task-1", 3), self.finished("task-2"))
         events = self.events("record")
         self.assertEqual([e for e in events if e["task"] in (task, done)], [])
         self.assertEqual(self.calls("rm"), [])
@@ -1704,7 +1891,7 @@ class RunTest(Base):
     def test_49_tokens_from_the_transcript(self):
         task = self.running_task()
         wt, head = self.pass_report(task)
-        self.agents(self.finished("task-1-1", sessionId="abc123-full"))
+        self.agents(self.finished("task-1", sessionId="abc123-full"))
         self.transcript_for(wt, "abc123-full.jsonl")
         events = self.events("close", str(task), "--verdict", "test-verified")
         self.assertEqual(self.meta(task)["tokens"], "11/3")
@@ -1714,8 +1901,8 @@ class RunTest(Base):
         for case in ("missing", "foreign", "ambiguous"):
             with self.subTest(case):
                 task = self.running_task(attempt=1)
-                wt, _ = self.pass_report(task, attempt=1, wt=self.worktree(f"task-{task}-1"))
-                self.agents(self.finished(f"task-{task}-1", sessionId="abc123"))
+                wt, _ = self.pass_report(task, attempt=1, wt=self.worktree(f"task-{task}"))
+                self.agents(self.finished(f"task-{task}", sessionId="abc123"))
                 if case == "foreign":
                     self.transcript_for(wt, "abc123.jsonl", folder="/work/other-project")
                 if case == "ambiguous":
@@ -1728,16 +1915,16 @@ class RunTest(Base):
     def test_49_session_id_falls_back_to_the_row_id(self):
         task = self.running_task()
         wt, _ = self.pass_report(task)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.transcript_for(wt, "sess-task-1-1.jsonl", tokens=4)
         self.ok("close", str(task), "--verdict", "test-verified")
         self.assertEqual(self.meta(task)["tokens"], "4/3")
 
-    def close_tokens(self, session_row, transcripts):
+    def close_tokens(self, session_row, transcripts, sessions=None):
         """Close a fresh task whose session row is `session_row(name)`; transcripts is [(name, kwargs)] for transcript_for."""
-        task = self.running_task(attempt=1)
-        wt, _ = self.pass_report(task, attempt=1, wt=self.worktree(f"task-{task}-1"))
-        self.agents(session_row(f"task-{task}-1"))
+        task = self.running_task(attempt=1, sessions=sessions)
+        wt, _ = self.pass_report(task, attempt=1, wt=self.worktree(f"task-{task}"))
+        self.agents(session_row(f"task-{task}"))
         for name, kwargs in transcripts:
             self.transcript_for(wt, name, **kwargs)
         events = self.events("close", str(task), "--verdict", "test-verified")
@@ -1746,7 +1933,7 @@ class RunTest(Base):
 
     def test_49_a_missing_token_count_names_the_reason(self):
         row = lambda wt: {**self.finished(wt), "id": ""}  # noqa: E731
-        detail, tokens, _ = self.close_tokens(row, [])
+        detail, tokens, _ = self.close_tokens(row, [], sessions=[])  # nothing recorded, and the row has no id
         self.assertEqual((detail, tokens), ("no session id recorded; none recorded", None))
         detail, tokens, folder = self.close_tokens(lambda wt: self.finished(wt, sessionId="abc123"), [])
         self.assertEqual((detail, tokens), (f"transcript folder {folder} not found; none recorded", None))
@@ -1772,13 +1959,13 @@ class RunTest(Base):
     def test_50_close_marks_done_and_stops_the_session(self):
         task = self.running_task()
         self.pass_report(task)
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         later = self.add_task("Next", depends=(task,))
         events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
         closed = self.one(events, "closed")
         self.assertEqual(self.one(events, "waits")["task"], later)
         self.assertIn("test-verified at", closed["detail"])
-        self.assertIn("branch worktree-task-1-1", closed["detail"])
+        self.assertIn("branch worktree-task-1", closed["detail"])
         self.assertEqual(self.status_of(task), "done")
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         stopped = [r for r in self.results(task) if r["status"] == "STOPPED"]
@@ -1789,7 +1976,7 @@ class RunTest(Base):
     def merge_setup(self):
         task = self.running_task()
         wt, head = self.pass_report(task)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         return task, wt, head
 
     def test_51_no_merge_line_lists_the_branch(self):
@@ -1797,7 +1984,7 @@ class RunTest(Base):
         before = self.git("rev-parse", "HEAD")
         events = self.events("close", str(task), "--verdict", "test-verified")
         ready = self.one(events, "ready-to-merge")
-        self.assertEqual(ready["detail"], "branch worktree-task-1-1")
+        self.assertEqual(ready["detail"], "branch worktree-task-1")
         self.assertIn(f"run.py merged {task} --by operator", ready["next"])
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.named(events, "merged"), [])
@@ -1808,8 +1995,8 @@ class RunTest(Base):
         self.orders("# Standing orders\n\n1. Keep tests green\n2. MERGE: verified branches into main\n")
         events = self.events("close", str(task), "--verdict", "test-verified")
         merged = self.one(events, "merged")
-        self.assertIn("worktree-task-1-1 into", merged["detail"])
-        self.assertEqual(self.merges(), "Merge worktree-task-1-1 (task #1)")
+        self.assertIn("worktree-task-1 into", merged["detail"])
+        self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "manager")
         self.assertIn("merged_at", meta)
@@ -1826,7 +2013,7 @@ class RunTest(Base):
         os.remove(os.path.join(self.root, "dirty.txt"))
         self.git("checkout", "-q", "--detach")
         other = self.running_task()
-        self.pass_report(other, wt=self.worktree("task-2-1"))
+        self.pass_report(other, wt=self.worktree("task-2"))
         events = self.events("close", str(other), "--verdict", "test-verified")
         self.assertIn("main checkout is detached", self.one(events, "ready-to-merge")["detail"])
 
@@ -1844,7 +2031,7 @@ class RunTest(Base):
         self.git("add", "f.txt")
         self.git("commit", "-q", "-m", "add f")
         task = self.running_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         head = self.wt_commit(wt, "f.txt", "theirs\n")
         self.pass_report(task, wt=wt, head=head)
         with open(os.path.join(self.root, "f.txt"), "w") as fh:
@@ -1865,7 +2052,7 @@ class RunTest(Base):
     # --- merged and cleanup
 
     def closed_task(self, merged=False):
-        task = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified")
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]")
         if merged:
             self.tg("edit", str(task), "--meta", 'merged_at="2026-10-26 10:00 UTC"', "merged_by=operator")
         self.tg("done", str(task))
@@ -1887,10 +2074,10 @@ class RunTest(Base):
 
     def test_53_cleanup_keeps_uncommitted_work(self):
         task = self.closed_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
             fh.write("x\n")
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         events = self.events("merged", str(task))
         self.assertIn("uncommitted changes", self.one(events, "kept")["detail"])
         self.assertEqual(self.calls("rm"), [])
@@ -1899,7 +2086,7 @@ class RunTest(Base):
     def test_53_discard_unpushed_only_for_commits_in_head(self):
         task = self.closed_task()
         head = self.git("rev-parse", "HEAD")
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {head[:12]}@wt-1"}}, fh)
         events = self.events("merged", str(task))
@@ -1909,9 +2096,9 @@ class RunTest(Base):
 
     def test_53_unmerged_commit_is_never_discarded(self):
         task = self.closed_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         side = self.wt_commit(wt)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {side}@wt-1"}}, fh)
         events = self.events("merged", str(task))
@@ -1921,8 +2108,8 @@ class RunTest(Base):
 
     def test_53_untracked_files_are_listed_never_deleted(self):
         task = self.closed_task()
-        wt = self.worktree("task-1-1")
-        self.agents(self.finished("task-1-1"))
+        wt = self.worktree("task-1")
+        self.agents(self.finished("task-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": "worktree has untracked files"}}, fh)
         events = self.events("merged", str(task))
@@ -1932,20 +2119,21 @@ class RunTest(Base):
 
     def test_53_other_failure_and_directory_without_a_session(self):
         task = self.closed_task()
-        self.worktree("task-1-1")
+        self.worktree("task-1")
         self.agents(self.finished("verify-1-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-verify-1-1": {"exit": 1, "stderr": "detached at an unmerged commit\nmore"}}, fh)
         events = self.events("merged", str(task))
         kept = self.named(events, "kept")
         details = sorted(e["detail"] for e in kept)
-        self.assertEqual(details, ["task-1-1: no session; remove it by hand if you want",
+        self.assertEqual(details, ["task-1: still present (not locked); remove it by hand: "
+                                   "git worktree remove -f -f .claude/worktrees/task-1 && git branch -D worktree-task-1",
                                    "verify-1-1: claude rm said: detached at an unmerged commit"])
 
     def test_53_abandoned_task_is_never_cleaned_up(self):
         task = self.closed_task(merged=True)
         self.tg("edit", str(task), "--meta", "abandoned=died")
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.events("merged", str(task))
         self.assertEqual(self.calls("rm"), [])
 
@@ -1953,17 +2141,17 @@ class RunTest(Base):
 
     def test_54_stop_files_a_stopped_row_and_touches_no_git_state(self):
         task = self.running_task()
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
             fh.write("half\n")
         head = self.git("rev-parse", "HEAD", cwd=wt)
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         events = self.events("stop", str(task))
         self.assertIn("run.py record commits its WIP", self.one(events, "stopped")["detail"])
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         row = self.results(task)[0]
         self.assertEqual((row["status"], row["author"], row["attempt"]), ("STOPPED", "manager", 1))
-        for line in ("Session: sess-task-1-1", f"Worktree: {wt}", "Branch: worktree-task-1-1", "Files: ?? wip.txt"):
+        for line in ("Session: sess-task-1-1", f"Worktree: {wt}", "Branch: worktree-task-1", "Files: ?? wip.txt"):
             self.assertIn(line, row["body"])
         self.assertNotIn("Head:", row["body"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
@@ -1974,14 +2162,14 @@ class RunTest(Base):
         self.assertIn("has no live session", out.stderr)
 
     def test_55_abandon(self):
-        task = self.running_task(attempt=3)
-        self.worktree("task-1-3")
-        self.agents(self.row("task-1-3"), self.finished("task-1-1"))
+        task = self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
+        self.worktree("task-1")
+        self.agents(self.row("task-1", 3), self.finished("task-1"))
         events = self.events("abandon", str(task), "died")
         self.assertEqual(self.meta(task)["abandoned"], "died")
         self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
         detail = self.one(events, "abandoned")["detail"]
-        self.assertIn("worktrees kept: task-1-1, task-1-3", detail)
+        self.assertIn("worktrees kept: task-1;", detail)
         filed = [r for r in self.results(task) if r["status"] == "ABANDONED"]
         self.assertEqual(len(filed), 1)
         self.assertIn("Session: sess-task-1-3", filed[0]["body"])
@@ -1996,7 +2184,7 @@ class RunTest(Base):
     def test_57_close_survives_a_failing_stop_and_can_be_resumed(self):
         task = self.running_task()
         self.pass_report(task)
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         self.orders("MERGE: verified branches into main\n")
         with open(os.path.join(self.root, "dirty.txt"), "w") as fh:
             fh.write("x\n")
@@ -2010,7 +2198,7 @@ class RunTest(Base):
         again = self.events("close", str(task))
         self.assertEqual(self.one(again, "resumed")["task"], task)
         self.assertEqual(self.one(again, "merged")["task"], task)
-        self.assertEqual(self.merges(), "Merge worktree-task-1-1 (task #1)")
+        self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
         self.assertEqual(self.meta(task)["merged_by"], "manager")
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         self.assertEqual(self.run_cmd("close", str(task)).returncode, 2)
@@ -2031,6 +2219,7 @@ class RunTest(Base):
                        "--notes", "Options: REST or RPC.", "--blocks", str(task))["id"]
         self.tg("edit", str(gate), "--notes", "Options: REST or RPC. Answer: use the REST API.")
         self.tg("done", str(gate))
+        self.worktree("task-1")
         arrived = self.one(self.events("record"), "arrived")
         self.assertEqual(arrived["next"], f"decision #{gate} answered; run.py launch {task}")
         context = self.section(self.brief(task), "CONTEXT")
@@ -2040,7 +2229,7 @@ class RunTest(Base):
 
     def test_59_launch_repairs_an_open_task_with_a_live_session(self):
         task = self.add_task()
-        self.agents(self.row("task-1-1", name="task-1-1-smoke"))
+        self.agents(self.row("task-1", name="task-1-1-smoke"))
         events = self.events("launch", str(task))
         repaired = self.one(events, "repaired")
         self.assertEqual((repaired["task"], repaired["attempt"], repaired["session"]), (1, 1, "sess-task-1-1"))
@@ -2049,13 +2238,15 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual((meta["attempt"], meta["session"]), (1, "task-1-1-smoke"))
         self.assertIn("started_at", meta)
+        self.assertEqual(meta["sessions"], [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1-smoke",
+                                             "worktree": "task-1"}])
         again = self.run_cmd("launch", str(task))
         self.assertEqual(again.returncode, 2)
         self.assertIn("has a live session", again.stderr)
 
     def test_60_cleanup_skips_a_session_that_is_still_running(self):
         task = self.closed_task(merged=True)
-        self.agents(self.row("verify-1-1"), self.finished("task-1-1"))
+        self.agents(self.row("verify-1-1"), self.finished("task-1"))
         events = self.events("merged", str(task))
         self.assertIn("still running", self.one(events, "kept")["detail"])
         self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"]])
@@ -2063,7 +2254,7 @@ class RunTest(Base):
     def test_61_checksum_close_cleans_up_at_once(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nHead: abc123  out.txt\n")
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         events = self.events("close", str(task), "--verdict", "artifact-verified")
         self.assertEqual(self.one(events, "removed")["session"], "sess-task-1-1")
 
@@ -2084,7 +2275,8 @@ class RunTest(Base):
         events = json.loads(out.stdout)
         self.assertEqual([e["event"] for e in events], ["dry-run"])
         self.assertIn("## GOAL", events[0]["detail"])
-        self.assertIn("--worktree task-1-1", out.stderr)
+        self.assertIn("--worktree task-1 ", out.stderr)
+        self.assertIn("--name task-1-1 ", out.stderr)
         self.assertEqual(self.calls("--bg"), [])
         self.agents(self.row("verify-1-1"))
         blocked = self.run_cmd("launch", str(task))
@@ -2214,11 +2406,11 @@ class RunTest(Base):
         fresh = self.add_task(verdict="test-verified", verdict_ref="abc1234")
         self.assertEqual(len(self.named(self.events("launch", str(fresh), env=env), "launched")), 1)
         task = self.running_task()
-        self.pass_report(task, wt=self.worktree("task-2-1"))
-        self.agents(self.row("task-2-1"))
+        self.pass_report(task, wt=self.worktree("task-2"))
+        self.agents(self.row("task-2"))
         events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test", env=env)
         self.assertEqual(self.one(events, "merged")["task"], task)
-        self.assertEqual(self.merges(), "Merge worktree-task-2-1 (task #2)")
+        self.assertEqual(self.merges(), "Merge worktree-task-2 (task #2)")
         closed = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified")
         self.tg("done", str(closed))
         self.assertEqual(self.one(self.events("merged", str(closed), env=env), "merged")["detail"], "recorded merged_by=operator")
@@ -2358,11 +2550,12 @@ class RunTest(Base):
             self.git("config", key, value, cwd=clone)
         ahead = self.commit_file("ahead.txt", "x\n", cwd=clone)
         self.git("push", "-q", "origin", "main", cwd=clone)
-        task = self.add_task(attempt=1)
+        task = self.add_task()
         self.assertNotEqual(self.git("rev-parse", "HEAD"), ahead)
         self.assert_base(self.brief(task), ahead)
-        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1-1\nHead: {SHA_A}\n")
-        self.assert_base(self.brief(task, "--attempt", "2"), SHA_A)
+        self.ok("launch", str(task))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), ahead)
+        self.assertEqual(self.meta(task)["base"], ahead)
 
     def adopt_setup(self, name="feat"):
         tip = self.feature_branch(name)
@@ -2388,7 +2581,8 @@ class RunTest(Base):
         self.assertIn("PASS by manager", arrived["detail"])
         self.assertTrue(arrived["detail"].endswith("; adopted"))
         closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
-        self.assertEqual(self.one(closed, "tokens")["detail"], "no session row; none recorded")
+        self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
+        self.assertEqual(self.meta(task)["sessions"], [])
         self.assertEqual(self.status_of(task), "done")
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
@@ -2404,7 +2598,7 @@ class RunTest(Base):
         out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:7], "--pr", "7")
         self.assertEqual(out.returncode, 2)
         self.assertIn('--pr needs merge.mode = "pr"', out.stderr)
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:7])
         self.assertIn("has a live session sess-task-1-1", out.stderr)
         self.assertIn("run run.py record first", out.stderr)
@@ -2472,7 +2666,7 @@ class RunTest(Base):
         lower = self.events("close", str(failed), "--verdict", "verify-blocked", "--override-verifier", "cannot run")
         self.assertIn("verify-blocked; not closed", self.one(lower, "verdict")["detail"])
         bare = self.running_task()
-        self.pass_report(bare, wt=self.worktree(f"task-{bare}-1"))
+        self.pass_report(bare, wt=self.worktree(f"task-{bare}"))
         out = self.run_cmd("close", str(bare), "--verdict", "test-verified", "--override-verifier", "x")
         self.assertEqual(out.returncode, 2)
         self.assertIn(f"#{bare} has no verifier verdict to override; pass --verdict alone", out.stderr)
@@ -2493,7 +2687,7 @@ class RunTest(Base):
         worker = self.running_task()
         verifier = self.running_task()
         self.add_result(verifier, "PASS", f"Task: 2\nStatus: PASS\nHead: {SHA_A}\n")
-        self.agents(self.row("task-1-1", status="waiting", state="working", waitingFor="permission prompt"),
+        self.agents(self.row("task-1", status="waiting", state="working", waitingFor="permission prompt"),
                     self.row("verify-2-1", status="waiting", state="blocked", waitingFor="permission prompt"))
         stuck = {e["task"]: e for e in self.named(self.events("record"), "stuck")}
         self.assertIn("(permission prompt)", stuck[worker]["detail"])
@@ -2517,6 +2711,195 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn(f"no .agentic-team.toml in {os.path.realpath(other)}; run from the repository root or pass --root <dir>", out.stderr)
         self.assertNotIn("taskgraph.project is empty", out.stderr)
+
+    # --- one worktree, many sessions
+
+    def test_23_the_recorded_session_id_comes_from_what_claude_printed(self):
+        sessions = lambda task: self.meta(task).get("sessions")  # noqa: E731
+        no_rows = self.add_task()
+        detail = self.one(self.events("launch", str(no_rows)), "launched")["detail"]
+        self.assertEqual([e["id"] for e in sessions(no_rows)], ["sess-task-1-1"])
+        self.assertIn("claude agents does not list sess-task-1-1 yet", detail)
+        listed = self.add_task()
+        self.agents(self.finished("task-2"))
+        detail = self.one(self.events("launch", str(listed)), "launched")["detail"]
+        self.assertEqual([e["id"] for e in sessions(listed)], ["sess-task-2-1"])
+        for note in ("does not list", "recorded the row", "no session id printed"):
+            self.assertNotIn(note, detail)
+        wrong = self.add_task()
+        self.agents(self.finished("task-3"))
+        env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded · garbage · task-3-1")
+        detail = self.one(self.events("launch", str(wrong), env=env), "launched")["detail"]
+        self.assertEqual(sessions(wrong), [self.entry(wrong, 1)])
+        self.assertIn("claude printed garbage; recorded the row sess-task-3-1 found in the worktree", detail)
+        silent = self.add_task()
+        self.agents()
+        detail = self.one(self.events("launch", str(silent), env=dict(self.env, FAKE_CLAUDE_BG_SAID="")), "launched")["detail"]
+        self.assertEqual(sessions(silent), [])
+        self.assertIn("no session id printed; the row is matched by its folder", detail)
+        self.assertNotIn("claude said", detail)
+        text_only = self.add_task()  # no `backgrounded` line at all: nothing is recorded, even with a row in the folder
+        self.agents(self.finished("task-5"))
+        detail = self.one(self.events("launch", str(text_only), env=dict(self.env, FAKE_CLAUDE_BG_SAID="garbage")),
+                          "launched")["detail"]
+        self.assertEqual(sessions(text_only), [])
+        self.assertIn("no session id printed", detail)
+
+    def two_rows(self):
+        task = self.running_task(attempt=2, sessions=[self.entry(1, 1), self.entry(1, 2)])
+        return task, self.task_wt(task)
+
+    def test_36_two_finished_rows_in_one_folder_are_told_apart_by_id(self):
+        task, wt = self.two_rows()
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        died = self.one(self.events("record"), "died")
+        self.assertEqual((died["attempt"], died["session"]), (2, "sess-task-1-2"))
+        body = self.results(task)[0]["body"]
+        self.assertIn("sess-task-1-2", body)
+        self.assertNotIn("sess-task-1-1", body)
+
+    def test_36_close_reads_the_transcript_of_the_current_attempt(self):
+        task, wt = self.two_rows()
+        self.pass_report(task, attempt=2, wt=wt)
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        self.transcript_for(wt, "sess-task-1-1.jsonl", tokens=11)
+        self.transcript_for(wt, "sess-task-1-2.jsonl", tokens=22)
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.meta(task)["tokens"], "22/3")
+        self.assertEqual(self.one(events, "tokens")["session"], "sess-task-1-2")
+
+    def test_36_stop_stops_the_live_session_of_a_shared_folder_only(self):
+        task, wt = self.two_rows()
+        self.agents(self.finished("task-1", 1), self.row("task-1", 2))
+        self.ok("stop", str(task))
+        self.assertEqual(self.calls("stop"), [["stop", "sess-task-1-2"]])
+
+    def test_36_an_unrecorded_finished_row_in_the_task_folder_is_the_current_attempts(self):
+        task = self.running_task(attempt=2, sessions=[])
+        self.agents(self.finished("task-1", 1))
+        died = self.one(self.events("record"), "died")
+        self.assertEqual((died["task"], died["attempt"], died["session"]), (task, 2, "sess-task-1-1"))
+        self.assertEqual([(r["attempt"], r["status"]) for r in self.results(task)], [(2, "DIED")])
+
+    def test_36_an_unrecorded_stopped_row_belongs_to_nobody(self):
+        task = self.running_task(attempt=2, sessions=[self.entry(1, 1)])
+        self.agents(self.stopped_row("task-1-2-smoke", sid="sess-task-1-2"))
+        died = self.one(self.events("record"), "died")
+        self.assertIsNone(died["session"])
+        self.assertEqual(self.calls("stop"), [])
+
+    def test_25_verify_again_records_each_verifier(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.add_result(task, "BLOCKED", "Verdict: verify-blocked\n", kind="verify", by="verify-1-1")
+        self.ok("verify", str(task), "--again")
+        self.agents(self.finished("verify-1-1"))
+        self.ok("verify", str(task), "--again")
+        self.assertEqual(self.meta(task)["sessions"], [self.entry(task, 1), self.entry(task, 1, "verify"),
+                                                       self.entry(task, 1, "verify", "verify-1-1-2")])
+
+    def test_53_cleanup_removes_the_first_session_last_and_each_once(self):
+        entries = [self.entry(1, 1), self.entry(1, 2), self.entry(1, 1, "verify")]
+        task = self.add_task(attempt=2, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions=json.dumps(entries))
+        self.tg("done", str(task))
+        self.worktree("task-1")
+        self.worktree("verify-1-1")
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2), self.finished("verify-1-1"))
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-2": {"row_only": True}}, fh)  # only the first session of a folder removes it
+        events = self.events("merged", str(task))
+        self.assertEqual([c[1] for c in self.calls("rm")], ["sess-verify-1-1", "sess-task-1-2", "sess-task-1-1"])
+        self.assertEqual(sorted(e["session"] for e in self.named(events, "removed")),
+                         ["sess-task-1-1", "sess-task-1-2", "sess-verify-1-1"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.worktree_state()[2], [])
+        self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
+
+    def test_53_a_folder_that_stays_is_named_with_its_lock_and_the_way_to_remove_it(self):
+        entries = [self.entry(1, 1), self.entry(1, 2)]
+        task = self.add_task(attempt=2, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions=json.dumps(entries))
+        self.tg("done", str(task))
+        wt = self.worktree("task-1")
+        self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"row_only": True}, "sess-task-1-2": {"row_only": True}}, fh)
+        events = self.events("merged", str(task))
+        (kept,) = self.named(events, "kept")
+        self.assertEqual(kept["detail"], "task-1: still present (claude session task-1-1 (pid 1)); remove it by hand: "
+                                         "git worktree remove -f -f .claude/worktrees/task-1 && git branch -D worktree-task-1")
+        self.assertTrue(os.path.isdir(wt))  # run.py never removes a folder itself
+        self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
+
+    def test_53_a_discard_is_passed_back_on_the_owners_rm_only_for_a_merged_commit(self):
+        entries = [self.entry(1, 1), self.entry(1, 2)]
+        task = self.add_task(attempt=2, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions=json.dumps(entries))
+        self.tg("done", str(task))
+        wt = self.worktree("task-1")
+        head = self.git("rev-parse", "HEAD")
+        side = self.wt_commit(wt)
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+
+        def table(commit):
+            with open(self.rm_file, "w") as fh:
+                json.dump({"sess-task-1-2": {"row_only": True},
+                           "sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {commit}@wt-1"}}, fh)
+
+        table(side)
+        events = self.events("merged", str(task))
+        self.assertIn(f"commit {side} is not in HEAD", self.one(events, "kept")["detail"])
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-2"], ["rm", "sess-task-1-1"]])
+        self.git("reset", "-q", "--hard", head, cwd=wt)  # the work is merged: the owner's rm may discard
+        table(head)
+        events = self.events("merged", str(task))
+        self.assertIn("discarded", self.named(events, "removed")[-1]["detail"])
+        self.assertEqual(self.calls("rm")[-1], ["rm", "sess-task-1-1", "--discard-unpushed", f"{head}@wt-1"])
+
+    def legacy_task(self):
+        """A task started under 0.6.0: attempt 1 in .claude/worktrees/task-1-1, no `sessions` meta."""
+        task = self.add_task(start=True, attempt=1)
+        wt = self.worktree("task-1-1")
+        head = self.wt_commit(wt)
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1-1\nHead: {head}\n")
+        return task, wt, head
+
+    def test_23_a_task_started_under_0_6_0_is_listed_and_refused_until_its_sessions_are_declared(self):
+        task, wt, head = self.legacy_task()
+        self.agents(self.row("task-1-1", name="task-1-1"))  # its live 0.6.0 row matches nothing
+        events = self.events("record")
+        legacy = self.one(events, "legacy")
+        self.assertEqual((legacy["task"], legacy["attempt"]), (task, 1))
+        self.assertIn("started under agentic-team 0.6.0 (worktree .claude/worktrees/task-1-1); "
+                      "run.py 0.7.0 does not manage it", legacy["detail"])
+        self.assertIn("tg edit 1 --meta sessions='[]'", legacy["next"])
+        for name in ("died", "stuck", "running", "unknown"):
+            self.assertEqual(self.named(events, name), [])
+        self.assertEqual(len(self.results(task)), 1)
+        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died")):
+            out = self.run_cmd(command[0], str(task), *command[1:])
+            self.assertEqual(out.returncode, 2, command)
+            self.assertIn("started under agentic-team 0.6.0", out.stderr)
+            self.assertIn("tg edit 1 --meta sessions='[]'", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+        self.tg("edit", str(task), "--meta", "sessions=[]")
+        self.agents()
+        self.assertEqual(self.named(self.events("record"), "legacy"), [])
+        detail = self.one(self.events("launch", str(task)), "launched")["detail"]
+        self.assertIn(f"created at Head {head[:7]} of attempt 1", detail)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), head)
+        self.assertTrue(os.path.isdir(wt))  # the old folder stays
+
+    def test_53_cleanup_of_a_task_started_under_0_6_0_removes_nothing_and_lists_its_folders(self):
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator")
+        self.tg("done", str(task))
+        self.worktree("task-1-1")
+        self.worktree("verify-1-1")
+        self.agents(self.finished("task-1-1"), self.finished("verify-1-1"))
+        events = self.events("merged", str(task))
+        self.assertEqual(self.calls("rm"), [])
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")),
+                         ["task-1-1: no session; remove it by hand if you want",
+                          "verify-1-1: no session; remove it by hand if you want"])
 
 
 
@@ -2604,7 +2987,7 @@ class PrTest(Base):
         self.pr_config(f'method = "{method}"\n')
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
         wt, head = self.pass_report(task)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.fake_host(head=head, merge_state="UNKNOWN")
         self.ok("close", str(task), "--verdict", "test-verified")
         self.orders("MERGE: verified branches into main\n")
@@ -2649,11 +3032,11 @@ class PrTest(Base):
     def test_82_a_merge_by_someone_else_is_recorded_and_its_commits_may_be_discarded(self):
         self.pr_config()
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         first = self.wt_commit(wt, "a.txt")
         head = self.wt_commit(wt, "b.txt")
         self.pass_report(task, wt=wt, head=head)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.fake_host(head=head, merge_state="UNKNOWN")
         before = self.checkout()
         self.ok("close", str(task), "--verdict", "test-verified")
@@ -2755,7 +3138,7 @@ class PrTest(Base):
         self.advance_main("f.txt", "ours\n")
         self.fake_host(head=head, merge_state="BEHIND")
         conflict = self.one(self.events("close", str(task)), "conflict")
-        self.assertIn("rebasing worktree-task-1-1 onto origin/main conflicted; rebase aborted", conflict["detail"])
+        self.assertIn("rebasing worktree-task-1 onto origin/main conflicted; rebase aborted", conflict["detail"])
         self.assertIn("--type decision", conflict["next"])
         git_dir = self.git("rev-parse", "--git-dir", cwd=wt)
         self.assertFalse(os.path.exists(os.path.join(wt, git_dir, "REBASE_HEAD")) or os.path.isdir(os.path.join(wt, git_dir, "rebase-merge")))
@@ -2772,7 +3155,7 @@ class PrTest(Base):
         self.fake_host(head=head, merge_state="BEHIND")
         changed = self.one(self.events("close", str(task)), "changed")
         self.assertIn("the rebase onto main changed the diff (different diff); restored " + head[:7], changed["detail"])
-        self.assertIn("Rebase worktree-task-1-1 onto main by hand", changed["next"])
+        self.assertIn("Rebase worktree-task-1 onto main by hand", changed["next"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
         self.assertEqual(self.remote_sha(), head)
         self.assertEqual(self.meta(task)["verdict_ref"], head)
@@ -2786,9 +3169,9 @@ class PrTest(Base):
             fh.write("x\n")
         line = self.one(self.events("close", str(task)), "pr-behind")
         self.assertIn(f"{self.label()} is behind main; cannot rebase: worktree dirty", line["detail"])
-        self.assertIn("rebase worktree-task-1-1 by hand, then run.py close 1", line["next"])
+        self.assertIn("rebase worktree-task-1 by hand, then run.py close 1", line["next"])
         os.remove(os.path.join(wt, "scratch.txt"))
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         line = self.one(self.events("close", str(task)), "pr-behind")
         self.assertIn("cannot rebase: session live", line["detail"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
@@ -2825,7 +3208,7 @@ class PrTest(Base):
         self.pr_config()
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
         wt, head = self.pass_report(task)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.tg("edit", str(task), "--meta", f'verdict_ref="{head}"', "verdict=test-verified")
         self.tg("done", str(task))
         line = self.one(self.events("record"), "unpublished")
@@ -2886,6 +3269,22 @@ class PrTest(Base):
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
 
     @both_hosts
+    def test_87_a_fix_round_of_an_adopted_branch_starts_in_the_task_worktree_at_its_tip(self):
+        self.pr_config()
+        self.fake_host()
+        tip = self.feature_branch("feat")
+        task = self.add_task()
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        base = self.meta(task)["base"]
+        self.assertEqual(self.worktree_state()[2], [])
+        self.ok("launch", str(task))
+        wt = self.wt_path("task-1")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), tip)
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
+        self.assertEqual(self.meta(task)["base"], base)
+        self.assertIn(f"Attempt 2. Your worktree is at `{tip}`", self.calls("--bg")[-1][-1])
+
+    @both_hosts
     def test_87_adopt_with_an_open_request_takes_its_branch_and_target(self):
         self.pr_config()
         tip = self.feature_branch("feat")
@@ -2909,6 +3308,7 @@ class PrTest(Base):
 
     @both_hosts
     def test_89_a_second_attempt_pushes_to_the_same_branch_and_opens_no_second_request(self):
+        main = self.git("rev-parse", "HEAD")
         task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
         self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
         self.ok("verify", str(task))
@@ -2918,12 +3318,14 @@ class PrTest(Base):
         self.ok("launch", str(task))
         meta = self.meta(task)
         self.assertEqual({k: meta[k] for k in pinned}, pinned)
-        self.assertEqual((meta["attempt"], meta["base"]), (2, head))
-        wt2 = self.wt_path("task-1-2")  # launch created it at the base
+        self.assertEqual((meta["attempt"], meta["base"]), (2, main))  # the branch still forks from where it did
+        wt2 = self.wt_path("task-1")  # attempt 2 continues in the one worktree
+        self.assertEqual(wt2, wt)
+        self.assertEqual(self.worktree_state()[2], ["task-1"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt2), head)
         head2 = self.wt_commit(wt2, "two.txt")
         self.pass_report(task, attempt=2, wt=wt2, head=head2)
-        self.agents(self.finished("task-1-1"), self.finished("task-1-2"))
+        self.agents(self.finished("task-1"), self.finished("task-1", 2))
         self.fake_host(head=head2, merge_state="UNKNOWN")
         before, seen = self.checkout(), len(self.host_log())
         events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
@@ -3053,8 +3455,8 @@ class PrTest(Base):
         self.assertIn("verify-failed; not closed", self.one(events, "verdict")["detail"])
         self.ok("launch", str(task))
         with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-2.md")) as fh:
-            self.assert_base(fh.read(), head)
-        self.agents(self.row("task-1-2"))
+            self.assertIn(f"Attempt 2. Your worktree is at `{head}` on branch `worktree-task-1`.", fh.read())
+        self.agents(self.row("task-1", 2))
         again = self.events("record")
         self.one(again, "running")
         self.assertEqual(self.named(again, "verified"), [])
@@ -3107,7 +3509,7 @@ class PrTest(Base):
         self.assertIn("Workflow: unit", row["body"])
         self.assertTrue(self.host_calls("api", f"projects/{self.project}/pipelines/11/jobs"))
         other = self.running_task(verify_mode="ci:integration", attempt=1)
-        wt2, head2 = self.pass_report(other, wt=self.worktree(f"task-{other}-1"))
+        wt2, head2 = self.pass_report(other, wt=self.worktree(f"task-{other}"))
         self.fake_host(head=head2, merge_state="UNKNOWN")
         self.ok("verify", str(other))
         self.fake_host(head=head2, merge_state="UNKNOWN", runs=[{"id": 21, "state": "success"}],
@@ -3134,11 +3536,11 @@ class PrTest(Base):
     def test_98_cleanup_keeps_what_it_must_and_never_forces(self):
         task, wt, head = self.published()
         self.fake_host(head=head, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
-        self.agents(self.row("task-1-1"))
+        self.agents(self.row("task-1"))
         events = self.events("record")
         self.assertIn("still running", self.one(events, "kept")["detail"])
         self.assertEqual(self.calls("rm"), [])
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
             fh.write("x\n")
         self.assertIn("uncommitted changes", self.one(self.events("record"), "kept")["detail"])
@@ -3155,7 +3557,7 @@ class PrTest(Base):
         self.pr_config()
         self.fake_host()
         task = self.running_task(attempt=3, verify_mode=f"ci:{self.ci}")
-        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1-3\nHead: {SHA_A}\n", attempt=3)
+        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1\nHead: {SHA_A}\n", attempt=3)
         self.add_result(task, "ISSUES", f"Verdict: verify-failed\nRun: 11/1 u\n", kind="verify", attempt=3, by="ci")
         tip = self.feature_branch("feat")
         for command in (("launch", str(task)), ("adopt", str(task), "--branch", "feat", "--head", tip)):
@@ -3197,11 +3599,12 @@ class PrTest(Base):
         self.ok("verify", str(task))
         self.ok("close", str(task))
         self.ok("launch", str(task))
-        wt2 = self.wt_path("task-1-2")  # launch created it at the base
+        wt2 = self.wt_path("task-1")  # attempt 2 continues in the one worktree
+        self.assertEqual(wt2, wt)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt2), head)
         head2 = self.wt_commit(wt2, "two.txt")
         self.pass_report(task, attempt=2, wt=wt2, head=head2)
-        self.agents(self.finished("task-1-1"), self.finished("task-1-2"))
+        self.agents(self.finished("task-1"), self.finished("task-1", 2))
         self.fake_host(head=head2, merge_state="UNKNOWN")
         self.ok("close", str(task), "--verdict", "test-verified", "--ran", "x")
         return task, wt2, head2
@@ -3271,7 +3674,7 @@ class PrTest(Base):
         self.host = "github"
         self.pr_config()
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")), verify_mode="ci:ci.yml")
-        wt = self.worktree("task-1-1")
+        wt = self.worktree("task-1")
         head = self.wt_commit(wt)
         self.pass_report(task, wt=wt, head=head[:9])
         self.fake_host(head=head, merge_state="UNKNOWN")
@@ -3304,10 +3707,10 @@ class PrTest(Base):
         self.pr_config()
         dep = self.feature_branch("dep")  # the dependency's branch: fork0 -> D
         task = self.running_task(base=json.dumps(dep))  # launched with --base dep
-        wt = self.worktree("task-1-1", base=dep)
+        wt = self.worktree("task-1", base=dep)
         head = self.wt_commit(wt, "out.txt")  # fork0 -> D -> T
         self.pass_report(task, wt=wt, head=head)
-        self.agents(self.finished("task-1-1"))
+        self.agents(self.finished("task-1"))
         self.fake_host(head=head, merge_state="UNKNOWN")
         self.ok("close", str(task), "--verdict", "test-verified", "--ran", "x")
         self.advance_main("dep.txt", "work\n")  # the dependency lands as S, the same patch as D

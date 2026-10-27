@@ -32,6 +32,7 @@ verification, a decision, a plan change) and before every report.
      the report with your recommendation.
    - `unmerged` and `waits`: say plainly which branch the operator should
      merge and which tasks wait on it.
+   - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` rebases and pushes.
@@ -86,8 +87,10 @@ verification, a decision, a plan change) and before every report.
    - Refill after every drain; never wait for a whole batch.
    - `launch <id> --base <sha|branch>` starts from that commit; use it for a fix on an unmerged feature
      branch. It lifts the unmerged-dependency refusal when the base contains the dependency's commit.
+     `--base` applies to a first attempt; a retry continues in the task worktree.
 5. **Fresh, not resumed.** Every attempt is a fresh session with a fresh brief,
-   including work after a pause. A stopped attempt's WIP commit is its base.
+   in the task's one worktree, on top of the earlier attempts' commits. A
+   stopped attempt's WIP commit is where the next one starts.
 
 **Reply** at the end of each drain: counts by state, what changed, open
 decisions, branches ready to merge and the tasks that wait on them, and
