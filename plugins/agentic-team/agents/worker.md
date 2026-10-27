@@ -13,9 +13,9 @@ Manager.
 
 ## Before you start
 
-- Run the `git reset --keep <base commit>` command in CONTEXT, in your worktree, before
-  anything else. Your worktree starts from the default branch, not from the Manager's
-  commit. A verifier checks out its commit instead, as its brief says.
+- Your worktree is already at the commit that CONTEXT names, on its own branch. Do not
+  reset it or check out another commit. If `git rev-parse HEAD` is not that commit,
+  report `BLOCKED` and change nothing.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
@@ -34,9 +34,8 @@ Manager.
   so `Head` is always set and the worktree is clean. On `PASS`, use a message that names
   the task. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
   `WIP task <id> attempt <n>: <status>`. If there is nothing to commit, that is fine. A
-  verifier commits nothing. Never push, rebase, merge, delete branches, or check out
-  another branch. The one `git reset --keep` that your brief gives is the only reset you
-  run.
+  verifier commits nothing. Never push, rebase, merge, reset, delete branches, or check out
+  another branch or commit.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
@@ -89,6 +88,6 @@ Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; bl
 
 A task report has no `Verdict:` line. A verifier adds one after `Status:`:
 `Verdict: artifact-verified | test-verified | check-only | verify-blocked | verify-failed`.
-A verifier writes `Branch: None` and the commit it checked out as `Head`.
+A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
 
 Write `None` for an empty field. Use the time zone label from the brief.
