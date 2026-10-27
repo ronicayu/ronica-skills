@@ -16,7 +16,7 @@ Depth on structure, order and openings is in `references/pyramid-principle.md`.
 ## Pick a mode before touching anything
 
 - **Review**: the user wants feedback, comments or a critique. Report findings. Leave the text alone.
-- **Rewrite**: the user wants it edited, tightened, fixed or simplified. Change the text, then say what changed and why.
+- **Rewrite**: the user wants it edited, tightened, fixed or simplified. Change the text, then say what changed and why. If pass 1 finds the shape, order or scope wrong, stop before any line edit. Report the structural finding and offer a rebuild through `references/drafting.md`, from the outline gate. Tightening a wrong structure makes it harder to rebuild.
 - **Draft**: the user is writing something new. See Draft mode.
 
 If the request is ambiguous, ask when the text is long. Otherwise review text the user wrote (their voice is theirs to keep) and rewrite text you wrote. Anything you drafted gets a rewrite pass before you hand it over.
@@ -41,24 +41,27 @@ Read the entire piece before changing a word. A local fix made blind to the endi
 - **What is the reader doing while they read?** This selects the shape:
   - **Approving or deciding**: the ask, what they accept, what they own afterwards, the risk they sign for. Answer first and short. They read the first half page.
   - **Implementing**: precision, edge cases, enough to work from without coming back. Answer first, then depth in the order the work happens.
-  - **Evaluating a design**: the problem, the options, the comparison, so they reach the conclusion themselves. This is the answer-first exception in `references/pyramid-principle.md`.
+  - **Evaluating a design**: the problem, the ranked goals and the trade-offs between them, the options, then the design, so they reach the conclusion themselves. Each key decision sits where it shapes the design and names the alternative it rejected. This is the answer-first exception in `references/pyramid-principle.md`, which also gives the shape for an architecture presented for review.
   - **Auditing or assuring**: traceability. Which requirement, control and evidence, and what is not yet proven.
   - **Orienting**: a map before any detail. The parts, how they connect, where to go next.
 
-When one document serves two of these, write the body for the primary reader and give the other their own section.
+When one document serves two of these, write the body for the primary reader and give the other their own section. Classify by what the reader does while reading, not by the meeting the document goes to. A design sent to a review is read by evaluators, not approvers.
+
+- **Does a template set the shape?** If the document follows a template, check it against the template in pass 1. Flag template sections that do not fit the subject. Do not fill them with placeholders.
+- **How long may it be?** Set a length for the reader's job (Size in `references/drafting.md`). A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
 
 - **Is the text technical?** For documentation, a README, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md`. Pick the Diátaxis mode, apply its shape and heading rules in pass 1, and its sentence rules in passes 4 and 5.
 
 ### 1. Structure
 
 - **Answer early.** The opening gives the recommendation, finding or main claim, not a tour of the background.
-- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The headings alone should carry the argument.
+- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The headings alone should carry the argument. Keep each one short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
 - **Partial reading.** The title, opening and headings alone give the answer and the ask.
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
 - **Horizontal logic.** The items in a group are the same kind of thing and cover the ground without overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.
 - **The sum holds.** If every support is true, the top line follows. If not, the claim overreaches or a support is missing.
-- **Current final state.** The body states what is true now. It holds no review-round history, agent actions, intermediate corrections, prior counts, superseded wording, or account of how the document evolved. Text whose job is the change (changelog, release notes, PR description, commit message, decision log, an ADR's status or history section) is exempt. History that must stay goes in its own section or a linked record.
+- **Current final state.** The body states what is true now. It holds no review-round history, agent actions, intermediate corrections, prior counts, superseded wording, or account of how the document evolved, including which draft, run, agent or input each idea came from. Text whose job is the change (changelog, release notes, PR description, commit message, decision log, an ADR's status or history section) is exempt. History that must stay goes in its own section or a linked record.
 
 Fix this layer first. In review mode, say plainly that the structure needs reshaping before you give line notes.
 
@@ -67,13 +70,15 @@ Fix this layer first. In review mode, say plainly that the structure needs resha
 - **Nothing is used before it is defined.**
 - **Expand every domain abbreviation on first use:** *Full Term (ABBR)*, then the abbreviation alone. Industry-universal terms are exempt. If it would belong in a glossary, expand it.
 - **One name per concept**, in the document and its neighbours. A synonym for variety reads as a second thing.
+- **Each fact is stated once, and the copies agree.** Elsewhere, point to it instead of restating it. Where a summary, table, glossary or log repeats the body, check counts, lists, statuses and scopes against the body. Copies drift apart, and a line edit does not see it.
+- **Identifiers stay out of the argument.** Requirement, story, control and ticket IDs go in tables and traceability sections. An argued sentence carries at most one. If a sentence cannot be understood without a lookup, rewrite it in words.
 - **A higher section reads completely without a lower one.** Where a lower detail is load-bearing, state it once as a named constraint and point to its definition.
 - **Groups stay at three to five.** Nine items are nine things to hold. Two groups of four with named summaries are two.
 - **Detail goes where the question arises**, not where it was discovered.
 
 ### 3. Claims: what the reader has to trust
 
-- **Load-bearing claims show their source** (a document, a person, a measurement, a run), in line and brief.
+- **Load-bearing claims show their source** (a document, a person, a measurement, a run), in line and brief. A source supports a claim. The draft or agent that first proposed an idea is not a source. Tag claims, not sections.
 - **Uncertainty is marked, with what would settle it.** "Unverified: no one has run the rollback end to end." A hedge that only lowers the temperature does not count.
 - **Decided is distinguishable from proposed.**
 - **Numbers carry a basis:** measured, estimated or assumed, and as of when.
