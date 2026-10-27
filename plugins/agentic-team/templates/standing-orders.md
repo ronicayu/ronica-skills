@@ -6,7 +6,9 @@ every brief. Add a line when the operator gives a directive that should outlive
 one task. To halt new launches, add `STOP: <reason>` as the first line. To let
 the Manager merge verified task branches, add a line that starts with `MERGE:`,
 for example `MERGE: verified branches into main`; `run.py` checks for that
-prefix. `STOP` matches with or without a colon; `MERGE` needs the colon.
+prefix. `STOP` matches with or without a colon; `MERGE` needs the colon. In
+`merge.mode = "pr"` the same `MERGE:` line lets `run.py record` merge a clean
+request.
 -->
 
 None yet.

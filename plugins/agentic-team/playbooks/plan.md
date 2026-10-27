@@ -17,7 +17,10 @@ adds what Taskgraph cannot decide.
    - `--meta estimate=<hours>`. The worker's timebox is twice the estimate;
    - `--meta tier=<mechanical|implementation|judgement|override key>`;
    - `--meta risk=low|high`. Use `high` when a check is expensive or needs
-     judgement, when other work builds on the output, or when readers rely on it.
+     judgement, when other work builds on the output, or when readers rely on it;
+   - `--meta verify_mode=ci:<workflow>` when CI on the pushed branch is the
+     right verifier (GitLab: `ci:pipeline` or `ci:<job>`); needs
+     `merge.mode = "pr"`. Default: a verifier session.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
 4. **Relay context through dependencies.** A task that needs an upstream

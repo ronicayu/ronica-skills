@@ -1,23 +1,31 @@
 """Tests for scripts/run.py. Run: "$PY" -m unittest discover plugins/agentic-team/tests
 
-Each test builds a temporary git repository as the root, a temporary Taskgraph
-database, a temporary HOME, the real tg.py from plugins/taskgraph, and a fake
-`claude` first on PATH. The fake logs every call and answers from files the
-test writes. Nothing here starts a real Claude session.
+Each test builds a temporary git repository as the root with a bare origin.git
+beside it, a temporary Taskgraph database, a temporary HOME, the real tg.py from
+plugins/taskgraph, and fakes first on PATH: `claude`, `gh`, and `glab`. Each fake
+logs every call and answers from files the test writes. Nothing here starts a
+real Claude session or reaches a real code host.
 """
 
+import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
+from urllib.parse import quote as urlquote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGINS = os.path.dirname(os.path.dirname(HERE))
 RUN = os.path.join(os.path.dirname(HERE), "scripts", "run.py")
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
+
+import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
@@ -58,6 +66,40 @@ elif cmd == "rm":
         sys.exit(entry["exit"])
 '''
 
+# One template, written under two names. It logs argv to $FAKE_<NAME>_LOG, then answers from the JSON table
+# in the file $FAKE_<NAME>: the longest table key that is a prefix of the joined argv wins. A value is
+# {"stdout", "stderr", "exit"} or a list of them, consumed in order, the last one repeating.
+FAKE_HOST = r'''#!/usr/bin/env python3
+import json, os, sys
+
+name = os.path.basename(sys.argv[0]).upper()
+argv = sys.argv[1:]
+log = os.environ["FAKE_%s_LOG" % name]
+with open(log, "a") as fh:
+    fh.write(json.dumps(argv) + "\n")
+if "-" in argv:  # a body on stdin
+    with open(log + ".in", "a") as fh:
+        fh.write(json.dumps({"argv": argv, "stdin": sys.stdin.read()}) + "\n")
+path = os.environ.get("FAKE_" + name)
+table = json.load(open(path)) if path and os.path.isfile(path) else {}
+line = " ".join(argv)
+keys = [k for k in table if line.startswith(k)]
+if not keys:
+    sys.stderr.write("fake: no answer for %s\n" % json.dumps(argv))
+    sys.exit(1)
+key = max(keys, key=len)
+value = table[key]
+if isinstance(value, list):
+    seen = json.load(open(path + ".pos")) if os.path.isfile(path + ".pos") else {}
+    index = seen.get(key, 0)
+    seen[key] = index + 1
+    json.dump(seen, open(path + ".pos", "w"))
+    value = value[min(index, len(value) - 1)]
+sys.stdout.write(value.get("stdout", ""))
+sys.stderr.write(value.get("stderr", ""))
+sys.exit(value.get("exit", 0))
+'''
+
 CHECKPOINT = "2026-10-26 10:00 SGT — completed: a; next: b; blocker: none"
 SHA_A = "a" * 40
 
@@ -72,7 +114,23 @@ def transcript(output_tokens):
     return "".join(json.dumps(r) + "\n" for r in records)
 
 
-class RunTest(unittest.TestCase):
+def both_hosts(test):
+    """Run a PR-mode test once for GitHub (gh) and once for GitLab (glab), each on a fresh repository."""
+    @functools.wraps(test)
+    def wrapper(self):
+        for index, name in enumerate(("github", "gitlab")):
+            with self.subTest(host=name):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self.host = name
+                test(self)
+    return wrapper
+
+
+class Base(unittest.TestCase):
+    host = "github"
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = os.path.realpath(self._tmp.name)
@@ -82,16 +140,20 @@ class RunTest(unittest.TestCase):
         self.logs = os.path.join(self.dir, "logs")
         for path in (self.root, self.home, self.bin, self.logs):
             os.makedirs(path)
-        self.git("init", "-q")
+        self.git("init", "-q", "-b", "main")
         for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
             self.git("config", key, value)
         self.git("commit", "-q", "--allow-empty", "-m", "base")
         with open(os.path.join(self.root, ".git", "info", "exclude"), "a") as fh:
             fh.write(".claude/worktrees/\n.agentic-team/\n.agentic-team.toml\n")
-        fake = os.path.join(self.bin, "claude")
-        with open(fake, "w") as fh:
-            fh.write(FAKE_CLAUDE)
-        os.chmod(fake, 0o755)
+        self.origin = os.path.join(self.dir, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True)
+        self.git("remote", "add", "origin", self.origin)
+        for name, text in (("claude", FAKE_CLAUDE), ("gh", FAKE_HOST), ("glab", FAKE_HOST)):
+            fake = os.path.join(self.bin, name)
+            with open(fake, "w") as fh:
+                fh.write(text)
+            os.chmod(fake, 0o755)
         self.log = os.path.join(self.dir, "claude.log")
         self.agents_file = os.path.join(self.dir, "agents.json")
         self.rm_file = os.path.join(self.dir, "rm.json")
@@ -103,7 +165,10 @@ class RunTest(unittest.TestCase):
             "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
             "FAKE_CLAUDE_LOG": self.log, "FAKE_CLAUDE_AGENTS": self.agents_file,
             "FAKE_CLAUDE_LOGS_DIR": self.logs, "FAKE_CLAUDE_RM": self.rm_file,
+            "FAKE_GH": os.path.join(self.dir, "gh.json"), "FAKE_GH_LOG": os.path.join(self.dir, "gh.log"),
+            "FAKE_GLAB": os.path.join(self.dir, "glab.json"), "FAKE_GLAB_LOG": os.path.join(self.dir, "glab.log"),
         })
+        self.project = urlquote(codehost.parse_remote(self.origin)[1], safe="")  # the GitLab project path
         self.write_config()
 
     def tearDown(self):
@@ -230,6 +295,197 @@ class RunTest(unittest.TestCase):
     def running_task(self, attempt=1, **meta):
         return self.add_task(start=True, attempt=attempt, **meta)
 
+
+    def make_runner(self):
+        return types.SimpleNamespace(root=self.root)
+
+    def commit_file(self, name, text, cwd=None, message=None, binary=False):
+        path = os.path.join(cwd or self.root, name)
+        with open(path, "wb" if binary else "w") as fh:
+            fh.write(text)
+        self.git("add", "-A", cwd=cwd)
+        self.git("commit", "-q", "-m", message or f"edit {name}", cwd=cwd)
+        return self.git("rev-parse", "HEAD", cwd=cwd)
+
+    def feature_branch(self, name="feature"):
+        self.git("checkout", "-q", "-b", name)
+        tip = self.commit_file(f"{name}.txt", "work\n")
+        self.git("checkout", "-q", "main")
+        return tip
+
+    def merges(self):
+        return self.git("log", "--merges", "--format=%s")
+
+    def status_sections(self, *args):
+        out = self.ok("status", *args)
+        sections = {}
+        for block in re.split(r"(?m)^## ", out.stdout)[1:]:
+            sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
+        return sections
+
+    def verified_by(self, verdict, task=None):
+        task = task or self.running_task()
+        self.pass_report(task, wt=self.worktree(f"task-{task}-1"))
+        status = {"verify-failed": "ISSUES", "verify-blocked": "BLOCKED"}.get(verdict, "PASS")
+        self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n", kind="verify", by=f"verify-{task}-1")
+        return task
+
+    # --- code host fakes (pr mode)
+
+    def pr_config(self, extra=""):
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\n' + extra)
+        self.git("push", "-q", "origin", "main")
+
+    def fake_host(self, **state):
+        """Write the fake gh or glab answer table for one request state, in the dialect of self.host.
+
+        number, state (OPEN MERGED CLOSED), merge_state (CLEAN BLOCKED BEHIND DIRTY DRAFT UNKNOWN), head,
+        base, branch, merge_commit, squash_commit, listed (find_pr sees it), checks (buckets), runs (newest
+        first: {id, attempt, state: success|failure|cancelled|pending, head}), jobs (GitLab, of the newest
+        pipeline), dispatch (ok|none|error), merge (ok or an error message), then (a state change that the
+        next view shows, as after a merge), extra (table entries added last)."""
+        s = {"number": 1, "state": "OPEN", "merge_state": "CLEAN", "head": "f" * 40, "base": "main", "branch": "task-1",
+             "merge_commit": None, "squash_commit": None, "listed": False, "checks": (), "runs": (), "jobs": (),
+             "dispatch": "ok", "merge": "ok", "then": None, "extra": {}}
+        s.update(state)
+
+        def out(text="", exit=0, err=""):
+            return {"stdout": text, "stderr": err, "exit": exit}
+
+        def at(run):
+            return f"2026-10-26T10:{(run['id'] // 60) % 60:02d}:{run['id'] % 60:02d}Z"
+
+        def views(build):
+            now = build(s)
+            return [out(json.dumps(now))] + ([out(json.dumps(build({**s, **s["then"]})))] if s["then"] else [])
+
+        n, runs = s["number"], list(s["runs"])
+        if self.host == "github":
+            words = {"UNKNOWN": "UNKNOWN"}
+
+            def view(x):
+                return {"number": x["number"], "url": f"https://github.com/o/r/pull/{x['number']}", "state": x["state"],
+                        "headRefOid": x["head"], "headRefName": x["branch"], "baseRefName": x["base"],
+                        "mergedAt": "2026-10-26T11:00:00Z" if x["state"] == "MERGED" else None,
+                        "mergeCommit": {"oid": x["merge_commit"]} if x["merge_commit"] else None,
+                        "mergeStateStatus": words.get(x["merge_state"], x["merge_state"])}
+
+            shown = {"success": ("completed", "success"), "failure": ("completed", "failure"),
+                     "cancelled": ("completed", "cancelled"), "pending": ("in_progress", None)}
+            table = {
+                "repo view": out(s["base"] + "\n"),
+                "pr list": out(json.dumps([view(s)] if s["listed"] else [])),
+                "pr create": out(f"https://github.com/o/r/pull/{n}\n"),
+                "pr view": views(view),
+                "pr checks": out(json.dumps([{"name": f"c{i}", "state": b, "bucket": b} for i, b in enumerate(s["checks"])]),
+                                 exit=1 if "fail" in s["checks"] else 8 if "pending" in s["checks"] else 0),
+                "pr merge": out() if s["merge"] == "ok" else out(exit=1, err=s["merge"] + "\n"),
+                "run list": out(json.dumps([{"databaseId": r["id"], "attempt": r.get("attempt", 1),
+                                             "status": shown[r["state"]][0], "conclusion": shown[r["state"]][1],
+                                             "headSha": r.get("head") or s["head"], "url": f"https://ci.example/runs/{r['id']}",
+                                             "createdAt": at(r)} for r in runs])),
+                "workflow run": {"ok": out(), "none": out(exit=1, err="HTTP 422: Workflow does not have 'workflow_dispatch' trigger\n"),
+                                 "error": out(exit=1, err="HTTP 500: boom\n")}[s["dispatch"]],
+            }
+        else:
+            words = {"CLEAN": "mergeable", "BLOCKED": "ci_must_pass", "BEHIND": "need_rebase", "DIRTY": "conflict",
+                     "DRAFT": "draft_status", "UNKNOWN": "checking"}
+            proj = f"projects/{self.project}"
+            api = f"api {proj}"
+
+            def view(x):
+                return {"iid": x["number"], "web_url": f"https://gitlab.example.com/g/p/-/merge_requests/{x['number']}",
+                        "state": {"OPEN": "opened", "MERGED": "merged", "CLOSED": "closed"}[x["state"]], "sha": x["head"],
+                        "source_branch": x["branch"], "target_branch": x["base"],
+                        "merged_at": "2026-10-26T11:00:00Z" if x["state"] == "MERGED" else None,
+                        "merge_commit_sha": x["merge_commit"], "squash_commit_sha": x["squash_commit"],
+                        "detailed_merge_status": words[x["merge_state"]], "has_conflicts": x["merge_state"] == "DIRTY"}
+
+            word = {"success": "success", "failure": "failed", "cancelled": "canceled", "pending": "running"}
+            pipes = [{"id": r["id"], "status": word[r["state"]], "web_url": f"https://ci.example/pipelines/{r['id']}",
+                      "created_at": at(r), "sha": r.get("head") or s["head"]} for r in runs]
+            if not pipes and s["checks"]:
+                status = "failed" if "fail" in s["checks"] else "running" if "pending" in s["checks"] else "success"
+                pipes = [{"id": 900, "status": status, "web_url": "https://ci.example/pipelines/900", "created_at": at({"id": 900}),
+                          "sha": s["head"]}]
+            merged = {**view({**s, "state": "MERGED"})}
+            table = {
+                api: out(json.dumps({"default_branch": s["base"]})),
+                f"{api}/merge_requests?": out(json.dumps([view(s)] if s["listed"] else [])),
+                f"{api}/merge_requests/{n}": views(view),
+                f"{api}/merge_requests/{n}/approvals": out(json.dumps({"approvals_left": 0})),
+                f"api -X POST {proj}/merge_requests": out(json.dumps(view(s))),
+                f"api -X PUT {proj}/merge_requests/{n}/merge": (out(json.dumps(merged)) if s["merge"] == "ok"
+                                                              else out(json.dumps({"message": s["merge"]}), exit=1)),
+                f"{api}/pipelines?": out(json.dumps(pipes)),
+                f"api -X POST {proj}/pipeline": {"ok": out("{}"), "error": out(json.dumps({"message": "boom"}), exit=1),
+                                                "none": out(json.dumps({"message": "Missing CI config file"}), exit=1)}[s["dispatch"]],
+            }
+            if pipes and s["jobs"]:
+                table[f"{api}/pipelines/{pipes[0]['id']}/jobs"] = out(json.dumps(
+                    [{"id": 5000 + i, "name": j["name"], "status": j["status"], "web_url": f"https://ci.example/jobs/{5000 + i}",
+                      "created_at": "2026-10-26T10:00:00Z"} for i, j in enumerate(s["jobs"])]))
+        table.update(s["extra"])
+        path = os.path.join(self.dir, "gh.json" if self.host == "github" else "glab.json")
+        for stale in (path, path + ".pos"):
+            if os.path.isfile(stale):
+                os.remove(stale)
+        with open(path, "w") as fh:
+            json.dump(table, fh)
+
+    def host_log(self, name=None):
+        """The argv lists the fake gh or glab was called with."""
+        path = os.path.join(self.dir, f"{name or ('gh' if self.host == 'github' else 'glab')}.log")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def host_calls(self, *words):
+        """The logged calls whose joined argv starts with the words."""
+        return [c for c in self.host_log() if " ".join(c).startswith(" ".join(words))]
+
+    def host_stdin(self):
+        path = os.path.join(self.dir, ("gh" if self.host == "github" else "glab") + ".log.in")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def label(self, number=1):
+        return f"PR #{number}" if self.host == "github" else f"MR !{number}"
+
+    def merge_calls(self):
+        return self.host_calls("pr merge") if self.host == "github" else self.host_calls("api -X PUT")
+
+    def create_calls(self):
+        return (self.host_calls("pr create") if self.host == "github"
+                else self.host_calls("api", "-X", "POST", f"projects/{self.project}/merge_requests"))
+
+    def checkout(self):
+        """What a pr-mode command must leave alone: the root's branch, HEAD, and porcelain."""
+        return (self.git("branch", "--show-current"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain"))
+
+    def remote_sha(self, branch="task-1"):
+        out = subprocess.run(["git", "-C", self.origin, "rev-parse", "--verify", "-q", f"refs/heads/{branch}"],
+                             capture_output=True, text=True)
+        return out.stdout.strip() or None
+
+    def pr_task(self, files=("out.txt", "x\n"), **meta):
+        """A running task whose worker passed, in pr mode. Returns (task, worktree, head)."""
+        self.pr_config()
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")), **meta)
+        wt = self.worktree(f"task-{task}-1")
+        wt, head = self.pass_report(task, wt=wt, head=self.wt_commit(wt, *files))
+        self.agents(self.finished(f"task-{task}-1"))
+        return task, wt, head
+
+    def fresh(self):
+        self.tearDown()
+        self.setUp()
+
+
+class RunTest(Base):
     # --- common
 
     def test_01_not_a_repository_root(self):
@@ -712,6 +968,8 @@ class RunTest(unittest.TestCase):
         self.agents(self.row("verify-1-1", status="waiting", state="blocked", waitingFor="permission"))
         stuck = self.one(self.events("record"), "stuck")
         self.assertIn("sess-verify-1-1", stuck["detail"])
+        self.assertIn("claude logs sess-verify-1-1", stuck["next"])
+        self.assertIn("run.py verify 1 --again", stuck["next"])
         self.assertIn(["stop", "sess-verify-1-1"], self.calls("stop"))
         filed = [r for r in self.results(task) if r["kind"] == "verify"]
         self.assertEqual([(r["status"], r["author"]) for r in filed], [("BLOCKED", "manager")])
@@ -778,7 +1036,7 @@ class RunTest(unittest.TestCase):
         self.agents(self.row("task-1-1", status="waiting", state="working", waitingFor="Bash permission"))
         stuck = self.one(self.events("record"), "stuck")
         self.assertIn("Bash permission", stuck["detail"])
-        self.assertIn("--model sonnet", stuck["next"])
+        self.assertIn("claude logs sess-task-1-1", stuck["next"])
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         filed = self.results(task)
         self.assertEqual([(r["status"], r["author"], r["attempt"]) for r in filed], [("BLOCKED", "manager", 1)])
@@ -1093,6 +1351,7 @@ class RunTest(unittest.TestCase):
         out = self.run_cmd("close", str(task), "--verdict", "test-verified")
         self.assertEqual(out.returncode, 2)
         self.assertIn("verifier verify-1-1 said artifact-verified", out.stderr)
+        self.assertIn("--override-verifier", out.stderr)
         events = self.events("close", str(task))
         self.assertIn("artifact-verified at", self.one(events, "closed")["detail"])
         self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
@@ -1104,7 +1363,7 @@ class RunTest(unittest.TestCase):
         self.wt_commit(wt, "more.txt")
         out = self.run_cmd("close", str(task), "--verdict", "test-verified")
         self.assertEqual(out.returncode, 2)
-        self.assertIn("the output changed after the verdict", out.stderr)
+        self.assertIn("the change differs (different diff)", out.stderr)
         self.assertEqual(self.status_of(task), "in_progress")
         self.assertNotIn("verdict", self.meta(task))
         self.assertEqual([r for r in self.results(task) if r["kind"] == "verify"], [])
@@ -1191,9 +1450,6 @@ class RunTest(unittest.TestCase):
         wt, head = self.pass_report(task)
         self.agents(self.finished("task-1-1"))
         return task, wt, head
-
-    def merges(self):
-        return self.git("log", "--merges", "--format=%s")
 
     def test_51_no_merge_line_lists_the_branch(self):
         task, wt, head = self.merge_setup()
@@ -1425,7 +1681,7 @@ class RunTest(unittest.TestCase):
         self.wt_commit(wt, "later.txt")
         out = self.run_cmd("close", str(task))
         self.assertEqual(out.returncode, 2)
-        self.assertIn("the output changed after the verdict", out.stderr)
+        self.assertIn("the change differs (different diff)", out.stderr)
 
     def test_58_a_done_decisions_notes_reach_the_next_brief(self):
         task = self.running_task()
@@ -1496,12 +1752,6 @@ class RunTest(unittest.TestCase):
 
     # --- status
 
-    def status_sections(self, *args):
-        out = self.ok("status", *args)
-        sections = {}
-        for block in re.split(r"(?m)^## ", out.stdout)[1:]:
-            sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
-        return sections
 
     def test_56_earlier_died_result_with_live_attempt_is_in_flight(self):
         task = self.running_task(attempt=2, session="task-1-2", model="sonnet", started_at='"2026-10-26 09:00 UTC"')
@@ -1609,6 +1859,1131 @@ class RunTest(unittest.TestCase):
         out = self.run_cmd("status")
         self.assertEqual(out.returncode, 2)
         self.assertIn("has no tasks", out.stderr)
+
+    # --- local mode never calls the host
+
+    def test_66_local_mode_never_calls_the_host(self):
+        bare = os.path.join(self.dir, "claude-only")
+        os.makedirs(bare)
+        os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
+        env = dict(self.env, PATH=bare + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
+        self.assertIsNone(shutil.which("gh", path=env["PATH"]))
+        self.assertIsNone(shutil.which("glab", path=env["PATH"]))
+        self.orders("MERGE: verified branches into main\n")
+        fresh = self.add_task(verdict="test-verified", verdict_ref="abc1234")
+        self.assertEqual(len(self.named(self.events("launch", str(fresh), env=env), "launched")), 1)
+        task = self.running_task()
+        self.pass_report(task, wt=self.worktree("task-2-1"))
+        self.agents(self.row("task-2-1"))
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test", env=env)
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertEqual(self.merges(), "Merge worktree-task-2-1 (task #2)")
+        closed = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified")
+        self.tg("done", str(closed))
+        self.assertEqual(self.one(self.events("merged", str(closed), env=env), "merged")["detail"], "recorded merged_by=operator")
+        self.events("record", env=env)
+        self.events("status", env=env)
+        self.assertEqual((self.host_log("gh"), self.host_log("glab")), ([], []))
+
+    # --- the change id
+
+    def test_69_change_id_survives_a_rebase_and_nothing_else(self):
+        import run as runner
+        run = self.make_runner()
+        lines = "".join(f"line {i}\n" for i in range(1, 11))
+        base = self.commit_file("f.txt", lines)
+        self.git("checkout", "-q", "-b", "task")
+        task = self.commit_file("f.txt", lines.replace("line 6\n", "LINE 6\n"))
+        self.git("checkout", "-q", "main")
+        target = self.commit_file("f.txt", "new first line\n" + lines.replace("line 2\n", "target 2\n"))
+        self.git("checkout", "-q", "task")
+        self.git("rebase", "-q", "main")
+        rebased = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(rebased, task)
+        original = runner.change_id(run, base, task)
+        self.assertEqual(runner.change_id(run, target, rebased), original)  # context moved, line numbers shifted
+        # squash, split and reorder: one diff over the whole range
+        self.git("checkout", "-q", "-b", "split", base)
+        self.commit_file("f.txt", lines.replace("line 6\n", "LINE 6\n"), message="part one")
+        self.commit_file("g.txt", "extra\n", message="part two")
+        self.git("reset", "--soft", base)
+        self.git("commit", "-q", "-m", "squashed")
+        squashed = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "twin", base)
+        self.commit_file("f.txt", lines.replace("line 6\n", "LINE 6\n"), message="a")
+        self.commit_file("g.txt", "extra\n", message="b")
+        self.assertEqual(runner.change_id(run, base, squashed), runner.change_id(run, base, self.git("rev-parse", "HEAD")))
+        self.assertNotEqual(runner.change_id(run, base, squashed), original)
+        # whitespace edit of a changed line, an appended commit, and a changed + line differ
+        self.git("checkout", "-q", "-b", "space", base)
+        spaced = self.commit_file("f.txt", lines.replace("line 6\n", "LINE 6 \n"))
+        self.assertNotEqual(runner.change_id(run, base, spaced), original)
+        appended = self.commit_file("h.txt", "more\n")
+        self.assertNotEqual(runner.change_id(run, base, appended), original)
+        self.git("checkout", "-q", "-b", "other", base)
+        self.assertNotEqual(runner.change_id(run, base, self.commit_file("f.txt", lines.replace("line 6\n", "LINE SIX\n"))), original)
+        # a binary file changed in the task and also on the target: the index line stays, so it differs
+        self.git("checkout", "-q", "main")
+        start = self.commit_file("b.dat", b"\x00\x01\x02", binary=True)
+        self.git("checkout", "-q", "-b", "bin-task", start)
+        first = self.commit_file("b.dat", b"\x00\x01\x09", binary=True)
+        self.git("checkout", "-q", "-b", "bin-target", start)
+        self.commit_file("b.dat", b"\x00\x01\x07", binary=True)
+        second = self.commit_file("b.dat", b"\x00\x01\x09", binary=True)
+        target_side = self.git("rev-parse", "HEAD~1")
+        self.assertNotEqual(runner.change_id(run, start, first), runner.change_id(run, target_side, second))
+
+    def test_70_close_accepts_a_rebased_branch_with_the_same_change(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.commit_file("main.txt", "moved on\n")
+        self.git("rebase", "-q", "main", cwd=wt)
+        rebased = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertNotEqual(rebased, head)
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertIn(f"same change at {rebased[:7]} (verified at {head[:7]})", self.one(events, "rebased")["detail"])
+        self.assertEqual(self.meta(task)["verdict_ref"], rebased)
+        self.assertIn(rebased, self.one(events, "closed")["detail"])
+        filed = [r for r in self.results(task) if r["kind"] == "verify"][-1]
+        self.assertIn(f"Head: {rebased}", filed["body"])
+        self.assertEqual(self.status_of(task), "done")
+
+    def test_70_a_rebased_branch_with_an_extra_commit_is_refused(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.commit_file("main.txt", "moved on\n")
+        self.git("rebase", "-q", "main", cwd=wt)
+        self.wt_commit(wt, "extra.txt")
+        out = self.run_cmd("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("the change differs (different diff)", out.stderr)
+        self.assertEqual(self.status_of(task), "in_progress")
+
+    def test_70_a_pruned_verified_commit_is_refused(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.commit_file("main.txt", "moved on\n")
+        self.git("rebase", "-q", "main", cwd=wt)
+        for cwd in (wt, self.root):
+            self.git("reflog", "expire", "--expire=now", "--all", cwd=cwd)
+        self.git("gc", "-q", "--prune=now")
+        out = self.run_cmd("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"the verified commit {head} is gone", out.stderr)
+
+    # --- launch --base, adopt, unmanaged
+
+    def test_71_launch_base_starts_from_any_commit(self):
+        tip = self.feature_branch()
+        self.git("push", "-q", "origin", "feature")
+        self.git("fetch", "-q", "origin")
+        before = (self.git("branch", "--show-current"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain"))
+        task = self.add_task()
+        self.assertIn(f"git reset --keep {tip}", self.brief(task, "--base", tip))
+        events = self.events("launch", str(task), "--base", tip)
+        self.assertIn(f"base {tip[:7]}", self.one(events, "launched")["detail"])
+        meta = self.meta(task)
+        self.assertEqual(meta["base"], tip)
+        self.assertNotIn("target", meta)
+        for ref in ("feature", "origin/feature"):
+            other = self.add_task()
+            self.ok("launch", str(other), "--base", ref)
+            self.assertEqual((self.meta(other)["base"], self.meta(other)["target"]), (tip, "feature"), ref)
+        out = self.run_cmd("launch", str(self.add_task()), "--base", "no-such-branch")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--base no-such-branch is not a commit or branch in this repository; fetch it first", out.stderr)
+        self.assertEqual((self.git("branch", "--show-current"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain")), before)
+
+    def test_72_base_lifts_the_unmerged_dependency_refusal_only_when_it_contains_the_commit(self):
+        tip = self.feature_branch()
+        self.git("branch", "elsewhere", "main")
+        up = self.add_task("Build base", "Why: base.\n- [ ] built", attempt=1, verdict_ref=tip)
+        task = self.add_task("Use base", "Why: needs base.\n- [ ] used", depends=(up,))
+        self.tg("done", str(up))
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("is not merged; merge it and run run.py merged", out.stderr)
+        self.assertIn("pass --base <its branch>", out.stderr)
+        self.assertEqual(self.run_cmd("launch", str(task), "--base", "elsewhere").returncode, 2)
+        self.ok("launch", str(task), "--base", "feature")
+        self.assertEqual(self.meta(task)["base"], tip)
+
+    def test_73_pr_mode_starts_from_the_fetched_target_branch(self):
+        self.pr_config()
+        self.fake_host()
+        clone = os.path.join(self.dir, "clone")
+        subprocess.run(["git", "clone", "-q", self.origin, clone], check=True)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=clone)
+        ahead = self.commit_file("ahead.txt", "x\n", cwd=clone)
+        self.git("push", "-q", "origin", "main", cwd=clone)
+        task = self.add_task(attempt=1)
+        self.assertNotEqual(self.git("rev-parse", "HEAD"), ahead)
+        self.assertIn(f"git reset --keep {ahead}", self.brief(task))
+        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1-1\nHead: {SHA_A}\n")
+        self.assertIn(f"git reset --keep {SHA_A}", self.brief(task, "--attempt", "2"))
+
+    def adopt_setup(self, name="feat"):
+        tip = self.feature_branch(name)
+        return tip, self.add_task()
+
+    def test_74_adopt_brings_a_branch_under_run_py(self):
+        tip, task = self.adopt_setup()
+        base = self.git("rev-parse", "HEAD")
+        events = self.events("adopt", str(task), "--branch", "feat", "--head", tip[:10])
+        adopted = self.one(events, "adopted")
+        self.assertEqual((adopted["task"], adopted["attempt"]), (task, 1))
+        self.assertIn(f"branch feat at {tip[:7]}", adopted["detail"])
+        self.assertIn(f"run.py verify {task}", adopted["next"])
+        self.assertEqual(self.status_of(task), "in_progress")
+        meta = self.meta(task)
+        self.assertEqual((meta["attempt"], meta["session"], meta["base"]), (1, "adopted", base))
+        self.assertNotIn("model", meta)
+        row = self.results(task)[0]
+        self.assertEqual((row["kind"], row["status"], row["author"], row["attempt"]), ("task", "PASS", "manager", 1))
+        for line in ("Branch: feat", f"Head: {tip}", "Worktree: None", "Ran: not stated (adopted)"):
+            self.assertIn(line, row["body"])
+        arrived = self.one(self.events("record"), "arrived")
+        self.assertIn("PASS by manager", arrived["detail"])
+        self.assertTrue(arrived["detail"].endswith("; adopted"))
+        closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertEqual(self.one(closed, "tokens")["detail"], "no session row; none recorded")
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.meta(task)["verdict_ref"], tip)
+
+    def test_74_adopt_refusals(self):
+        tip, task = self.adopt_setup()
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", "b" * 12)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"branch feat is at {tip}, not {'b' * 12}; adopt takes the branch tip", out.stderr)
+        out = self.run_cmd("adopt", str(task), "--branch", "nope", "--head", tip[:7])
+        self.assertIn("branch nope not found; fetch it: git fetch origin nope:nope", out.stderr)
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", "zzz")
+        self.assertEqual(out.returncode, 2)
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:7], "--pr", "7")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('--pr needs merge.mode = "pr"', out.stderr)
+        self.agents(self.row("task-1-1"))
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:7])
+        self.assertIn("has a live session sess-task-1-1", out.stderr)
+        self.assertIn("run run.py record first", out.stderr)
+        self.agents()
+        done = self.add_task()
+        self.tg("done", str(done))
+        self.assertIn(f"#{done} is done", self.run_cmd("adopt", str(done), "--branch", "feat", "--head", tip[:7]).stderr)
+        gone = self.running_task(attempt=3, abandoned="died")
+        out = self.run_cmd("adopt", str(gone), "--branch", "feat", "--head", tip[:7])
+        self.assertIn(f"is abandoned (died); run.py launch {gone} --attempt 4 to try again", out.stderr)
+        self.assertEqual(self.status_of(task), "open")
+        self.assertEqual(self.results(task), [])
+
+    def test_75_tasks_without_an_attempt_are_one_unmanaged_line(self):
+        for _ in range(3):
+            self.add_task(start=True)
+        events = self.events("record")
+        unmanaged = self.one(events, "unmanaged")
+        self.assertEqual(unmanaged["detail"], "#1 #2 #3")
+        self.assertIn("run.py adopt <id> --branch <b> --head <sha> [--pr <n>]", unmanaged["next"])
+        self.assertEqual(self.named(events, "unknown"), [])
+        self.assertIn("unmanaged: #1 #2 #3 | next: run.py adopt", self.ok("record").stdout)
+        for task in (1, 2, 3):
+            self.assertEqual(self.results(task), [])
+        self.assertEqual(self.calls("--bg"), [])
+        self.assertEqual(self.status_sections()["In flight"].count("not managed"), 3)
+
+    # --- verifier override
+
+
+    def test_76_override_upgrade_needs_evidence(self):
+        task = self.verified_by("check-only")
+        out = self.run_cmd("close", str(task), "--verdict", "artifact-verified")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('--override-verifier "<reason>"', out.stderr)
+        out = self.run_cmd("close", str(task), "--verdict", "artifact-verified", "--override-verifier", "probe",
+                           "--ran", "ran the probe")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("an upgrade from check-only to artifact-verified needs evidence in --ran", out.stderr)
+        self.assertEqual(self.status_of(task), "in_progress")
+        events = self.events("close", str(task), "--verdict", "artifact-verified", "--override-verifier", "probe",
+                             "--ran", "see https://ci/run/1")
+        self.assertEqual(self.one(events, "override")["detail"], "check-only by verify-1-1 -> artifact-verified; probe")
+        self.one(events, "closed")
+        filed = [r for r in self.results(task) if r["kind"] == "verify" and r["author"] == "manager"]
+        self.assertEqual(len(filed), 1)
+        for line in ("Verdict: artifact-verified", "Overrides: check-only (result #2 by verify-1-1)", "Reason: probe",
+                     "Ran: see https://ci/run/1"):
+            self.assertIn(line, filed[0]["body"])
+        self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
+        second = self.verified_by("check-only")
+        self.ok("close", str(second), "--verdict", "test-verified", "--override-verifier", "probe", "--ran", "run 123456789")
+        self.assertEqual(self.meta(second)["verdict"], "test-verified")
+
+    def test_76_override_downgrade_and_the_refusals(self):
+        task = self.verified_by("test-verified")
+        events = self.events("close", str(task), "--verdict", "check-only", "--override-verifier", "no runner")
+        self.assertIn("check-only; not closed", self.one(events, "verdict")["detail"])
+        self.assertEqual(self.status_of(task), "in_progress")
+        self.assertIn("Ran: not stated", [r for r in self.results(task) if r["author"] == "manager"][0]["body"])
+        failed = self.verified_by("verify-failed")
+        out = self.run_cmd("close", str(failed), "--verdict", "test-verified", "--override-verifier", "x", "--ran", "https://x")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"a verify-failed verdict needs a fix round (run.py launch {failed}), not an override", out.stderr)
+        lower = self.events("close", str(failed), "--verdict", "verify-blocked", "--override-verifier", "cannot run")
+        self.assertIn("verify-blocked; not closed", self.one(lower, "verdict")["detail"])
+        bare = self.running_task()
+        self.pass_report(bare, wt=self.worktree(f"task-{bare}-1"))
+        out = self.run_cmd("close", str(bare), "--verdict", "test-verified", "--override-verifier", "x")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{bare} has no verifier verdict to override; pass --verdict alone", out.stderr)
+
+    def test_77_an_override_outranks_the_older_verifier_row_until_a_newer_one_arrives(self):
+        task = self.verified_by("test-verified")
+        self.ok("close", str(task), "--verdict", "check-only", "--override-verifier", "no runner")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "verified"), [])
+        self.assertIn("verdict check-only", self.one(events, "unclosed")["detail"])
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1-2")
+        again = self.events("record")
+        self.assertIn("Verdict test-verified by verify-1-1-2", self.one(again, "verified")["detail"])
+
+    # --- the permission-prompt hint, --root
+
+    def test_78_a_stuck_session_gets_the_prompt_hint_not_a_model_change(self):
+        worker = self.running_task()
+        verifier = self.running_task()
+        self.add_result(verifier, "PASS", f"Task: 2\nStatus: PASS\nHead: {SHA_A}\n")
+        self.agents(self.row("task-1-1", status="waiting", state="working", waitingFor="permission prompt"),
+                    self.row("verify-2-1", status="waiting", state="blocked", waitingFor="permission prompt"))
+        stuck = {e["task"]: e for e in self.named(self.events("record"), "stuck")}
+        self.assertIn("(permission prompt)", stuck[worker]["detail"])
+        self.assertIn("filed verify BLOCKED (permission prompt)", stuck[verifier]["detail"])
+        for task, sid, cmd in ((worker, "sess-task-1-1", "run.py launch 1"), (verifier, "sess-verify-2-1", "run.py verify 2 --again")):
+            hint = stuck[task]["next"]
+            for text in (f"claude logs {sid}", "verify_mode=ci", "A pinned old model id is one more possible cause", f"Then {cmd}."):
+                self.assertIn(text, hint)
+            self.assertNotIn("--model sonnet", hint)
+        self.agents()
+        again = {e["task"]: e for e in self.named(self.events("record"), "stuck")}
+        self.assertEqual(again[worker]["detail"], "filed earlier")
+        self.assertIn("claude logs sess-task-1-1", again[worker]["next"])
+        self.assertIn("Then run.py launch 1.", again[worker]["next"])
+
+    def test_79_a_root_without_the_toml_is_refused_before_the_config_is_read(self):
+        other = os.path.join(self.dir, "other")
+        os.makedirs(other)
+        subprocess.run(["git", "-C", other, "init", "-q"], check=True)
+        out = self.run_cmd("record", root=other)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"no .agentic-team.toml in {os.path.realpath(other)}; run from the repository root or pass --root <dir>", out.stderr)
+        self.assertNotIn("taskgraph.project is empty", out.stderr)
+
+
+
+class PrTest(Base):
+    """merge.mode = "pr": close pushes and opens the request, record merges it. Each test runs for gh and glab."""
+
+    @property
+    def ci(self):
+        return "ci.yml" if self.host == "github" else "pipeline"
+
+    def published(self, **meta):
+        """A task that passed, was closed, and was pushed with an open request (state UNKNOWN)."""
+        task, wt, head = self.pr_task(**meta)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        return task, wt, head
+
+    def advance_main(self, name="moved.txt", text="x\n"):
+        clone = os.path.join(self.dir, "clone")
+        if not os.path.isdir(clone):
+            subprocess.run(["git", "clone", "-q", self.origin, clone], check=True)
+            for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+                self.git("config", key, value, cwd=clone)
+        else:
+            self.git("pull", "-q", "origin", "main", cwd=clone)
+        with open(os.path.join(clone, name), "w") as fh:
+            fh.write(text)
+        self.git("add", "-A", cwd=clone)
+        self.git("commit", "-q", "-m", f"main: {name}", cwd=clone)
+        self.git("push", "-q", "origin", "main", cwd=clone)
+        return self.git("rev-parse", "HEAD", cwd=clone)
+
+    # --- close and publish
+
+    @both_hosts
+    def test_80_close_pushes_and_opens_the_request_and_record_merges_it_under_the_merge_line(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = self.checkout()
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        for name in ("closed", "published", "pr-pending"):
+            self.one(events, name)
+        self.assertIn(f"{self.label()} ", self.one(events, "published")["detail"])
+        self.assertIn(f"head {head[:7]} on origin/task-1, base main", self.one(events, "published")["detail"])
+        self.assertEqual(self.remote_sha(), head)
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["pr_branch"], meta["pushed"]), (1, "task-1", head))
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.merges(), "")
+        self.assertEqual(self.checkout(), before)
+        (create,) = self.create_calls()
+        if self.host == "github":
+            self.assertEqual(create[:7], ["pr", "create", "--head", "task-1", "--base", "main", "--title"])
+            self.assertIn("(task #1)", create[7])
+            self.assertIn("Taskgraph #1: Sweep domains", self.host_stdin()[0]["stdin"])
+        else:
+            for field in ("source_branch=task-1", "target_branch=main", "remove_source_branch=false"):
+                self.assertIn(field, create)
+        request = "#1" if self.host == "github" else "!1"
+        self.assertRegex(self.status_sections()["Done, branch not merged"], rf"{head}\s*\|\s*{re.escape(request)}\s*\|")
+        self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
+        blocked = self.one(self.events("record"), "pr-blocked")
+        self.assertIn("1 fail" if self.host == "github" else "pipeline failed", blocked["detail"])
+        self.fake_host(head=head, merge_state="CLEAN")
+        ready = self.one(self.events("record"), "ready-to-merge")
+        self.assertEqual(ready["detail"], f"{self.label()} is clean")
+        self.assertEqual(self.merge_calls(), [])
+        self.orders("# Standing orders\n\n1. MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["detail"], f"{self.label()} merged (merge) at {'c' * 40}")
+        (call,) = self.merge_calls()
+        if self.host == "github":
+            self.assertEqual(call, ["pr", "merge", "1", "--merge", "--match-head-commit", head])
+        else:
+            self.assertEqual(call, ["api", "-X", "PUT", f"projects/{self.project}/merge_requests/1/merge", "-f", f"sha={head}",
+                                    "-f", "should_remove_source_branch=false"])
+        meta = self.meta(task)
+        self.assertEqual(meta["merged_by"], "manager")
+        self.assertIn("merged_at", meta)
+        self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
+        self.assertEqual(self.merges(), "")
+
+    def merge_method(self, method):
+        self.pr_config(f'method = "{method}"\n')
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.agents(self.finished("task-1-1"))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified")
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+        self.assertIn(f"merged ({method})", self.one(self.events("record"), "merged")["detail"])
+        (call,) = self.merge_calls()
+        return call, head
+
+    @both_hosts
+    def test_80_method_squash(self):
+        call, head = self.merge_method("squash")
+        self.assertIn("--squash" if self.host == "github" else "squash=true", call)
+        self.assertNotIn("--merge", call)
+
+    @both_hosts
+    def test_80_method_rebase(self):
+        call, head = self.merge_method("rebase")
+        if self.host == "github":
+            self.assertIn("--rebase", call)
+        else:
+            self.assertNotIn("squash=true", call)
+
+    @both_hosts
+    def test_81_stop_blocks_the_merge_and_a_failed_merge_changes_nothing(self):
+        task, wt, head = self.published()
+        before = self.checkout()
+        self.orders("STOP: paused\nMERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN")
+        ready = self.one(self.events("record"), "ready-to-merge")
+        self.assertEqual(ready["detail"], f"{self.label()} is clean; not merged during a pause")
+        self.assertEqual(self.merge_calls(), [])
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN", merge="Pull request is not mergeable")
+        failed = self.one(self.events("record"), "merge-failed")
+        self.assertEqual(failed["detail"], f"{self.label()}: Pull request is not mergeable")
+        self.assertIn("run.py record", failed["next"])
+        self.assertEqual(len(self.merge_calls()), 1)
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertEqual(self.checkout(), before)
+
+    @both_hosts
+    def test_82_a_merge_by_someone_else_is_recorded_and_its_commits_may_be_discarded(self):
+        self.pr_config()
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt = self.worktree("task-1-1")
+        first = self.wt_commit(wt, "a.txt")
+        head = self.wt_commit(wt, "b.txt")
+        self.pass_report(task, wt=wt, head=head)
+        self.agents(self.finished("task-1-1"))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = self.checkout()
+        self.ok("close", str(task), "--verdict", "test-verified")
+        self.fake_host(head=head, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {first}@wt-1"}}, fh)
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["detail"], f"{self.label()} merged at {'c' * 40}; recorded merged_by=operator")
+        meta = self.meta(task)
+        self.assertEqual((meta["merged_by"], meta["pushed"]), ("operator", head))
+        self.assertIn("merged_at", meta)
+        self.assertIn("discarded", self.one(events, "removed")["detail"])
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"], ["rm", "sess-task-1-1", "--discard-unpushed", f"{first}@wt-1"]])
+        self.assertEqual(self.merge_calls(), [])
+        self.assertEqual(self.checkout(), before)
+
+    @both_hosts
+    def test_82_a_commit_outside_the_merged_head_is_kept(self):
+        task, wt, head = self.published()
+        self.git("checkout", "-q", "-b", "side")
+        side = self.commit_side("side.txt")
+        self.git("checkout", "-q", "main")
+        self.fake_host(head=head, state="MERGED", merge_state="UNKNOWN")
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {side}@wt-1"}}, fh)
+        events = self.events("record")
+        self.assertIn(f"commit {side} is not in HEAD", self.one(events, "kept")["detail"])
+        self.one(events, "merged")
+        self.assertEqual(len(self.calls("rm")), 1)
+
+    def commit_side(self, name):
+        with open(os.path.join(self.root, name), "w") as fh:
+            fh.write("side\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", name)
+        return self.git("rev-parse", "HEAD")
+
+    def test_82_gitlab_merge_commit_falls_back_to_the_squash_commit_then_the_head(self):
+        self.host = "gitlab"
+        for fields, wanted in (({"merge_commit": "m" * 40, "squash_commit": "s" * 40}, "m" * 40),
+                               ({"squash_commit": "s" * 40}, "s" * 40), ({}, None)):
+            with self.subTest(fields=fields):
+                self.fresh()
+                task, wt, head = self.published()
+                self.fake_host(head=head, state="MERGED", merge_state="UNKNOWN", **fields)
+                self.assertIn(f"merged at {wanted or head};", self.one(self.events("record"), "merged")["detail"])
+
+    @both_hosts
+    def test_83_closed_draft_conflicting_and_moved_requests(self):
+        task, wt, head = self.published()
+        before = self.checkout()
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, state="CLOSED")
+        closed = self.one(self.events("record"), "pr-closed")
+        self.assertEqual(closed["detail"], f"{self.label()} closed without a merge")
+        self.assertIn(f'tg add "{self.label()} for #1 was closed: redo or drop?" --type decision --meta decider=operator', closed["next"])
+        self.fake_host(head=head, merge_state="DRAFT")
+        self.assertEqual(self.one(self.events("record"), "pr-draft")["detail"], f"{self.label()} is a draft")
+        self.fake_host(head=head, merge_state="DIRTY")
+        conflict = self.one(self.events("record"), "conflict")
+        self.assertEqual(conflict["detail"], f"{self.label()} conflicts with main")
+        self.assertIn("--type decision", conflict["next"])
+        self.fake_host(head="e" * 40, merge_state="CLEAN")
+        changed = self.one(self.events("record"), "pr-changed")
+        self.assertIn(f"head is {'e' * 7}, not the pushed {head[:7]}; not merged by run.py", changed["detail"])
+        self.assertIn("run.py merged 1 --by operator", changed["next"])
+        self.assertEqual(self.merge_calls(), [])
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertEqual(self.checkout(), before)
+
+    # --- the request is behind its target
+
+    @both_hosts
+    def test_84_a_behind_request_is_rebased_in_its_worktree_and_pushed_under_the_lease(self):
+        task, wt, head = self.published()
+        self.fake_host(head=head, merge_state="BEHIND")
+        behind = self.one(self.events("record"), "pr-behind")
+        self.assertEqual(behind["detail"], f"{self.label()} is behind main")
+        self.assertIn("run.py close 1", behind["next"])
+        moved = self.advance_main()
+        before = self.checkout()
+        events = self.events("close", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertNotEqual(new, head)
+        self.assertIn(f"onto origin/main at {new[:7]}; same change as {head[:7]}", self.one(events, "rebased")["detail"])
+        self.assertIn(f"{new[:7]} to origin/task-1", self.one(events, "pushed")["detail"])
+        self.assertEqual(self.git("merge-base", new, moved), moved)
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"]), (new, new))
+        self.assertEqual(self.remote_sha(), new)
+        self.assertEqual(self.checkout(), before)
+
+    @both_hosts
+    def test_84_a_rebase_conflict_is_aborted(self):
+        self.commit_file("f.txt", "one\n")
+        task, wt, head = self.pr_task(files=("f.txt", "theirs\n"))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified")
+        self.advance_main("f.txt", "ours\n")
+        self.fake_host(head=head, merge_state="BEHIND")
+        conflict = self.one(self.events("close", str(task)), "conflict")
+        self.assertIn("rebasing worktree-task-1-1 onto origin/main conflicted; rebase aborted", conflict["detail"])
+        self.assertIn("--type decision", conflict["next"])
+        git_dir = self.git("rev-parse", "--git-dir", cwd=wt)
+        self.assertFalse(os.path.exists(os.path.join(wt, git_dir, "REBASE_HEAD")) or os.path.isdir(os.path.join(wt, git_dir, "rebase-merge")))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(self.one(self.events("record"), "pr-behind")["task"], task)
+
+    @both_hosts
+    def test_84_a_rebase_that_changes_the_diff_is_undone(self):
+        task, wt, head = self.published()
+        self.advance_main("out.txt", "x\n")  # the target already holds the task's change
+        self.advance_main("later.txt", "y\n")
+        self.fake_host(head=head, merge_state="BEHIND")
+        changed = self.one(self.events("close", str(task)), "changed")
+        self.assertIn("the rebase onto main changed the diff (different diff); restored " + head[:7], changed["detail"])
+        self.assertIn("Rebase worktree-task-1-1 onto main by hand", changed["next"])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(self.meta(task)["verdict_ref"], head)
+
+    @both_hosts
+    def test_84_a_dirty_worktree_or_a_live_session_is_not_rebased(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND")
+        with open(os.path.join(wt, "scratch.txt"), "w") as fh:
+            fh.write("x\n")
+        line = self.one(self.events("close", str(task)), "pr-behind")
+        self.assertIn(f"{self.label()} is behind main; cannot rebase: worktree dirty", line["detail"])
+        self.assertIn("rebase worktree-task-1-1 by hand, then run.py close 1", line["next"])
+        os.remove(os.path.join(wt, "scratch.txt"))
+        self.agents(self.row("task-1-1"))
+        line = self.one(self.events("close", str(task)), "pr-behind")
+        self.assertIn("cannot rebase: session live", line["detail"])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+
+    @both_hosts
+    def test_85_a_push_onto_a_moved_remote_branch_is_refused(self):
+        task, wt, head = self.published()
+        self.advance_main("moved.txt")
+        self.git("fetch", "-q", "origin")
+        self.git("rebase", "-q", "origin/main", cwd=wt)  # a hand rebase: the next close has a new head to push
+        other = os.path.join(self.dir, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=other)
+        self.git("checkout", "-q", "-b", "task-1", "origin/task-1", cwd=other)
+        stranger = self.commit_file("stranger.txt", "x\n", cwd=other)
+        self.git("push", "-q", "origin", "task-1", cwd=other)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = self.checkout()
+        events = self.events("close", str(task))
+        self.assertEqual(self.checkout(), before)
+        self.one(events, "rebased")
+        refused = self.one(events, "push-refused")
+        self.assertIn(f"origin/task-1 is not at {head[:7]}; someone else pushed", refused["detail"])
+        self.assertIn("the operator decides", refused["next"])
+        self.assertEqual(self.remote_sha(), stranger)
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["pr"]), (head, 1))
+        self.assertEqual(len(self.create_calls()), 1)
+        self.assertEqual(self.named(events, "pushed"), [])
+
+    @both_hosts
+    def test_86_a_half_closed_task_resumes_at_publish(self):
+        self.pr_config()
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.agents(self.finished("task-1-1"))
+        self.tg("edit", str(task), "--meta", f'verdict_ref="{head}"', "verdict=test-verified")
+        self.tg("done", str(task))
+        line = self.one(self.events("record"), "unpublished")
+        self.assertEqual(line["detail"], f"closed at {head[:7]}, not pushed")
+        self.assertEqual(line["next"], f"run.py close {task}")
+        # the push happened and the tg edit was lost: a remote branch at our head is ours
+        self.git("push", "-q", "origin", f"{head}:refs/heads/task-1")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = self.checkout()
+        events = self.events("close", str(task))
+        self.assertEqual(self.checkout(), before)
+        self.assertEqual(self.one(events, "resumed")["detail"], "closed earlier; continuing at publish")
+        self.one(events, "published")
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["pr"]), (head, 1))
+
+    @both_hosts
+    def test_88_a_remote_branch_that_is_not_ours_stops_the_publish(self):
+        task, wt, head = self.pr_task()
+        self.git("push", "-q", "origin", "main:refs/heads/task-1")
+        self.fake_host(head=head)
+        before = self.checkout()
+        out = self.run_cmd("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.checkout(), before)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("delete or rename it on the host", out.stderr)
+        self.assertIn("run.py adopt 1 --branch", out.stderr)
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.create_calls(), [])
+        self.git("push", "-q", "-f", "origin", f"{head}:refs/heads/task-1")
+        self.assertIn("published", [e["event"] for e in self.events("close", str(task))])
+
+    @both_hosts
+    def test_87_an_adopted_branch_is_pushed_without_a_worktree_and_a_hand_rebase_keeps_the_pin(self):
+        self.pr_config()
+        self.fake_host()
+        tip = self.feature_branch("feat")
+        task = self.add_task()
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        self.fake_host(head=tip, merge_state="UNKNOWN")
+        before = self.checkout()
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.one(events, "published")
+        self.assertEqual(self.remote_sha(), tip)
+        self.assertEqual(self.checkout(), before)
+        self.advance_main()
+        self.fake_host(head=tip, merge_state="BEHIND")
+        behind = self.one(self.events("close", str(task)), "pr-behind")
+        self.assertIn("cannot rebase: worktree missing", behind["detail"])
+        self.git("fetch", "-q", "origin")
+        self.git("checkout", "-q", "feat")
+        self.git("rebase", "-q", "origin/main")
+        new = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "main")
+        events = self.events("close", str(task))
+        self.assertIn(f"same change at {new[:7]} (verified at {tip[:7]})", self.one(events, "rebased")["detail"])
+        self.assertEqual(self.meta(task)["verdict_ref"], new)
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+
+    @both_hosts
+    def test_87_adopt_with_an_open_request_takes_its_branch_and_target(self):
+        self.pr_config()
+        tip = self.feature_branch("feat")
+        task = self.add_task()
+        base = self.git("rev-parse", "HEAD")
+        self.fake_host(number=7, head="f" * 40, branch="feat", base="main")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip, "--pr", "7")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"{self.label(7)} head is {'f' * 40}, not {tip}", out.stderr)
+        self.fake_host(number=7, head=tip, branch="feat", base="develop", state="MERGED")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip, "--pr", "7")
+        self.assertIn(f"{self.label(7)} is MERGED; adopt takes an open request", out.stderr)
+        self.fake_host(number=7, head=tip, branch="feat", base="develop")
+        self.git("branch", "develop", "main")
+        self.git("push", "-q", "origin", "develop")
+        events = self.events("adopt", str(task), "--branch", "feat", "--head", tip, "--pr", "7")
+        self.assertIn(self.label(7), self.one(events, "adopted")["detail"])
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["pr_branch"], meta["pushed"], meta["target"]), (7, "feat", tip, "develop"))
+        self.assertEqual(meta["base"], base)
+
+    @both_hosts
+    def test_89_a_second_attempt_pushes_to_the_same_branch_and_opens_no_second_request(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        self.ok("verify", str(task))
+        self.ok("close", str(task))
+        pinned = {k: self.meta(task)[k] for k in ("pr", "pr_branch", "pushed")}
+        self.assertEqual(pinned, {"pr": 1, "pr_branch": "task-1", "pushed": head})
+        self.ok("launch", str(task))
+        meta = self.meta(task)
+        self.assertEqual({k: meta[k] for k in pinned}, pinned)
+        self.assertEqual((meta["attempt"], meta["base"]), (2, head))
+        wt2 = self.worktree("task-1-2", base=head)
+        head2 = self.wt_commit(wt2, "two.txt")
+        self.pass_report(task, attempt=2, wt=wt2, head=head2)
+        self.agents(self.finished("task-1-1"), self.finished("task-1-2"))
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        before, seen = self.checkout(), len(self.host_log())
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertIn(f"{head2[:7]} to origin/task-1", self.one(events, "pushed")["detail"])
+        self.assertEqual(self.named(events, "published"), [])
+        self.assertEqual(self.remote_sha(), head2)
+        self.assertEqual((self.meta(task)["pushed"], self.meta(task)["pr"]), (head2, 1))
+        self.assertEqual(len(self.create_calls()), 1)
+        lookup = ("pr list", "pr create") if self.host == "github" else (f"api projects/{self.project}/merge_requests?", "api -X POST")
+        self.assertEqual([c for c in self.host_log()[seen:] if " ".join(c).startswith(lookup)], [])
+        self.assertEqual(self.checkout(), before)
+
+    # --- verify_mode = ci:<name>
+
+    def ci_rows(self, task):
+        return [r for r in self.results(task) if r["kind"] == "verify" and r["author"] == "ci"]
+
+    def dispatch_calls(self):
+        if self.host == "github":
+            return self.host_calls("workflow run")
+        return self.host_calls("api", "-X", "POST", f"projects/{self.project}/pipeline")
+
+    @both_hosts
+    def test_90_ci_mode_needs_pr_mode_and_a_name(self):
+        task = self.add_task(verify_mode=f"ci:{self.ci}")
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('verify_mode=ci needs merge.mode = "pr"; the run must be on a pushed branch', out.stderr)
+        for bad in ("ci:", "ci", "CI:ci.yml", "nightly"):
+            task = self.add_task(verify_mode=bad)
+            out = self.run_cmd("launch", str(task))
+            self.assertEqual(out.returncode, 2, bad)
+            self.assertIn(f'#{task} verify_mode must be "session" or "ci:<workflow>" (GitLab: "ci:pipeline" or "ci:<job>"), not {bad}',
+                          out.stderr)
+        self.pr_config()
+        self.fake_host()
+        self.assertEqual(self.run_cmd("launch", str(self.add_task(verify_mode=f"ci:{self.ci}"))).returncode, 0)
+        self.assertEqual(self.run_cmd("launch", str(self.add_task(verify_mode="session"))).returncode, 0)
+
+    @both_hosts
+    def test_91_a_passing_ci_mode_task_goes_to_verify_whatever_its_risk(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}", risk="low")
+        arrived = self.one(self.events("record"), "arrived")
+        self.assertEqual(arrived["next"], f"run.py verify {task}")
+
+    @both_hosts
+    def test_92_verify_pushes_opens_the_request_and_dispatches(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN", dispatch="ok")
+        before, keys = self.checkout(), set(self.meta(task))
+        events = self.events("verify", str(task))
+        self.one(events, "published")
+        dispatched = self.one(events, "ci-dispatched")
+        self.assertEqual(dispatched["detail"], f"{self.ci} on task-1 at {head[:7]}")
+        self.assertEqual(dispatched["next"], "run.py record")
+        (call,) = self.dispatch_calls()
+        if self.host == "github":
+            self.assertEqual(call, ["workflow", "run", "ci.yml", "--ref", "task-1"])
+        else:
+            self.assertEqual(call[-2:], ["-f", "ref=task-1"])
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(set(self.meta(task)) - keys, {"pr", "pr_branch", "pushed"})
+        self.assertEqual(self.calls("--bg"), [])
+        self.assertEqual(self.status_of(task), "in_progress")
+        self.assertEqual(self.checkout(), before)
+        out = self.run_cmd("verify", str(task), "--model", "opus")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("verify_mode=ci runs on the branch head and starts no session; drop --ref/--model/--effort/--dry-run", out.stderr)
+        self.assertEqual(self.run_cmd("verify", str(task), "--dry-run").returncode, 2)
+        self.fake_host(head=head, merge_state="UNKNOWN", dispatch="none")
+        waiting = self.one(self.events("verify", str(task)), "ci-waiting")
+        self.assertIn(f"no run for {head[:7]} yet; {self.ci} has no manual trigger, the push or the request starts it", waiting["detail"])
+        self.fake_host(head=head, merge_state="UNKNOWN", dispatch="error")
+        failed = self.one(self.events("verify", str(task)), "ci-waiting")
+        self.assertIn("dispatch failed:", failed["detail"])
+        self.assertEqual(failed["next"], f"fix it, then run.py verify {task} --again")
+        self.assertEqual(self.ci_rows(task), [])
+
+    @both_hosts
+    def test_93_a_finished_run_on_the_pushed_head_becomes_a_ci_verdict(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "pending"}])
+        pending = self.one(self.events("record"), "ci-pending")
+        self.assertIn("run 11", pending["detail"])
+        self.assertEqual(self.ci_rows(task), [])
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "success"}])
+        events = self.events("record")
+        self.assertEqual(self.one(events, "verified")["detail"].split(" (")[0], "Verdict test-verified by ci")
+        (row,) = self.ci_rows(task)
+        self.assertEqual((row["status"], row["attempt"]), ("PASS", 1))
+        for line in ("Verdict: test-verified", f"Workflow: {self.ci}", "Run: 11/1 https://ci.example/", f"Head: {head}",
+                     "Branch: origin/task-1", "Conclusion: success"):
+            self.assertIn(line, row["body"])
+        self.assertEqual(len(self.ci_rows(task)), 1)
+        self.one(self.events("record"), "verified")
+        self.assertEqual(len(self.ci_rows(task)), 1)
+        closed = self.events("close", str(task))
+        self.assertIn("test-verified at", self.one(closed, "closed")["detail"])
+        self.assertEqual(self.meta(task)["verdict"], "test-verified")
+        self.assertEqual([r for r in self.results(task) if r["author"] == "manager" and r["kind"] == "verify"], [])
+
+    @both_hosts
+    def test_93_a_run_for_another_head_is_ignored(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 12, "state": "success", "head": "9" * 40}])
+        waiting = self.one(self.events("record"), "ci-waiting")
+        self.assertEqual(waiting["detail"], f"no run for {head[:7]} on {self.ci} yet")
+        self.assertEqual(self.ci_rows(task), [])
+
+    @both_hosts
+    def test_94_a_failed_run_is_a_fix_round_and_a_cancelled_run_is_a_retry(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        verified = self.one(self.events("record"), "verified")
+        self.assertIn("Verdict verify-failed by ci", verified["detail"])
+        self.assertIn(f"run run.py close {task} (records verify-failed)", verified["next"])
+        self.assertIn(f"fix round: run.py launch {task}", verified["next"])
+        (row,) = self.ci_rows(task)
+        self.assertEqual((row["status"], row["body"].splitlines()[0]), ("ISSUES", "Verdict: verify-failed"))
+        events = self.events("close", str(task))
+        self.assertIn("verify-failed; not closed", self.one(events, "verdict")["detail"])
+        self.ok("launch", str(task))
+        with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-2.md")) as fh:
+            self.assertIn(f"git reset --keep {head}", fh.read())
+        self.agents(self.row("task-1-2"))
+        again = self.events("record")
+        self.one(again, "running")
+        self.assertEqual(self.named(again, "verified"), [])
+        self.assertEqual(len(self.ci_rows(task)), 1)
+
+    @both_hosts
+    def test_94_a_cancelled_run_is_blocked_and_verify_again_files_each_new_run(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}])
+        verified = self.one(self.events("record"), "verified")
+        self.assertIn("Verdict verify-blocked by ci", verified["detail"])
+        self.assertEqual(verified["next"], f"run.py verify {task} --again")
+        self.assertEqual(self.ci_rows(task)[0]["status"], "BLOCKED")
+        refused = self.run_cmd("verify", str(task))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn(f"already has verify result #{self.ci_rows(task)[0]['id']} (Verdict: verify-blocked) from CI; "
+                      f"run run.py close {task}, or pass --again to run it again", refused.stderr)
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}], dispatch="ok")
+        seen = len(self.dispatch_calls())
+        self.assertEqual(len(self.named(self.events("verify", str(task), "--again"), "ci-dispatched")), 1)
+        self.assertEqual(len(self.dispatch_calls()), seen + 1)
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 12, "state": "success"}, {"id": 11, "state": "cancelled"}])
+        self.assertIn("Verdict test-verified by ci", self.one(self.events("record"), "verified")["detail"])
+        self.assertEqual([r["body"].splitlines()[0] for r in self.ci_rows(task)], ["Verdict: verify-blocked", "Verdict: test-verified"])
+        self.assertIn("Run: 12/1", self.ci_rows(task)[1]["body"])
+
+    def test_94_a_github_rerun_is_a_new_row(self):
+        self.host = "github"
+        task, wt, head = self.pr_task(verify_mode="ci:ci.yml")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "attempt": 1, "state": "failure"}])
+        self.ok("record")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "attempt": 2, "state": "success"}])
+        self.ok("record")
+        self.assertEqual([re.search(r"Run: (\S+)", r["body"]).group(1) for r in self.ci_rows(task)], ["11/1", "11/2"])
+
+    def test_95_a_gitlab_job_decides_when_the_mode_names_one(self):
+        self.host = "gitlab"
+        task, wt, head = self.pr_task(verify_mode="ci:unit")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "pending"}],
+                       jobs=[{"name": "lint", "status": "failed"}, {"name": "unit", "status": "success"}])
+        self.assertIn("Verdict test-verified by ci", self.one(self.events("record"), "verified")["detail"])
+        (row,) = self.ci_rows(task)
+        self.assertIn("Run: 11/5001", row["body"])
+        self.assertIn("Workflow: unit", row["body"])
+        self.assertTrue(self.host_calls("api", f"projects/{self.project}/pipelines/11/jobs"))
+        other = self.running_task(verify_mode="ci:integration", attempt=1)
+        wt2, head2 = self.pass_report(other, wt=self.worktree(f"task-{other}-1"))
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        self.ok("verify", str(other))
+        self.fake_host(head=head2, merge_state="UNKNOWN", runs=[{"id": 21, "state": "success"}],
+                       jobs=[{"name": "unit", "status": "success"}])
+        blocked = [e for e in self.events("record") if e["task"] == other and e["event"] == "verified"][0]
+        self.assertIn("Verdict verify-blocked by ci", blocked["detail"])
+        self.assertIn("Conclusion: no job integration", self.ci_rows(other)[0]["body"])
+
+    @both_hosts
+    def test_96_ci_verification_runs_under_stop(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.orders("STOP: paused\n")
+        self.fake_host(head=head, merge_state="UNKNOWN", dispatch="ok")
+        events = self.events("verify", str(task))
+        self.one(events, "ci-dispatched")
+        self.assertEqual(self.remote_sha(), head)
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "success"}])
+        self.one(self.events("record"), "verified")
+        self.assertEqual(len(self.ci_rows(task)), 1)
+
+    # --- carry-over
+
+    @both_hosts
+    def test_98_cleanup_keeps_what_it_must_and_never_forces(self):
+        task, wt, head = self.published()
+        self.fake_host(head=head, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
+        self.agents(self.row("task-1-1"))
+        events = self.events("record")
+        self.assertIn("still running", self.one(events, "kept")["detail"])
+        self.assertEqual(self.calls("rm"), [])
+        self.agents(self.finished("task-1-1"))
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("x\n")
+        self.assertIn("uncommitted changes", self.one(self.events("record"), "kept")["detail"])
+        self.assertEqual(self.calls("rm"), [])
+        os.remove(os.path.join(wt, "wip.txt"))
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"exit": 1, "stderr": "worktree has untracked files"}}, fh)
+        self.assertIn("untracked files", self.one(self.events("record"), "kept")["detail"])
+        self.assertTrue(os.path.isdir(wt))
+        self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
+
+    @both_hosts
+    def test_99_the_attempt_cap_holds_for_launch_and_adopt(self):
+        self.pr_config()
+        self.fake_host()
+        task = self.running_task(attempt=3, verify_mode=f"ci:{self.ci}")
+        self.add_result(task, "PASS", f"Task: 1\nBranch: worktree-task-1-3\nHead: {SHA_A}\n", attempt=3)
+        self.add_result(task, "ISSUES", f"Verdict: verify-failed\nRun: 11/1 u\n", kind="verify", attempt=3, by="ci")
+        tip = self.feature_branch("feat")
+        for command in (("launch", str(task)), ("adopt", str(task), "--branch", "feat", "--head", tip)):
+            out = self.run_cmd(*command)
+            self.assertEqual(out.returncode, 2, command)
+            self.assertIn("#1: attempt 3 has failed; run run.py abandon 1", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+
+    @both_hosts
+    def test_100_the_merge_line_is_the_only_permission_to_merge(self):
+        task, wt, head = self.published()
+        for merge_state in ("CLEAN", "BLOCKED", "UNKNOWN", "DRAFT", "BEHIND", "DIRTY"):
+            self.fake_host(head=head, merge_state=merge_state)
+            self.ok("record")
+        self.assertEqual(self.merge_calls(), [])
+        self.orders("MERGE: verified branches into main\n")
+        for merge_state in ("BLOCKED", "UNKNOWN", "DRAFT", "BEHIND", "DIRTY"):
+            self.fake_host(head=head, merge_state=merge_state)
+            self.ok("record")
+        for state in ("CLOSED", "OPEN"):
+            self.fake_host(head="e" * 40 if state == "OPEN" else head, state=state, merge_state="CLEAN")
+            self.ok("record")
+        self.assertEqual(self.merge_calls(), [])
+        self.assertNotIn("merged_at", self.meta(task))
+
+    @both_hosts
+    def test_abandon_names_the_request_that_stays_open(self):
+        task, wt, head = self.pr_task()
+        self.tg("edit", str(task), "--meta", "pr=1", "attempt=3")
+        detail = self.one(self.events("abandon", str(task), "died"), "abandoned")["detail"]
+        self.assertTrue(detail.endswith(f"; request {self.label()} stays open, close it on the host by hand"), detail)
+
+    # --- review fixes
+
+    def two_attempt_task(self):
+        """Attempt 1 failed CI, attempt 2 passed and was closed and published. Returns (task, wt2, head2)."""
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        self.ok("verify", str(task))
+        self.ok("close", str(task))
+        self.ok("launch", str(task))
+        wt2 = self.worktree("task-1-2", base=head)
+        head2 = self.wt_commit(wt2, "two.txt")
+        self.pass_report(task, attempt=2, wt=wt2, head=head2)
+        self.agents(self.finished("task-1-1"), self.finished("task-1-2"))
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        return task, wt2, head2
+
+    @both_hosts
+    def test_84_a_branch_of_two_attempts_is_rebased_twice_and_by_hand(self):
+        task, wt, head = self.two_attempt_task()
+        for round_ in (1, 2):
+            self.advance_main(f"moved{round_}.txt")
+            self.fake_host(head=head, merge_state="BEHIND")
+            events = self.events("close", str(task))
+            new = self.git("rev-parse", "HEAD", cwd=wt)
+            self.assertNotEqual(new, head, round_)
+            self.one(events, "rebased")
+            self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+            head = new
+        self.advance_main("moved3.txt")
+        self.git("fetch", "-q", "origin")
+        self.git("rebase", "-q", "origin/main", cwd=wt)
+        by_hand = self.git("rev-parse", "HEAD", cwd=wt)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.assertIn(f"same change at {by_hand[:7]} (verified at {head[:7]})", self.one(events, "rebased")["detail"])
+        self.assertEqual((self.meta(task)["verdict_ref"], self.remote_sha()), (by_hand, by_hand))
+
+    @both_hosts
+    def test_86_an_open_request_with_no_pushed_head_is_never_merged(self):
+        task, wt, head = self.published()
+        self.tg("edit", str(task), "--unset-meta", "pushed")
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN")
+        line = self.one(self.events("record"), "pr-unpinned")
+        self.assertIn("no pushed head is recorded", line["detail"])
+        self.assertEqual(line["next"], f"run.py close {task} (pushes the branch and records the head)")
+        self.assertEqual(self.merge_calls(), [])
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.one(self.events("close", str(task)), "resumed")
+        self.assertEqual(self.meta(task)["pushed"], head)
+
+    def test_84_no_required_checks_do_not_stop_the_drain(self):
+        self.host = "github"
+        task, wt, head = self.published()
+        self.fake_host(head=head, merge_state="BLOCKED",
+                       extra={"pr checks": {"stdout": "", "stderr": "no required checks reported on the 'task-1' branch\n", "exit": 1}})
+        events = self.events("record")
+        self.assertIn("no required checks reported", self.one(events, "pr-blocked")["detail"])
+        self.one(events, "slots")
+
+    def test_84_a_host_failure_is_one_tasks_line_and_the_drain_goes_on(self):
+        self.host = "github"
+        task, wt, head = self.published()
+        second = self.add_task("Second", attempt=1, verdict_ref=SHA_A, pr=2, pr_branch="task-2", pushed=SHA_A)
+        self.tg("done", str(second))
+        self.fake_host(number=2, head=SHA_A, merge_state="UNKNOWN",
+                       extra={"pr view 1": {"stdout": "", "stderr": "authentication lapsed\n", "exit": 4}})
+        out = self.run_cmd("record", pre=["--json"])
+        self.assertEqual(out.returncode, 1)
+        events = json.loads(out.stdout)
+        error = self.one(events, "host-error")
+        self.assertEqual((error["task"], error["detail"], error["next"]),
+                         (task, "gh pr view failed: authentication lapsed", "fix it and run.py record"))
+        self.assertEqual(self.one(events, "pr-pending")["task"], second)
+        self.one(events, "slots")
+        self.one(events, "ready")
+
+    def test_93_a_short_head_in_the_worker_report_still_files_the_ci_row(self):
+        self.host = "github"
+        self.pr_config()
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")), verify_mode="ci:ci.yml")
+        wt = self.worktree("task-1-1")
+        head = self.wt_commit(wt)
+        self.pass_report(task, wt=wt, head=head[:9])
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "success"}])
+        self.one(self.events("record"), "verified")
+        self.assertEqual(len(self.ci_rows(task)), 1)
+
+    def test_76_an_unknown_verifier_word_can_be_overridden(self):
+        task = self.verified_by("passed")
+        out = self.run_cmd("close", str(task), "--verdict", "test-verified", "--override-verifier", "x", "--ran", "ran 123456789")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.meta(task)["verdict"], "test-verified")
+
+    @both_hosts
+    def test_85_a_deleted_remote_branch_is_named_not_blamed_on_someone_else(self):
+        task, wt, head = self.published()
+        self.advance_main("moved.txt")
+        self.git("fetch", "-q", "origin")
+        self.git("rebase", "-q", "origin/main", cwd=wt)
+        self.git("push", "-q", "origin", ":refs/heads/task-1")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("remote branch origin/task-1 is gone", out.stderr)
+        self.assertIn("unset the pr, pr_branch and pushed meta", out.stderr)
+
+    @both_hosts
+    def test_84_a_stacked_task_is_rebased_after_its_dependency_was_squash_merged(self):
+        self.pr_config()
+        dep = self.feature_branch("dep")  # the dependency's branch: fork0 -> D
+        task = self.running_task(base=json.dumps(dep))  # launched with --base dep
+        wt = self.worktree("task-1-1", base=dep)
+        head = self.wt_commit(wt, "out.txt")  # fork0 -> D -> T
+        self.pass_report(task, wt=wt, head=head)
+        self.agents(self.finished("task-1-1"))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.advance_main("dep.txt", "work\n")  # the dependency lands as S, the same patch as D
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertEqual(self.git("rev-list", "--count", f"origin/main..{new}"), "1")  # D was dropped
+        self.one(events, "rebased")
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+
+    @both_hosts
+    def test_85_a_failing_ls_remote_is_reported_not_read_as_a_deleted_branch(self):
+        task, wt, head = self.published()
+        self.tg("edit", str(task), "--meta", f'pushed="{"b" * 40}"')
+        self.git("remote", "set-url", "origin", os.path.join(self.dir, "no-such-remote.git"))
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("ls-remote of origin failed:", out.stderr)
+        self.assertNotIn("unset the pr", out.stderr)
 
 
 if __name__ == "__main__":

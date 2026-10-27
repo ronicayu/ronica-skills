@@ -9,7 +9,9 @@ Usage:
 
 Merges <root>/.agentic-team.toml with the optional, gitignored
 <root>/.agentic-team.local.toml (local keys win; local lists replace tracked
-lists), fills in defaults from SCHEMA, and validates the result.
+lists), fills in defaults from SCHEMA, and validates the result. A value of
+kind "choice:a,b" must be one of the listed strings. `check` reads no git
+state and makes no network call; run.py detects the code host from [merge].
 
     get     print one value: a scalar plainly, a table or list as JSON
     show    print the merged config with defaults, as TOML-like text or JSON
@@ -62,6 +64,7 @@ def system_timezone():
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
 # A default of None means "unset"; callables are evaluated at load time.
+# A type "choice:a,b" holds one of the listed strings.
 SCHEMA = {
     "taskgraph": {"project": ("str", "")},
     "constraints": {"forbidden": ("list", [])},
@@ -82,6 +85,13 @@ SCHEMA = {
         "verifier": ("model?", None),
         "overrides": ("overrides", {}),
     },
+    "merge": {
+        "mode": ("choice:local,pr", "local"),
+        "host": ("choice:auto,github,gitlab", "auto"),
+        "remote": ("nonempty", "origin"),
+        "base": ("str", ""),
+        "method": ("choice:merge,squash,rebase", "merge"),
+    },
     "notifications": {"skill": ("str", "")},
 }
 
@@ -95,6 +105,14 @@ TYPE_NAMES = {
     "model?": 'a model id or { model = "...", effort = "..." }',
     "overrides": 'a table of "work type" = model',
 }
+
+
+
+def type_name(kind):
+    if kind.startswith("choice:"):
+        return "one of " + ", ".join(f'"{c}"' for c in kind[7:].split(","))
+    return TYPE_NAMES[kind]
+
 
 ALL_KEYS = [f"{s}.{k}" for s, keys in SCHEMA.items() for k in keys]
 
@@ -232,6 +250,8 @@ def is_todo(value):
 
 
 def type_ok(kind, value):
+    if kind.startswith("choice:"):
+        return isinstance(value, str) and value in kind[7:].split(",")
     if kind == "str":
         return isinstance(value, str)
     if kind == "nonempty":
@@ -262,7 +282,7 @@ def problems(config):
                 found.append(f"{dotted} is TODO; set it, or \"\" / [] if it does not apply")
                 continue
             if not type_ok(kind, value):
-                found.append(f"{dotted} must be {TYPE_NAMES[kind]}, not {json.dumps(value)}")
+                found.append(f"{dotted} must be {type_name(kind)}, not {json.dumps(value)}")
                 continue
             if kind == "timezone":
                 try:

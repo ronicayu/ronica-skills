@@ -34,20 +34,25 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
    - `constraints.forbidden`: suggest items from lockfiles and version files
      the repository already has ("do not change the pinned versions in ..."),
      then ask the user to confirm them.
-4. **Ask for the rest.** Ask the user one question for the remaining `"TODO"`,
+4. **Ask how the repository merges.** Ask whether it merges only through
+   pull or merge requests. If yes, set `[merge] mode = "pr"`. Set `host` only
+   when the `origin` URL is a self-managed GitLab. Ask for `method` (`merge`,
+   `squash`, `rebase`). Confirm that `gh auth status` or `glab auth status`
+   passes; if it does not, say the operator runs the login.
+5. **Ask for the rest.** Ask the user one question for the remaining `"TODO"`,
    `forbidden`. It affects safety, so do not set it to `[]` unless the user
    confirms that nothing applies.
-5. **Keep private values and run state out of git.** Put machine-specific or
+6. **Keep private values and run state out of git.** Put machine-specific or
    private values in `.agentic-team.local.toml`, with the same tables and
    only the keys that override. Its keys win; a list there replaces the
    tracked list. Add `.agentic-team.local.toml`, `.agentic-team/` (the
    Manager's run directory for briefs and standing orders), and
    `.claude/worktrees/` (where each worker's git worktree lives) to
    `.gitignore` if they are not already ignored.
-6. **Trust the workspace.** `claude --bg` refuses to start in a workspace that
+7. **Trust the workspace.** `claude --bg` refuses to start in a workspace that
    is not trusted. A trusted parent folder does not count. Tell the user to
    run `claude` once in the repository and accept the trust prompt.
-7. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
+8. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
    prints `ok`; otherwise fix each problem it lists and run it again. Make
    sure neither file holds a credential or secret. Show the user the final
    file and `"${CLAUDE_PLUGIN_ROOT}/scripts/config" show`, and say which keys use their defaults.

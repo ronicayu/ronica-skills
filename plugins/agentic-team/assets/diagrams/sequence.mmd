@@ -6,6 +6,7 @@ sequenceDiagram
   participant TG as Taskgraph
   participant W as Worker
   participant V as Verifier
+  participant H as Code host
 
   M->>M: config.py check
   M->>R: launch 41
@@ -26,6 +27,10 @@ sequenceDiagram
   R-->>M: verified #41 attempt 1: Verdict test-verified
   M->>R: close 41
   R->>TG: meta verdict, verdict_ref, tokens, then done 41
-  R->>R: merge if a MERGE: line allows it, then claude rm
+  R->>R: local mode: merge if a MERGE: line allows it, then claude rm
+  R->>H: pr mode: push task-41, create request
   R-->>M: closed #41, then merged or ready-to-merge
+  M->>R: record
+  R->>H: request state, merge when clean
+  R-->>M: merged #41, or the request state
   M->>OP: Status report, open decisions, branches ready to merge

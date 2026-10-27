@@ -42,6 +42,10 @@ Manager.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
   parties; draft them and name the file. Do not delete anything unless the brief allows
   it.
+- **Processes.** Anything you start that outlives a command (a server, a watcher, an emulator) runs
+  under a `trap 'kill $PID' EXIT` or is stopped by you before your final commit. Record each pid when
+  you start it. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under
+  Follow-ups so the Manager can stop it.
 - **Taskgraph is read only,** except the one `result add` command in your brief. The
   Manager runs `tg start`, `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read
