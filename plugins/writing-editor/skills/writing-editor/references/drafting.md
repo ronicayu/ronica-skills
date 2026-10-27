@@ -120,7 +120,7 @@ Write section by section in document order, setting `Status: DRAFTING <section>`
 - **A list shows a count. Prose shows a relation.** Use a list when the items are parallel and their number is the point. Use prose when the point is how they differ, because a list asserts they are equivalent. One idea per line makes a document scannable and doubles its length. Do it where the reader scans, not where they follow.
 - **Use a diagram** where it carries the content better than prose: interactions, flows, sequences, state. Follow the house format.
 
-Set `Status: DRAFT COMPLETE`. Then run passes 2 to 6 of `SKILL.md` on the draft. You wrote it, so you are its worst reader. Finally, check three things. No `msg:` comment remains. The target length held, or you can say why it moved. The brief block is deleted.
+Set `Status: DRAFT COMPLETE`. Then run passes 2 to 6 of `SKILL.md` on the draft. You wrote it, so you are its worst reader. Finally, check four things. No `msg:` comment remains. The target length held, or you can say why it moved. The brief block is deleted. The body states the current final state, with no trace of the outline rounds or of earlier wording.
 
 ## Failure modes
 
