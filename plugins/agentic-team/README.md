@@ -124,8 +124,10 @@ rebases, or checks out another commit in place. Before a retry the worktree
 must be clean. `launch` refuses a `STOPPED` attempt whose WIP commit is not made
 yet (run `record` first). When a dead or stuck attempt left uncommitted files,
 `launch` commits them as `WIP task <id> attempt <n>: <status>` and says so in
-the `launched` line. A worktree on another branch, or a plain folder, is
-refused with the fix. If the worktree is missing on a retry, `launch` reattaches
+the `launched` line, with the file names. That commit holds every untracked file
+that is not ignored, and in `pr` mode it is pushed with the branch. A worktree on another branch (a detached `HEAD` included), or a plain folder, is
+refused with a fix that loses no commit. `record` never commits WIP in such a
+folder: it files the `STOPPED` row with `Head: None` and says why. If the worktree is missing on a retry, `launch` reattaches
 `worktree-task-<id>` when the branch exists; else it creates the worktree at the
 `Head` of the latest worker or stopped result (an adopted task's first fix
 round); else it asks for `--base`. A failed `claude --bg` on a retry removes

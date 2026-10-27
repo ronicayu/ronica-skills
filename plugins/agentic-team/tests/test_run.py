@@ -59,6 +59,8 @@ elif cmd == "--bg":
     if os.environ.get("FAKE_CLAUDE_BG_ERROR"):
         sys.stderr.write(os.environ["FAKE_CLAUDE_BG_ERROR"] + "\n")
         sys.exit(1)
+    if os.environ.get("FAKE_CLAUDE_BG_ROW"):  # the new session shows up in `claude agents`
+        open(os.environ["FAKE_CLAUDE_AGENTS"], "w").write("[" + os.environ["FAKE_CLAUDE_BG_ROW"] + "]")
     said = os.environ.get("FAKE_CLAUDE_BG_SAID")
     if said is None:  # what claude 2.1.311 prints: the short id and the name, then help lines
         name = argv[argv.index("--name") + 1]
@@ -1130,7 +1132,8 @@ class RunTest(Base):
         self.assertNotEqual(new, head)
         self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt), "WIP task 1 attempt 1: DIED")
         self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
-        self.assertIn(f"committed 1 uncommitted files of attempt 1 as {new[:7]}", detail)
+        self.assertIn(f"committed 1 uncommitted files of attempt 1 as {new[:7]} (left.txt)", detail)
+        self.assertIn("includes every untracked file that is not ignored, and in pr mode it is pushed with the branch", detail)
         self.assertIn(f"continues at {new[:7]}", detail)
         self.assertIn(f"Attempt 2. Your worktree is at `{new}`", self.calls("--bg")[-1][-1])
         self.assertIn("left.txt", self.git("show", "--stat", "--format=", "HEAD", cwd=wt))
@@ -1155,7 +1158,8 @@ class RunTest(Base):
                       "run git -C .claude/worktrees/task-1 switch worktree-task-1", out.stderr)
         self.git("checkout", "-q", "--detach", cwd=wt)
         out = self.run_cmd("launch", str(task))
-        self.assertIn("is on a detached HEAD, not worktree-task-1", out.stderr)
+        self.assertIn("is on a detached HEAD at", out.stderr)
+        self.assertIn("worktree-task-1 (this keeps the commits)", out.stderr)
         self.assertEqual(len(self.calls("--bg")), 1)
         self.git("worktree", "remove", "-f", wt)
         os.makedirs(wt)
@@ -2727,8 +2731,9 @@ class RunTest(Base):
         for note in ("does not list", "recorded the row", "no session id printed"):
             self.assertNotIn(note, detail)
         wrong = self.add_task()
-        self.agents(self.finished("task-3"))
-        env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded · garbage · task-3-1")
+        self.agents()
+        row = json.dumps(self.row("task-3"))  # the session appears in `claude agents` when it starts
+        env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded \u00b7 garbage \u00b7 task-3-1", FAKE_CLAUDE_BG_ROW=row)
         detail = self.one(self.events("launch", str(wrong), env=env), "launched")["detail"]
         self.assertEqual(sessions(wrong), [self.entry(wrong, 1)])
         self.assertIn("claude printed garbage; recorded the row sess-task-3-1 found in the worktree", detail)
@@ -2738,12 +2743,24 @@ class RunTest(Base):
         self.assertEqual(sessions(silent), [])
         self.assertIn("no session id printed; the row is matched by its folder", detail)
         self.assertNotIn("claude said", detail)
-        text_only = self.add_task()  # no `backgrounded` line at all: nothing is recorded, even with a row in the folder
+        text_only = self.add_task()  # no `backgrounded` line: a finished row in the folder is not the new session
         self.agents(self.finished("task-5"))
         detail = self.one(self.events("launch", str(text_only), env=dict(self.env, FAKE_CLAUDE_BG_SAID="garbage")),
                           "launched")["detail"]
         self.assertEqual(sessions(text_only), [])
         self.assertIn("no session id printed", detail)
+        live_only = self.add_task()  # no `backgrounded` line, but exactly one live unrecorded row in the folder
+        self.agents()
+        env = dict(self.env, FAKE_CLAUDE_BG_SAID="garbage", FAKE_CLAUDE_BG_ROW=json.dumps(self.row("task-6")))
+        detail = self.one(self.events("launch", str(live_only), env=env), "launched")["detail"]
+        self.assertEqual(sessions(live_only), [self.entry(live_only, 1)])
+        self.assertIn("no session id printed; recorded the row sess-task-6-1 found in the worktree", detail)
+        stale = self.add_task()  # a printed id that is not listed, and only a finished row: the printed id stands
+        self.agents(self.finished("task-7"))
+        env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded \u00b7 abc123 \u00b7 x")
+        detail = self.one(self.events("launch", str(stale), env=env), "launched")["detail"]
+        self.assertEqual([e["id"] for e in sessions(stale)], ["abc123"])
+        self.assertIn("claude agents does not list abc123 yet", detail)
 
     def two_rows(self):
         task = self.running_task(attempt=2, sessions=[self.entry(1, 1), self.entry(1, 2)])
@@ -2875,7 +2892,8 @@ class RunTest(Base):
         for name in ("died", "stuck", "running", "unknown"):
             self.assertEqual(self.named(events, name), [])
         self.assertEqual(len(self.results(task)), 1)
-        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died")):
+        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died"),
+                        ("adopt", "--branch", "main", "--head", "abc1234")):
             out = self.run_cmd(command[0], str(task), *command[1:])
             self.assertEqual(out.returncode, 2, command)
             self.assertIn("started under agentic-team 0.6.0", out.stderr)
@@ -2900,6 +2918,156 @@ class RunTest(Base):
         self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")),
                          ["task-1-1: no session; remove it by hand if you want",
                           "verify-1-1: no session; remove it by hand if you want"])
+
+    # --- review fixes
+
+    def test_53_a_row_that_a_refused_rm_left_behind_is_finished_not_running(self):
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator",
+                             sessions=json.dumps([self.entry(1, 1)]))
+        self.tg("done", str(task))
+        wt = self.worktree("task-1")
+        head = self.git("rev-parse", "HEAD")
+        side = self.wt_commit(wt)
+        # What claude 2.1.311 lists after a refused `claude rm`: the session ended; no status, no pid, the repo root.
+        left = {"id": "sess-task-1-1", "name": "task-1-1", "cwd": self.root, "state": "done"}
+        self.agents(left)
+
+        def table(commit):
+            with open(self.rm_file, "w") as fh:
+                json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {commit}@wt-1"}}, fh)
+
+        table(side)
+        self.assertEqual(self.one(self.events("record"), "slots")["detail"], "0/2 live")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: commit {side} is not in HEAD"])
+        self.assertTrue(os.path.isdir(wt))
+        self.git("reset", "-q", "--hard", head, cwd=wt)  # now the commit is merged: the owner's rm may discard it
+        table(head)
+        events = self.events("merged", str(task))
+        self.assertNotIn("still running", json.dumps(events))
+        self.assertIn("discarded", self.one(events, "removed")["detail"])
+        self.assertEqual(self.calls("rm")[-1], ["rm", "sess-task-1-1", "--discard-unpushed", f"{head}@wt-1"])
+        for row in ({"state": "done", "status": "busy"}, {"state": "blocked", "status": "idle"}):
+            self.agents({**left, **row})  # a busy or asking session is still live
+            self.assertEqual(self.one(self.events("record"), "slots")["detail"], "1/2 live")
+
+    def stopped_for_commit(self, task=None):
+        task = task or self.running_task()
+        self.add_result(task, "STOPPED", "Session: s\nWorktree: w\nBranch: b\nStopped: now\nFiles: x\n", by="manager")
+        return task
+
+    def test_36_a_plain_folder_in_place_of_the_worktree_commits_nothing_to_main(self):
+        task = self.stopped_for_commit()
+        plain = self.wt_path("task-1")
+        os.makedirs(plain)
+        with open(os.path.join(self.root, "mine.txt"), "w") as fh:
+            fh.write("the operator's file\n")
+        before = self.git("rev-parse", "HEAD")
+        stopped = self.one(self.events("record"), "stopped")
+        self.assertIn("folder .claude/worktrees/task-1 is a plain folder, not a git worktree; move or delete it yourself",
+                      stopped["detail"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.git("status", "--porcelain"), "?? mine.txt")
+        self.assertIn("Head: None", self.results(task)[-1]["body"])
+        self.assertEqual(len(self.named(self.events("record"), "stopped")), 1)
+
+    def test_36_a_worktree_off_its_branch_is_never_committed_to(self):
+        for how in ("branch", "detached"):
+            with self.subTest(how):
+                self.fresh()
+                task = self.stopped_for_commit()
+                wt = self.worktree("task-1")
+                head = self.git("rev-parse", "HEAD", cwd=wt)
+                if how == "branch":
+                    self.git("switch", "-q", "-c", "elsewhere", cwd=wt)
+                else:
+                    self.git("checkout", "-q", "--detach", cwd=wt)
+                with open(os.path.join(wt, "wip.txt"), "w") as fh:
+                    fh.write("half\n")
+                stopped = self.one(self.events("record"), "stopped")
+                self.assertIn("is on elsewhere, not worktree-task-1" if how == "branch"
+                              else f"is on a detached HEAD at {head[:7]}, not worktree-task-1", stopped["detail"])
+                self.assertIn("nothing committed", stopped["detail"])
+                self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+                self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? wip.txt")
+                self.assertIn("Head: None", self.results(task)[-1]["body"])
+
+    def test_23_a_detached_worktree_gets_a_fix_that_keeps_its_commits(self):
+        task, wt, head = self.retry_ready()
+        self.git("checkout", "-q", "--detach", cwd=wt)
+        moved = self.wt_commit(wt, "more.txt")
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"is on a detached HEAD at {moved[:7]}, which holds worktree-task-1 (at {head[:7]}); "
+                      "run git -C .claude/worktrees/task-1 switch -C worktree-task-1 (this keeps the commits)", out.stderr)
+        self.git("switch", "-C", "worktree-task-1", cwd=wt)  # the suggested command
+        self.assertEqual(self.git("rev-parse", "worktree-task-1"), moved)
+        self.ok("launch", str(task))
+        # A detached commit that is not built on the branch: no switch is suggested.
+        self.agents(self.finished("task-1", 2))
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {moved}\n", attempt=2)
+        self.git("checkout", "-q", "--detach", "HEAD~2", cwd=wt)
+        side = self.wt_commit(wt, "side.txt")
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"detached HEAD at {side[:7]}, which is not built on worktree-task-1 (at {moved[:7]})", out.stderr)
+        self.assertIn(f"git -C .claude/worktrees/task-1 branch <name> {side[:7]}", out.stderr)
+        self.assertNotIn("switch -C", out.stderr)
+        self.assertEqual(self.git("rev-parse", "worktree-task-1"), moved)
+
+    def test_36_an_unrecorded_row_is_recorded_for_the_attempt_it_was_filed_for(self):
+        task = self.running_task(sessions=[])
+        self.agents(self.finished("task-1"))
+        self.one(self.events("record"), "died")
+        entry = {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1", "worktree": "task-1"}
+        self.assertEqual(self.meta(task)["sessions"], [entry])
+        self.tg("edit", str(task), "--meta", "attempt=2")  # a later attempt must not inherit the old row
+        died = self.one(self.events("record"), "died")
+        self.assertEqual((died["attempt"], died["session"]), (2, None))
+        self.assertIn("no session recorded for attempt 2", self.results(task)[-1]["body"])
+        stuck_task = self.running_task(sessions=[])
+        self.agents(self.row("task-2", status="waiting", waitingFor="a permission"))
+        self.one(self.events("record"), "stuck")
+        self.assertEqual([e["id"] for e in self.meta(stuck_task)["sessions"]], ["sess-task-2-1"])
+
+    def test_23_a_locked_stale_registration_gets_the_unlock_fix(self):
+        task, wt, head = self.retry_ready()
+        self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
+        shutil.rmtree(wt)
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("stale worktree registration that is locked; run git worktree unlock .claude/worktrees/task-1, "
+                      "then git worktree prune, then rerun", out.stderr)
+        self.assertNotIn("fatal", out.stderr)
+        other = self.add_task()
+        self.add_result(other, "ISSUES", "Task: 2\n")  # unrelated; the first attempt of task 2 meets a locked stale folder
+        stale = self.worktree("task-2")
+        self.git("worktree", "lock", "--reason", "claude session task-2-1 (pid 1)", stale)
+        shutil.rmtree(stale)
+        out = self.run_cmd("launch", str(other))
+        self.assertEqual(out.returncode, 2)
+        self.assertLess(out.stderr.index("`git worktree unlock .claude/worktrees/task-2`"),
+                        out.stderr.index("`git worktree prune`"))
+
+    def test_23_a_base_on_a_retry_whose_branch_remains_says_how_much_is_on_it(self):
+        task, wt, head = self.retry_ready()
+        self.git("worktree", "remove", "-f", wt)
+        base = self.git("rev-parse", "main")
+        out = self.run_cmd("launch", str(task), "--base", "main")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"continues on branch worktree-task-1 at {head[:7]} and holds 1 commit beyond {base[:7]}; "
+                      "--base applies to a first attempt.", out.stderr)
+        self.assertIn("git branch -D worktree-task-1, then rerun with --base.", out.stderr)
+
+    def test_23_the_base_hint_names_the_pushed_branch_in_pr_mode_only(self):
+        task = self.running_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        text = "pass --base <sha|branch>"
+        self.assertTrue(self.run_cmd("launch", str(task)).stderr.rstrip().endswith(text))
+        self.pr_config()
+        self.fake_host()
+        out = self.run_cmd("launch", str(task))
+        self.assertIn(f"{text} (in pr mode, --base replaces the pushed branch task-1)", out.stderr)
 
 
 

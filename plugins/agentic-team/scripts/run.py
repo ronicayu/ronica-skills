@@ -395,7 +395,10 @@ class Session:
                     self.kind, self.task_id, self.wtname = "task", int(m.group(1)), folder
                 elif m := VERIFY_WT.match(folder):
                     self.kind, self.task_id, self.attempt, self.wtname = "verify", int(m.group(1)), int(m.group(2)), folder
-        self.finished = (self.status == "idle" and self.state == "done") or self.state == "stopped"
+        # A row with state "stopped", or state "done" with status idle or none, has ended. (A `claude rm` that
+        # refuses still ends the session and leaves a "done" row with no status.) idle/blocked and the like
+        # stay live: the session asked the user.
+        self.finished = self.state == "stopped" or (self.state == "done" and self.status in ("idle", None, ""))
         self.live = not self.finished
         self.stuck = self.live and (bool(self.waiting) or self.state == "blocked")
         self.unknown = self.live and not self.stuck and self.status != "busy"
@@ -729,6 +732,8 @@ def add_worktree(run, name, ref):
             steps.append(f"move or delete {rel} yourself")
     elif registered:
         facts.append(f"{rel} is a stale worktree registration (the folder is gone)")
+        if path in worktree_locks(run):  # prune skips a locked registration
+            steps.append(f"`git worktree unlock {rel}`")
         steps.append("`git worktree prune`")
     tip = commit_of(run, f"refs/heads/{branch}")
     if tip:
@@ -796,6 +801,22 @@ def drift_warning(run, name, ref, branch=True):
     if head and head == commit_of(run, ref) and (on or not branch):
         return ""
     return f"the session's worktree is not at {ref[:7]}; claude may no longer reuse a prepared worktree"
+
+
+def detached_or_wrong(run, wt, rel, on, branch):
+    """The refusal for a task worktree that is not on its branch, with a fix that loses no commit."""
+    if on:
+        return f"{rel} is on {on}, not {branch}; run git -C {rel} switch {branch}"
+    head = run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+    tip = commit_of(run, f"refs/heads/{branch}")
+    if not tip:
+        return f"{rel} is on a detached HEAD at {head[:7]} and {branch} does not exist; run git -C {rel} switch -c {branch}"
+    if head == tip or run.git("merge-base", "--is-ancestor", tip, head, check=False).returncode == 0:
+        return (f"{rel} is on a detached HEAD at {head[:7]}, which holds {branch} (at {tip[:7]}); "
+                f"run git -C {rel} switch -C {branch} (this keeps the commits)")
+    return (f"{rel} is on a detached HEAD at {head[:7]}, which is not built on {branch} (at {tip[:7]}). Both hold "
+            f"commits the other lacks, so a plain switch would lose one: keep the detached commit with "
+            f"git -C {rel} branch <name> {head[:7]}, then decide which one {branch} should be")
 
 
 def last_head(run, rows, attempt=None):
@@ -921,25 +942,29 @@ def decision_text(text, task, snap=None, extra=""):
 
 def session_entry(run, tid, kind, attempt, name, worktree, said):
     """(entry, note) for the session `claude --bg` just started. The entry is what goes into the task's
-    `sessions` meta, or None when claude printed no id. It never fails the launch: the session runs."""
+    `sessions` meta, or None when no id is known. It never fails the launch: the session runs.
+
+    A row that is not recorded yet and is live in the folder can be the session just started; a finished
+    one cannot."""
     run._sessions = None
     try:
         rows = run.sessions()
     except Refused:
         rows = []
     match = BACKGROUNDED.search(said or "")
-    if not match:
-        return None, "no session id printed; the row is matched by its folder"
-    printed = match.group(1)
-    unrecorded = [s for s in rows if not s.recorded and s.state != "stopped" and s.task_id == tid
-                  and s.kind == kind and s.wtname == worktree]
-    if any(s.sid == printed for s in rows):
+    printed = match.group(1) if match else None
+    fresh = [s for s in rows if not s.recorded and s.live and s.task_id == tid
+             and s.kind == kind and s.wtname == worktree]
+    if printed and any(s.sid == printed for s in rows):
         sid, note = printed, ""
-    elif len(unrecorded) == 1:
-        sid = unrecorded[0].sid
-        note = f"claude printed {printed}; recorded the row {sid} found in the worktree"
-    else:
+    elif len(fresh) == 1:
+        sid = fresh[0].sid
+        note = (f"claude printed {printed}; recorded the row {sid} found in the worktree" if printed else
+                f"no session id printed; recorded the row {sid} found in the worktree")
+    elif printed:
         sid, note = printed, f"claude agents does not list {printed} yet"
+    else:
+        return None, "no session id printed; the row is matched by its folder"
     return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree}, note
 
 
@@ -1023,7 +1048,7 @@ def cmd_launch(run, args):
             raise Refused(f"folder {rel} is a plain folder, not a git worktree; move or delete it yourself")
         on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
         if on != branch:
-            raise Refused(f"{rel} is on {on or 'a detached HEAD'}, not {branch}; run git -C {rel} switch {branch}")
+            raise Refused(detached_or_wrong(run, wt, rel, on, branch))
         if not wt_head:
             raise Refused(f"cannot read HEAD of {rel}; check it with git -C {rel} status")
         if given:
@@ -1038,8 +1063,11 @@ def cmd_launch(run, args):
         reported = last_head(run, rows)
         if tip:
             if given:
-                raise Refused(f"#{tid} continues on branch {branch} at {tip[:7]}; --base applies to a first attempt. To "
-                              f"restart from {args.base}: git branch -D {branch}, then rerun with --base.")
+                count = run.git("rev-list", "--count", f"{given}..{branch}", check=False).stdout.strip()
+                holds_n = f" and holds {count} commit{'s' * (count != '1')} beyond {given[:7]}" if count.isdigit() and count != "0" else ""
+                raise Refused(f"#{tid} continues on branch {branch} at {tip[:7]}{holds_n}; --base applies to a first attempt. "
+                              f"To restart from {args.base} (the commits on {branch} are lost unless you keep them): "
+                              f"git branch -D {branch}, then rerun with --base.")
             mode, base = "reattach", tip
         elif given:
             mode, base = "base", given
@@ -1048,7 +1076,8 @@ def cmd_launch(run, args):
             notes.append(f"created at Head {base[:7]} of attempt {reported[1] or current}")
         else:
             raise Refused(f"#{tid} attempt {current} left no worktree, branch or Head in this repository; "
-                          "pass --base <sha|branch>")
+                          "pass --base <sha|branch>"
+                          + (f" (in pr mode, --base replaces the pushed branch task-{tid})" if run.pr_mode else ""))
     base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
     continuing = mode in ("continue", "reattach", "head")
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
@@ -1081,9 +1110,15 @@ def cmd_launch(run, args):
             run.git("add", "-A", cwd=wt)
             run.git("commit", "-q", "-m", f"WIP task {tid} attempt {current}: {status}", cwd=wt)
             base = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
-            notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]}")
+            names = [line[3:] for line in porcelain]
+            shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
+            notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
+                            "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
             text = render(run, task, "task", nxt, session, base=base, retry=True)
     elif mode == "reattach":
+        if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
+            raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
+                          "then git worktree prune, then rerun")
         run.git("worktree", "prune")
         out = run.git("worktree", "add", "-q", os.path.join(run.wt_dir, worktree), branch, check=False)
         if out.returncode != 0:
@@ -1135,6 +1170,7 @@ def cmd_adopt(run, args):
         raise Refused(f'#{tid} is a {task["type"]}, not a task')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
+    refuse_legacy(task)
     current = wanted_attempt(task) or 0
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']}); run.py launch {tid} --attempt {current + 1} to try again")
@@ -1354,6 +1390,17 @@ def emit_verified(run, tid, attempt, row):
 
 # ------------------------------------------------------------------ record
 
+def record_row(run, task, session, attempt):
+    """Record a row that run.py did not start, under the attempt it was filed for. An unrecorded row in the
+    shared task folder counts for the current attempt; recording it keeps a later attempt from inheriting it."""
+    if session.recorded or not session.sid:
+        return
+    entry = {"id": session.sid, "kind": session.kind, "attempt": session.attempt or attempt,
+             "name": session.name or session.wtname, "worktree": session.wtname}
+    run.set_meta(task, sessions=recorded_sessions(task) + [entry])
+    session.recorded, session.attempt = True, entry["attempt"]
+
+
 def file_stuck(run, tid, attempt, kind, session, label):
     reason = session.waiting or session.state
     run.claude("stop", session.sid)
@@ -1427,6 +1474,22 @@ def commit_stopped(run, tid, attempt, rows, sessions):
                        f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\nFiles: None")
         run.emit("stopped", tid, attempt, sid, "worktree missing; nothing to commit")
         return
+    rel = f".claude/worktrees/task-{tid}"
+    if os.path.realpath(wt) not in registered_worktrees(run):  # git would find the main checkout from here
+        run.add_result(tid, "task", attempt, "manager", "STOPPED",
+                       f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\nFiles: None")
+        run.emit("stopped", tid, attempt, sid, f"folder {rel} is a plain folder, not a git worktree; move or delete "
+                 "it yourself; nothing committed", f"run.py launch {tid} after the pause")
+        return
+    on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+    if on != task_branch(tid):  # a commit here would not be on the task branch
+        at = run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+        where = f"on {on}" if on else f"on a detached HEAD at {at[:7]}"
+        run.add_result(tid, "task", attempt, "manager", "STOPPED",
+                       f"Session: {sid}\nWorktree: {wt}\nBranch: {on or 'None'}\nHead: None\nFiles: None")
+        run.emit("stopped", tid, attempt, sid, f"{rel} is {where}, not {task_branch(tid)}; nothing committed; "
+                 "its uncommitted work stays there", f"fix the branch (launch says how), then run.py launch {tid}")
+        return
     porcelain = run.git("status", "--porcelain", cwd=wt).stdout.rstrip("\n")
     if porcelain:
         run.git("add", "-A", cwd=wt)
@@ -1457,6 +1520,7 @@ def record_in_progress(run, snap, task, unmanaged):
     if live:
         for s in live:
             if s.stuck:
+                record_row(run, task, s, attempt)
                 reason = file_stuck(run, tid, attempt, "verify", s, "Verifier")
                 run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}; filed verify BLOCKED ({reason})",
                          PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again"))
@@ -1502,6 +1566,7 @@ def record_in_progress(run, snap, task, unmanaged):
         unknown = [s for s in mine if s.unknown]
         if stuck:
             s = stuck[0]
+            record_row(run, task, s, attempt)
             reason = file_stuck(run, tid, attempt, "task", s, "Session")
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}; filed BLOCKED ({reason})",
                      PROMPT_HINT.format(sid=s.sid, cmd=f"run.py launch {tid}"))
@@ -1514,6 +1579,8 @@ def record_in_progress(run, snap, task, unmanaged):
         else:
             s = mine[-1] if mine else None
             found = salvage(run, tid, attempt, s)
+            if s is not None:  # filed for this attempt, either way
+                record_row(run, task, s, attempt)
             if found:
                 added = run.add_result(tid, "task", attempt, "manager", found[0], found[1])
                 run.emit("salvaged", tid, attempt, s.sid,
