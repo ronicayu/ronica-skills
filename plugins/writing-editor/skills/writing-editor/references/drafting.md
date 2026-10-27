@@ -78,13 +78,13 @@ Keep each heading short enough to cite in a sentence. If *Section `<heading>`* c
 <!-- OUTLINE, expand only when Status says APPROVED. Intro: direct (C-S-Q-A), the reader is worried about the date.
      Body: inductive, 3 supports, ordered by degree (most binding first). -->
 
-## The DCS gate is the binding one, and its owner is unnamed
+## The data-sync gate is the binding one, and its owner is unnamed
 <!-- msg: this gate decides the date, and no one is working it.
      src: cutover-risk sheet, row 14. GAP: owner unnamed. -->
 
 ## Rollback is ruled out, so the gate becomes a rehearsal gate
 <!-- msg: with no rollback, the only assurance is a rehearsed forward path.
-     src: TNO minutes 2026-08-12. GAP: no rehearsal evidence. -->
+     src: steering committee minutes 2026-08-12. GAP: no rehearsal evidence. -->
 
 ## Everything else on the critical path has landed
 <!-- msg: the reassuring support, which earns the "can" in the top line.
