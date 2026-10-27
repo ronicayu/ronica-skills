@@ -28,7 +28,9 @@ Search the repository for earlier ADRs, RFCs and design documents on the same sy
 
 ## Draft mode
 
-If the `writing-editor` skill is in your skill list, invoke it and follow its Draft mode (its `references/drafting.md` stages and outline gate), with the additions below. Without it, run the same four stages: purpose and readers, sources, an outline the user approves, then content. Write no body prose before the user approves the outline.
+**The gate comes first.** Your first reply in draft mode asks the stage 1 questions. It is never a document, an outline or a design. Write no body prose until the user approves the outline. A request to "write the design doc" asks for the stages, not for a skipped outline. If the user explicitly says to skip the outline, say once what it costs, then comply. This holds in a non-interactive session too: ask, then stop.
+
+**Stages.** Before anything else, if the `writing-editor` skill is in your skill list, invoke it and follow its Draft mode (its `references/drafting.md` stages and outline gate), with the additions below. Without it, run the same four stages: purpose and readers, sources, an outline the user approves, then content.
 
 **Stage 1 interview.** Ask these after writing-editor's own stage 1 items. One question at a time, each with your recommended answer. Skip any that the request or the repository already answers, and read that answer back instead. In this order:
 
