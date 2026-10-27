@@ -74,7 +74,7 @@ Fix this layer first. In review mode, say plainly that the structure needs resha
 - **Identifiers stay out of the argument.** Requirement, story, control and ticket IDs go in tables and traceability sections. An argued sentence carries at most one. If a sentence cannot be understood without a lookup, rewrite it in words.
 - **A higher section reads completely without a lower one.** Where a lower detail is load-bearing, state it once as a named constraint and point to its definition.
 - **Groups stay at three to five.** Nine items are nine things to hold. Two groups of four with named summaries are two.
-- **Detail goes where the question arises**, not where it was discovered.
+- **Detail goes where the question arises**, not where it was discovered. Test each inline detail: does it answer a question the reader already had, or open a new one? A detail that opens a question the section never answers fails, even in a sentence at the right level. Parentheticals and inline expansions fail this most often, because they look like clarifications. Cut the detail to the named concept, or keep the name and point to where it is defined.
 
 ### 3. Claims: what the reader has to trust
 
