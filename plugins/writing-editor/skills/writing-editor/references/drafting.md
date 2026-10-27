@@ -21,7 +21,7 @@ This stage is about the reader and the outcome, not the document. Settle these a
 - **What the reader is doing.** Use pass 0 of `SKILL.md`. Record the shape it picks.
 - **Technical?** For documentation, a README or an RFC, apply the technical bullet of pass 0 now. Pick the Diátaxis mode. For a tutorial, how-to or reference page, the heading forms and shape in `technical-docs.md` override message headings.
 - **Scanning or following.** This sets granularity and is separate from shape. A scanning reader needs short paragraphs, visible counts and a heading every few points. A following reader needs *because*, *therefore* and *but*, which exist only in multi-sentence paragraphs. Name which sections are which now. Retrofitting granularity means rewriting.
-- **Constraints and house style.** Format, deadline, a `CLAUDE.md`, a style guide or the convention of neighbouring documents. These override every default here.
+- **Constraints and house style.** Format, deadline, a `CLAUDE.md`, a style guide, a document template or the convention of neighbouring documents. These override every default here.
 - **Size.** Agree a target length now. It sets heading depth. Two pages supports two levels and three or four sections. Twenty pages supports four levels.
 
 The brief block is the first thing in the file. Delete it before handover.

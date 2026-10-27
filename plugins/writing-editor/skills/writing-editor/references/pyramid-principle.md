@@ -46,6 +46,18 @@ Everything the reader must accept before the answer belongs in the introduction.
 
 **Answer-first has one common exception.** A technical reader evaluating a design must be able to reach the conclusion independently, so a design document often runs problem → options → comparison → recommendation. That is still a pyramid; the governing thought is still stated early, in a summary, and the body earns it. For the document-type split (Diátaxis), see `technical-docs.md`.
 
+**An architecture presented for review follows the same rule at system scale.** The subject is the design. Its decisions are the key choices inside it, not a separate list to approve. Order it so the reviewer can test each choice against what it must achieve:
+
+1. **Context**: what the system is, who uses it, and its boundary, in one paragraph and one context diagram. State what the design is here, as orientation. Do not argue that it is right yet.
+2. **Problem, goals and constraints**: the problem without the solution; the quality goals, ranked; the constraints. The ranking is the tie-breaker every later trade-off appeals to.
+3. **Trade-offs**: for each pair of goals that conflict, the goal that wins and what is given up. "We balance X and Y" is not a trade-off.
+4. **The fundamental options**: the few top-level shapes considered, compared against the goals, and the one chosen.
+5. **The design, top-down**: structure, then runtime with its failure modes, then data, contracts, deployment, operations and security. Each key decision sits in the section it shapes, with its reason and the alternative it rejected.
+6. **Risks and open questions**, each with an owner. Put first the questions the design depends on, which block sign-off.
+7. **The review asks**, at the end.
+
+The decision log, requirement traceability, compliance mapping and glossary go in appendices for lookup. A reader who reads only the context, the goals, the trade-offs and the headings should know what the design is and why it has this shape. If the organisation has an architecture template (arc42 or a house template), it sets the section names. This order is the check that it is filled in to support a review.
+
 ## Grouping: inductive and deductive
 
 **Inductive** — a set of ideas of the same kind, from which the summary is inferred. The group can be named with a plural noun: *three reasons*, *four symptoms*, *two prerequisites*. The summary states what the group implies.
