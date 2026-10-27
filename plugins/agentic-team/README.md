@@ -76,7 +76,7 @@ the trust prompt before the Manager launches its first worker.
 | [Worker](agents/worker.md) | Each task session runs as `--agent agentic-team:worker`, in its own worktree. The worker agent holds the fixed rules and the report format (`PASS`, `ISSUES`, or `BLOCKED`), so briefs carry only task content. |
 | [Principles](skills/) | One skill per principle (`principle-<name>`), hidden from automatic invocation. The Manager keeps a one-line index and reads the full rule only when it applies. |
 | [Config script](scripts/config.py) | The only reader of the project config. It merges, fills defaults, validates, and answers `get`, `show`, `check`, and `model`. |
-| [Run script](scripts/run.py) | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports. It refuses an unscoped task, a fourth attempt, a launch under `STOP`, and a merge without a `MERGE:` line or (in `local` mode) into a dirty checkout. It matches sessions to tasks by worktree path, never by name. |
+| [Run script](scripts/run.py) | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports. It refuses an unscoped task, a fourth attempt, a launch under `STOP`, and a merge without a `MERGE:` line or (in `local` mode) into a dirty checkout. It matches sessions to tasks by the session id it recorded, never by name. |
 | [Host script](scripts/host.py) | The one module that speaks to a code host in `pr` mode: push, request, checks, merge. GitHub through `gh`, GitLab through `glab`. |
 
 Three rules carry the rest:
@@ -97,25 +97,47 @@ Nothing is patched in place. A refused launch is fixed in Taskgraph, a retry
 or fix round renders a fresh brief, and a closed task unblocks the next. Only
 calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 
-`run.py launch <id>` renders the brief and starts the worker in its own
-worktree (`.claude/worktrees/task-<id>-<attempt>`), on its own branch
-(`worktree-task-<id>-<attempt>`). `run.py` creates that worktree itself, at the
-base commit, with `git worktree add`, and `claude --bg --worktree` reuses it.
-This relies on `claude --bg --worktree <name>` reusing an existing worktree, which was
-verified with Claude Code 2.1.311; the `launched` and `verifying` events warn if the
-session's worktree is no longer at the base.
-The worker resets and checks out nothing: its brief names the base, and it
-reports `BLOCKED` if `HEAD` is not there. `launch` refuses when the branch or
-folder already exists (the message gives `--attempt <n+1>` first, then the steps
-to reuse the name), and removes the worktree and branch again if `claude` fails
-to start, unless a session, a change or a new commit is there. The base is the Manager's `HEAD`, or the `Head` commit of the
-task's previous worker result, or of a stopped attempt's WIP commit. A previous
-`Head` counts only when the base recorded for the task is its ancestor;
-otherwise (or when the `Head` is not in the repository) the retry starts from
-the recorded base, and the `launched` event says so. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
-branch. `launch --base <sha|branch>` starts from any commit and wins over all
-of these. `run.py verify` creates the verifier's worktree the same way, at the
-commit under review. `claude --bg` writes session data under `~/.claude`, so run
+`run.py launch <id>` renders the brief and starts the worker in the task's one
+worktree (`.claude/worktrees/task-<id>`), on the task's one branch
+(`worktree-task-<id>`). A task keeps that worktree and branch for its whole
+life. The first attempt creates the worktree itself, at the base commit, with
+`git worktree add`, and `claude --bg --worktree` reuses it. This relies on
+`claude --bg --worktree <name>` reusing an existing worktree, which was
+verified with Claude Code 2.1.311; the `launched` and `verifying` events warn if
+the session's worktree is no longer at the base. The worker resets and checks
+out nothing: its brief names the commit the worktree is at, and it reports
+`BLOCKED` if `HEAD` is not there. The first `launch` refuses when the branch or
+folder already exists (the message gives the steps to reuse the name), and
+removes the worktree and branch again if `claude` fails to start, unless a
+session, a change or a new commit is there. The base of a first attempt is the
+Manager's `HEAD`; in `pr` mode the fetched target branch replaces it.
+`launch --base <sha|branch>` starts a first attempt from any commit and wins
+over both.
+
+A retry or fix round is a fresh session with a fresh brief, in the same
+worktree, on top of the commits of the earlier attempts. The attempt is only a
+number: it caps retries at 3 and labels result rows, session names, and brief
+files. The retry starts at the worktree's `HEAD`, and its brief says so and pastes
+the previous report. `launch --base` on a retry is refused while the worktree
+exists, and the message gives the by-hand reset; `run.py` never resets,
+rebases, or checks out another commit in place. Before a retry the worktree
+must be clean. `launch` refuses a `STOPPED` attempt whose WIP commit is not made
+yet (run `record` first). When a dead or stuck attempt left uncommitted files,
+`launch` commits them as `WIP task <id> attempt <n>: <status>` and says so in
+the `launched` line, with the file names. That commit holds every untracked file
+that is not ignored, and in `pr` mode it is pushed with the branch. A worktree on another branch (a detached `HEAD` included), or a plain folder, is
+refused with a fix that loses no commit. `record` never commits WIP in such a
+folder: it files the `STOPPED` row with `Head: None` and says why. If the worktree is missing on a retry, `launch` reattaches
+`worktree-task-<id>` when the branch exists; else it creates the worktree at the
+`Head` of the latest worker or stopped result (an adopted task's first fix
+round); else it asks for `--base`. A failed `claude --bg` on a retry removes
+nothing. `base` in the task's metadata is the commit the branch forked from; it
+is written once and a retry does not change it.
+
+`run.py verify` creates a verifier's worktree of its own
+(`verify-<id>-<attempt>`, then `-2`, `-3` for a second verifier), fresh at the
+commit under review, and `cleanup` removes it with its session. `claude --bg`
+writes session data under `~/.claude`, so run
 `launch` and `verify` outside the Bash sandbox or allow writes to `~/.claude`;
 either needs the operator's agreement. Before it files its report, whatever the
 status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
@@ -129,7 +151,7 @@ no result is filed as `DIED` and retried; a complete report in `claude logs`
 is filed as the worker's own. A session stuck on a permission prompt is
 stopped and filed as `BLOCKED`. Attempt 3 is the last (`launch` refuses a
 fourth): when it fails, `run.py abandon` marks the task abandoned. Its
-worktrees stay, and the report lists them for the operator to remove.
+worktree stays, and the report lists it for the operator to remove.
 
 The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
@@ -144,11 +166,17 @@ operator says a branch is merged, by any method including squash or rebase,
 `run.py merged <id>` records it. In `pr` mode `close` pushes the branch and
 opens a request instead (next section). A task that builds on a done but unmerged branch waits, and the Manager
 says so plainly in its replies and reports. After the merge, `run.py` removes
-every session and worktree of the task with `claude rm`. `claude rm` refuses
-work that is on no remote, so the script passes `--discard-unpushed` only for
-a commit that `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode,
-in the recorded merged head (`pushed`). It never deletes
-a file and never forces a worktree removal.
+every session of the task with `claude rm`, newest first and the task's first
+session last. `claude` locks a worktree in the name of the first session that
+used it. `claude rm` of any later session removes only that row; `claude rm` of
+the first session removes the folder, when the tree is clean and pushed. When a
+folder is still there after the last `rm` and no `kept` line explains it, the
+`kept` line `still present (<lock reason>)` gives the by-hand command
+(`git worktree remove -f -f ...`). `claude rm` refuses work that is on no
+remote, so the script passes `--discard-unpushed` only for a commit that
+`git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
+recorded merged head (`pushed`). It never deletes a file and never forces a
+worktree removal.
 
 A question only the operator can answer is a Taskgraph `decision` node that
 `--blocks` the tasks it holds back. Blocked tasks leave `ready` by themselves,
@@ -158,8 +186,8 @@ A pause adds `STOP: ...` as the first standing-orders line. `run.py stop <id>`
 stops a worker that cannot finish soon and files a `STOPPED` result. Once the
 session has exited, `run.py record` commits the worktree's uncommitted work as
 a WIP commit and files a second `STOPPED` row with its `Head`. The next
-attempt starts fresh from that commit; there is no resume. A stopped attempt
-does not count as a failure.
+attempt is a fresh session in the same worktree, on top of that commit; there
+is no resume. A stopped attempt does not count as a failure.
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
 
@@ -174,7 +202,7 @@ the operator's standing permission for `run.py` to push task branches to
 1. `run.py close` records the verdict, runs `tg done`, pushes the branch, and
    opens a request against the target branch (`merge.base`, else the host's
    default branch). The task keeps one request across attempts: a fix round
-   pushes `worktree-task-<id>-<n>` to the same `task-<id>`. Every push after the
+   pushes `worktree-task-<id>` to the same `task-<id>`. Every push after the
    first carries a lease on the last pushed head (`--force-with-lease`), recorded
    as `pushed`. A remote branch that is not ours stops the first push.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
@@ -203,8 +231,10 @@ the operator's standing permission for `run.py` to push task branches to
 and the push accept a branch at a new head when the change is the same. The
 change id is a hash of `git diff -U0 base tip` without line numbers or blob
 ids. The base of the old head is its merge base with the target, which covers
-every attempt on the branch and survives repeated rebases; the attempt's `base`
-meta stands in only when git finds none. A clean rebase, a squash, a split, and
+every attempt on the branch and survives repeated rebases; the task's `base`
+meta (the commit the branch forked from, which a retry does not move) is a
+second span for a stacked task whose dependency was merged and dropped by the
+rebase. A clean rebase, a squash, a split, and
 a reorder give the same id. A whitespace edit, an added commit, a conflict
 resolved by hand into a changed line, and a binary file changed on both sides do
 not. Two trade-offs: with no context lines, the same `-` and `+` lines at
@@ -280,7 +310,7 @@ Manager runs `record` later.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, creates the worktree at the base, starts the worker, and records `session`, `model`, `attempt`, `base`, and `started_at`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
+| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
@@ -306,16 +336,22 @@ else on stdout (`status --json` prints one object). Refusals go to stderr as
 `local` mode never runs `gh` or `glab`.
 
 `run.py` finds `tg.py` through `--tg`, then `$TASKGRAPH_TG`, then
-`scripts/tg-path.sh`. It matches a live session to its task by the session's
-working directory, which ends `.claude/worktrees/<task|verify>-<id>-<attempt>`
-in this repository. It never uses names, because `claude agents --all` lists
-every project on the machine. A session that `claude stop` ended shows `state`
-`stopped`, no `status`, and an unrelated directory. `run.py` counts it as exited
-and ties it to a task only through the `Session: <id>` line of the result it
-filed when it stopped that session (`stop`, a stuck session, `close`,
-`abandon`); it derives the worktree path from the task and attempt. A worker
-that the operator stopped by hand has no such line, so `run.py` treats it as no
-session.
+`scripts/tg-path.sh`. It matches a session to its task by the session id it
+recorded in the task's `sessions` meta when it started the session. A live or
+finished row whose id is not recorded, and whose working directory is a
+worktree folder of this repository (`.claude/worktrees/task-<id>` or
+`verify-<id>-<attempt>`), belongs to the task of that folder, current attempt;
+this covers a launch that died before it wrote its meta. A second
+`claude --bg --worktree task-<id>` after the first session finished reuses the
+same folder and branch, so the folder is shared by every attempt and the id
+tells the sessions apart. It never uses names, because `claude agents --all`
+lists every project on the machine. A session that `claude stop` ended shows
+`state` `stopped`, no `status`, and the repository root as its directory. A
+stopped row cannot be matched by its directory: `run.py` ties it to a task only
+through its recorded id, counts it as exited, and derives the worktree path from
+the task. A stopped row that is not recorded, such as a worker the operator
+stopped by hand, belongs to nobody. The `Session: <id>` lines in result bodies
+are a record, not the match.
 
 ## Configuration
 
@@ -461,7 +497,8 @@ a `kind`, a `status`, an `attempt`, and an author (`--by`):
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
 `Overrides:` and `Reason:`. Every row filed when
-`run.py` stops a session carries `Session: <id>` and `Worktree: <path>` lines.
+`run.py` stops a session carries `Session: <id>` and `Worktree: <path>` lines;
+they are a record, not how sessions are matched.
 
 `tg result ls <id>` lists them. An attempt has arrived when a result exists
 for the task's current `attempt` and the task has no `verdict`.
@@ -469,7 +506,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 21 keys:
+skill. Metadata holds everything else, 22 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -477,9 +514,10 @@ skill. Metadata holds everything else, 21 keys:
 | `estimate` | plan | Taskgraph's own estimate in hours. The worker's timebox is twice it. |
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `base` | `launch`, `adopt` | The commit the attempt started from. The verified change is `base..Head`. |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
+| `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
-| `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the worker's worktree path; the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
+| `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
 | `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
@@ -488,6 +526,20 @@ skill. Metadata holds everything else, 21 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.6.0
+
+Version 0.7.0 gives a task one worktree for its whole life; 0.6.0 gave each
+attempt its own (`.claude/worktrees/task-<id>-<attempt>`). Finish or abandon
+the tasks in flight before you upgrade. `run.py` does not migrate a task that
+0.6.0 started: a task in progress with an attempt and no `sessions` meta is
+`legacy`. `record` prints one `legacy` line for it and skips it, and `launch`,
+`verify`, `close`, `stop`, and `abandon` refuse it with the same text. Once its
+session has ended and its result is filed, declare it a 0.7.0 task with
+`tg edit <id> --meta sessions='[]'`, then run `run.py record`. The next
+`launch` creates `.claude/worktrees/task-<id>` at the last reported `Head`. The
+old folders stay; `cleanup` lists them as `no session; remove it by hand if you
+want`, and removes nothing of a 0.6.0 task that is done.
 
 ## Layout
 

@@ -139,8 +139,8 @@ class GitHubTest(unittest.TestCase):
 
     def test_67_push_builds_the_lease_and_the_environment(self):
         client, sh = gh((["push"], {"stderr": "To origin\n"}))
-        self.assertEqual(client.push("refs/heads/worktree-task-1-1", "task-1", ""), (True, "To origin"))
-        self.assertEqual(sh.calls[0]["cmd"], ["git", "-C", "/repo", "push", "origin", "refs/heads/worktree-task-1-1:refs/heads/task-1",
+        self.assertEqual(client.push("refs/heads/worktree-task-1", "task-1", ""), (True, "To origin"))
+        self.assertEqual(sh.calls[0]["cmd"], ["git", "-C", "/repo", "push", "origin", "refs/heads/worktree-task-1:refs/heads/task-1",
                                               "--force-with-lease=refs/heads/task-1:"])
         self.assertEqual(sh.calls[0]["cwd"], "/repo")
         for key, value in (("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1"), ("NO_COLOR", "1")):

@@ -11,7 +11,7 @@ sequenceDiagram
   M->>M: config.py check
   M->>R: launch 41
   R->>TG: show 41 (notes, scope, verify)
-  R->>W: render brief, claude --bg --worktree task-41-1
+  R->>W: render brief, claude --bg --worktree task-41
   R->>TG: start 41, meta session, model, attempt
   R-->>M: launched #41 attempt 1
   Note over M: Manager launches other tasks meanwhile

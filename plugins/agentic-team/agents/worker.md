@@ -15,7 +15,8 @@ Manager.
 
 - Your worktree is already at the commit that CONTEXT names, on its own branch. Do not
   reset it or check out another commit. If `git rev-parse HEAD` is not that commit,
-  report `BLOCKED` and change nothing.
+  report `BLOCKED` and change nothing. On a retry the worktree holds the earlier
+  attempts' commits; CONTEXT says so and pastes the previous report.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
