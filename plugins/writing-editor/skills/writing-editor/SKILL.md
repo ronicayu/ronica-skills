@@ -98,7 +98,7 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 ### 6. Strip the tells of machine-drafted prose
 
-Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check each tell. The most common three are everything in threes, signposts like "It's worth noting", and a first sentence that restates its heading.
+Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check each numbered tell. Start with the five most common: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5).
 
 ## Reporting a review
 
