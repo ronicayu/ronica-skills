@@ -20,8 +20,10 @@ verification, a decision, a plan change) and before every report.
    - `died`: retry by failure mode. Infrastructure failures retry as they are.
      A tool error or a stuck model retries one `--tier` higher. An unknown
      cause retries once.
-   - `stuck`: the session waited on a prompt nobody answers. Relaunch with
-     `--model sonnet`. `stopped`: after the pause, `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
+   - `stuck`: read the `next:` hint; it names the command the session waited
+     on and the three remedies. `--model sonnet` is not the fix unless the hint
+     says a pinned model id. `stopped`: after the pause,
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
      session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.
    - `attempt 3 failed`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`, add a decision if
@@ -30,6 +32,11 @@ verification, a decision, a plan change) and before every report.
      the report with your recommendation.
    - `unmerged` and `waits`: say plainly which branch the operator should
      merge and which tasks wait on it.
+   - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
+   - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
+   - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` rebases and pushes.
+   - `pr-changed`, `pr-closed`, `pr-unpinned`, `push-refused`, `merge-failed`, `host-error`: tell the operator what the line says; add a
+     decision when they must choose. `published`, `pushed`, `rebased`: no action.
 
    A result whose attempt is not the task's current attempt is superseded.
    Check it against the current state before you use anything in it, and
@@ -43,6 +50,12 @@ verification, a decision, a plan change) and before every report.
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --ran "<what you ran and saw>"`.
    - `risk=high`, or a check that is expensive or needs judgement: run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; a later `verified` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
+   - `verify_mode=ci:<name>`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; it pushes the branch, opens the
+     request and finds or starts the run. A later `verified ... by ci` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
+   - When the verifier's verdict is weaker than your evidence, run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --override-verifier "<why>" --ran "<run id or URL, what you saw>"`.
+     An upgrade needs a run id or a link in `--ran`. `verify-failed` is never
+     overridden; start a fix round.
    - Verdict levels: `artifact-verified` (the real output was exercised or
      read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
      `check-only` (static checks only, not enough for behavior);
@@ -50,13 +63,14 @@ verification, a decision, a plan change) and before every report.
      `verify-failed` (start a fix round, do not just re-verify).
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - `close` refuses a changed output, records the verdict and tokens, runs
-     `tg done`, and merges only on a `MERGE:` line into a clean checkout.
-     Otherwise it lists the branch as ready to merge. A merge through the code
-     host, such as a PR the standing orders or the autonomy grant allow, is not
-     recorded by `close`: after it, run
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by manager`. When the operator says a
-     branch is merged, by any method, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
+   - `close` accepts a rebased branch when the change is the same, records the
+     verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
+     `local` it merges only on a `MERGE:` line into a clean checkout, and
+     otherwise lists the branch as ready to merge. In `pr` it pushes the branch
+     and opens the request; `record` merges it under a `MERGE:` line when the
+     host reports it clean, and records a merge anyone did. When the operator
+     says a branch is merged and `record` cannot see it, run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
      After a `kept` line about untracked files, delete only files your rerun
      created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. Rerun a `close` that stopped.
 4. **Launch.** For each task `record` lists under `ready`, while `slots` has
@@ -70,6 +84,8 @@ verification, a decision, a plan change) and before every report.
      answer in the standing orders, and rerun with `dangerouslyDisableSandbox`
      only if they agreed. Never edit a rendered brief.
    - Refill after every drain; never wait for a whole batch.
+   - `launch <id> --base <sha|branch>` starts from that commit; use it for a fix on an unmerged feature
+     branch. It lifts the unmerged-dependency refusal when the base contains the dependency's commit.
 5. **Fresh, not resumed.** Every attempt is a fresh session with a fresh brief,
    including work after a pause. A stopped attempt's WIP commit is its base.
 

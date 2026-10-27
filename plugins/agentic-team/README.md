@@ -19,7 +19,9 @@ The design adapts the playbook, and principle structure of
 /plugin install agentic-team@ronica-skills
 ```
 
-This also installs its dependency, `taskgraph`.
+This also installs its dependency, `taskgraph`. After installing or updating
+the plugin, restart Claude Code. `/reload-skills` does not load a freshly
+installed plugin's skills or agents.
 
 The scripts need Python 3.11 or later.
 [scripts/python-path.sh](scripts/python-path.sh) finds one (`python3.13`,
@@ -74,7 +76,8 @@ the trust prompt before the Manager launches its first worker.
 | [Worker](agents/worker.md) | Each task session runs as `--agent agentic-team:worker`, in its own worktree. The worker agent holds the fixed rules and the report format (`PASS`, `ISSUES`, or `BLOCKED`), so briefs carry only task content. |
 | [Principles](skills/) | One skill per principle (`principle-<name>`), hidden from automatic invocation. The Manager keeps a one-line index and reads the full rule only when it applies. |
 | [Config script](scripts/config.py) | The only reader of the project config. It merges, fills defaults, validates, and answers `get`, `show`, `check`, and `model`. |
-| [Run script](scripts/run.py) | Launches, drains, verifies, closes, merges, stops, abandons, and reports. It refuses an unscoped task, a fourth attempt, a launch under `STOP`, and a merge without a `MERGE:` line or into a dirty checkout. It matches sessions to tasks by worktree path, never by name. |
+| [Run script](scripts/run.py) | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports. It refuses an unscoped task, a fourth attempt, a launch under `STOP`, and a merge without a `MERGE:` line or (in `local` mode) into a dirty checkout. It matches sessions to tasks by worktree path, never by name. |
+| [Host script](scripts/host.py) | The one module that speaks to a code host in `pr` mode: push, request, checks, merge. GitHub through `gh`, GitLab through `glab`. |
 
 Three rules carry the rest:
 
@@ -100,7 +103,8 @@ worktree (`.claude/worktrees/task-<id>-<attempt>`), on its own branch
 branch, so the brief gives the worker a base commit, and the worker's first
 step is `git reset --keep <base>`. The base is the Manager's `HEAD`, or the
 `Head` commit of the task's previous worker result, or of a stopped attempt's
-WIP commit. Before it files its report, whatever the status, the worker
+WIP commit. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
+branch. `launch --base <sha|branch>` starts from any commit. Before it files its report, whatever the status, the worker
 commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
 `ISSUES` or `BLOCKED`), so `Head` is always set and the worktree is clean. It
 files its report with `tg result add`. The report names the `Branch`, the
@@ -118,17 +122,19 @@ The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
 verifier in a worktree of its own that checks out the `Head` commit. Then
 `run.py close` records the verdict and the token counts, runs `tg done`, and
-merges only when a standing-orders line starts with `MERGE:`, and only into
-the checked-out branch of a clean main checkout. Without that line, `close`
-lists the branch as ready to merge. On a conflict it aborts the merge and
-prints the decision to add, naming both branches. A confirmed merge is
-recorded as `merged_at` and `merged_by`. When the operator says a branch is
-merged, by any method including squash or rebase, `run.py merged <id>` records
-it. A task that builds on a done but unmerged branch waits, and the Manager
+then follows `merge.mode`. In `local` mode it merges only when a standing-orders
+line starts with `MERGE:`, and only into the checked-out branch of a clean main
+checkout. Without that line, `close` lists the branch as ready to merge. On a
+conflict it aborts the merge and prints the decision to add, naming both
+branches. A confirmed merge is recorded as `merged_at` and `merged_by`. When the
+operator says a branch is merged, by any method including squash or rebase,
+`run.py merged <id>` records it. In `pr` mode `close` pushes the branch and
+opens a request instead (next section). A task that builds on a done but unmerged branch waits, and the Manager
 says so plainly in its replies and reports. After the merge, `run.py` removes
 every session and worktree of the task with `claude rm`. `claude rm` refuses
 work that is on no remote, so the script passes `--discard-unpushed` only for
-a commit that `git merge-base --is-ancestor` finds in `HEAD`. It never deletes
+a commit that `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode,
+in the recorded merged head (`pushed`). It never deletes
 a file and never forces a worktree removal.
 
 A question only the operator can answer is a Taskgraph `decision` node that
@@ -143,6 +149,103 @@ attempt starts fresh from that commit; there is no resume. A stopped attempt
 does not count as a failure.
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
+
+### Merging through pull or merge requests
+
+Set `[merge] mode = "pr"` for a repository whose protected branch takes changes
+only through pull requests (GitHub) or merge requests (GitLab). Setting it is
+the operator's standing permission for `run.py` to push task branches to
+`<remote>/task-<id>` and to open requests. Merging still needs a `MERGE:` line.
+`local` mode never pushes and never runs `gh` or `glab`.
+
+1. `run.py close` records the verdict, runs `tg done`, pushes the branch, and
+   opens a request against the target branch (`merge.base`, else the host's
+   default branch). The task keeps one request across attempts: a fix round
+   pushes `worktree-task-<id>-<n>` to the same `task-<id>`. Every push after the
+   first carries a lease on the last pushed head (`--force-with-lease`), recorded
+   as `pushed`. A remote branch that is not ours stops the first push.
+2. `run.py record` reads the request at each drain. It prints `pr-pending`,
+   `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
+   `pr-behind`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
+   request clean, a `MERGE:` line exists, and `STOP` is absent, `record` merges
+   it with `merge.method`. The merge is guarded by the pushed head
+   (`--match-head-commit` on GitHub, `sha` on GitLab). A request whose head is
+   not the pushed head is never merged by `run.py`, and an open request with no
+   recorded `pushed` head is never merged either (`pr-unpinned`; `close <id>`
+   pushes and records it). If the host fails for one task, `record` prints
+   `host-error` for that task, goes on with the others, and exits 1 at the end.
+3. A merge that anyone did on the host is recorded at the next drain from the
+   request state (`merged_by=operator`), squash and rebase merges included.
+   `run.py merged <id> --by operator` is for a merge the host cannot show. A
+   request closed without a merge is reported at every drain (`pr-closed`).
+4. When the host reports the request behind its target, `run.py close <id>`
+   rebases the branch in its idle worktree, checks that the change is the same,
+   and pushes it again. A conflict is aborted and written as a decision. A
+   worktree that is missing, dirty, or in use is not touched. `run.py` never
+   approves, force-resolves, or unprotects. A push is made only when our head
+   moved. If someone else moved the remote branch while our head stayed, `record`
+   prints `pr-changed`; `push-refused` appears when our head moved too.
+
+**Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
+and the push accept a branch at a new head when the change is the same. The
+change id is a hash of `git diff -U0 base tip` without line numbers or blob
+ids. The base of the old head is its merge base with the target, which covers
+every attempt on the branch and survives repeated rebases; the attempt's `base`
+meta stands in only when git finds none. A clean rebase, a squash, a split, and
+a reorder give the same id. A whitespace edit, an added commit, a conflict
+resolved by hand into a changed line, and a binary file changed on both sides do
+not. Two trade-offs: with no context lines, the same `-` and `+` lines at
+another place in the same file count as the same change; and a target that
+renamed a file the task edited is refused (the `diff --git` line differs), which
+is the safe side. The move is printed
+(`rebased`) and written (`verdict_ref`); any other difference is refused.
+
+**CI as the verifier.** With `--meta verify_mode=ci:<name>` on the task,
+`run.py verify <id>` pushes the branch, opens the request, and finds the CI run
+for the pushed head, or dispatches one when it has a manual trigger. `record`
+files the finished run as a `verify` result by `ci` (`test-verified`, or
+`verify-failed`; a cancelled run is `verify-blocked`), once per run id and
+attempt. `artifact-verified` stays a Manager override. On GitHub `<name>` is a
+workflow file or name; on GitLab it is `pipeline` or a job name.
+
+**Override.** `run.py close <id> --verdict <level> --override-verifier "<why>"`
+changes a verifier's verdict and files the reason. An upgrade needs a run id or
+a link in `--ran`. `verify-failed` is never upgraded; it needs a fix round.
+
+**Adopt.** `run.py adopt <id> --branch <b> --head <sha> [--pr <n>]` brings work
+that started outside `run.py` under the Manager. It files a `PASS` result by the
+Manager (no worktree, no session) and records the request when `--pr` is given.
+`record` lists tasks in progress with no `attempt` in one `unmanaged` line.
+
+**The host seam.** [scripts/host.py](scripts/host.py) is the only module that
+speaks to a code host: GitHub through `gh`, GitLab through `glab api`.
+`merge.host = "auto"` reads the `remote` URL: `github.com` is GitHub, and a host
+name that contains `gitlab` is GitLab. A self-managed GitLab on another host
+name needs `host = "gitlab"`. The operator runs `gh auth login` or
+`glab auth login --hostname <host>` once. The GitLab host is tested only against
+a fake `glab`; its calls rest on the documented REST API and carry `UNVERIFIED`
+notes in `host.py` until they are checked against a test project. The seam is
+separate from Taskgraph's storage backend (issue #15); neither depends on the
+other.
+
+GitLab differs from GitHub in these ways:
+
+- `run.py` keeps only pipelines whose `sha` is the pushed head. A pipeline run on
+  a merged-results commit (Premium) never matches, so the task waits (`ci-waiting`),
+  which is the safe side.
+- Requests are numbered by `iid` per project. The `pr` meta holds the `iid`.
+  Event lines say `MR !<iid>` for GitLab and `PR #<n>` for GitHub.
+- GitLab has one pipeline per commit, not named workflows, so `verify_mode` is
+  `ci:pipeline` or `ci:<job name>`.
+- The merge method is a project setting (merge commit, rebase and merge,
+  fast-forward). `merge.method` only controls `squash`. A fast-forward project
+  reports `need_rebase` when the branch is behind; `run.py` rebases locally and
+  pushes again, and never calls the server-side rebase endpoint.
+- Required approvals and protected branches show as `pr-blocked` (`not_approved`)
+  or as a failed merge with the API message. `run.py` never approves and never
+  unprotects.
+- The pushed branch `task-<id>` must not match a protected branch pattern that
+  forbids force pushes; a refused push is reported, not forced.
 
 ### One task, end to end
 
@@ -164,10 +267,11 @@ Manager runs `record` later.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, starts the worker, and records `session`, `model`, `attempt`, and `started_at`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
-| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. |
-| `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges or lists the branch as ready to merge. Options: `--verdict`, `--ref`, `--ran`. Rerun it if it stopped after `tg done`: it resumes at the merge. |
+| `launch <id>` | Renders the brief, starts the worker, and records `session`, `model`, `attempt`, `base`, and `started_at`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
+| `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
+| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
+| `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
+| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker for a pause and files a `STOPPED` result. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
@@ -185,6 +289,8 @@ else on stdout (`status --json` prints one object). Refusals go to stderr as
 | 1 | A tool failed: `tg`, `git`, or `claude`. |
 | 2 | The command refused. The message names the fix. |
 | 3 | The standing orders say `STOP`. Only `launch` returns it. |
+
+`local` mode never runs `gh` or `glab`.
 
 `run.py` finds `tg.py` through `--tg`, then `$TASKGRAPH_TG`, then
 `scripts/tg-path.sh`. It matches a live session to its task by the session's
@@ -209,7 +315,7 @@ marks a value someone still has to fill in. Never put credentials or secrets
 in either file.
 
 Model values are either a model id (`"opus"`) or a table
-(`{ model = "sonnet", effort = "high" }`).
+(`{ model = "sonnet", effort = "high" }`). The config has 7 sections and 19 keys.
 
 ### `[taskgraph]`
 
@@ -252,6 +358,16 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `verifier` | model | unset | Verification sessions. Unset means a different model from the worker's: `opus`, or `sonnet` if the worker ran on `opus`. |
 | `overrides` | table | `{}` | `[models.overrides]` maps a work type to a model, for example `"data migration" = { model = "opus", effort = "high" }`. Matched case-insensitively before the tiers. A task's `tier` meta may name an override key. |
 
+### `[merge]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `mode` | `"local"` or `"pr"` | `"local"` | `local`: `close` merges into the main checkout under a `MERGE:` line, as before. `pr`: `close` pushes the task branch and opens a pull or merge request; `record` merges it under a `MERGE:` line when the host reports it clean, and records merges done by anyone from the request state. Setting `pr` is the operator's standing permission to push task branches and open requests. Merging still needs the `MERGE:` line. |
+| `host` | `"auto"`, `"github"`, `"gitlab"` | `"auto"` | Which CLI speaks to the host: `gh` or `glab`. `auto` reads the `remote` URL: a host name of `github.com` means GitHub, a host name that contains `gitlab` means GitLab. A self-managed GitLab on another host name needs `host = "gitlab"`. Only read in `pr` mode. |
+| `remote` | string | `"origin"` | The git remote the host is reached through. |
+| `base` | string | `""` | The branch requests target. `""` means the host's default branch, asked once per `run.py` command. A task launched with `--base <branch>` targets that branch instead (meta `target`). |
+| `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
+
 ### `[notifications]`
 
 | Key | Type | Default | Meaning |
@@ -275,7 +391,9 @@ brief carries what they need.
 
 `check` reports a missing file, TOML syntax errors with their line, `"TODO"`
 values, an empty `taskgraph.project`, unknown sections or keys (with the
-closest known key), wrong types, and invalid time zones. `get` and `model`
+closest known key), wrong types (a value outside a fixed choice reads `must be
+one of "local", "pr"`), and invalid time zones. It reads no git state and makes
+no network call. `get` and `model`
 refuse to answer while `check` fails. Exit codes: 0 OK, 2 config problem, 1
 unexpected error. It needs Python 3.11 or later; the `config` wrapper finds
 one through `scripts/python-path.sh`.
@@ -309,7 +427,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 
 | Path | Content |
 |------|---------|
-| `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout. |
+| `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout, or (in `pr` mode) lets `record` merge a clean request. |
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
 
@@ -324,9 +442,12 @@ a `kind`, a `status`, an `attempt`, and an author (`--by`):
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt. A worker report that the Manager copied from `claude logs` keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker stopped for a pause (a second row carries the WIP commit `Head:`), or a session `close` stopped. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
+| `task` | `PASS` | The Manager | The evidence for an adopted task (`Worktree: None`, `Ran: not stated (adopted)`). |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED`, `DIED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. The Manager files its own verdict for a `risk=low` task, and `DIED` for a verifier that ended with no result. |
+| `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
-`verify` results by `manager` carry `Verdict:` and `Ran:`. Every row filed when
+`verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
+`Overrides:` and `Reason:`. Every row filed when
 `run.py` stops a session carries `Session: <id>` and `Worktree: <path>` lines.
 
 `tg result ls <id>` lists them. An attempt has arrived when a result exists
@@ -335,17 +456,25 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 15 keys:
+skill. Metadata holds everything else, 21 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
 | `scope`, `verify`, `tier`, `risk` | plan | Brief inputs. `tier` is a tier name or a `models.overrides` key. `risk=high` sends verification to a separate session. |
 | `estimate` | plan | Taskgraph's own estimate in hours. The worker's timebox is twice it. |
-| `started_at`, `session`, `model`, `attempt` | `launch` | The current attempt, and when it started. |
-| `verdict`, `verdict_ref` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). |
-| `tokens` | `close` | `"<out>/<in>"`, from the session transcript under the worker's worktree path. The cache counts are printed on the `tokens` event line. |
-| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager` or `operator`; a squash or rebase merge needs the operator's word. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
+| `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
+| `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
+| `base` | `launch`, `adopt` | The commit the attempt started from. The verified change is `base..Head`. |
+| `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
+| `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the worker's worktree path; the cache counts are printed on the `tokens` event line. |
+| `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
+| `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
+| `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
+| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager` or `operator`. In `pr` mode `record` sets them from the request state. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
+
+`launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
+request across attempts.
 
 ## Layout
 
@@ -363,8 +492,9 @@ skill. Metadata holds everything else, 15 keys:
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
 | `scripts/python-path.sh` | Finds a Python 3.11 or later. `AGENTIC_TEAM_PYTHON` overrides it. |
 | `scripts/config.py` | Reads, merges, and validates the project config; holds every default |
-| `scripts/run.py` | Launches, drains, verifies, closes, merges, stops, abandons, and reports |
-| `tests/` | Tests for the scripts. Run `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |
+| `scripts/host.py` | The code host seam: GitHub through `gh`, GitLab through `glab` |
+| `scripts/run.py` | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports |
+| `tests/` | Tests for the scripts, with a fake `claude`, a fake `gh`, and a fake `glab`. Run `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |
 
 ## Extending
 

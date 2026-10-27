@@ -6,7 +6,7 @@
 1. **Stop launching.** Add `STOP: paused by operator <time>` as the first line
    of `.agentic-team/standing-orders.md`. `STOP` halts `run.py launch` only:
    verifiers may still start and verified work may still close, but `close`
-   does not merge while `STOP` is set.
+   does not merge while `STOP` is set, in either merge mode.
 2. **Bring sessions to a safe point.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`. Let a worker that
    is close to done, and every verifier, finish. Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>` on each
    other worker. Its uncommitted work stays in its worktree. Do not record it

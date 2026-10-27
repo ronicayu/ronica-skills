@@ -22,11 +22,12 @@ up).
    started before the switch: subagents, background commands, open branches or
    PRs, and half-done edits. Stop any subagent or background command that is
    doing task work. For each item, choose one of these:
-   - Finish only the integration steps a Manager owns: push, PR, CI, and merge
-     under the standing orders or the autonomy grant. Merge locally only
-     through `run close` under a `MERGE:` line, or through the code host when
-     the standing orders or the grant allow it. After a merge that `run close`
-     did not do, record it with `run merged <id> --by manager`.
+   - Finish only the integration steps a Manager owns: the `run` commands that
+     push, open requests, read CI and merge. Merging goes through
+     `run`: `run close` under a `MERGE:` line (`merge.mode` decides local or
+     request). A branch or request you opened before the switch:
+     `run adopt <id> --branch <b> --head <sha> [--pr <n>]` once it has a task.
+     Record a merge `run` cannot see with `run merged <id> --by operator`.
    - Turn the rest into a scoped Taskgraph task.
    - Ask the operator.
 

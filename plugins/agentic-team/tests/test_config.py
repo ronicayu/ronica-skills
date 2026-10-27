@@ -54,6 +54,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["models"]["implementation"], {"model": "sonnet", "effort": "high"})
         self.assertIsNone(cfg["models"]["verifier"])
         self.assertEqual(cfg["constraints"]["forbidden"], [])
+        self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge"})
+        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method"})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):
@@ -128,12 +130,27 @@ class ConfigTest(unittest.TestCase):
             sessions.timezone = "Mars/Olympus"
             constraints.forbidden = "x"
             models.judgement = { effort = "high" }
+            merge.mode = "PR"
+            merge.method = 3
         """)
         found = "\n".join(config.problems(config.load(self.root)))
         self.assertIn("sessions.max_parallel must be a positive integer", found)
         self.assertIn("not an IANA time zone", found)
         self.assertIn("constraints.forbidden must be a list of strings", found)
         self.assertIn("models.judgement must be a model id", found)
+        self.assertIn('merge.mode must be one of "local", "pr", not "PR"', found)
+        self.assertIn('merge.method must be one of "merge", "squash", "rebase", not 3', found)
+
+    def test_64_merge_section(self):
+        self.write(MINIMAL + '[merge]\nmode = "pr"\nhost = "gitlab"\nremote = "upstream"\nmethod = "squash"\nmethd = 1\n')
+        found = config.problems(config.load(self.root))
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("unknown key merge.methd (did you mean merge.method?)", found[0])
+        self.assertEqual(self.run_cli("get", "merge.host")[:2], (2, ""))
+        self.write(MINIMAL + '[merge]\nmode = "pr"\nhost = "gitlab"\nremote = "upstream"\nmethod = "squash"\n')
+        self.assertEqual(self.run_cli("get", "merge.host")[:2], (0, "gitlab\n"))
+        self.write(MINIMAL + '[merge]\nremote = " "\n')
+        self.assertIn("merge.remote must be a non-empty string", " ".join(config.problems(config.load(self.root))))
 
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")

@@ -21,7 +21,8 @@ data, then add only the judgement the data cannot give.
    2. what changed in the plan, and what is next on the critical path;
    3. what waits for the operator: open decisions with your recommendation,
       files to send, branches ready to merge and the tasks that wait on them,
-      and kept or abandoned worktrees (from the `kept` and `abandoned` lines)
+      requests waiting on the host (pending checks, approvals, behind, closed)
+      with the request link, and kept or abandoned worktrees (from the `kept` and `abandoned` lines)
       to remove. These are the only questions you ask;
    4. what is unmet or stuck.
 

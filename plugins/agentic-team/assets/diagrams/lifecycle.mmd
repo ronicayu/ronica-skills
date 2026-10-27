@@ -14,8 +14,19 @@ flowchart TD
   RETRY -->|"yes: run.py abandon"| DECIDE
   VERIFY --> CLOSE{run.py close}
   CLOSE -->|"verify-failed"| AGAIN
-  CLOSE -->|"artifact- or test-verified:<br/>tokens, tg done"| MERGE{MERGE: line in<br/>standing orders?}
-  MERGE -->|"yes: merge,<br/>then claude rm"| DONE([Done])
+  CLOSE -->|"artifact- or test-verified:<br/>tokens, tg done"| MODE{merge.mode?}
+  MODE -->|"local"| MERGE{MERGE: line in<br/>standing orders?}
+  MODE -->|"pr"| PUB[close: push task-id,<br/>open the request]
+  PUB --> REC{record: request state}
+  REC -->|"clean + MERGE: line"| HOSTMERGE[gh/glab merge]
+  HOSTMERGE --> DONE([Done])
+  REC -->|"behind"| CLOSE
+  REC -->|"blocked / pending"| REC
+  REC -->|"merged by someone"| DONE
+  REC -->|"closed, conflict"| DECIDE
+  RECORD -->|"verify_mode ci"| CI[verify: push, request, CI run]
+  CI --> RECORD
+  MERGE -->|"yes: merge,<br/>then claude rm"| DONE
   MERGE -->|"no: ready to merge"| OPMERGE[Operator merges]
   OPMERGE -->|"run.py merged,<br/>then claude rm"| DONE
   AGAIN --> LAUNCH
