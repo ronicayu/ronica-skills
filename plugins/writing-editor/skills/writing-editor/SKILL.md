@@ -58,6 +58,7 @@ When one document serves two of these, write the body for the primary reader and
 - **Horizontal logic.** The items in a group are the same kind of thing and cover the ground without overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.
 - **The sum holds.** If every support is true, the top line follows. If not, the claim overreaches or a support is missing.
+- **Current final state.** The body states what is true now. It holds no review-round history, agent actions, intermediate corrections, prior counts, superseded wording, or account of how the document evolved. Text whose job is the change (changelog, release notes, PR description, commit message, decision log, an ADR's status or history section) is exempt. History that must stay goes in its own section or a linked record.
 
 Fix this layer first. In review mode, say plainly that the structure needs reshaping before you give line notes.
 

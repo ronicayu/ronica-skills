@@ -160,6 +160,8 @@ None of these is a grammatical error, which is why the earlier passes leave them
 
 **Sweeping frames.** *In today's rapidly evolving landscape*, *As organizations increasingly…*, and the matching closings about journeys, foundations, unlocking, and empowering. Cut to the specific claim, or cut the sentence.
 
+**Revision narration.** *Updated after review*, *previously this said*, *now 115 lines (was 166)*, *as requested, I changed*, *corrected from an earlier draft*. The reader needs the result, not the route to it. State the current fact and cut the history (see *Current final state* in `SKILL.md`).
+
 **Hedge and hype in one sentence.** "This may potentially deliver significant improvements." Neither half survives: say what changes, by how much, and how confident you are.
 
 **Self-praise about the document.** *Comprehensive*, *robust*, *thorough*, *carefully designed*, *rigorous*, *best practice*. These are claims about the work rather than claims in it, and the reader judges that for themselves.
