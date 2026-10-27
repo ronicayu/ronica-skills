@@ -643,43 +643,121 @@ def start_session(run, worktree, name, model, effort, text):
     return out.stdout.strip()
 
 
+def registered_worktrees(run):
+    """Real paths of the worktrees git has registered, including stale ones whose folder is gone."""
+    out = run.git("worktree", "list", "--porcelain", check=False).stdout
+    return {os.path.realpath(line[len("worktree "):]) for line in out.splitlines() if line.startswith("worktree ")}
+
+
+def commit_of(run, ref):
+    out = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
 def add_worktree(run, name, ref, retry=""):
     """Create .claude/worktrees/<name> on branch worktree-<name> at ref, where `claude --bg --worktree <name>`
-    reuses it. An existing branch or folder is refused, never reused or reset."""
+    reuses it. An existing branch or folder is refused, never reused or reset. `retry` is a hint that gives a
+    way out without removing anything."""
     path, branch = os.path.join(run.wt_dir, name), f"worktree-{name}"
-    clash, fix = [], []
+    rel, facts, steps = f".claude/worktrees/{name}", [], []
+    registered = path in registered_worktrees(run)
     if os.path.lexists(path):
-        clash.append(f"folder .claude/worktrees/{name}")
-        fix.append(f"`git worktree remove --force .claude/worktrees/{name}`")
-    if run.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).returncode == 0:
-        clash.append(f"branch {branch}")
-        fix.append(f"`git branch -D {branch}`")
-    if clash:
-        raise Refused(f"{' and '.join(clash)} already exist{'s' * (len(clash) == 1)}; nothing was created. "
-                      f"Remove {' and '.join(fix)}, then rerun{retry}")
+        if registered:
+            facts.append(f"folder {rel} is a git worktree")
+            steps.append(f"`git worktree remove {rel}`")
+        else:
+            facts.append(f"folder {rel} is a plain folder, not a git worktree")
+            steps.append(f"move or delete {rel} yourself")
+    elif registered:
+        facts.append(f"{rel} is a stale worktree registration (the folder is gone)")
+        steps.append("`git worktree prune`")
+    tip = commit_of(run, f"refs/heads/{branch}")
+    if tip:
+        want = commit_of(run, ref)
+        count = run.git("rev-list", "--count", f"{want or ref}..{branch}", check=False)
+        short = (want or ref)[:7]
+        if tip == want:
+            note = f"is at {short}; nothing is on it"
+        elif count.returncode == 0 and count.stdout.strip() == "0":
+            note = f"holds no commits beyond {short}; nothing is on it"
+        elif count.returncode == 0:
+            note = (f"holds {count.stdout.strip()} commit{'s' * (count.stdout.strip() != '1')} beyond {short}; "
+                    "remove it only if you do not need them")
+        else:
+            note = "exists"
+        facts.append(f"branch {branch} {note}")
+        if not (registered and not os.path.lexists(path)):  # `branch -D` fails until the stale registration is pruned
+            steps.append(f"`git branch -D {branch}`")
+    if facts:
+        raise Refused("; ".join(facts) + ". Nothing was created." + (f" {retry}." if retry else "")
+                      + " To reuse this name: " + ", then ".join(steps) + ", then rerun.")
     out = run.git("worktree", "add", "-q", "-b", branch, path, ref, check=False)
     if out.returncode != 0:
         raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
 
 
-def remove_worktree(run, name):
-    """Undo add_worktree after a failed start. Best effort: the original error is the one to report."""
-    run.git("worktree", "remove", "--force", os.path.join(run.wt_dir, name), check=False)
-    run.git("branch", "-D", f"worktree-{name}", check=False)
+def remove_worktree(run, name, ref):
+    """Undo add_worktree after a failed start, only when nothing else lives there. Returns None when it
+    removed them, else why it kept them. Best effort: the caller reports the original error."""
+    path, branch = os.path.join(run.wt_dir, name), f"worktree-{name}"
+    want = commit_of(run, ref)
+    if not want or commit_of(run, f"refs/heads/{branch}") != want:
+        return f"branch {branch} is no longer at {(want or ref)[:7]}"
+    if os.path.isdir(path) and run.git("status", "--porcelain", cwd=path, check=False).stdout.strip():
+        return "it has uncommitted changes"
+    run._sessions = None  # the failed start may have left a row
+    try:
+        if any(s.wtname == name for s in run.sessions()):
+            return "a session row uses it"
+    except Refused:
+        pass  # claude may be what failed; the checks above still held
+    run.git("worktree", "remove", "--force", path, check=False)
+    run.git("branch", "-D", branch, check=False)
+    return None
+
+
+def started_or_cleaned(run, name, ref, exc):
+    """Called when the brief or `claude --bg` failed after add_worktree. Removes the worktree when safe,
+    then raises the original error, with a note when the worktree stays."""
+    kept = remove_worktree(run, name, ref)
+    if kept is None:
+        raise exc
+    raise Refused(f"{exc}\nkept .claude/worktrees/{name}: {kept}", getattr(exc, "code", 1)) from exc
+
+
+def drift_warning(run, name, ref, branch=True):
+    """"" when the session's worktree is still at ref (and on its branch), else the warning for the event."""
+    path = os.path.join(run.wt_dir, name)
+    head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
+    on = run.git("branch", "--show-current", cwd=path, check=False).stdout.strip() == f"worktree-{name}"
+    if head and head == commit_of(run, ref) and (on or not branch):
+        return ""
+    return f"the session's worktree is not at {ref[:7]}; claude may no longer reuse a prepared worktree"
 
 
 def previous_head(run, rows, base, nxt):
     """(commit, note) from the latest worker result or stopped attempt, else (None, None). Its Head: is the
-    new base only when `base`, the previous attempt's recorded base, is an ancestor of it; else `base`, with a note."""
+    new base only when `base`, the base recorded for the previous attempt, is an ancestor of it. Otherwise
+    the recorded base is, with a note; a Head that is not in this repository does the same."""
     found = [r for r in rows if is_worker_result(r) or (r["status"] == "STOPPED" and r["kind"] == "task")]
     match = HEAD_LINE.search(found[-1]["body"]) if found else None
     if not match:
         return None, None
-    head = match.group(1)
-    if is_sha(base) and run.git("merge-base", "--is-ancestor", base, head, check=False).returncode == 1:
-        return base, (f"attempt {found[-1].get('attempt') or nxt - 1} Head {head[:7]} is not built on its "
-                      f"base {base[:7]}; starting from {base[:7]}")
-    return head, None
+    head, n = match.group(1), found[-1].get("attempt") or nxt - 1
+    if not is_sha(base):
+        return head, None
+    code = run.git("merge-base", "--is-ancestor", base, head, check=False).returncode
+    if code == 0:
+        return head, None
+    if code == 1:
+        return base, (f"Head {head[:7]} of attempt {n} is not built on the recorded base {base[:7]}; "
+                      f"starting from {base[:7]}")
+    if commit_of(run, base):
+        return base, f"attempt {n} Head {head[:7]} is not in this repository; starting from the recorded base {base[:7]}"
+    if commit_of(run, head):
+        return head, None  # only the base is gone: the lineage cannot be checked
+    raise Refused(f"attempt {n} Head {head[:7]} and the recorded base {base[:7]} are not in this repository; "
+                  "pass --base <sha|branch>")
 
 
 def resolve_base(run, ref):
@@ -843,6 +921,7 @@ def cmd_launch(run, args):
     base, note = (given, None) if given else previous_head(run, rows, meta.get("base"), nxt)
     if base is None:
         base = run.git("rev-parse", "--verify", f"{run.target_ref(task)}^{{commit}}").stdout.strip()
+    base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
     text = render(run, task, "task", nxt, session, base=base)
     live = [s for s in run.sessions() if s.task_id == tid and s.live]
@@ -868,13 +947,13 @@ def cmd_launch(run, args):
         else:
             print(text, end="")
         return
-    add_worktree(run, worktree, base, f" (or pass --attempt {nxt + 1} for a new name)")
+    add_worktree(run, worktree, base, f"Pass --attempt {nxt + 1} to start under a new name")
     try:
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         said = start_session(run, worktree, session, model, effort, text)
-    except BaseException:
-        remove_worktree(run, worktree)
-        raise
+    except Exception as exc:
+        started_or_cleaned(run, worktree, base, exc)
+    drift = drift_warning(run, worktree, base)
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts.
@@ -884,7 +963,7 @@ def cmd_launch(run, args):
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
     detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree .claude/worktrees/{worktree} "
               f"base {base[:7]} brief {path}" + (f"; {note}" if note else "")
-              + (f"; claude said: {said}" if said else ""))
+              + (f"; claude said: {said}" if said else "") + (f"; {drift}" if drift else ""))
     run.emit("launched", tid, nxt, session, detail)
 
 
@@ -1009,7 +1088,12 @@ def cmd_verify(run, args):
             m = WT_NAME.match(entry)
             if m and m.group(1) == "verify" and int(m.group(2)) == tid and int(m.group(3)) == attempt:
                 names.add(entry)
-    k = 1 + len(names)
+    stale = run.git("branch", "--list", "--format=%(refname:short)", f"worktree-verify-{tid}-{attempt}",
+                    f"worktree-verify-{tid}-{attempt}-*", check=False).stdout.split()
+    names |= {b[len("worktree-"):] for b in stale}  # a branch left behind counts like a folder
+    k = 1
+    while f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "") in names:
+        k += 1
     name = f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "")
     verifier = run.config["models"]["verifier"]
     if args.model:
@@ -1037,11 +1121,12 @@ def cmd_verify(run, args):
     try:
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         start_session(run, name, name, model, effort, text)
-    except BaseException:
+    except Exception as exc:
         if is_sha(ref):
-            remove_worktree(run, name)
+            started_or_cleaned(run, name, ref, exc)
         raise
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}")
+    drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
+    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}" + (f"; {drift}" if drift else ""))
 
 
 def verify_ci(run, args, task, name):

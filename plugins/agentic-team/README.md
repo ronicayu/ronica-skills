@@ -101,14 +101,18 @@ calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 worktree (`.claude/worktrees/task-<id>-<attempt>`), on its own branch
 (`worktree-task-<id>-<attempt>`). `run.py` creates that worktree itself, at the
 base commit, with `git worktree add`, and `claude --bg --worktree` reuses it.
+This relies on `claude --bg --worktree <name>` reusing an existing worktree, which was
+verified with Claude Code 2.1.311; the `launched` and `verifying` events warn if the
+session's worktree is no longer at the base.
 The worker resets and checks out nothing: its brief names the base, and it
 reports `BLOCKED` if `HEAD` is not there. `launch` refuses when the branch or
-folder already exists, and removes the worktree and branch again if `claude`
-fails to start. The base is the Manager's `HEAD`, or the `Head` commit of the
+folder already exists (the message gives `--attempt <n+1>` first, then the steps
+to reuse the name), and removes the worktree and branch again if `claude` fails
+to start, unless a session, a change or a new commit is there. The base is the Manager's `HEAD`, or the `Head` commit of the
 task's previous worker result, or of a stopped attempt's WIP commit. A previous
-`Head` counts only when the base recorded for that attempt is its ancestor;
-otherwise the retry starts from the recorded base, and the `launched` event
-says so. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
+`Head` counts only when the base recorded for the task is its ancestor;
+otherwise (or when the `Head` is not in the repository) the retry starts from
+the recorded base, and the `launched` event says so. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
 branch. `launch --base <sha|branch>` starts from any commit and wins over all
 of these. `run.py verify` creates the verifier's worktree the same way, at the
 commit under review. `claude --bg` writes session data under `~/.claude`, so run
