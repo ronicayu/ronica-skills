@@ -164,6 +164,14 @@ For each template section: what "good" looks like in two or three lines, the mos
 - Build detail is linked from a one-line summary, not inlined.
 - Every ADR lists its criteria before its options and has a "Revisit when".
 
+**Changes made during the build:**
+
+- The ADR form is in its own file, `references/adr-template.md` (owner's request), at 81 lines.
+- Stage 1 adds a question on outcomes (what will be better, and how it is measured), because the template has an Outcomes table. The questions follow writing-editor's own stage 1 items, and any the request or repository answers are skipped.
+- When an ADR is split out, the design document keeps the decision's fields in short form, not only one line, so the section still reads without the ADR.
+- Draft mode adds a stop after Fundamental options: the user agrees the high-level choice before the design sections are written.
+- Key decision status adds Draft.
+
 **Added after approval (owner's layering rules, 2026-10-27):**
 
 - Blocks the review: the summary and context name no class, table, queue, field, state or ID; a load-bearing low-level fact is a named constraint with a pointer.

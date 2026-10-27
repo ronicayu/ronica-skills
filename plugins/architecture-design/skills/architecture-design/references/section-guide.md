@@ -22,7 +22,7 @@ What a good section looks like, its most common failure, and a short example. Us
 ## Quality goals and trade-offs
 
 **Good:** goals are ranked, and each names the decisions it drives. Each trade-off names the goal that loses and the compromise.
-**Failure:** an unranked list of every "-ility". A goal that changes no decision is not a goal.
+**Failure:** an unranked list of every "-ility". A goal that changes no decision is not a goal. "We balance X and Y" is not a trade-off: name the goal that loses.
 **Example:** "Data integrity over responsiveness: under peak load we queue requests rather than skip the durable write. Users may wait; no order is lost."
 
 ## Measurable NFRs
@@ -37,7 +37,7 @@ What a good section looks like, its most common failure, and a short example. Us
 **Failure:** assumptions hidden in the design text ("the provider allows 1,000 sends per second").
 **Example:** "The email provider grants 1,000 sends per second. Affects throughput and fan-out design. Confirm with the provider account manager."
 
-## Requirements and design elements
+## Requirements and design elements (all sections)
 
 **Good:** requirements say what and why; the design says how. Every design element traces back to a requirement, goal, NFR or constraint.
 **Failure:** "The system must use a message queue." That is a design decision written as a requirement. Also: a component that no requirement asks for. Flag it as proposed beyond the requirements, or remove it.
@@ -48,7 +48,7 @@ What a good section looks like, its most common failure, and a short example. Us
 **Failure:** one real option and two strawmen. Also: a comparison whose criteria are not the stated goals.
 **Example:** "Do nothing: the backlog grows 20% a year and peak waits reach 1 hour by next year. Rejected on goal 1."
 
-## Key decisions
+## Key decisions (in the section each one shapes)
 
 **Good:** each decision sits in the section it shapes, with the goal it serves, the alternative it rejected, what becomes easier and harder, and a measurable revisit condition.
 **Failure:** "Decision: use per-purpose tables. Why: best practice." No alternative, no cost, no trigger.
@@ -64,6 +64,11 @@ What a good section looks like, its most common failure, and a short example. Us
 **Good:** the happy path of each main flow, and at least three failure modes, each with detection, recovery and what the user sees.
 **Failure:** only happy paths. Also: "we retry" with no limit and no terminal state.
 **Example:** "Downstream timeout: circuit opens after 5 failures in 30 s; requests queue; the user sees 'confirmation delayed'; an alert fires at 10 minutes."
+
+## Diagrams
+
+**Good:** Mermaid, C4 style. Role names ("Web layer", "Order store") unless the technology is the decision. One screen per diagram; split one that needs scrolling.
+**Failure:** a technology name standing in for a responsibility. Also: a diagram that needs scrolling.
 
 ## Cross-cutting concerns
 
@@ -90,7 +95,7 @@ What a good section looks like, its most common failure, and a short example. Us
 **Good:** blocking questions first, each with what it blocks, how it gets resolved, an owner and a date.
 **Failure:** thirty questions with equal weight. Also: an owner written as "TBD".
 
-## Review record
+## Review
 
 **Good:** everyone asked appears in the log or in the declined list, with the reason they were asked. Every comment has a response: taken, partly or not, with reasons.
 **Failure:** editing past comments, or answering them in the body without a response row.

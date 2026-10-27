@@ -4,7 +4,7 @@
 1. Copy it to the project's design folder. Use it for a system (several contexts or services) or a module (one part of a larger system).
 2. Depth rule: the document holds the design at the level a reviewer needs in order to review it. Each section comment says CORE (always here) or BUILD DETAIL (may live in a companion document, linked from a one-line summary here).
 3. Remove a section that does not fit the subject, with one line of reason in the review asks. Never leave a placeholder.
-4. Lead with the problem, the goals and the options. Naming the answer first turns a review into rubber-stamping.
+4. Argue for the design only after the problem, the goals and the options. The summary and context say what the design is; the case for it comes after the options. Arguing it first turns a review into rubber-stamping.
 5. Name an industry standard (OIDC, OAuth 2, AMQP, REST) and link it. Describe only what is specific to this design: which provider, which scopes, which deviation, and why.
 6. Diagrams: Mermaid, C4 style. Use role names ("Web layer", "Module database") unless the technology is the decision. Split a diagram that does not fit one screen.
 7. Delete every comment, including this one, before the review opens. -->
@@ -89,6 +89,8 @@ Rel(this, dep, "calls / publishes to")
 
 ### Non-goals
 
+<!-- CORE. What this design deliberately does not cover. -->
+
 - {Out of scope, explicitly}
 
 ### Measurable NFRs
@@ -100,6 +102,8 @@ Status: Committed (agreed and verifiable now) | Provisional (the design does not
 | --- | --- | --- | --- | --- | --- |
 
 ### Constraints
+
+<!-- CORE. What the design must accept and cannot change. -->
 
 - **Technical:** {what must be used or cannot be replaced; inherited platform standards}
 - **Business and regulatory:** {data residency, retention, audit, the compliance regime}
@@ -113,7 +117,7 @@ Status: Committed (agreed and verifiable now) | Provisional (the design does not
 
 ## Fundamental options
 
-<!-- CORE. The few top-level shapes considered, including doing nothing where that is possible. Brief and factual. Compare them against the ranked goals, plus complexity, cost and team familiarity. Then state the choice and why. Stop here until the high-level choice is agreed. -->
+<!-- CORE. The few top-level shapes considered, including doing nothing where that is possible. Brief and factual. Compare them against the ranked goals, plus complexity, cost and team familiarity. Then state the choice and why. -->
 
 | Option | {Goal 1} | {Goal 2} | {Goal 3} | Complexity | Cost | Team familiarity |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -175,7 +179,9 @@ sequenceDiagram
   B-->>A: result
 ```
 
-### Scenario 2: {name} (failure: {which})
+### Failure modes
+
+<!-- One row per failure, at least three. Add a sequence diagram only where the recovery path is not obvious. -->
 
 | Failure | Detection | Recovery | User-visible impact |
 | --- | --- | --- | --- |
@@ -284,12 +290,10 @@ Greenfield: replace this section with one paragraph that starts "Greenfield: no 
 
 ## Decisions inside this design
 
-<!-- CORE. An index: one row per key decision, pointing to the section that argues it. Never restate the reasoning here. Status values match the ADR form. -->
+<!-- CORE. An index: one row per key decision, pointing to the section that argues it. Never restate the reasoning here. Status values are those of a key decision: Draft, Proposed, Accepted, Rejected, Withdrawn, Superseded. -->
 
 | Decision | Section | ADR | Status |
 | --- | --- | --- | --- |
-
-<!-- In its section, each key decision has: Decision and status; Serves (the goal); Alternative rejected, and why; Easier; Harder; Revisit when (a measurable condition); ADR. -->
 
 ## Risks and open questions
 
@@ -332,10 +336,12 @@ Greenfield: replace this section with one paragraph that starts "Greenfield: no 
 
 ## Appendix A: Glossary
 
+<!-- CORE when the document uses domain terms; expand each on first use in the body as well. -->
+
 ## Appendix B: Traceability
 
-<!-- Requirements and compliance controls mapped to the sections that meet them. IDs live here, not in the argued text. -->
+<!-- BUILD DETAIL. Requirements and compliance controls mapped to the sections that meet them. IDs live here, not in the argued text. -->
 
 ## Appendix C: Reviewer checklist sign-off
 
-<!-- Reviewers initial each item of the review checklist before sign-off. -->
+<!-- Reviewers initial each review ask, and each item of the project's design review checklist if it has one, before sign-off. -->

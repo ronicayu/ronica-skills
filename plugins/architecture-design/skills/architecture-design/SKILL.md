@@ -5,7 +5,7 @@ description: "Draft and review architecture design documents and ADRs that go to
 
 # Architecture Design
 
-This skill owns the content of an architecture document: whether the design is complete and argued well enough to review. It does not own the prose. For the prose, use the `writing-editor` skill when it is installed. This skill does not restate its rules.
+This skill owns the content of an architecture document: whether the design is complete and argued well enough to review. It does not own the prose. For the prose, use the `writing-editor` skill when it is installed. This skill does not restate writing-editor's rules, except the few under Restraint that must hold without it.
 
 The reader of an architecture document is evaluating a design. They must be able to test each choice against what it has to achieve. So the document shows the problem, the ranked goals and the options before it argues for the design, and every key decision names what it rejected.
 
@@ -18,9 +18,9 @@ If the request is ambiguous, ask.
 
 ## Pick the template
 
-1. **Search the repository first.** Look for an architecture, design, RFC or ADR template: `**/templates/*`, `docs/**/*template*`, `**/adr/**`, and any pointer in a `CLAUDE.md`. If more than one matches, ask which. A project template always wins.
+1. **Search the repository first.** Look for an architecture, design, RFC or ADR template: `**/templates/*.md`, `docs/**/*template*`, `**/adr/**`, and any pointer in a `CLAUDE.md`. If more than one matches, ask which. A project template always wins.
 2. **Otherwise use the bundled templates.** `references/template.md` for a design document or RFC, `references/adr-template.md` for an ADR.
-3. **Pick the scope.** **System**: several contexts or services. **Module**: one part of a larger system. The template marks the few places where they differ.
+3. **Pick the scope.** **System**: several contexts or services. **Module**: one part of a larger system. The template marks where they differ.
 
 ## Find what was decided before
 
@@ -28,9 +28,9 @@ Search the repository for earlier ADRs, RFCs and design documents on the same sy
 
 ## Draft mode
 
-With `writing-editor` installed, follow its `references/drafting.md` stages and its outline gate, with the additions below. Without it, run the same four stages: purpose and readers, sources, an outline the user approves, then content. Write no body prose before the user approves the outline.
+If the `writing-editor` skill is in your skill list, invoke it and follow its Draft mode (its `references/drafting.md` stages and outline gate), with the additions below. Without it, run the same four stages: purpose and readers, sources, an outline the user approves, then content. Write no body prose before the user approves the outline.
 
-**Stage 1 interview.** One question at a time, each with your recommended answer. In this order:
+**Stage 1 interview.** Ask these after writing-editor's own stage 1 items. One question at a time, each with your recommended answer. Skip any that the request or the repository already answers, and read that answer back instead. In this order:
 
 1. Functional requirements: what the system must do.
 2. Non-functional requirements: scale, latency, availability, cost, retention, compliance.
@@ -40,11 +40,11 @@ With `writing-editor` installed, follow its `references/drafting.md` stages and 
 6. The options the user already has in mind. Ask them to name each one, even if they lean one way.
 7. Assumptions nobody has confirmed, and who could confirm each.
 
-**Stage 3 outline.** Use the template's section list, with one message line under each heading. Propose removing template sections that do not fit the subject, with one line of reason. Do not keep them as placeholders. Mark each section core or build detail (see the depth rule in `references/template.md`).
+**Stage 3 outline.** Use the template's section list, with one message line under each heading. Propose removing template sections that do not fit the subject, with one line of reason. Do not keep them as placeholders. Mark each section core or build detail (see the depth rule in `references/template.md`). The template's section names stand, because a template sets the section names. The message goes in the comment under each heading and becomes the section's first sentence.
 
-**Stage 4 content.** Write each section to the bar in `references/section-guide.md`. Open at the highest level and descend one level per section. Keep low-level names (tables, queues, fields, states, IDs) out of the summary and context. Requirements say what and why; the design says how, and every design element traces to a requirement.
+**Stage 4 content.** Write each section to the bar in `references/section-guide.md`. The layering items in `references/review-checklist.md` apply while drafting. After Fundamental options, stop and get the user to agree the choice before writing the design sections.
 
-**Before handover.** Run `references/review-checklist.md` on the draft and fix what it finds. Then, with `writing-editor` installed, run its passes 2 to 6.
+**Before handover.** Run `references/review-checklist.md` on the draft and fix what it finds. Then, if `writing-editor` is installed, invoke it and run its passes 2 to 6.
 
 ## Review mode
 
@@ -62,7 +62,7 @@ With `writing-editor` installed, follow its `references/drafting.md` stages and 
 
 A key decision is written in the section it shapes, not in a separate list. It has these fields:
 
-- **Decision** and **status**: Proposed, Accepted, Rejected, Withdrawn or Superseded (by which decision).
+- **Decision** and **status**: Draft, Proposed, Accepted, Rejected, Withdrawn or Superseded (by which decision).
 - **Serves**: the ranked goal it protects.
 - **Alternative rejected**, and why.
 - **Easier**: what the decision makes easier.
@@ -75,8 +75,6 @@ The "Decisions inside this design" table is an index: one row and a section link
 ## Split out an ADR
 
 Write a separate ADR when a decision is contested, hard to reverse, or shared with other teams. Use `references/adr-template.md`, or the project's own. The design document keeps the decision's fields in short form and links the ADR.
-
-In an ADR, the criteria are ranked and come before the options. Options are judged against the criteria, not justified after the choice.
 
 ## Restraint
 
