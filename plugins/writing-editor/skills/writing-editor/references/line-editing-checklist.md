@@ -131,46 +131,82 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 None of these is a grammatical error, which is why the earlier passes leave them standing, and a machine reader would not care about any of them. A human notices them within two paragraphs, concludes that nobody actually wrote this, and discounts the content from there on. Run this pass last, and always on prose you drafted yourself.
 
-**The rule of three, applied everywhere.** Three adjectives, three clauses, three bullets, whatever the subject actually has. Count the real points and use that number; two is a fine number, and so is one.
+The numbers are stable IDs. Other skills cite them as *writing-editor tell N*. A removed tell leaves a gap, and a new tell takes the next free number.
+
+### The five most common, with examples
+
+**1. The rule of three, applied everywhere.** Three adjectives, three clauses, three bullets, whatever the subject actually has. Count the real points and use that number; two is a fine number, and so is one.
 
 > "The design is clear, scalable, and maintainable."
 > → "Each module owns one schema, so a change lands in one place."
 
-**Not just X, but Y.** Also *It's not about X, it's about Y* and *X isn't merely Y — it's Z*. The frame promises a reversal and delivers emphasis.
+**2. Not just X, but Y.** Also *It's not about X, it's about Y* and *X isn't merely Y — it's Z*. The frame promises a reversal and delivers emphasis.
 
 > "This isn't just a migration — it's a re-architecture."
 > → "The migration also replaces the scheduler."
 
-**Signposts that signal nothing.** *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete. A point that matters is shown to matter by where it sits.
-
-**Sections padded to equal length.** Every section the same size and depth, because an outline was filled in rather than an argument written. Let the section that matters run longer, and delete the one that existed for symmetry.
-
-**Heading echo.** The first sentence restates the heading in different words, spending the most-read line in the section on nothing.
+**3. Heading echo.** The first sentence restates the heading in different words, spending the most-read line in the section on nothing.
 
 > "## Rollback is untested
 > Rollback has not been tested end to end."
 > → "## Rollback is untested
 > The plan has been walked through on paper twice; no one has run it against a restored database."
 
-**A summary that adds nothing.** "In summary, the three factors above…" tells a reader who just read them what they already hold. Keep a closing only when it states something new: the consequence, the decision, or who does what next.
+**4. A sentence that could be anywhere.** It names a feeling instead of a mechanism. The test: if the sentence could appear unchanged in another project's documents, it says nothing about this one. Ask what it tells the reader to do or know, and write that as a mechanism, a fact or a number. If you cannot, cut it.
 
-**Emphasis inflation.** Bold on every third phrase, italics on ordinary words, em-dashes as the only punctuation between clauses. Bold marks the one thing a skimmer must not miss; four times on a page it marks nothing.
+> "The query layer keeps SQL close at hand and easy to read."
+> → "`.toSQL()` returns the exact string sent to the database."
 
-**Tables and bullets by reflex.** A table with one meaningful column, or a bulleted list of what was an argument. Prefer a list only where the items are genuinely parallel, and a table only where each row has two or more comparable columns (see *Restraint* in `SKILL.md` for why bullets cost reasoning).
+**5. Over-compression.** Arrows, symbol-speak, dropped articles, verbless fragments, and private abbreviations that make the reader decode instead of read. Common in table cells and bullets.
 
-**Sweeping frames.** *In today's rapidly evolving landscape*, *As organizations increasingly…*, and the matching closings about journeys, foundations, unlocking, and empowering. Cut to the specific claim, or cut the sentence.
+> "Parser rejects bad date → exit 2, no write."
+> → "The parser rejects a bad date, exits with code 2, and writes nothing."
 
-**Revision narration.** *Updated after review*, *previously this said*, *now 115 lines (was 166)*, *as requested, I changed*, *corrected from an earlier draft*. The reader needs the result, not the route to it. State the current fact and cut the history (see *Current final state* in `SKILL.md`).
+### The rest, one line each
 
-**Hedge and hype in one sentence.** "This may potentially deliver significant improvements." Neither half survives: say what changes, by how much, and how confident you are.
+**6. Signposts that signal nothing.** *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete them; a point shows it matters by where it sits.
 
-**Self-praise about the document.** *Comprehensive*, *robust*, *thorough*, *carefully designed*, *rigorous*, *best practice*. These are claims about the work rather than claims in it, and the reader judges that for themselves.
+**7. Sections padded to equal length.** An outline filled in rather than an argument written. Let the section that matters run longer, and delete the one that exists for symmetry.
 
-**Faux precision.** "Approximately 40–60% faster", "roughly 3–5 days", where nothing was measured. Give the basis, or give the narrower range you can defend.
+**8. A summary that adds nothing.** "In summary, the three factors above…" Keep a closing only when it states something new: the consequence, the decision, or who does what next.
 
-**Uniform rhythm.** Every sentence fifteen to twenty words, every paragraph three sentences, page after page. The fix is under [Vary length](#flow-and-rhythm), but the cause is different: assembled prose has no voice to vary.
+**9. Emphasis inflation.** Bold on every third phrase, italics on ordinary words, em dashes as the only punctuation between clauses. Bold marks the one thing a skimmer must not miss.
 
-**Restating the request.** "As requested, this document outlines…" spends the opening line on what the reader already knows. Start with the answer.
+**10. Inline-header lists.** A bold label and a colon that restate the line: "**Performance:** Performance improved…". Write it as prose. A bold lead-in that ends in a period, names the item and is followed by new detail is fine.
+
+**11. Tables and bullets by reflex.** A table with one meaningful column, or a bulleted list of what was an argument. Lists for parallel items, tables for two or more comparable columns (see *Restraint* in `SKILL.md`).
+
+**12. Sweeping frames.** *In today's rapidly evolving landscape*, *As organizations increasingly…*, and closings about journeys, foundations, unlocking and empowering. Cut to the specific claim, or cut the sentence.
+
+**13. Revision narration.** *Updated after review*, *previously this said*, *now 115 lines (was 166)*, *as requested, I changed*. State the current fact and cut the history (see *Current final state* in `SKILL.md`).
+
+**14. Hedge and hype in one sentence.** "This may potentially deliver significant improvements." Say what changes, by how much, and how confident you are.
+
+**15. Self-praise about the document.** *Comprehensive*, *robust*, *thorough*, *carefully designed*, *rigorous*, *best practice*. These are claims about the work, not in it.
+
+**16. Faux precision.** "Approximately 40–60% faster" where nothing was measured. Give the basis, or the narrower range you can defend.
+
+**17. Uniform rhythm.** Every sentence fifteen to twenty words, every paragraph three sentences. The fix is under [Vary length](#flow-and-rhythm); the cause is prose assembled without a voice.
+
+**18. Restating the request.** "As requested, this document outlines…" Start with the answer.
+
+**19. Machine vocabulary.** *Delve*, *tapestry*, *pivotal*, *underscore*, *testament*, *intricate*, *garner*, *crucial*, *vibrant*, *interplay*, *landscape* used abstractly, *Additionally* to open a sentence. Use the plain word.
+
+**20. Abstract metaphor nouns.** *Substrate*, *surface* (as in "API surface"), *primitive*, *harness*, *vector*, *wedge*, *locus*, *nexus*, *scaffolding*, *ratchet*, *north star*, *flywheel*, *endgame*. They sound technical and name nothing. Use the concrete word: base, add, method, the mechanism's real name.
+
+**21. Mannered prose.** Aphorisms ("wire it or delete it"), fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"). Say it literally.
+
+**22. A fancy way to say "is".** *Serves as*, *stands as*, *boasts*, *features*. Write "is" or "has".
+
+**23. A trailing -ing phrase.** "…, highlighting the need for…", "…, ensuring that…", "…, reflecting…". Cut it, or make it a sentence with a subject and a source.
+
+**24. A colon as a connector.** A colon belongs before a list, an example or a definition. Mid-sentence, as a hinge between two clauses, it is a crutch. Make two sentences.
+
+**25. False ranges.** "From X to Y" where X and Y sit on no real scale. List the items.
+
+**26. An adverb propping up a weak verb.** "Runs quickly", "significantly improves". Give the number or the measured change, or find the verb that carries it.
+
+**27. Vague attribution.** *Experts believe*, *industry reports suggest*, *some argue*. Name the source or cut the claim.
 
 ## Swap tables
 
