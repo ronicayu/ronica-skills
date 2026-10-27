@@ -99,13 +99,26 @@ calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 
 `run.py launch <id>` renders the brief and starts the worker in its own
 worktree (`.claude/worktrees/task-<id>-<attempt>`), on its own branch
-(`worktree-task-<id>-<attempt>`). A new worktree starts from the default
-branch, so the brief gives the worker a base commit, and the worker's first
-step is `git reset --keep <base>`. The base is the Manager's `HEAD`, or the
-`Head` commit of the task's previous worker result, or of a stopped attempt's
-WIP commit. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
-branch. `launch --base <sha|branch>` starts from any commit. Before it files its report, whatever the status, the worker
-commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
+(`worktree-task-<id>-<attempt>`). `run.py` creates that worktree itself, at the
+base commit, with `git worktree add`, and `claude --bg --worktree` reuses it.
+This relies on `claude --bg --worktree <name>` reusing an existing worktree, which was
+verified with Claude Code 2.1.311; the `launched` and `verifying` events warn if the
+session's worktree is no longer at the base.
+The worker resets and checks out nothing: its brief names the base, and it
+reports `BLOCKED` if `HEAD` is not there. `launch` refuses when the branch or
+folder already exists (the message gives `--attempt <n+1>` first, then the steps
+to reuse the name), and removes the worktree and branch again if `claude` fails
+to start, unless a session, a change or a new commit is there. The base is the Manager's `HEAD`, or the `Head` commit of the
+task's previous worker result, or of a stopped attempt's WIP commit. A previous
+`Head` counts only when the base recorded for the task is its ancestor;
+otherwise (or when the `Head` is not in the repository) the retry starts from
+the recorded base, and the `launched` event says so. In `pr` mode the Manager's `HEAD` is replaced by the fetched target
+branch. `launch --base <sha|branch>` starts from any commit and wins over all
+of these. `run.py verify` creates the verifier's worktree the same way, at the
+commit under review. `claude --bg` writes session data under `~/.claude`, so run
+`launch` and `verify` outside the Bash sandbox or allow writes to `~/.claude`;
+either needs the operator's agreement. Before it files its report, whatever the
+status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
 `ISSUES` or `BLOCKED`), so `Head` is always set and the worktree is clean. It
 files its report with `tg result add`. The report names the `Branch`, the
 `Head` commit SHA, and the `Worktree` path. The Manager never messages a
@@ -120,7 +133,7 @@ worktrees stay, and the report lists them for the operator to remove.
 
 The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
-verifier in a worktree of its own that checks out the `Head` commit. Then
+verifier in a worktree of its own, created at the `Head` commit. Then
 `run.py close` records the verdict and the token counts, runs `tg done`, and
 then follows `merge.mode`. In `local` mode it merges only when a standing-orders
 line starts with `MERGE:`, and only into the checked-out branch of a clean main
@@ -267,7 +280,7 @@ Manager runs `record` later.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, starts the worker, and records `session`, `model`, `attempt`, `base`, and `started_at`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
+| `launch <id>` | Renders the brief, creates the worktree at the base, starts the worker, and records `session`, `model`, `attempt`, `base`, and `started_at`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
@@ -466,7 +479,7 @@ skill. Metadata holds everything else, 21 keys:
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
 | `base` | `launch`, `adopt` | The commit the attempt started from. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
-| `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the worker's worktree path; the cache counts are printed on the `tokens` event line. |
+| `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the worker's worktree path; the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
 | `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |

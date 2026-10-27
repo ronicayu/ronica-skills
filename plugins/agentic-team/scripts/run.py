@@ -4,10 +4,12 @@
 Usage:
     run.py [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command> ...
 
-    launch <id>    render the brief, start the worker, record the start
+    launch <id>    render the brief, create the worktree at the base, start the
+                   worker, record the start
     adopt <id>     bring a branch started outside run.py under the Manager
-    verify <id>    start a verifier session for a PASS result, or find the
-                   CI run on the pushed branch (verify_mode ci:<name>)
+    verify <id>    start a verifier session, in a worktree at the commit, for a
+                   PASS result, or find the CI run on the pushed branch
+                   (verify_mode ci:<name>)
     record         read the queue: results, dead and stuck sessions, merges,
                    open decisions, free slots, ready tasks
     close <id>     record the verdict and tokens, mark the task done, merge
@@ -84,9 +86,12 @@ VERDICT_LINE = re.compile(r"(?m)^Verdict:\s*(\S+)\s*$")
 STATUS_LINE = re.compile(r"(?m)^Status:\s*(PASS|ISSUES|BLOCKED)\s*$")
 TRUST_HINT = ("Run claude once in the repository and accept the trust prompt; "
               "a trusted parent folder does not count.")
+SANDBOX_HINT = ("claude --bg writes session data under ~/.claude. Run run.py launch and run.py verify outside the "
+                "Bash sandbox, or allow writes to ~/.claude. Either change needs the operator's agreement.")
 PROMPT_HINT = ("claude logs {sid} shows the command it waited on. Remove the need for it: narrow the brief or "
                "SCOPE, keep the step for the Manager's integration list, or set verify_mode=ci:<workflow> when "
                "the check needs the runner. Then {cmd}. A pinned old model id is one more possible cause; use an alias.")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
@@ -555,9 +560,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None):
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
             "SCOPE": "Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete anything.",
-            "SETUP": (f"Output under review: {ref}. If it is a commit SHA, run `git checkout --detach {ref}` in your "
-                      "worktree first. If it is a list of checksums, the output is outside git: compare the files "
-                      "against the checksums and check nothing out."),
+            "SETUP": (f"Output under review: {ref}. Your worktree is already at `{ref}`. Do not check out another "
+                      f"commit. If `git rev-parse HEAD` is not `{ref}`, report BLOCKED."
+                      if is_sha(ref) else
+                      f"Output under review: {ref}. If it is a list of checksums, the output is outside git: compare "
+                      "the files against the checksums and check nothing out."),
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
@@ -591,8 +598,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None):
         values.update({
             "GOAL": f"{task['title']}. {why}",
             "SCOPE": str(meta["scope"]).strip(),
-            "SETUP": (f"Base commit: {base}. Your worktree starts from the default branch. Before anything else, "
-                      f"run `git reset --keep {base}` in your worktree."),
+            "SETUP": (f"Base commit: {base}. Your worktree is already at the base commit `{base}`, on branch "
+                      f"`worktree-task-{tid}-{attempt}`. Do not reset it or check out another commit. If "
+                      f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."),
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
@@ -629,15 +637,127 @@ def start_session(run, worktree, name, model, effort, text):
         message = out.stderr.strip() or out.stdout.strip()
         if "not trusted" in message:
             message += "\n" + TRUST_HINT
+        if any(word in message for word in ("Operation not permitted", "EPERM", "Read-only file system")):
+            message += "\n" + SANDBOX_HINT
         raise Refused(message, 1)
     return out.stdout.strip()
 
 
-def previous_head(rows):
-    """The Head: of the latest worker result or stopped attempt, else None."""
+def registered_worktrees(run):
+    """Real paths of the worktrees git has registered, including stale ones whose folder is gone."""
+    out = run.git("worktree", "list", "--porcelain", check=False).stdout
+    return {os.path.realpath(line[len("worktree "):]) for line in out.splitlines() if line.startswith("worktree ")}
+
+
+def commit_of(run, ref):
+    out = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def add_worktree(run, name, ref, retry=""):
+    """Create .claude/worktrees/<name> on branch worktree-<name> at ref, where `claude --bg --worktree <name>`
+    reuses it. An existing branch or folder is refused, never reused or reset. `retry` is a hint that gives a
+    way out without removing anything."""
+    path, branch = os.path.join(run.wt_dir, name), f"worktree-{name}"
+    rel, facts, steps = f".claude/worktrees/{name}", [], []
+    registered = path in registered_worktrees(run)
+    if os.path.lexists(path):
+        if registered:
+            facts.append(f"folder {rel} is a git worktree")
+            steps.append(f"`git worktree remove {rel}`")
+        else:
+            facts.append(f"folder {rel} is a plain folder, not a git worktree")
+            steps.append(f"move or delete {rel} yourself")
+    elif registered:
+        facts.append(f"{rel} is a stale worktree registration (the folder is gone)")
+        steps.append("`git worktree prune`")
+    tip = commit_of(run, f"refs/heads/{branch}")
+    if tip:
+        want = commit_of(run, ref)
+        count = run.git("rev-list", "--count", f"{want or ref}..{branch}", check=False)
+        short = (want or ref)[:7]
+        if tip == want:
+            note = f"is at {short}; nothing is on it"
+        elif count.returncode == 0 and count.stdout.strip() == "0":
+            note = f"holds no commits beyond {short}; nothing is on it"
+        elif count.returncode == 0:
+            note = (f"holds {count.stdout.strip()} commit{'s' * (count.stdout.strip() != '1')} beyond {short}; "
+                    "remove it only if you do not need them")
+        else:
+            note = "exists"
+        facts.append(f"branch {branch} {note}")
+        if not (registered and not os.path.lexists(path)):  # `branch -D` fails until the stale registration is pruned
+            steps.append(f"`git branch -D {branch}`")
+    if facts:
+        raise Refused("; ".join(facts) + ". Nothing was created." + (f" {retry}." if retry else "")
+                      + " To reuse this name: " + ", then ".join(steps) + ", then rerun.")
+    out = run.git("worktree", "add", "-q", "-b", branch, path, ref, check=False)
+    if out.returncode != 0:
+        raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
+
+
+def remove_worktree(run, name, ref):
+    """Undo add_worktree after a failed start, only when nothing else lives there. Returns None when it
+    removed them, else why it kept them. Best effort: the caller reports the original error."""
+    path, branch = os.path.join(run.wt_dir, name), f"worktree-{name}"
+    want = commit_of(run, ref)
+    if not want or commit_of(run, f"refs/heads/{branch}") != want:
+        return f"branch {branch} is no longer at {(want or ref)[:7]}"
+    if os.path.isdir(path) and run.git("status", "--porcelain", cwd=path, check=False).stdout.strip():
+        return "it has uncommitted changes"
+    run._sessions = None  # the failed start may have left a row
+    try:
+        if any(s.wtname == name for s in run.sessions()):
+            return "a session row uses it"
+    except Refused:
+        pass  # claude may be what failed; the checks above still held
+    run.git("worktree", "remove", "--force", path, check=False)
+    run.git("branch", "-D", branch, check=False)
+    return None
+
+
+def started_or_cleaned(run, name, ref, exc):
+    """Called when the brief or `claude --bg` failed after add_worktree. Removes the worktree when safe,
+    then raises the original error, with a note when the worktree stays."""
+    kept = remove_worktree(run, name, ref)
+    if kept is None:
+        raise exc
+    raise Refused(f"{exc}\nkept .claude/worktrees/{name}: {kept}", getattr(exc, "code", 1)) from exc
+
+
+def drift_warning(run, name, ref, branch=True):
+    """"" when the session's worktree is still at ref (and on its branch), else the warning for the event."""
+    path = os.path.join(run.wt_dir, name)
+    head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
+    on = run.git("branch", "--show-current", cwd=path, check=False).stdout.strip() == f"worktree-{name}"
+    if head and head == commit_of(run, ref) and (on or not branch):
+        return ""
+    return f"the session's worktree is not at {ref[:7]}; claude may no longer reuse a prepared worktree"
+
+
+def previous_head(run, rows, base, nxt):
+    """(commit, note) from the latest worker result or stopped attempt, else (None, None). Its Head: is the
+    new base only when `base`, the base recorded for the previous attempt, is an ancestor of it. Otherwise
+    the recorded base is, with a note; a Head that is not in this repository does the same."""
     found = [r for r in rows if is_worker_result(r) or (r["status"] == "STOPPED" and r["kind"] == "task")]
     match = HEAD_LINE.search(found[-1]["body"]) if found else None
-    return match.group(1) if match else None
+    if not match:
+        return None, None
+    head, n = match.group(1), found[-1].get("attempt") or nxt - 1
+    if not is_sha(base):
+        return head, None
+    code = run.git("merge-base", "--is-ancestor", base, head, check=False).returncode
+    if code == 0:
+        return head, None
+    if code == 1:
+        return base, (f"Head {head[:7]} of attempt {n} is not built on the recorded base {base[:7]}; "
+                      f"starting from {base[:7]}")
+    if commit_of(run, base):
+        return base, f"attempt {n} Head {head[:7]} is not in this repository; starting from the recorded base {base[:7]}"
+    if commit_of(run, head):
+        return head, None  # only the base is gone: the lineage cannot be checked
+    raise Refused(f"attempt {n} Head {head[:7]} and the recorded base {base[:7]} are not in this repository; "
+                  "pass --base <sha|branch>")
 
 
 def resolve_base(run, ref):
@@ -796,10 +916,12 @@ def cmd_launch(run, args):
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
         raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
     refuse_past_cap(tid, nxt, latest, args.attempt)
-    # BASE: --base, else the previous attempt's Head:, else the fetched target branch (pr) or HEAD (local).
-    base = given or previous_head(rows)
+    # BASE: --base, else the previous attempt's Head: (when it is built on that attempt's base), else the
+    # fetched target branch (pr) or HEAD (local).
+    base, note = (given, None) if given else previous_head(run, rows, meta.get("base"), nxt)
     if base is None:
         base = run.git("rev-parse", "--verify", f"{run.target_ref(task)}^{{commit}}").stdout.strip()
+    base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
     text = render(run, task, "task", nxt, session, base=base)
     live = [s for s in run.sessions() if s.task_id == tid and s.live]
@@ -825,8 +947,13 @@ def cmd_launch(run, args):
         else:
             print(text, end="")
         return
-    path = write_brief(run, f"task-{tid}-{nxt}.md", text)
-    said = start_session(run, worktree, session, model, effort, text)
+    add_worktree(run, worktree, base, f"Pass --attempt {nxt + 1} to start under a new name")
+    try:
+        path = write_brief(run, f"task-{tid}-{nxt}.md", text)
+        said = start_session(run, worktree, session, model, effort, text)
+    except Exception as exc:
+        started_or_cleaned(run, worktree, base, exc)
+    drift = drift_warning(run, worktree, base)
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts.
@@ -835,7 +962,8 @@ def cmd_launch(run, args):
            meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("base", base), *keep,
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
     detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree .claude/worktrees/{worktree} "
-              f"base {base[:7]} brief {path}" + (f"; claude said: {said}" if said else ""))
+              f"base {base[:7]} brief {path}" + (f"; {note}" if note else "")
+              + (f"; claude said: {said}" if said else "") + (f"; {drift}" if drift else ""))
     run.emit("launched", tid, nxt, session, detail)
 
 
@@ -960,7 +1088,12 @@ def cmd_verify(run, args):
             m = WT_NAME.match(entry)
             if m and m.group(1) == "verify" and int(m.group(2)) == tid and int(m.group(3)) == attempt:
                 names.add(entry)
-    k = 1 + len(names)
+    stale = run.git("branch", "--list", "--format=%(refname:short)", f"worktree-verify-{tid}-{attempt}",
+                    f"worktree-verify-{tid}-{attempt}-*", check=False).stdout.split()
+    names |= {b[len("worktree-"):] for b in stale}  # a branch left behind counts like a folder
+    k = 1
+    while f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "") in names:
+        k += 1
     name = f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "")
     verifier = run.config["models"]["verifier"]
     if args.model:
@@ -971,6 +1104,9 @@ def cmd_verify(run, args):
         model = "sonnet" if str((task.get("meta") or {}).get("model") or "").startswith("opus") else "opus"
         effort = args.effort
     check_cap(run)
+    if is_sha(ref):  # the verifier compares HEAD with this text, so give the full SHA
+        full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
+        ref = full.stdout.strip() if full.returncode == 0 else ref
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker)
     if args.dry_run:
         print("claude " + " ".join(session_args(run, name, name, model, effort)) + " <brief>", file=sys.stderr)
@@ -980,9 +1116,17 @@ def cmd_verify(run, args):
             print(text, end="")
         return
     suffix = "-verify" if k == 1 else f"-verify-{k}"
-    write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
-    start_session(run, name, name, model, effort, text)
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}")
+    if is_sha(ref):
+        add_worktree(run, name, ref)
+    try:
+        write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
+        start_session(run, name, name, model, effort, text)
+    except Exception as exc:
+        if is_sha(ref):
+            started_or_cleaned(run, name, ref, exc)
+        raise
+    drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
+    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}" + (f"; {drift}" if drift else ""))
 
 
 def verify_ci(run, args, task, name):
@@ -1521,33 +1665,49 @@ def pr_status(run, snap, task, p):
 
 # ------------------------------------------------------------------- close
 
+def transcript_usage(path):
+    """(out, in, cache-read, cache-write) summed over the transcript."""
+    usage = {}
+    with open(path) as fh:
+        for line in fh:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            message = record.get("message") or {}
+            # Streaming writes one record per content block; keep the last usage per message.
+            if record.get("type") == "assistant" and message.get("usage") and message.get("id"):
+                usage[message["id"]] = message["usage"]
+    return tuple(sum(u.get(key, 0) for u in usage.values()) for key in
+                 ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
 def find_tokens(run, session):
     """(out, in, cache-read, cache-write), or the reason there is none."""
     cwd = os.path.abspath(session.worktree(run.root))
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     folder = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
-    ids = [i for i in (session.row.get("sessionId"), session.row.get("id")) if i]
-    for prefix in dict.fromkeys(str(i) for i in ids):
-        if not re.fullmatch(r"[0-9A-Za-z-]+", prefix):
-            continue
+    ids = [str(i) for i in dict.fromkeys(filter(None, (session.row.get("sessionId"), session.row.get("id"))))
+           if re.fullmatch(r"[0-9A-Za-z-]+", str(i))]
+    if not ids:
+        return "no session id recorded"
+    for prefix in ids:
         found = glob.glob(os.path.join(glob.escape(folder), glob.escape(prefix) + "*.jsonl"))
         if len(found) > 1:
             return "the session id matches several transcripts"
         if found:
-            usage = {}
-            with open(found[0]) as fh:
-                for line in fh:
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        continue
-                    message = record.get("message") or {}
-                    # Streaming writes one record per content block; keep the last usage per message.
-                    if record.get("type") == "assistant" and message.get("usage") and message.get("id"):
-                        usage[message["id"]] = message["usage"]
-            return tuple(sum(u.get(key, 0) for u in usage.values()) for key in
-                         ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-    return "no transcript found"
+            return transcript_usage(found[0])
+    # The worktree's folder has no transcript. A full session id (a UUID) may be filed under another folder.
+    for prefix in ids:
+        if UUID.fullmatch(prefix):
+            elsewhere = glob.glob(os.path.join(glob.escape(base), "projects", "*", glob.escape(prefix) + ".jsonl"))
+            if len(elsewhere) > 1:
+                return f"session id {prefix} matches several transcripts under {os.path.join(base, 'projects')}"
+            if elsewhere:
+                return transcript_usage(elsewhere[0])
+    if not os.path.isdir(folder):
+        return f"transcript folder {folder} not found"
+    return f"no transcript {ids[0]}*.jsonl in {folder}"
 
 
 def stop_live(run, tid, attempt, branch):
