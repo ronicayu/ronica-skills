@@ -1,7 +1,7 @@
 {
   "name": "architecture-design",
   "description": "Draft and review architecture design documents and ADRs for a design review: problem and outcomes, ranked goals, trade-offs, options including doing nothing, decisions with rejected alternatives, failure modes, migration and the review record. Ships a design document template, an ADR template and a reviewer checklist. Works best with writing-editor for the prose.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Yu Rong",
     "url": "https://github.com/ronicayu"

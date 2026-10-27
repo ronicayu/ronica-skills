@@ -195,3 +195,14 @@ For each template section: what "good" looks like in two or three lines, the mos
 3. **Dependency on `writing-editor`:** soft. SKILL.md and the README say it works best with `writing-editor` installed. Without it, draft mode uses the stage list in SKILL.md and skips the prose passes.
 4. **Taskgraph filing:** no. The skill does not file tasks.
 5. **Who builds it:** Opus implements; Fable reviews the diff and the two manual checks in section 8.
+
+## 10. 0.2.0: design critique
+
+The owner found that review mode checked only completeness, not the design's substance. 0.2.0 adds `references/design-critique.md`, a fixed procedure run before the completeness checklist:
+
+- **Step 0, right problem.** If the design solves the wrong problem, the review stops and asks the owner. If the problem is unclear, it states the assumption and asks before continuing.
+- **Steps 1 to 6:** trace each goal to its mechanism (a table with a verdict per row, arithmetic checked), contradictions, structure, failure behaviour, decisions, and whether the team can deliver and run it.
+- Every finding names its breaking scenario, is marked verified or suspected, and is rated design fails or risky.
+- The reviewer may raise risks and alternatives as labelled challenges, never as the document's facts.
+- Draft mode runs the critique on its own design before handover.
+- Security is out of scope (owner's decision): it has its own review.

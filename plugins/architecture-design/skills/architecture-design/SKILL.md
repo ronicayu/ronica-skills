@@ -1,11 +1,11 @@
 ---
 name: architecture-design
-description: "Draft and review architecture design documents and ADRs that go to a design review. Checks the content a prose editor cannot: problem and measurable outcomes, ranked quality goals, trade-offs that name the losing goal, options including doing nothing, decisions with the alternative they rejected, failure modes, migration, blocking requirements, and the review record. Use to write a system or module architecture document, an RFC or an ADR, or to review one before a design review. Works best with the writing-editor skill, which handles the prose."
+description: "Draft and review architecture design documents and ADRs that go to a design review. Critiques the design itself (is it solving the right problem, does each mechanism meet its goal, contradictions, structure, failure behaviour, decisions, whether the team can run it) and checks the content a prose editor cannot: problem and measurable outcomes, ranked quality goals, trade-offs that name the losing goal, options including doing nothing, decisions with the alternative they rejected, failure modes, migration, blocking requirements, and the review record. Use to write a system or module architecture document, an RFC or an ADR, or to review one before a design review. Works best with the writing-editor skill, which handles the prose."
 ---
 
 # Architecture Design
 
-This skill owns the content of an architecture document: whether the design is complete and argued well enough to review. It does not own the prose. For the prose, use the `writing-editor` skill when it is installed. This skill does not restate writing-editor's rules, except the few under Restraint that must hold without it.
+This skill owns the content of an architecture document: whether the design is right, and whether it is complete and argued well enough to review. It does not own the prose. For the prose, use the `writing-editor` skill when it is installed. This skill does not restate writing-editor's rules, except the few under Restraint that must hold without it.
 
 The reader of an architecture document is evaluating a design. They must be able to test each choice against what it has to achieve. So the document shows the problem, the ranked goals and the options before it argues for the design, and every key decision names what it rejected.
 
@@ -46,18 +46,19 @@ Search the repository for earlier ADRs, RFCs and design documents on the same sy
 
 **Stage 4 content.** Write each section to the bar in `references/section-guide.md`. The layering items in `references/review-checklist.md` apply while drafting. After Fundamental options, stop and get the user to agree the choice before writing the design sections.
 
-**Before handover.** Run `references/review-checklist.md` on the draft and fix what it finds. Then, if `writing-editor` is installed, invoke it and run its passes 2 to 6.
+**Before handover.** Run `references/design-critique.md` on the draft. Fix what it finds, or bring a finding to the user when the fix changes a decision they agreed. Then run `references/review-checklist.md` and fix what it finds. Then, if `writing-editor` is installed, invoke it and run its passes 2 to 6.
 
 ## Review mode
 
-1. Read the whole document. Identify the template it follows, or should follow.
-2. Run `references/review-checklist.md`.
-3. Report findings in three groups, most serious first:
+Two lenses, substance first. Substance is whether the design is right; completeness is whether the document lets reviewers judge it.
+
+1. Read the whole document and its sources. Identify the template it follows, or should follow.
+2. **Substance.** Run `references/design-critique.md`, steps 0 to 6, in order. Step 0 asks whether the design solves the right problem. If it does not, stop there: report the evidence and ask the owner to confirm the problem. Run nothing else.
+3. **Completeness.** Run `references/review-checklist.md`. Report its findings in two groups:
    - **Blocks the review**: the reviewers cannot judge the design until this is fixed.
    - **Weakens the design case**: the design can be judged, but a reviewer will challenge this.
-   - **Polish**: hand to `writing-editor`.
-4. Each finding quotes or points to the text, names the gap in one line, and says what would close it.
-5. Invent no design content. Where a rejected alternative, a failure mode or an owner is missing, name the gap. Do not supply one.
+4. Report in the order `references/design-critique.md` gives: the step 0 verdict, the goal trace table, the substance findings, the completeness findings, then polish for `writing-editor`.
+5. Each finding quotes or points to the text, names the problem in one line, and says what would close it.
 6. Offer a `writing-editor` review of the prose, if it is installed.
 
 ## Key decisions
@@ -80,7 +81,7 @@ Write a separate ADR when a decision is contested, hard to reverse, or shared wi
 
 ## Restraint
 
-- **Invent nothing.** No figures, owners, failure modes or alternatives the sources do not give. Mark gaps as gaps.
+- **Invent nothing in the document.** No figures, owners, failure modes or alternatives the sources do not give. Mark gaps as gaps. In a review you may raise risks, alternatives and simpler designs, labelled as your challenge; never present them as the document's facts.
 - **Keep the project's terms and template.** House style wins over this skill's defaults.
 - **Depth to review, not to build.** Build detail goes in companion documents, linked from a one-line summary.
 - **History stays in its sections.** The review record and the decisions table are history by design. The rest of the body states the current design.
