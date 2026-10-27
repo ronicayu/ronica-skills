@@ -46,18 +46,18 @@ Search the repository for earlier ADRs, RFCs and design documents on the same sy
 
 **Stage 4 content.** Write each section to the bar in `references/section-guide.md`. The layering items in `references/review-checklist.md` apply while drafting. After Fundamental options, stop and get the user to agree the choice before writing the design sections.
 
-**Before handover.** Run `references/design-critique.md` on the draft. Fix what it finds, or bring a finding to the user when the fix changes a decision they agreed. Then run `references/review-checklist.md` and fix what it finds. Then, if `writing-editor` is installed, invoke it and run its passes 2 to 6.
+**Before handover.** Run `references/design-critique.md` on the draft. Fix what it finds, or bring a finding to the user when the fix changes a decision they agreed. A challenge that proposes a new option goes to the user, not into the draft. Then run `references/review-checklist.md` and fix what it finds. Then, if `writing-editor` is installed, invoke it and run its passes 2 to 6.
 
 ## Review mode
 
 Two lenses, substance first. Substance is whether the design is right; completeness is whether the document lets reviewers judge it.
 
 1. Read the whole document and its sources. Identify the template it follows, or should follow.
-2. **Substance.** Run `references/design-critique.md`, steps 0 to 6, in order. Step 0 asks whether the design solves the right problem. If it does not, stop there: report the evidence and ask the owner to confirm the problem. Run nothing else.
+2. **Substance.** Run `references/design-critique.md`, steps 0 to 6, in order. Step 0 asks whether the design solves the right problem. If it does not, stop there: report the evidence and ask the user to confirm the problem. Run nothing else.
 3. **Completeness.** Run `references/review-checklist.md`. Report its findings in two groups:
    - **Blocks the review**: the reviewers cannot judge the design until this is fixed.
    - **Weakens the design case**: the design can be judged, but a reviewer will challenge this.
-4. Report in the order `references/design-critique.md` gives: the step 0 verdict, the goal trace table, the substance findings, the completeness findings, then polish for `writing-editor`.
+4. Report in the order `references/design-critique.md` gives.
 5. Each finding quotes or points to the text, names the problem in one line, and says what would close it.
 6. Offer a `writing-editor` review of the prose, if it is installed.
 

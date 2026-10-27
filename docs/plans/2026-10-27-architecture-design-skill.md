@@ -200,9 +200,11 @@ For each template section: what "good" looks like in two or three lines, the mos
 
 The owner found that review mode checked only completeness, not the design's substance. 0.2.0 adds `references/design-critique.md`, a fixed procedure run before the completeness checklist:
 
-- **Step 0, right problem.** If the design solves the wrong problem, the review stops and asks the owner. If the problem is unclear, it states the assumption and asks before continuing.
+- **Step 0, right problem.** If the design solves the wrong problem (a contradiction with a source), the review stops and asks the user. If the problem is unclear but plausible, it states the assumed problem, asks the user to confirm it, and continues.
 - **Steps 1 to 6:** trace each goal to its mechanism (a table with a verdict per row, arithmetic checked), contradictions, structure, failure behaviour, decisions, and whether the team can deliver and run it.
 - Every finding names its breaking scenario, is marked verified or suspected, and is rated design fails or risky.
 - The reviewer may raise risks and alternatives as labelled challenges, never as the document's facts.
 - Draft mode runs the critique on its own design before handover.
 - Security is out of scope (owner's decision): it has its own review.
+
+Done when, for 0.2.0: a headless review of a real design excerpt produces the goal trace table and substance findings from the procedure; a headless review of a design that solves the wrong problem stops at step 0 and asks.
