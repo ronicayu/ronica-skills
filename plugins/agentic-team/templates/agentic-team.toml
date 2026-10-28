@@ -39,3 +39,6 @@ always_pause = []           # decisions that always need the operator
 # base = ""                 # "" = the host's default branch
 # method = "merge"          # "merge" | "squash" | "rebase" (GitLab: the project setting decides; "squash" adds squash=true)
 # remove_worktrees = true # false: keep every worktree and session of a merged task (run.py removes nothing)
+
+[verify]
+# kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta

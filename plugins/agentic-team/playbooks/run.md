@@ -53,6 +53,10 @@ verification, a decision, a plan change) and before every report.
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; a later `verified` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
    - `verify_mode=ci:<name>`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; it pushes the branch, opens the
      request and finds or starts the run. A later `verified ... by ci` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
+   - `verify_kind=schema` or `design-doc`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>` whatever the risk. Only
+     `artifact-verified` closes it. A `test-verified` verdict, a CI run included, is recorded but does not close;
+     run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id> --again`, or upgrade with `--override-verifier` and the run id
+     or URL in `--ran`.
    - When the verifier's verdict is weaker than your evidence, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --override-verifier "<why>" --ran "<run id or URL, what you saw>"`.
      An upgrade needs a run id or a link in `--ran`. `verify-failed` is never
@@ -61,7 +65,10 @@ verification, a decision, a plan change) and before every report.
      read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
      `check-only` (static checks only, not enough for behavior);
      `verify-blocked` (the check could not run; retry when fixed);
-     `verify-failed` (start a fix round, do not just re-verify).
+     `verify-failed` (start a fix round, do not just re-verify). The brief
+     defines each level for the task's verify kind.
+   - A verifier's `Follow-ups: decision: <question>` line becomes a Taskgraph
+     decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
    - `close` accepts a rebased branch when the change is the same, records the

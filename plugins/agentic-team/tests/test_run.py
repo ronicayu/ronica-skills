@@ -744,10 +744,79 @@ class RunTest(Base):
         self.assertIn("Files: out.txt", context)
         self.assertIn("Last checkpoint: None", context)
         self.assertIn("Then exercise the real output", self.section(text, "VERIFY"))
+        self.assertIn("Base commit: unknown (", context)
+        self.assertIn(f"Head commit: {SHA_A}", context)
+        self.assertIn("### Method: code", self.section(text, "VERIFY"))
+        self.assertIn("A behaviour change you did not drive is `check-only`", " ".join(self.section(text, "VERIFY").split()))
         self.assertIn("--kind verify --attempt 1 --by verify-1-1 --status <STATUS>", text)
         self.assertIn("`Verdict:` line", self.section(text, "REPORT"))
         self.assertTrue(self.section(text, "AUTONOMY").startswith("- None."))
         self.assertEqual(self.calls("--bg"), [])
+
+    def verify_context(self, task, *extra):
+        text = self.ok("verify", str(task), "--dry-run", *extra).stdout
+        return self.section(text, "CONTEXT"), self.section(text, "VERIFY"), text
+
+    def test_13_verify_brief_names_the_base_from_the_meta(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        old_head = self.git("rev-parse", "HEAD")
+        wt, head = self.pass_report(task)
+        self.commit_file("later.txt", "main moved\n")
+        context, _, text = self.verify_context(task)
+        self.assertIn(f"Base commit: {old_head} (the task's base meta). Head commit: {head}.", context)
+        self.assertIn(f"git diff {old_head} {head}", context)
+        self.assertIn(f'git archive {old_head} | tar -x -C "$(mktemp -d)"', context)
+        self.assertIn("Never check out, reset, or add a worktree.", context)
+        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+
+    def test_13_verify_brief_falls_back_to_the_merge_base(self):
+        main_head = self.git("rev-parse", "HEAD")
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        context, _, _ = self.verify_context(task)
+        self.assertIn(f"Base commit: {main_head} (merge base with HEAD). Head commit: {head}.", context)
+
+    def test_13_verify_brief_a_base_meta_that_is_not_an_ancestor_is_ignored(self):
+        task = self.running_task(base=json.dumps(self.feature_branch()))
+        wt, head = self.pass_report(task)
+        context, _, _ = self.verify_context(task)
+        self.assertIn("(merge base with HEAD)", context)
+        self.assertNotIn("base meta", context)
+
+    def test_13_verify_brief_checksum_output_has_no_base(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFiles: sums.txt\n")
+        context, _, _ = self.verify_context(task, "--ref", "sums.txt abc")
+        self.assertIn("Base commit: none; the output is outside git.", context)
+        self.assertNotIn("Head commit:", context)
+
+    def test_13_verify_brief_by_kind(self):
+        for kind in ("schema", "design-doc"):
+            with self.subTest(kind):
+                task = self.running_task(verify_kind=kind)
+                self.pass_report(task)
+                _, verify, _ = self.verify_context(task)
+                self.assertIn(f"### Method: {kind}", verify)
+                self.assertIn(f"This is the only level that closes a {kind} task", " ".join(verify.split()))
+                self.assertLess(verify.index("make test"), verify.index("### Method"))
+                self.assertNotIn("Then exercise the real output: run it, open it", verify)
+                self.assertNotIn("### Method: code", verify)
+                if kind == "schema":
+                    self.assertIn("--rm", verify)
+                    self.assertIn("leftover container:", verify)
+                else:
+                    self.assertIn("decision: <the question, one line>", verify)
+                    self.assertIn("does not lower the verdict", verify)
+                detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
+                self.assertIn(f" kind {kind}", detail)
+
+    def test_13_the_config_default_kind_applies_without_the_meta(self):
+        self.write_config('[verify]\nkind = "design-doc"\n')
+        plain, explicit = self.running_task(), self.running_task(verify_kind="code")
+        self.pass_report(plain)
+        self.pass_report(explicit)
+        self.assertIn("### Method: design-doc", self.verify_context(plain)[1])
+        self.assertIn("### Method: code", self.verify_context(explicit)[1])
 
     # --- launch
 
@@ -1458,6 +1527,15 @@ class RunTest(Base):
         text = self.ok("record").stdout
         self.assertIn("arrived #1 attempt 1: PASS by worker (result #1) | next:", text)
 
+    def test_28_arrived_pass_by_kind(self):
+        schema = self.running_task(verify_kind="schema", risk="low")
+        doc = self.running_task(verify_kind="design-doc")
+        self.add_result(schema, "PASS", f"Task: {schema}\n")
+        self.add_result(doc, "PASS", f"Task: {doc}\n")
+        arrived = {e["task"]: e for e in self.named(self.events("record"), "arrived")}
+        self.assertEqual(arrived[schema]["next"], f"run.py verify {schema}")
+        self.assertEqual(arrived[doc]["next"], f"run.py verify {doc}")
+
     def test_29_verifier_sessions(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
@@ -1887,6 +1965,89 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["verdict"], "check-only")
         self.assertTrue(re.fullmatch(r"[0-9a-f]{40}", meta["verdict_ref"]))
+
+    def test_48_test_verified_does_not_close_a_schema_or_design_doc_task(self):
+        for kind in ("schema", "design-doc"):
+            with self.subTest(kind):
+                task = self.verified_by("test-verified", task=self.running_task(verify_kind=kind))
+                events = self.events("close", str(task))
+                verdict = self.one(events, "verdict")
+                self.assertEqual(verdict["detail"], "test-verified; not closed")
+                self.assertIn(f"test-verified does not close a {kind} task", verdict["next"])
+                self.assertIn(f"run.py verify {task} --again", verdict["next"])
+                self.assertEqual(self.named(events, "closed"), [])
+                self.assertEqual(self.status_of(task), "in_progress")
+                meta = self.meta(task)
+                self.assertEqual(meta["verdict"], "test-verified")
+                self.assertTrue(re.fullmatch(r"[0-9a-f]{40}", meta["verdict_ref"]))
+                unclosed = [e for e in self.named(self.events("record"), "unclosed") if e["task"] == task]
+                self.assertEqual(len(unclosed), 1)
+                self.assertEqual(unclosed[0]["next"], verdict["next"])
+                other = self.verified_by("artifact-verified", task=self.running_task(verify_kind=kind))
+                closed = self.events("close", str(other))
+                self.one(closed, "closed")
+                self.assertEqual(self.status_of(other), "done")
+
+    def test_48_a_manager_verdict_test_verified_does_not_close_a_schema_task(self):
+        task = self.running_task(verify_kind="schema")
+        self.pass_report(task)
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "ran the scripts")
+        (row,) = [r for r in self.results(task) if r["kind"] == "verify" and r["author"] == "manager"]
+        self.assertIn("Verdict: test-verified", row["body"])
+        self.assertEqual(self.one(events, "verdict")["detail"], "test-verified; not closed")
+        self.assertEqual(self.status_of(task), "in_progress")
+        out = self.run_cmd("close", str(task), "--verdict", "artifact-verified", "--override-verifier", "recomputed",
+                           "--ran", "https://ci/run/9")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("no verifier verdict to override; pass --verdict alone", out.stderr)
+        events = self.events("close", str(task), "--verdict", "artifact-verified", "--ran", "recomputed 182 columns")
+        self.one(events, "closed")
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
+
+    def test_48_a_code_task_still_closes_on_test_verified(self):
+        task = self.verified_by("test-verified")
+        events = self.events("close", str(task))
+        self.one(events, "closed")
+        self.assertEqual(self.status_of(task), "done")
+
+    def test_90_an_unknown_verify_kind_is_refused_everywhere(self):
+        for bad in ("Code", "doc", "design_doc"):
+            with self.subTest(bad):
+                self.fresh()
+                message = f'#1 verify_kind must be "code", "schema" or "design-doc", not {bad}'
+                task = self.add_task(verify_kind=bad)
+                out = self.run_cmd("launch", str(task))
+                self.assertEqual(out.returncode, 2)
+                self.assertIn(message, out.stderr)
+                self.fresh()
+                task = self.running_task(verify_kind=bad)
+                self.pass_report(task)
+                before = self.worktree_state()
+                out = self.run_cmd("verify", str(task))
+                self.assertEqual(out.returncode, 2)
+                self.assertIn(message, out.stderr)
+                self.assertEqual(self.worktree_state(), before)
+                out = self.run_cmd("close", str(task), "--verdict", "test-verified", "--ran", "x")
+                self.assertEqual(out.returncode, 2)
+                self.assertIn(message, out.stderr)
+                self.assertEqual(self.status_of(task), "in_progress")
+                self.assertEqual([r for r in self.results(task) if r["kind"] == "verify"], [])
+                self.fresh()
+                task = self.add_task(verify_kind=bad)
+                tip = self.wt_commit(self.worktree(f"task-{task}"))
+                out = self.run_cmd("adopt", str(task), "--branch", f"worktree-task-{task}", "--head", tip)
+                self.assertEqual(out.returncode, 2)
+                self.assertIn(message, out.stderr)
+
+    def test_90_an_empty_verify_kind_is_the_default(self):
+        task = self.add_task(verify_kind="code")
+        self.tg("edit", str(task), "--meta", "verify_kind=")
+        stored = self.meta(task).get("verify_kind")
+        if stored not in ("", None):
+            self.skipTest(f"tg stored {stored!r}")
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
 
     def transcript_for(self, wt, name, tokens=11, folder=None):
         folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", folder or wt))
@@ -4009,6 +4170,28 @@ class PrTest(Base):
         self.assertIn("test-verified at", self.one(closed, "closed")["detail"])
         self.assertEqual(self.meta(task)["verdict"], "test-verified")
         self.assertEqual([r for r in self.results(task) if r["author"] == "manager" and r["kind"] == "verify"], [])
+
+    @both_hosts
+    def test_93_a_ci_test_verified_does_not_close_a_schema_task(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}", verify_kind="schema")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "success"}])
+        verified = self.one(self.events("record"), "verified")
+        self.assertTrue(verified["detail"].startswith("Verdict test-verified by ci"))
+        self.assertIn("does not close a schema task", verified["next"])
+        before = self.checkout()
+        verdict = self.one(self.events("close", str(task)), "verdict")
+        self.assertEqual(verdict["detail"], "test-verified; not closed")
+        self.assertEqual(self.status_of(task), "in_progress")
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(self.checkout(), before)
+        events = self.events("close", str(task), "--verdict", "artifact-verified", "--override-verifier",
+                             "CI recomputed the numbers", "--ran", "https://ci.example/runs/11")
+        self.one(events, "override")
+        self.one(events, "closed")
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
 
     @both_hosts
     def test_93_a_run_for_another_head_is_ignored(self):

@@ -78,6 +78,8 @@ MAX_ATTEMPTS = 3
 DEFAULT_TIMEBOX_HOURS = 2
 VERDICTS = ("artifact-verified", "test-verified", "check-only", "verify-blocked", "verify-failed")
 CLOSING = ("artifact-verified", "test-verified")
+VERIFY_KINDS = ("code", "schema", "design-doc")
+PASSING = {"code": CLOSING, "schema": ("artifact-verified",), "design-doc": ("artifact-verified",)}
 ABANDON_MODES = ("died", "tool-error", "stuck", "unknown")
 TASK_WT = re.compile(r"^task-(\d+)$")
 VERIFY_WT = re.compile(r"^verify-(\d+)-(\d+)(?:-(\d+))?$")
@@ -498,11 +500,14 @@ def unmerged(task):
     return task["status"] == "done" and is_sha(meta.get("verdict_ref")) and not meta.get("merged_at")
 
 
-def unclosed_next(task_id, verdict):
+def unclosed_next(task_id, verdict, kind="code"):
     if verdict == "verify-blocked":
         return f"retry the check when its cause is fixed, then run.py close {task_id}"
     if verdict == "verify-failed":
         return f"fix round: run.py launch {task_id}"
+    if verdict == "test-verified" and verdict not in PASSING[kind]:
+        return (f"test-verified does not close a {kind} task; run.py verify {task_id} --again for artifact-verified, "
+                f'or run.py close {task_id} --verdict artifact-verified --override-verifier "<why>" --ran "<run id or URL>"')
     if verdict == "check-only":
         return f"run.py verify {task_id} --again for a stronger verdict, or accept it"
     return f"run run.py close {task_id}"
@@ -615,20 +620,38 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session),
     }
     if kind == "verify":
+        vkind = verify_kind(run, task)
+        setup = (f"Output under review: {ref}. Your worktree is already at `{ref}`. Do not check out another "
+                 f"commit. If `git rev-parse HEAD` is not `{ref}`, report BLOCKED."
+                 if is_sha(ref) else
+                 f"Output under review: {ref}. If it is a list of checksums, the output is outside git: compare "
+                 "the files against the checksums and check nothing out.")
+        if is_sha(ref):
+            base_sha, how = verify_base(run, task, ref)
+            if base_sha:
+                setup += ("\n- " + f"Base commit: {base_sha} ({how}). Head commit: {ref}. The change under review is "
+                          f"`git diff {base_sha} {ref}`; `git log --oneline {base_sha}..{ref}` lists its commits. To run "
+                          f'anything at the base commit, export it read only: `git archive {base_sha} | tar -x -C '
+                          '"$(mktemp -d)"`, install what the run needs there (the export holds tracked files only), '
+                          "work in that folder, and delete it before you report. Never check out, reset, or add a "
+                          "worktree.")
+            else:
+                setup += ("\n- " + f"Base commit: unknown ({how}). Head commit: {ref}. Judge the head against ACCEPTANCE "
+                          "alone; skip the steps that need the base commit and say so under Ran:.")
+        else:
+            setup += ("\n- Base commit: none; the output is outside git. Skip the steps that need the base commit and "
+                      "say so under Ran:.")
+        with open(os.path.join(PLUGIN_ROOT, "templates", f"verify-{vkind}.md")) as fh:
+            method = fh.read().strip()
         values.update({
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
             "SCOPE": "Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete anything.",
-            "SETUP": (f"Output under review: {ref}. Your worktree is already at `{ref}`. Do not check out another "
-                      f"commit. If `git rev-parse HEAD` is not `{ref}`, report BLOCKED."
-                      if is_sha(ref) else
-                      f"Output under review: {ref}. If it is a list of checksums, the output is outside git: compare "
-                      "the files against the checksums and check nothing out."),
+            "SETUP": setup,
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
-            "VERIFY": values["VERIFY"] + ("\n\nThen exercise the real output: run it, open it, or read the values it\n"
-                                          "produced. Report every failure you can prove, not only the first."),
+            "VERIFY": values["VERIFY"] + "\n\n" + method,
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
                             "verify-blocked, or verify-failed."),
@@ -878,6 +901,36 @@ def verify_mode(run, task):
     return text
 
 
+def verify_kind(run, task, strict=True):
+    """"code", "schema" or "design-doc": the task's verify_kind meta, else verify.kind from the config.
+    strict refuses any other value; record passes strict=False and falls back to the config default."""
+    value = (task.get("meta") or {}).get("verify_kind")
+    if value is None or value == "":
+        return run.config["verify"]["kind"]
+    text = str(value)
+    if text in VERIFY_KINDS:
+        return text
+    if not strict:
+        return run.config["verify"]["kind"]
+    raise Refused(f'#{task["id"]} verify_kind must be "code", "schema" or "design-doc", not {text}')
+
+
+def verify_base(run, task, head):
+    """(sha, how) for the verifier brief: the task's base meta when it is an ancestor of head, else the merge
+    base of head with the target; (None, reason) when neither exists."""
+    meta_base = str((task.get("meta") or {}).get("base") or "")
+    if meta_base and run.git("merge-base", "--is-ancestor", meta_base, head, check=False).returncode == 0:
+        return commit_of(run, meta_base), "the task's base meta"
+    try:
+        target = run.target_ref(task)
+    except Refused as exc:
+        return None, f"the target branch could not be fetched: {exc}"
+    out = run.git("merge-base", head, target, check=False)
+    if out.returncode == 0 and out.stdout.strip():
+        return out.stdout.strip(), f"merge base with {target}"
+    return None, f"no base meta is an ancestor of {head[:7]}, and it has no merge base with {target}"
+
+
 def change_id(run, base, tip):
     """A hash of the change base..tip that survives a rebase: the -U0 diff without
     line numbers or blob ids. A binary file keeps its index line."""
@@ -991,6 +1044,7 @@ def cmd_launch(run, args):
         raise Refused(f"#{tid} is done")
     refuse_legacy(task)
     verify_mode(run, task)
+    verify_kind(run, task)
     blockers = waiting_for(run, task)
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
@@ -1183,6 +1237,7 @@ def cmd_adopt(run, args):
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
     verify_mode(run, task)
+    verify_kind(run, task)
     refuse_past_cap(tid, current + 1, task_rows(run.results_for(tid), current), None)
     if not re.fullmatch(r"[0-9a-f]{7,40}", args.head):
         raise Refused(f"--head {args.head} is not a commit SHA (7 to 40 hex characters)")
@@ -1257,6 +1312,7 @@ def cmd_verify(run, args):
     task = run.show(tid)
     refuse_legacy(task)
     mode = verify_mode(run, task)
+    kind = verify_kind(run, task)
     if mode != "session":
         return verify_ci(run, args, task, mode[3:])
     attempt = refuse_unless_running(task)
@@ -1320,7 +1376,7 @@ def cmd_verify(run, args):
     entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said)
     if entry:  # the only meta verify writes
         run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref}"
+    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind}"
              + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else ""))
 
 
@@ -1347,7 +1403,8 @@ def verify_ci(run, args, task, name):
     if runs and not args.again:
         rows = ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs)
         if rows is not None:
-            emit_verified(run, tid, attempt, [r for r in task_rows(rows, attempt, "verify") if r.get("author") == "ci"][-1])
+            emit_verified(run, tid, attempt, [r for r in task_rows(rows, attempt, "verify") if r.get("author") == "ci"][-1],
+                          verify_kind(run, task, strict=False))
         return
     where = f"{name} on {pr_branch} at {head[:7]}"
     ok, why = run.host().dispatch(pr_branch, name)
@@ -1380,13 +1437,15 @@ def ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs):
     return run.results_for(tid)
 
 
-def emit_verified(run, tid, attempt, row):
+def emit_verified(run, tid, attempt, row, kind):
     level = verdict_of(row)
     nxt = f"run run.py close {tid}"
     if row["author"] == "ci" and level == "verify-failed":
         nxt += f" (records verify-failed), then fix round: run.py launch {tid}"
     elif row["author"] == "ci" and level == "verify-blocked":
         nxt = f"run.py verify {tid} --again"
+    if level == "test-verified" and kind != "code":
+        nxt += f" (records test-verified; it does not close a {kind} task)"
     run.emit("verified", tid, attempt, None, f"Verdict {level} by {row['author']} (result #{row['id']})", nxt)
 
 
@@ -1433,6 +1492,7 @@ def record_arrived(run, snap, task, attempt, result):
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
         nxt = (f"run.py verify {tid}" if str(meta.get("verify_mode") or "").startswith("ci:") or meta.get("risk") == "high"
+               or verify_kind(run, task, strict=False) != "code"
                else f"rerun VERIFY in <Worktree:>, then run.py close {tid} --verdict L --ran \"...\"")
         adopted = WORKTREE_LINE.search(result.get("body") or "")
         detail += "; adopted" if adopted and adopted.group(1).strip() == "None" else ""
@@ -1546,14 +1606,14 @@ def record_in_progress(run, snap, task, unmanaged):
     newest_manager = max((r["id"] for r in task_rows(rows, attempt, "verify") if r.get("author") == "manager"), default=0)
     with_verdict = [r for r in verdicts if verdict_of(r) and r["id"] > newest_manager]  # an override outranks older rows
     if with_verdict and (not meta.get("verdict") or verdict_of(with_verdict[-1]) != meta.get("verdict")):
-        emit_verified(run, tid, attempt, with_verdict[-1])
+        emit_verified(run, tid, attempt, with_verdict[-1], verify_kind(run, task, strict=False))
         return
     if verdicts and not any(verdict_of(r) for r in verdicts) and not meta.get("verdict"):
         run.emit("verified", tid, attempt, None, f"no Verdict line (result #{verdicts[-1]['id']} by {verdicts[-1]['author']})",
                  f"run run.py close {tid} --verdict L")
         return
     if meta.get("verdict"):
-        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"]))
+        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], verify_kind(run, task, strict=False)))
         return
     finished = [s for s in verifiers if s.finished]
     if finished and not task_rows(rows, attempt, "verify"):
@@ -2254,6 +2314,7 @@ def cmd_close(run, args):
     refuse_legacy(task)
     attempt = refuse_unless_running(task)
     rows, worker = worker_for(run, tid, attempt)
+    kind = verify_kind(run, task)
     branch_line = tail_or_none(BRANCH_LINE.search(worker["body"]))
     level, manual, override = choose_verdict(run, args, task, rows, attempt)
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
@@ -2295,8 +2356,8 @@ def cmd_close(run, args):
             run.edit_meta(tid, tokens=f"{found[0]}/{found[1]}")
             run.emit("tokens", tid, None, sid or None,
                      f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
-    if level not in CLOSING:
-        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level))
+    if level not in PASSING[kind]:
+        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, kind))
         return
     run.tg("done", str(tid))
     stop_live(run, tid, attempt, branch)

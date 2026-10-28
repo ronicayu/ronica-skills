@@ -93,6 +93,7 @@ SCHEMA = {
         "method": ("choice:merge,squash,rebase", "merge"),
         "remove_worktrees": ("bool", True),
     },
+    "verify": {"kind": ("choice:code,schema,design-doc", "code")},
     "notifications": {"skill": ("str", "")},
 }
 
