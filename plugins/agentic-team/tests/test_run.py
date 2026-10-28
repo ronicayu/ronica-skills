@@ -82,6 +82,8 @@ elif cmd == "rm":
     if entry.get("exit") and "--discard-unpushed" not in argv:
         sys.stderr.write(entry.get("stderr", "") + "\n")
         sys.exit(entry["exit"])
+    if os.environ.get("FAKE_CLAUDE_AFTER_RM"):  # a session started while the rows were being removed
+        open(os.environ["FAKE_CLAUDE_AGENTS"], "w").write(open(os.environ["FAKE_CLAUDE_AFTER_RM"]).read())
     if not entry.get("row_only"):  # like the real claude rm: the worktree goes with the session that owns it
         folder = argv[1][len("sess-"):] if argv[1].startswith("sess-") else argv[1]
         if re.fullmatch(r"task-\d+-\d+", folder):  # sess-task-<id>-<attempt>: the folder is task-<id>
@@ -2873,7 +2875,7 @@ class RunTest(Base):
         legacy = self.one(events, "legacy")
         self.assertEqual((legacy["task"], legacy["attempt"]), (task, 1))
         self.assertIn("started under agentic-team 0.6.0 (worktree .claude/worktrees/task-1-1); "
-                      "run.py 0.7.0 does not manage it", legacy["detail"])
+                      "run.py does not manage it", legacy["detail"])
         self.assertIn("tg edit 1 --meta sessions='[]'", legacy["next"])
         for name in ("died", "stuck", "running", "unknown"):
             self.assertEqual(self.named(events, name), [])
@@ -2917,7 +2919,7 @@ class RunTest(Base):
     def test_70_a_merged_clean_locked_folder_left_after_rm_is_unlocked_and_removed(self):
         task = self.merged_task(self.entry(1, 1), self.entry(1, 2))
         wt = self.worktree("task-1")
-        self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
+        self.claude_lock("task-1", self.dead_pid())
         self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
         self.rows_only("sess-task-1-1", "sess-task-1-2")
         events = self.events("merged", str(task))
@@ -3033,7 +3035,7 @@ class RunTest(Base):
         task = self.merged_task()
         wt = self.worktree("task-1")
         self.git("-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", cwd=wt)
-        self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
+        reason = self.claude_lock("task-1", self.dead_pid())
         self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
         self.agents(self.finished("task-1"))
         self.rows_only("sess-task-1-1")
@@ -3043,7 +3045,7 @@ class RunTest(Base):
                                          "cannot be moved or removed")
         self.assertEqual(self.named(events, "removed")[-1]["session"], "sess-task-1-1")
         self.assertTrue(os.path.isdir(wt))
-        self.assertIn("locked claude session task-1-1 (pid 1)", self.git("worktree", "list", "--porcelain"))
+        self.assertIn("locked " + reason, self.git("worktree", "list", "--porcelain"))
         self.assertIn("worktree-task-1", self.worktree_state()[1])
         self.no_force()
 
@@ -3076,6 +3078,214 @@ class RunTest(Base):
         self.assertEqual((self.named(events, "removed"), self.named(events, "kept")), ([], []))
         self.assertTrue(os.path.isdir(wt))
         self.assertEqual(self.calls("rm"), [])
+
+    # --- review fixes: what counts as merged, locks, processes, repeated lines
+
+    def dead_pid(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        return child.pid
+
+    def claude_lock(self, folder, pid):
+        reason = f"claude session {folder} (pid {pid} start 2026-10-28T10:00:00)"
+        self.git("worktree", "lock", "--reason", reason, self.wt_path(folder))
+        return reason
+
+    def closed_at(self, tip, merged=False, **meta):
+        """A done task whose verified commit is `tip`, local mode."""
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]", **meta)
+        if merged:
+            self.tg("edit", str(task), "--meta", 'merged_at="2026-10-26 10:00 UTC"', "merged_by=operator")
+        self.tg("done", str(task))
+        return task
+
+    def test_72_a_detached_head_at_the_task_tip_does_not_make_it_merged(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.closed_at(tip)
+        self.git("checkout", "-q", "--detach", tip)
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unmerged")["task"], task)
+        self.assertEqual(self.named(events, "merged"), [])
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertEqual((self.named(events, "removed"), self.named(events, "kept")), ([], []))
+        self.assertTrue(os.path.isdir(wt))
+        self.assertIn("worktree-task-1", self.worktree_state()[1])
+        self.assertEqual(self.calls("rm"), [])
+
+    def test_72_a_feature_branch_that_holds_the_tip_is_not_the_target(self):
+        self.write_config('[merge]\nbase = "main"\n')
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.closed_at(tip)
+        self.git("checkout", "-q", "-b", "feature", tip)
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unmerged")["task"], task)
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertTrue(os.path.isdir(wt))
+        self.write_config()  # no merge.base: the branch the main checkout is on is the target, and it holds the tip
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertEqual(self.worktree_state()[2], [])
+
+    def test_72_a_local_squash_merge_leaves_no_ancestor_so_the_verified_change_counts(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt, "feature.txt", "work\n")
+        self.git("merge", "--squash", "-q", "worktree-task-1")
+        self.git("commit", "-q", "-m", "squash task 1")
+        self.assertNotEqual(self.git("merge-base", "HEAD", tip), tip)
+        same = self.worktree("verify-1-1", base=tip)
+        self.git("commit", "-q", "--amend", "-m", "same change, other message", cwd=same)
+        copy = self.git("rev-parse", "HEAD", cwd=same)
+        self.assertNotEqual(copy, tip)
+        more = self.worktree("verify-1-2", base=tip)
+        extra = self.wt_commit(more, "more.txt")
+        task = self.closed_at(tip, merged=True)
+        self.agents()
+        events = self.events("record")
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "removed")),
+                         [f"worktree task-1 (merged at {tip[:7]})", f"worktree verify-1-1 (merged at {copy[:7]})"])
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"verify-1-2: commit {extra[:7]} is not merged"])
+        self.assertEqual(self.worktree_state()[2], ["verify-1-2"])
+        self.assertEqual(task, 1)
+
+    def test_72_pr_mode_does_not_trust_the_main_checkouts_head(self):
+        self.pr_config()
+        self.fake_host()
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        self.git("merge", "--ff-only", "-q", "worktree-task-1")  # the operator's checkout holds the tip; the request did not
+        task = self.merged_task(pushed=self.git("rev-parse", "HEAD~1"))
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: commit {tip[:7]} is not merged"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_72_a_pushed_head_that_is_not_in_this_clone_says_to_fetch(self):
+        self.pr_config()
+        self.fake_host()
+        wt = self.worktree("task-1")
+        self.wt_commit(wt)
+        task = self.merged_task(pushed="f" * 40)
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: pushed head fffffff is not in this clone; fetch origin/task-1"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_73_only_the_lock_of_an_ended_claude_session_is_released(self):
+        task = self.merged_task(self.entry(1, 1))
+        operator, live, ended = (self.worktree(f"verify-1-{n}") for n in (1, 2, 3))
+        self.git("worktree", "lock", "--reason", "do not touch", operator)
+        self.claude_lock("verify-1-2", os.getpid())
+        reason = self.claude_lock("verify-1-3", self.dead_pid())
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")), [
+            "verify-1-1: locked (do not touch)",
+            f"verify-1-2: still running (pid {os.getpid()} holds its lock)"])
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree verify-1-3 (merged at {self.short()})"])
+        self.assertEqual(self.worktree_state()[2], ["verify-1-1", "verify-1-2"])
+        listing = self.git("worktree", "list", "--porcelain")
+        self.assertIn("locked do not touch", listing)
+        self.assertNotIn(reason, listing)
+        self.no_force()
+
+    def test_73_a_lock_that_names_another_folder_is_not_claudes_for_this_one(self):
+        task = self.merged_task()
+        self.worktree("task-1")
+        self.git("worktree", "lock", "--reason", f"claude session task-2 (pid {self.dead_pid()} start x)", self.wt_path("task-1"))
+        self.agents()
+        events = self.events("merged", str(task))
+        (kept,) = self.named(events, "kept")
+        self.assertTrue(kept["detail"].startswith("task-1: locked (claude session task-2 "), kept)
+        self.assertTrue(os.path.isdir(self.wt_path("task-1")))
+
+    def test_74_a_process_with_its_working_directory_in_the_folder_keeps_it(self):
+        if not shutil.which("lsof"):
+            self.skipTest("lsof is not installed")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        child = subprocess.Popen(["sleep", "30"], cwd=wt)
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: process {child.pid} (sleep) uses it"])
+        self.assertTrue(os.path.isdir(wt))
+        child.kill()
+        child.wait()
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 1)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_74_without_lsof_the_process_check_is_skipped(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        bare = os.path.join(self.dir, "bare")  # python and git only: no lsof
+        os.makedirs(bare)
+        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        os.symlink(sys.executable, os.path.join(bare, "python3"))
+        os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
+        env = dict(self.env, PATH=bare)
+        self.agents()
+        out = self.run_cmd("merged", str(task), pre=["--json"], env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.named(json.loads(out.stdout), "removed")), 1)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_74_the_session_list_is_read_again_before_the_folders_go(self):
+        task = self.merged_task(self.entry(1, 1))
+        wt = self.worktree("task-1")
+        self.agents(self.finished("task-1", 1))
+        self.rows_only("sess-task-1-1")
+        with open(os.path.join(self.dir, "after.json"), "w") as fh:
+            fh.write("[" + json.dumps(self.row("task-1", 2)) + "]")
+        env = dict(self.env, FAKE_CLAUDE_AFTER_RM=os.path.join(self.dir, "after.json"))
+        out = self.run_cmd("merged", str(task), pre=["--json"], env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        events = json.loads(out.stdout)
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], ["task-1: still running"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_75_a_kept_line_is_repeated_by_record_only_when_its_reason_changes(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(wt, "a.txt"), "w") as fh:
+            fh.write("x\n")
+        self.agents()
+        first = self.events("record")
+        self.assertEqual([e["detail"] for e in self.named(first, "kept")], ["task-1: uncommitted changes (?? a.txt)"])
+        self.assertEqual(self.meta(task)["cleanup_kept"], {"task-1": "uncommitted changes (?? a.txt)"})
+        self.assertEqual(self.named(self.events("record"), "kept"), [])
+        with open(os.path.join(wt, "b.txt"), "w") as fh:
+            fh.write("y\n")
+        changed = self.events("record")
+        self.assertEqual([e["detail"] for e in self.named(changed, "kept")], ["task-1: uncommitted changes (?? a.txt, ?? b.txt)"])
+        merged = self.events("merged", str(task))  # an explicit run.py merged always says it
+        self.assertEqual(len(self.named(merged, "kept")), 1)
+        os.remove(os.path.join(wt, "a.txt"))
+        os.remove(os.path.join(wt, "b.txt"))
+        removed = self.events("record")
+        self.assertEqual(len(self.named(removed, "removed")), 1)
+        self.assertEqual(self.meta(task)["cleanup_kept"], {})
+
+    def test_76_the_removed_line_counts_the_ignored_files_it_took_with_the_folder(self):
+        self.commit_file(".gitignore", "*.log\nbuild/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        for n in range(6):
+            with open(os.path.join(wt, f"f{n}.log"), "w") as fh:
+                fh.write("x\n")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual(self.one(events, "removed")["detail"],
+                         f"worktree task-1 (merged at {self.short()}) (ignored files removed: 6: "
+                         "f0.log, f1.log, f2.log, f3.log, f4.log, ...)")
 
     # --- merge.remove_worktrees = false
 
