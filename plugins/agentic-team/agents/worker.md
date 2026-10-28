@@ -46,6 +46,14 @@ Manager.
   under a `trap 'kill $PID' EXIT` or is stopped by you before your final commit. Record each pid when
   you start it. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under
   Follow-ups so the Manager can stop it.
+  - Stop only processes that you started. Find each one by the pid that you recorded, or by a
+    cwd inside your own worktree (`lsof -a -d cwd -p <pid>`).
+  - Do not use `pkill -f` or `killall` with a pattern that a process in another worktree can
+    match. Do not find your processes by a path pattern either: a command started with a
+    relative path (for example `node ./node_modules/.bin/../@playwright/test/cli.js`) does not
+    contain the worktree path.
+  - When you stop a gate or a test runner, also stop its child processes (its process group or
+    their recorded pids). Orphan processes can hold locks and ports.
 - **Taskgraph is read only,** except the one `result add` command in your brief. The
   Manager runs `tg start`, `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read
