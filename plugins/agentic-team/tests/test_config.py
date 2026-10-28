@@ -54,8 +54,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["models"]["implementation"], {"model": "sonnet", "effort": "high"})
         self.assertIsNone(cfg["models"]["verifier"])
         self.assertEqual(cfg["constraints"]["forbidden"], [])
-        self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge"})
-        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method"})
+        self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge",
+                                       "remove_worktrees": True})
+        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "remove_worktrees"})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):
@@ -151,6 +152,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("get", "merge.host")[:2], (0, "gitlab\n"))
         self.write(MINIMAL + '[merge]\nremote = " "\n')
         self.assertIn("merge.remote must be a non-empty string", " ".join(config.problems(config.load(self.root))))
+
+    def test_remove_worktrees_must_be_a_boolean(self):
+        self.write(MINIMAL + "[merge]\nremove_worktrees = false\n")
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "merge.remove_worktrees")[:2], (0, "false\n"))
+        for bad in ('"no"', "0", "[]"):
+            self.write(MINIMAL + f"[merge]\nremove_worktrees = {bad}\n")
+            found = config.problems(config.load(self.root))
+            self.assertEqual(found, [f"merge.remove_worktrees must be true or false, not {bad}"])
+            self.assertEqual(self.run_cli("check")[0], 2)
 
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
