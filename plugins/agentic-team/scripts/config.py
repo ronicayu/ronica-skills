@@ -91,6 +91,7 @@ SCHEMA = {
         "remote": ("nonempty", "origin"),
         "base": ("str", ""),
         "method": ("choice:merge,squash,rebase", "merge"),
+        "remove_worktrees": ("bool", True),
     },
     "notifications": {"skill": ("str", "")},
 }
@@ -100,6 +101,7 @@ TYPE_NAMES = {
     "nonempty": "a non-empty string",
     "list": "a list of strings",
     "posint": "a positive integer",
+    "bool": "true or false",
     "timezone": "an IANA time zone name",
     "model": 'a model id or { model = "...", effort = "..." }',
     "model?": 'a model id or { model = "...", effort = "..." }',
@@ -260,6 +262,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    if kind == "bool":
+        return isinstance(value, bool)
     if kind == "timezone":
         return isinstance(value, str)
     if kind == "model":

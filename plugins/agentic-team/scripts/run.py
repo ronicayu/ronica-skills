@@ -62,6 +62,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -443,7 +444,7 @@ LEGACY_NEXT = ("finish it with 0.6.0 before you upgrade; or, once its session ha
 def legacy_detail(task):
     n = wanted_attempt(task)
     return (f"started under agentic-team 0.6.0 (worktree .claude/worktrees/task-{task['id']}-{n}); "
-            "run.py 0.7.0 does not manage it")
+            "run.py does not manage it")
 
 
 def refuse_legacy(task):
@@ -895,9 +896,10 @@ def change_id(run, base, tip):
     return hashlib.sha256("".join(kept).encode("utf-8", "surrogateescape")).hexdigest()
 
 
-def same_change(run, task, old_head, new_head):
-    """(True, "") when new_head carries the same change as old_head, else (False, reason)."""
-    ref = run.target_ref(task)
+def same_change(run, task, old_head, new_head, ref=None):
+    """(True, "") when new_head carries the same change as old_head, else (False, reason).
+    `ref` is what the change is compared with; the default is run.target_ref(task)."""
+    ref = ref or run.target_ref(task)
     base_new = run.git("merge-base", new_head, ref, check=False).stdout.strip()
     if not base_new:
         return False, f"{new_head[:7]} shares no history with {ref}"
@@ -1620,7 +1622,7 @@ def record_done(run, snap, task):
             pr_status(run, snap, task, run.host().pr(int(meta["pr"])))
     elif unmerged(task):
         sha = str(meta["verdict_ref"])
-        if run.git("merge-base", "--is-ancestor", sha, "HEAD", check=False).returncode == 0:
+        if merged_into(run, task, sha):
             run.tg("edit", str(tid), "--meta", meta_arg("merged_at", run.now()), meta_arg("merged_by", "operator"))
             run.emit("merged", tid, None, None, f"{sha} is in HEAD; recorded merged_by=operator")
             cleanup(run, task)
@@ -1629,7 +1631,7 @@ def record_done(run, snap, task):
             run.emit("unmerged", tid, None, None,
                      f"branch {task_branch(tid)} at {sha} is ready to merge; blocks {ids_text(waits)}")
     elif meta.get("merged_at"):
-        cleanup(run, task)
+        cleanup(run, task, sweep=True)
 
 
 def ready_events(run, snap):
@@ -1691,20 +1693,185 @@ def task_folders(run, tid):
     return current, legacy
 
 
-def cleanup(run, task):
+def merge_refs(run, task):
+    """The refs that hold merged work. Local mode: the local branch the task merges into (its `target` meta, else
+    merge.base, else the branch the main checkout is on); a detached or unknown target gives none, so nothing
+    counts as merged. pr mode: the head the request merged (`pushed`) and the fetched target branch; never the
+    main checkout's HEAD."""
+    meta, refs = task.get("meta") or {}, []
+    if run.pr_mode:
+        if meta.get("pushed"):
+            refs.append(str(meta["pushed"]))
+        try:
+            branch = run.target(task)
+        except codehost.HostError:
+            branch = None
+        if branch:
+            refs.append(f"refs/remotes/{run.config['merge']['remote']}/{branch}")
+    else:
+        branch = (meta.get("target") or run.config["merge"]["base"]
+                  or run.git("branch", "--show-current", check=False).stdout.strip())
+        if branch:
+            refs.append(f"refs/heads/{branch}")
+    return [r for r in refs if run.git("rev-parse", "--verify", "-q", f"{r}^{{commit}}", check=False).returncode == 0]
+
+
+def merged_into(run, task, commit):
+    """True when `commit` is an ancestor of one of merge_refs."""
+    return any(run.git("merge-base", "--is-ancestor", commit, ref, check=False).returncode == 0
+               for ref in merge_refs(run, task))
+
+
+def not_merged_reason(run, task, head):
+    """None when `head` (a folder's HEAD commit) is merged, else why not. Besides ancestry, in local mode a squash
+    or rebase merge leaves the commit out of the target: the task's verified commit (`verdict_ref`) or a commit with
+    the same change then counts, because cleanup only runs for a task recorded as merged."""
+    meta = task.get("meta") or {}
+    if merged_into(run, task, head):
+        return None
+    if run.pr_mode:
+        pushed = meta.get("pushed")
+        if pushed and not commit_of(run, str(pushed)):
+            branch = meta.get("pr_branch") or "task-" + str(task["id"])
+            return f"pushed head {str(pushed)[:7]} is not in this clone; fetch {run.config['merge']['remote']}/{branch}"
+    else:
+        verdict = commit_of(run, str(meta["verdict_ref"])) if is_sha(meta.get("verdict_ref")) else None
+        refs = merge_refs(run, task)
+        if verdict and (head == verdict or (refs and same_change(run, task, verdict, head, ref=refs[0])[0])):
+            return None
+    return f"commit {head[:7]} is not merged"
+
+
+def files_text(lines, limit=10):
+    shown = [line.strip() for line in lines[:limit]]
+    return ", ".join(shown) + (f", and {len(lines) - limit} more" if len(lines) > limit else "")
+
+
+def cwd_in(cwd, path):
+    """True when a session's working directory is the folder or inside it."""
+    real = os.path.realpath(cwd) if cwd else ""
+    return real == path or real.startswith(path + os.sep)
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def cwd_users():
+    """[(pid, command, cwd)] of the processes `lsof` shows with a working directory; None when lsof is missing."""
+    if not shutil.which("lsof"):
+        return None
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpcn"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except OSError:
+        return None
+    found, pid, command = [], None, ""
+    for line in out.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid, command = int(line[1:]), ""
+        elif line.startswith("c"):
+            command = line[1:]
+        elif line.startswith("n") and pid is not None and pid != os.getpid():
+            found.append((pid, command, line[1:]))
+    return found
+
+
+def folder_check(run, task, folder, path, registered, live, locks, users):
+    """Why a worktree folder is not safe to remove, else None. Three checks, in this order: no live session or
+    process uses it, `git status --porcelain` prints nothing, and its HEAD commit is merged. A lock must be
+    Claude Code's own for a session that has ended. Returns (reason, session, head, ignored files)."""
+    if path not in registered:
+        return "not a registered git worktree; inspect it and remove it yourself if you do not need it", None, None, []
+    for s in live:
+        if s.wtname == folder or cwd_in(s.cwd, path):
+            return "still running", s.sid, None, []
+    lock = locks.get(path)
+    if lock is not None:
+        m = re.match(rf"claude session {re.escape(folder)} \(pid (\d+)\b", lock)
+        if not m:
+            return f"locked ({lock or 'no reason'})", None, None, []
+        if pid_alive(int(m.group(1))):
+            return f"still running (pid {m.group(1)} holds its lock)", None, None, []
+    for pid, command, cwd in users or []:
+        if cwd_in(cwd, path):
+            return f"process {pid} ({command}) uses it", None, None, []
+    status = run.git("status", "--porcelain", "--ignored", cwd=path, check=False)
+    if status.returncode != 0:
+        return f"git status said: {first_line(status.stderr or status.stdout)}", None, None, []
+    lines = status.stdout.splitlines()
+    changed = [line for line in lines if not line.startswith("!!")]
+    if changed:
+        return f"uncommitted changes ({files_text(changed)})", None, None, []
+    head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
+    if not head:
+        return "cannot read its HEAD commit", None, None, []
+    why = not_merged_reason(run, task, head)
+    if why:
+        return why, None, None, []
+    return None, None, head, [line[3:] for line in lines]
+
+
+def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, note):
+    """Remove one safe folder: unlock (a lock of an ended Claude session, checked by folder_check), a plain
+    `git worktree remove` (never forced), the branch when its tip is merged, then the session rows that name
+    the folder. Says `removed` for the folder, or `kept` with the reason."""
+    reason = locks.get(path)
+    if reason is not None:
+        undone = run.git("worktree", "unlock", path, check=False)
+        if undone.returncode != 0:
+            note(folder, f"git worktree unlock said: {first_line(undone.stderr or undone.stdout)}")
+            return
+    out = run.git("worktree", "remove", path, check=False)
+    if out.returncode != 0:
+        if reason is not None:  # put Claude Code's lock back: the folder stays as it was
+            run.git("worktree", "lock", *(["--reason", reason] if reason else []), path, check=False)
+        note(folder, f"git worktree remove said: {first_line(out.stderr or out.stdout)}")
+        return
+    tid = task["id"]
+    branch = f"worktree-{folder}"
+    tip = run.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}", check=False).stdout.strip()
+    if tip and not_merged_reason(run, task, tip):
+        run.emit("kept", tid, None, None, f"{branch}: branch stays, commit {tip[:7]} is not merged")
+    elif tip:
+        out = run.git("branch", "-D", branch, check=False)
+        if out.returncode != 0:
+            run.emit("kept", tid, None, None, f"{branch}: branch stays, git said: {first_line(out.stderr or out.stdout)}")
+    for s in rows:
+        if s.sid and s.sid not in gone and (s.wtname == folder or cwd_in(s.cwd, path)):
+            out = run.claude("rm", s.sid, check=False)
+            if out.returncode == 0:
+                gone.add(s.sid)
+            else:
+                run.emit("kept", tid, None, s.sid, f"{folder}: claude rm said: {first_line(out.stderr or out.stdout)}")
+    extra = ""
+    if ignored:
+        extra = f" (ignored files removed: {len(ignored)}: {', '.join(ignored[:5])}{', ...' if len(ignored) > 5 else ''})"
+    run.emit("removed", tid, None, None, f"worktree {folder} (merged at {head[:7]}){extra}")
+
+
+def cleanup(run, task, sweep=False):
     """Remove the sessions and worktrees of a merged task. Never deletes a file, never forces.
 
     `claude rm` locks in the first session that used a worktree (even after it stopped). `claude rm` of any later
     session removes only its row; `claude rm` of the first session removes the folder, when the tree is clean
-    and pushed. So the sessions go newest first and the task's first session goes last."""
+    and pushed. So the sessions go newest first and the task's first session goes last. Then every task folder
+    still present goes when it is safe: no live session, a clean `git status`, a merged HEAD (`folder_check`).
+    `sweep` is `record` coming back to a task that was merged earlier: it prints a folder's `kept` line only when
+    the reason differs from the last one stored in the task's `cleanup_kept` meta."""
     tid = task["id"]
     if (task.get("meta") or {}).get("abandoned"):
         return
     folders, legacy = task_folders(run, tid)
-    if "sessions" not in (task.get("meta") or {}) and (wanted_attempt(task) or 0) >= 1:
-        # Started under 0.6.0: its rows are not recorded, so run.py removes nothing and lists the folders.
-        for folder in folders + legacy:
-            run.emit("kept", tid, None, None, f"{folder}: no session; remove it by hand if you want")
+    if not run.config["merge"]["remove_worktrees"]:
+        if not sweep:  # said once, at the merge
+            for folder in folders + legacy:
+                run.emit("kept", tid, None, None, f"{folder}: merge.remove_worktrees is false")
         return
     rows = own_sessions(run, tid)
     if not rows and not folders and not legacy:
@@ -1716,67 +1883,72 @@ def cleanup(run, task):
                       key=lambda s: (s.sid == first, -order.index(s.sid)))
     sessions = [s for s in rows if s not in recorded] + recorded
     in_use = {s.wtname for s in rows if s.live}
-    dirty, noted, kept = {}, set(), set()  # folders: has changes, already reported, with a kept line
+    meta = task.get("meta") or {}
+    before = meta.get("cleanup_kept") if isinstance(meta.get("cleanup_kept"), dict) else {}
+    after = {}  # folder -> why it was kept this time
+
+    def note(folder, detail, sid=None):
+        after[folder] = detail
+        if not (sweep and before.get(folder) == detail):
+            run.emit("kept", tid, None, sid, f"{folder}: {detail}")
+
+    dirty = {}  # folder -> has changes
+    held, gone = {}, set()  # folder -> what a refused claude rm said; session ids already removed
     for s in sessions:
         wt = s.worktree(run.root)
-        if s.live:
-            run.emit("kept", tid, None, s.sid, f"{s.wtname}: still running")
-            kept.add(s.wtname)
-            continue
-        if s.wtname in in_use:  # claude rm refuses while another live session uses the worktree
-            kept.add(s.wtname)
+        if s.live or s.wtname in in_use:  # claude rm refuses while a live session uses the worktree
             continue
         if os.path.isdir(wt):
             if s.wtname not in dirty:
                 dirty[s.wtname] = bool(run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip())
             if dirty[s.wtname]:
-                if s.wtname not in noted:
-                    run.emit("kept", tid, None, s.sid, f"{s.wtname}: uncommitted changes")
-                    noted.add(s.wtname)
-                kept.add(s.wtname)
                 continue
         out = run.claude("rm", s.sid, check=False)
         if out.returncode == 0:
+            gone.add(s.sid)
             run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}")
             continue
-        kept.add(s.wtname)
         message = (out.stderr + "\n" + out.stdout).strip()
         m = re.search(r"--discard-unpushed\s+([0-9A-Za-z]+)@(\S+)", message)
         if m:
             commit, wtid = m.groups()
-            pushed = (task.get("meta") or {}).get("pushed") if run.pr_mode else None
-            if any(run.git("merge-base", "--is-ancestor", commit, str(into), check=False).returncode == 0
-                   for into in ["HEAD"] + ([pushed] if pushed else [])):
+            if merged_into(run, task, commit):
                 again = run.claude("rm", s.sid, "--discard-unpushed", f"{commit}@{wtid}", check=False)
                 if again.returncode == 0:
-                    kept.discard(s.wtname)
+                    gone.add(s.sid)
+                    held.pop(s.wtname, None)
                     run.emit("removed", tid, None, s.sid,
                              f"session {s.sid} worktree {s.wtname} (discarded {commit}, which is merged)")
                 else:
-                    run.emit("kept", tid, None, s.sid,
-                             f"{s.wtname}: claude rm said: {first_line(again.stderr or again.stdout)}")
+                    held.setdefault(s.wtname, (s.sid, f"claude rm said: {first_line(again.stderr or again.stdout)}"))
             else:
-                run.emit("kept", tid, None, s.sid, f"{s.wtname}: commit {commit} is not in HEAD")
-        elif "untracked" in message.lower():
-            files = ""
-            if os.path.isdir(wt):
-                listing = run.git("status", "--porcelain", cwd=wt, check=False).stdout.splitlines()
-                files = " (" + ", ".join(line[3:] for line in listing if line.startswith("??")) + ")"
-            run.emit("kept", tid, None, s.sid,
-                     f"{s.wtname}: untracked files{files}; delete only files you created, then run run.py merged {tid}")
+                held.setdefault(s.wtname, (s.sid, f"commit {commit} is not merged"))
         else:
-            run.emit("kept", tid, None, s.sid, f"{s.wtname}: claude rm said: {first_line(message)}")
-    locks = worktree_locks(run)
-    for folder in task_folders(run, tid)[0]:
-        if folder in kept:
-            continue
-        reason = locks.get(os.path.realpath(os.path.join(run.wt_dir, folder)))
-        why = "not locked" if reason is None else (reason or "locked")
-        run.emit("kept", tid, None, None,
-                 f"{folder}: still present ({why}); remove it by hand: "
-                 f"git worktree remove -f -f .claude/worktrees/{folder} && git branch -D worktree-{folder}")
-    for folder in legacy:
-        run.emit("kept", tid, None, None, f"{folder}: no session; remove it by hand if you want")
+            held.setdefault(s.wtname, (s.sid, f"claude rm said: {first_line(message)}"))
+    run._sessions = None  # the pass changed the rows; look again before the sweep
+    registered, locks = registered_worktrees(run), worktree_locks(run)
+    live = [s for s in run.sessions() if s.live]
+    present = [f for f in sum(task_folders(run, tid), []) if os.path.isdir(os.path.join(run.wt_dir, f))]
+    users = cwd_users() if present else None
+    swept = set()
+    for folder in sorted(present):
+        path = os.path.join(run.wt_dir, folder)
+        swept.add(folder)
+        reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users)
+        if reason:
+            note(folder, reason, sid)
+        else:
+            remove_folder(run, task, folder, path, locks, head, ignored, run.sessions(), gone, note)
+    for folder, (sid, detail) in held.items():  # a session whose folder the sweep did not see
+        if folder not in swept:
+            note(folder, detail, sid)
+    noted = set()
+    for s in rows:  # a live session whose folder is gone or never existed
+        if s.live and s.wtname not in swept and s.wtname not in noted:
+            noted.add(s.wtname)
+            note(s.wtname, "still running", s.sid)
+    if after != before:
+        run.set_meta(task, cleanup_kept=after)
 
 
 # ---------------------------------------------------- pull and merge requests

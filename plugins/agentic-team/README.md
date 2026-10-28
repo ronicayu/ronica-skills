@@ -136,7 +136,7 @@ is written once and a retry does not change it.
 
 `run.py verify` creates a verifier's worktree of its own
 (`verify-<id>-<attempt>`, then `-2`, `-3` for a second verifier), fresh at the
-commit under review, and `cleanup` removes it with its session. `claude --bg`
+commit under review, and `cleanup` removes it after the merge. `claude --bg`
 writes session data under `~/.claude`, so run
 `launch` and `verify` outside the Bash sandbox or allow writes to `~/.claude`;
 either needs the operator's agreement. Before it files its report, whatever the
@@ -166,17 +166,61 @@ operator says a branch is merged, by any method including squash or rebase,
 `run.py merged <id>` records it. In `pr` mode `close` pushes the branch and
 opens a request instead (next section). A task that builds on a done but unmerged branch waits, and the Manager
 says so plainly in its replies and reports. After the merge, `run.py` removes
-every session of the task with `claude rm`, newest first and the task's first
-session last. `claude` locks a worktree in the name of the first session that
-used it. `claude rm` of any later session removes only that row; `claude rm` of
-the first session removes the folder, when the tree is clean and pushed. When a
-folder is still there after the last `rm` and no `kept` line explains it, the
-`kept` line `still present (<lock reason>)` gives the by-hand command
-(`git worktree remove -f -f ...`). `claude rm` refuses work that is on no
-remote, so the script passes `--discard-unpushed` only for a commit that
-`git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
-recorded merged head (`pushed`). It never deletes a file and never forces a
-worktree removal.
+the worktrees of the task by default (`merge.remove_worktrees = true`). It
+works in two steps.
+
+1. It removes every session of the task with `claude rm`, newest first and the
+   task's first session last. `claude` locks a worktree in the name of the first
+   session that used it. `claude rm` of any later session removes only that
+   row; `claude rm` of the first session removes the folder, when the tree is
+   clean and pushed. `claude rm` refuses work that is on no remote, so the
+   script passes `--discard-unpushed` only for a commit that
+   `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
+   recorded merged head (`pushed`).
+2. It then removes every folder of the task that is still there: `task-<id>`,
+   an old `task-<id>-<n>`, and `verify-<id>-<n>[-<k>]`. This covers a task that
+   0.6.0 started, a folder whose lock owner has no row, and a row `claude rm`
+   refused. It reads `claude agents` again first. A folder is removed only when
+   all three checks hold:
+   - No live session or process uses it: no live row has it as its working
+     directory, and (when `lsof` is installed) no process has its working
+     directory inside it. A lock must be Claude Code's own
+     (`claude session <folder> (pid <N> ...)`) with a pid that has ended; any
+     other lock reason, or a live pid, keeps the folder.
+   - `git status --porcelain` prints nothing. Ignored files such as
+     `node_modules` do not count and go with the folder (the `removed` line
+     counts them and names the first five); untracked or modified files do count.
+   - Its `HEAD` commit is merged. `local` mode: it is in the local branch the
+     task merges into (the `target` meta, else `merge.base`, else the branch the
+     main checkout is on; a detached checkout counts as nothing merged). After a
+     squash or rebase merge that was recorded, the task's verified commit
+     (`verdict_ref`), or a commit with the same change, counts as well. `pr`
+     mode: it is in `pushed`, the head the request merged, or in the fetched
+     target branch. The main checkout's `HEAD` is never the test in `pr` mode.
+
+   Then `run.py` runs `git worktree unlock` when the folder is locked (it
+   unlocks Claude Code's lock only for a clean, merged folder),
+   `git worktree remove` without `--force`, and `git branch -D worktree-<folder>`
+   when the branch tip is merged too. A branch checked out elsewhere, or with an
+   unmerged tip, stays. It last runs `claude rm` for every session row that
+   still names the folder, so `claude agents` does not list sessions of a
+   folder that is gone. It prints `removed ... worktree <folder> (merged at <short>)`.
+
+A folder that fails a check stays, with one `kept` line that names the check:
+`still running`, `process <pid> (<command>) uses it`, `locked (<reason>)`,
+`uncommitted changes (<files>)`, `commit <short> is not merged`, or `pushed head
+<short> is not in this clone; fetch <remote>/<branch>`. If git refuses the removal (for example for a worktree with a
+submodule), the folder and its lock stay and the `kept` line quotes git's first
+line; `run.py` does not retry with force. `run.py` never deletes a file and
+never forces a worktree removal. A done task that is not merged yet (`local`
+mode, waiting for the operator) keeps its worktree, and so does an abandoned
+task. `run.py record` repeats this for every done task with `merged_at` that
+still has a folder, so it also removes the leftovers of tasks closed under 0.4.0
+to 0.6.0. It prints a folder's `kept` line only when the reason differs from
+the last one (stored in the task's `cleanup_kept` meta); the merge and
+`run.py merged` always print it. Set `merge.remove_worktrees = false` to keep everything: `run.py`
+then removes no session and no worktree, and prints `kept <folder>:
+merge.remove_worktrees is false` once, at the merge.
 
 A question only the operator can answer is a Taskgraph `decision` node that
 `--blocks` the tasks it holds back. Blocked tasks leave `ready` by themselves,
@@ -416,6 +460,7 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `remote` | string | `"origin"` | The git remote the host is reached through. |
 | `base` | string | `""` | The branch requests target. `""` means the host's default branch, asked once per `run.py` command. A task launched with `--base <branch>` targets that branch instead (meta `target`). |
 | `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
+| `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no live session, clean tree, merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
 
 ### `[notifications]`
 
@@ -506,7 +551,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 22 keys:
+skill. Metadata holds everything else, 23 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -520,12 +565,20 @@ skill. Metadata holds everything else, 22 keys:
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
 | `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
+| `cleanup_kept` | `cleanup` | A JSON object `{folder: reason}` for the worktree folders of a merged task that `run.py` kept, so `record` repeats a `kept` line only when its reason changes. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager` or `operator`. In `pr` mode `record` sets them from the request state. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.7.0
+
+Version 0.8.0 removes a merged task's worktrees by default, including the old
+`task-<id>-<n>` folders and the folders of tasks that 0.4.0 to 0.6.0 closed:
+the next `run.py record` sweeps every done task with `merged_at`. Set
+`[merge] remove_worktrees = false` before you upgrade to keep them.
 
 ### Upgrading from 0.6.0
 
@@ -538,8 +591,8 @@ the tasks in flight before you upgrade. `run.py` does not migrate a task that
 session has ended and its result is filed, declare it a 0.7.0 task with
 `tg edit <id> --meta sessions='[]'`, then run `run.py record`. The next
 `launch` creates `.claude/worktrees/task-<id>` at the last reported `Head`. The
-old folders stay; `cleanup` lists them as `no session; remove it by hand if you
-want`, and removes nothing of a 0.6.0 task that is done.
+old folders stay until the task is merged; then `cleanup` removes them like any
+other safe folder.
 
 ## Layout
 

@@ -82,6 +82,8 @@ elif cmd == "rm":
     if entry.get("exit") and "--discard-unpushed" not in argv:
         sys.stderr.write(entry.get("stderr", "") + "\n")
         sys.exit(entry["exit"])
+    if os.environ.get("FAKE_CLAUDE_AFTER_RM"):  # a session started while the rows were being removed
+        open(os.environ["FAKE_CLAUDE_AGENTS"], "w").write(open(os.environ["FAKE_CLAUDE_AFTER_RM"]).read())
     if not entry.get("row_only"):  # like the real claude rm: the worktree goes with the session that owns it
         folder = argv[1][len("sess-"):] if argv[1].startswith("sess-") else argv[1]
         if re.fullmatch(r"task-\d+-\d+", folder):  # sess-task-<id>-<attempt>: the folder is task-<id>
@@ -2106,33 +2108,35 @@ class RunTest(Base):
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {side}@wt-1"}}, fh)
         events = self.events("merged", str(task))
-        self.assertIn(f"commit {side} is not in HEAD", self.one(events, "kept")["detail"])
+        self.assertEqual(self.one(events, "kept")["detail"], f"task-1: commit {side[:7]} is not merged")
         self.assertEqual(len(self.calls("rm")), 1)
         self.assertTrue(os.path.isdir(wt))
 
     def test_53_untracked_files_are_listed_never_deleted(self):
         task = self.closed_task()
         wt = self.worktree("task-1")
+        with open(os.path.join(wt, "notes.txt"), "w") as fh:
+            fh.write("mine\n")
         self.agents(self.finished("task-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": "worktree has untracked files"}}, fh)
         events = self.events("merged", str(task))
-        self.assertIn("untracked files", self.one(events, "kept")["detail"])
-        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(self.one(events, "kept")["detail"], "task-1: uncommitted changes (?? notes.txt)")
+        self.assertTrue(os.path.isfile(os.path.join(wt, "notes.txt")))
         self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
 
     def test_53_other_failure_and_directory_without_a_session(self):
         task = self.closed_task()
-        self.worktree("task-1")
+        wt = self.worktree("task-1")
         self.agents(self.finished("verify-1-1"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-verify-1-1": {"exit": 1, "stderr": "detached at an unmerged commit\nmore"}}, fh)
         events = self.events("merged", str(task))
-        kept = self.named(events, "kept")
-        details = sorted(e["detail"] for e in kept)
-        self.assertEqual(details, ["task-1: still present (not locked); remove it by hand: "
-                                   "git worktree remove -f -f .claude/worktrees/task-1 && git branch -D worktree-task-1",
-                                   "verify-1-1: claude rm said: detached at an unmerged commit"])
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["verify-1-1: claude rm said: detached at an unmerged commit"])
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.git('rev-parse', '--short=7', 'HEAD')})"])  # clean and merged: git removes it
+        self.assertFalse(os.path.exists(wt))
 
     def test_53_abandoned_task_is_never_cleaned_up(self):
         task = self.closed_task(merged=True)
@@ -2832,22 +2836,6 @@ class RunTest(Base):
         self.assertEqual(self.worktree_state()[2], [])
         self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
 
-    def test_53_a_folder_that_stays_is_named_with_its_lock_and_the_way_to_remove_it(self):
-        entries = [self.entry(1, 1), self.entry(1, 2)]
-        task = self.add_task(attempt=2, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions=json.dumps(entries))
-        self.tg("done", str(task))
-        wt = self.worktree("task-1")
-        self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
-        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
-        with open(self.rm_file, "w") as fh:
-            json.dump({"sess-task-1-1": {"row_only": True}, "sess-task-1-2": {"row_only": True}}, fh)
-        events = self.events("merged", str(task))
-        (kept,) = self.named(events, "kept")
-        self.assertEqual(kept["detail"], "task-1: still present (claude session task-1-1 (pid 1)); remove it by hand: "
-                                         "git worktree remove -f -f .claude/worktrees/task-1 && git branch -D worktree-task-1")
-        self.assertTrue(os.path.isdir(wt))  # run.py never removes a folder itself
-        self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
-
     def test_53_a_discard_is_passed_back_on_the_owners_rm_only_for_a_merged_commit(self):
         entries = [self.entry(1, 1), self.entry(1, 2)]
         task = self.add_task(attempt=2, verdict_ref=SHA_A, merged_at="x", merged_by="operator", sessions=json.dumps(entries))
@@ -2864,7 +2852,7 @@ class RunTest(Base):
 
         table(side)
         events = self.events("merged", str(task))
-        self.assertIn(f"commit {side} is not in HEAD", self.one(events, "kept")["detail"])
+        self.assertEqual(self.one(events, "kept")["detail"], f"task-1: commit {side[:7]} is not merged")
         self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-2"], ["rm", "sess-task-1-1"]])
         self.git("reset", "-q", "--hard", head, cwd=wt)  # the work is merged: the owner's rm may discard
         table(head)
@@ -2887,7 +2875,7 @@ class RunTest(Base):
         legacy = self.one(events, "legacy")
         self.assertEqual((legacy["task"], legacy["attempt"]), (task, 1))
         self.assertIn("started under agentic-team 0.6.0 (worktree .claude/worktrees/task-1-1); "
-                      "run.py 0.7.0 does not manage it", legacy["detail"])
+                      "run.py does not manage it", legacy["detail"])
         self.assertIn("tg edit 1 --meta sessions='[]'", legacy["next"])
         for name in ("died", "stuck", "running", "unknown"):
             self.assertEqual(self.named(events, name), [])
@@ -2907,17 +2895,439 @@ class RunTest(Base):
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), head)
         self.assertTrue(os.path.isdir(wt))  # the old folder stays
 
-    def test_53_cleanup_of_a_task_started_under_0_6_0_removes_nothing_and_lists_its_folders(self):
-        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator")
+    # --- a merged task's worktrees are removed when they are safe to remove
+
+    def merged_task(self, *entries, sessions=True, **meta):
+        """A done, merged task. `entries` are the sessions run.py recorded (default: the first attempt's);
+        sessions=False models a task started before 0.7.0 (no `sessions` meta)."""
+        extra = {"sessions": json.dumps(list(entries) or [self.entry(1, 1)])} if sessions else {}
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator", **extra, **meta)
         self.tg("done", str(task))
+        return task
+
+    def rows_only(self, *sids):
+        """`claude rm` of these sessions removes the row and leaves the folder, as for a later session of a folder."""
+        with open(self.rm_file, "w") as fh:
+            json.dump({sid: {"row_only": True} for sid in sids}, fh)
+
+    def short(self, rev="HEAD", cwd=None):
+        return self.git("rev-parse", rev, cwd=cwd)[:7]
+
+    def no_force(self):
+        self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
+
+    def test_70_a_merged_clean_locked_folder_left_after_rm_is_unlocked_and_removed(self):
+        task = self.merged_task(self.entry(1, 1), self.entry(1, 2))
+        wt = self.worktree("task-1")
+        self.claude_lock("task-1", self.dead_pid())
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        self.rows_only("sess-task-1-1", "sess-task-1-2")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed") if e["session"] is None],
+                         [f"worktree task-1 (merged at {self.short()})"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.worktree_state(), (1, "", []))  # folder, registration and branch are gone
+        self.assertEqual([c[1] for c in self.calls("rm")], ["sess-task-1-2", "sess-task-1-1"])  # each row once
+        self.no_force()
+
+    def test_70_rows_that_name_a_removed_folder_go_and_a_refusal_is_reported_not_fatal(self):
+        task = self.merged_task(self.entry(1, 1), self.entry(1, 2))
+        self.worktree("task-1")
+        self.agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"row_only": True}, "sess-task-1-2": {"exit": 1, "stderr": "boom\nmore"}}, fh)
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 2)  # the first session's row, then the folder
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], ["task-1: claude rm said: boom"])
+        self.assertEqual(self.worktree_state()[2], [])
+        self.assertEqual([c[1] for c in self.calls("rm")], ["sess-task-1-2", "sess-task-1-1", "sess-task-1-2"])
+
+    def test_70_a_task_started_before_0_7_0_loses_its_task_and_verifier_folders(self):
+        task = self.merged_task(sessions=False)
         self.worktree("task-1-1")
         self.worktree("verify-1-1")
         self.agents(self.finished("task-1-1"), self.finished("verify-1-1"))
+        self.rows_only("sess-task-1-1", "sess-verify-1-1")
         events = self.events("merged", str(task))
+        short = self.short()
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "removed") if e["session"] is None),
+                         [f"worktree task-1-1 (merged at {short})", f"worktree verify-1-1 (merged at {short})"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.worktree_state(), (1, "", []))
+        self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))  # the row of the old per-attempt folder
+        self.no_force()
+
+    def test_70_a_folder_that_fails_a_check_stays_with_one_line_that_names_it(self):
+        self.commit_file("tracked.txt", "one\n")
+        task = self.merged_task()
+        untracked, modified = self.worktree("task-1"), self.worktree("verify-1-1")
+        unmerged, live = self.worktree("verify-1-2"), self.worktree("verify-1-3")
+        with open(os.path.join(untracked, "notes.txt"), "w") as fh:
+            fh.write("mine\n")
+        with open(os.path.join(modified, "tracked.txt"), "w") as fh:
+            fh.write("two\n")
+        side = self.wt_commit(unmerged)
+        self.agents(self.row("verify-1-3"))
+        events = self.events("merged", str(task))
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")), sorted([
+            "task-1: uncommitted changes (?? notes.txt)",
+            "verify-1-1: uncommitted changes (M tracked.txt)",
+            f"verify-1-2: commit {side[:7]} is not merged",
+            "verify-1-3: still running"]))
+        self.assertEqual(self.named(events, "removed"), [])
+        self.assertEqual(self.worktree_state()[2], ["task-1", "verify-1-1", "verify-1-2", "verify-1-3"])
+        self.assertIn("worktree-verify-1-2", self.worktree_state()[1])
         self.assertEqual(self.calls("rm"), [])
+        self.no_force()
+
+    def test_70_an_ignored_file_does_not_keep_a_folder(self):
+        self.commit_file(".gitignore", "build/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        os.makedirs(os.path.join(wt, "build"))
+        with open(os.path.join(wt, "build", "out.bin"), "w") as fh:
+            fh.write("x\n")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 2)
+        self.assertEqual(self.worktree_state()[2], [])
+
+    def test_70_pr_mode_a_head_equal_to_pushed_is_merged_after_a_squash(self):
+        self.pr_config()
+        wt = self.worktree("task-1")
+        pushed = self.wt_commit(wt)  # a squash merge leaves this commit out of main
+        extra = self.worktree("verify-1-1")
+        later = self.wt_commit(extra, "later.txt")
+        task = self.merged_task(pushed=pushed)
+        self.assertNotEqual(self.git("merge-base", "HEAD", pushed), pushed)
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))
+        self.rows_only("sess-task-1-1", "sess-verify-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed") if e["session"] is None],
+                         [f"worktree task-1 (merged at {pushed[:7]})"])
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"verify-1-1: commit {later[:7]} is not merged"])
+        self.assertEqual(self.worktree_state()[2], ["verify-1-1"])
+        self.assertNotIn("worktree-task-1", self.worktree_state()[1])
+        self.assertIn("worktree-verify-1-1", self.worktree_state()[1])
+
+    def test_70_a_branch_whose_tip_is_not_merged_stays_when_the_folder_goes(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        self.git("checkout", "-q", "--detach", "HEAD~1", cwd=wt)  # the folder is at a merged commit; the branch is not
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 2)
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         [f"worktree-task-1: branch stays, commit {tip[:7]} is not merged"])
+        self.assertEqual(self.worktree_state()[1].split()[-1], "worktree-task-1")
+
+    def test_70_git_refusing_the_removal_keeps_the_folder_and_its_lock_without_force(self):
+        sub = os.path.join(self.dir, "sub")
+        os.makedirs(sub)
+        self.git("init", "-q", "-b", "main", cwd=sub)
+        self.git("commit", "-q", "--allow-empty", "-m", "s", cwd=sub)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "libs")
+        self.git("commit", "-q", "-m", "add libs")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.git("-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q", cwd=wt)
+        reason = self.claude_lock("task-1", self.dead_pid())
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        (kept,) = self.named(events, "kept")
+        self.assertEqual(kept["detail"], "task-1: git worktree remove said: fatal: working trees containing submodules "
+                                         "cannot be moved or removed")
+        self.assertEqual(self.named(events, "removed")[-1]["session"], "sess-task-1-1")
+        self.assertTrue(os.path.isdir(wt))
+        self.assertIn("locked " + reason, self.git("worktree", "list", "--porcelain"))
+        self.assertIn("worktree-task-1", self.worktree_state()[1])
+        self.no_force()
+
+    def test_70_record_sweeps_a_merged_task_closed_before_0_7_0(self):
+        task = self.merged_task(sessions=False)
+        self.worktree("task-1-2")
+        self.worktree("verify-1-1")
+        self.agents()
+        events = self.events("record")
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "removed")),
+                         [f"worktree task-1-2 (merged at {self.short()})", f"worktree verify-1-1 (merged at {self.short()})"])
+        self.assertEqual(self.worktree_state(), (1, "", []))
+        again = self.events("record")
+        self.assertEqual((self.named(again, "removed"), self.named(again, "kept")), ([], []))
+        self.assertEqual(task, 1)
+
+    def test_70_record_with_nothing_to_remove_calls_no_claude_rm(self):
+        self.merged_task()
+        self.agents()
+        events = self.events("record")
+        self.assertEqual((self.named(events, "removed"), self.named(events, "kept")), ([], []))
+        self.assertEqual(self.calls("rm"), [])
+
+    def test_70_a_done_task_that_is_not_merged_keeps_its_worktree(self):
+        task = self.closed_task()
+        wt = self.worktree("task-1")
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unmerged")["task"], task)
+        self.assertEqual((self.named(events, "removed"), self.named(events, "kept")), ([], []))
+        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(self.calls("rm"), [])
+
+    # --- review fixes: what counts as merged, locks, processes, repeated lines
+
+    def dead_pid(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        return child.pid
+
+    def claude_lock(self, folder, pid):
+        reason = f"claude session {folder} (pid {pid} start 2026-10-28T10:00:00)"
+        self.git("worktree", "lock", "--reason", reason, self.wt_path(folder))
+        return reason
+
+    def closed_at(self, tip, merged=False, **meta):
+        """A done task whose verified commit is `tip`, local mode."""
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]", **meta)
+        if merged:
+            self.tg("edit", str(task), "--meta", 'merged_at="2026-10-26 10:00 UTC"', "merged_by=operator")
+        self.tg("done", str(task))
+        return task
+
+    def test_72_a_detached_head_at_the_task_tip_does_not_make_it_merged(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.closed_at(tip)
+        self.git("checkout", "-q", "--detach", tip)
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unmerged")["task"], task)
+        self.assertEqual(self.named(events, "merged"), [])
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertEqual((self.named(events, "removed"), self.named(events, "kept")), ([], []))
+        self.assertTrue(os.path.isdir(wt))
+        self.assertIn("worktree-task-1", self.worktree_state()[1])
+        self.assertEqual(self.calls("rm"), [])
+
+    def test_72_a_feature_branch_that_holds_the_tip_is_not_the_target(self):
+        self.write_config('[merge]\nbase = "main"\n')
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.closed_at(tip)
+        self.git("checkout", "-q", "-b", "feature", tip)
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unmerged")["task"], task)
+        self.assertNotIn("merged_at", self.meta(task))
+        self.assertTrue(os.path.isdir(wt))
+        self.write_config()  # no merge.base: the branch the main checkout is on is the target, and it holds the tip
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertEqual(self.worktree_state()[2], [])
+
+    def test_72_a_local_squash_merge_leaves_no_ancestor_so_the_verified_change_counts(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt, "feature.txt", "work\n")
+        self.git("merge", "--squash", "-q", "worktree-task-1")
+        self.git("commit", "-q", "-m", "squash task 1")
+        self.assertNotEqual(self.git("merge-base", "HEAD", tip), tip)
+        same = self.worktree("verify-1-1", base=tip)
+        self.git("commit", "-q", "--amend", "-m", "same change, other message", cwd=same)
+        copy = self.git("rev-parse", "HEAD", cwd=same)
+        self.assertNotEqual(copy, tip)
+        more = self.worktree("verify-1-2", base=tip)
+        extra = self.wt_commit(more, "more.txt")
+        task = self.closed_at(tip, merged=True)
+        self.agents()
+        events = self.events("record")
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "removed")),
+                         [f"worktree task-1 (merged at {tip[:7]})", f"worktree verify-1-1 (merged at {copy[:7]})"])
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"verify-1-2: commit {extra[:7]} is not merged"])
+        self.assertEqual(self.worktree_state()[2], ["verify-1-2"])
+        self.assertEqual(task, 1)
+
+    def test_72_pr_mode_does_not_trust_the_main_checkouts_head(self):
+        self.pr_config()
+        self.fake_host()
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        self.git("merge", "--ff-only", "-q", "worktree-task-1")  # the operator's checkout holds the tip; the request did not
+        task = self.merged_task(pushed=self.git("rev-parse", "HEAD~1"))
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: commit {tip[:7]} is not merged"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_72_a_pushed_head_that_is_not_in_this_clone_says_to_fetch(self):
+        self.pr_config()
+        self.fake_host()
+        wt = self.worktree("task-1")
+        self.wt_commit(wt)
+        task = self.merged_task(pushed="f" * 40)
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: pushed head fffffff is not in this clone; fetch origin/task-1"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_73_only_the_lock_of_an_ended_claude_session_is_released(self):
+        task = self.merged_task(self.entry(1, 1))
+        operator, live, ended = (self.worktree(f"verify-1-{n}") for n in (1, 2, 3))
+        self.git("worktree", "lock", "--reason", "do not touch", operator)
+        self.claude_lock("verify-1-2", os.getpid())
+        reason = self.claude_lock("verify-1-3", self.dead_pid())
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")), [
+            "verify-1-1: locked (do not touch)",
+            f"verify-1-2: still running (pid {os.getpid()} holds its lock)"])
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree verify-1-3 (merged at {self.short()})"])
+        self.assertEqual(self.worktree_state()[2], ["verify-1-1", "verify-1-2"])
+        listing = self.git("worktree", "list", "--porcelain")
+        self.assertIn("locked do not touch", listing)
+        self.assertNotIn(reason, listing)
+        self.no_force()
+
+    def test_73_a_lock_that_names_another_folder_is_not_claudes_for_this_one(self):
+        task = self.merged_task()
+        self.worktree("task-1")
+        self.git("worktree", "lock", "--reason", f"claude session task-2 (pid {self.dead_pid()} start x)", self.wt_path("task-1"))
+        self.agents()
+        events = self.events("merged", str(task))
+        (kept,) = self.named(events, "kept")
+        self.assertTrue(kept["detail"].startswith("task-1: locked (claude session task-2 "), kept)
+        self.assertTrue(os.path.isdir(self.wt_path("task-1")))
+
+    def test_74_a_process_with_its_working_directory_in_the_folder_keeps_it(self):
+        if not shutil.which("lsof"):
+            self.skipTest("lsof is not installed")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        child = subprocess.Popen(["sleep", "30"], cwd=wt)
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: process {child.pid} (sleep) uses it"])
+        self.assertTrue(os.path.isdir(wt))
+        child.kill()
+        child.wait()
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 1)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_74_without_lsof_the_process_check_is_skipped(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        bare = os.path.join(self.dir, "bare")  # python and git only: no lsof
+        os.makedirs(bare)
+        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        os.symlink(sys.executable, os.path.join(bare, "python3"))
+        os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
+        env = dict(self.env, PATH=bare)
+        self.agents()
+        out = self.run_cmd("merged", str(task), pre=["--json"], env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.named(json.loads(out.stdout), "removed")), 1)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_74_the_session_list_is_read_again_before_the_folders_go(self):
+        task = self.merged_task(self.entry(1, 1))
+        wt = self.worktree("task-1")
+        self.agents(self.finished("task-1", 1))
+        self.rows_only("sess-task-1-1")
+        with open(os.path.join(self.dir, "after.json"), "w") as fh:
+            fh.write("[" + json.dumps(self.row("task-1", 2)) + "]")
+        env = dict(self.env, FAKE_CLAUDE_AFTER_RM=os.path.join(self.dir, "after.json"))
+        out = self.run_cmd("merged", str(task), pre=["--json"], env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        events = json.loads(out.stdout)
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], ["task-1: still running"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_75_a_kept_line_is_repeated_by_record_only_when_its_reason_changes(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(wt, "a.txt"), "w") as fh:
+            fh.write("x\n")
+        self.agents()
+        first = self.events("record")
+        self.assertEqual([e["detail"] for e in self.named(first, "kept")], ["task-1: uncommitted changes (?? a.txt)"])
+        self.assertEqual(self.meta(task)["cleanup_kept"], {"task-1": "uncommitted changes (?? a.txt)"})
+        self.assertEqual(self.named(self.events("record"), "kept"), [])
+        with open(os.path.join(wt, "b.txt"), "w") as fh:
+            fh.write("y\n")
+        changed = self.events("record")
+        self.assertEqual([e["detail"] for e in self.named(changed, "kept")], ["task-1: uncommitted changes (?? a.txt, ?? b.txt)"])
+        merged = self.events("merged", str(task))  # an explicit run.py merged always says it
+        self.assertEqual(len(self.named(merged, "kept")), 1)
+        os.remove(os.path.join(wt, "a.txt"))
+        os.remove(os.path.join(wt, "b.txt"))
+        removed = self.events("record")
+        self.assertEqual(len(self.named(removed, "removed")), 1)
+        self.assertEqual(self.meta(task)["cleanup_kept"], {})
+
+    def test_76_the_removed_line_counts_the_ignored_files_it_took_with_the_folder(self):
+        self.commit_file(".gitignore", "*.log\nbuild/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        for n in range(6):
+            with open(os.path.join(wt, f"f{n}.log"), "w") as fh:
+                fh.write("x\n")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual(self.one(events, "removed")["detail"],
+                         f"worktree task-1 (merged at {self.short()}) (ignored files removed: 6: "
+                         "f0.log, f1.log, f2.log, f3.log, f4.log, ...)")
+
+    # --- merge.remove_worktrees = false
+
+    def test_71_remove_worktrees_false_removes_nothing_and_says_so_once(self):
+        self.write_config("[merge]\nremove_worktrees = false\n")
+        task = self.merged_task(self.entry(1, 1))
+        self.worktree("task-1")
+        self.worktree("verify-1-1")
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))
+        events = self.events("merged", str(task))
         self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")),
-                         ["task-1-1: no session; remove it by hand if you want",
-                          "verify-1-1: no session; remove it by hand if you want"])
+                         ["task-1: merge.remove_worktrees is false", "verify-1-1: merge.remove_worktrees is false"])
+        self.assertEqual(self.named(events, "removed"), [])
+        self.assertEqual(self.calls("rm"), [])
+        self.assertEqual(self.worktree_state()[2], ["task-1", "verify-1-1"])
+        self.assertEqual(self.worktree_state()[0], 3)
+        later = self.events("record")
+        self.assertEqual((self.named(later, "kept"), self.named(later, "removed")), ([], []))
+        self.assertEqual(self.calls("rm"), [])
+        self.assertEqual(self.worktree_state()[2], ["task-1", "verify-1-1"])
+
+    def test_71_remove_worktrees_false_at_a_merge_by_close(self):
+        self.write_config("[merge]\nremove_worktrees = false\n")
+        task = self.running_task()
+        wt, _ = self.pass_report(task)
+        self.agents(self.finished("task-1"))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], ["task-1: merge.remove_worktrees is false"])
+        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(self.calls("rm"), [])
+
+    def test_71_remove_worktrees_true_is_the_default(self):
+        self.write_config("[merge]\nremove_worktrees = true\n")
+        task = self.merged_task()
+        self.worktree("task-1")
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual(len(self.named(events, "removed")), 2)
+        self.assertEqual(self.worktree_state()[2], [])
 
     # --- review fixes
 
@@ -2939,7 +3349,7 @@ class RunTest(Base):
         table(side)
         self.assertEqual(self.one(self.events("record"), "slots")["detail"], "0/2 live")
         events = self.events("merged", str(task))
-        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: commit {side} is not in HEAD"])
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")], [f"task-1: commit {side[:7]} is not merged"])
         self.assertTrue(os.path.isdir(wt))
         self.git("reset", "-q", "--hard", head, cwd=wt)  # now the commit is merged: the owner's rm may discard it
         table(head)
@@ -3231,9 +3641,12 @@ class PrTest(Base):
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": f"unpushed commits; pass --discard-unpushed {side}@wt-1"}}, fh)
         events = self.events("record")
-        self.assertIn(f"commit {side} is not in HEAD", self.one(events, "kept")["detail"])
         self.one(events, "merged")
-        self.assertEqual(len(self.calls("rm")), 1)
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         [f"task-1: claude rm said: unpushed commits; pass --discard-unpushed {side}@wt-1"])
+        # The folder's HEAD is the merged head, so git removes the folder; the commit that is not merged is never discarded.
+        self.assertEqual(self.one(events, "removed")["detail"], f"worktree task-1 (merged at {head[:7]})")
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"], ["rm", "sess-task-1-1"]])
 
     def commit_side(self, name):
         with open(os.path.join(self.root, name), "w") as fh:
@@ -3713,11 +4126,11 @@ class PrTest(Base):
             fh.write("x\n")
         self.assertIn("uncommitted changes", self.one(self.events("record"), "kept")["detail"])
         self.assertEqual(self.calls("rm"), [])
-        os.remove(os.path.join(wt, "wip.txt"))
+        os.rename(os.path.join(wt, "wip.txt"), os.path.join(wt, "notes.txt"))
         with open(self.rm_file, "w") as fh:
             json.dump({"sess-task-1-1": {"exit": 1, "stderr": "worktree has untracked files"}}, fh)
-        self.assertIn("untracked files", self.one(self.events("record"), "kept")["detail"])
-        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(self.one(self.events("record"), "kept")["detail"], "task-1: uncommitted changes (?? notes.txt)")
+        self.assertTrue(os.path.isfile(os.path.join(wt, "notes.txt")))
         self.assertTrue(all("--force-remove-worktree" not in c for c in self.calls()))
 
     @both_hosts
