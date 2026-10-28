@@ -89,7 +89,8 @@ Three rules carry the rest:
   purpose, acceptance criteria, scope, or verify command, and the Manager
   fixes the task in Taskgraph rather than writing the brief by hand.
 - A worker's `PASS` is a claim. A task closes only on a verdict tied to the
-  exact output: the commit SHA the worker reports.
+  exact output: the commit SHA the worker reports, at the pass level of its
+  verify kind.
 
 ### Task lifecycle
 
@@ -155,7 +156,10 @@ worktree stays, and the report lists it for the operator to remove.
 
 The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
-verifier in a worktree of its own, created at the `Head` commit. Then
+verifier in a worktree of its own, created at the `Head` commit. A `schema` or
+`design-doc` task always goes to `run.py verify`, whatever its `risk`. The brief
+carries the method for the task's verify kind and names the base and head
+commits. Only `artifact-verified` closes those two kinds. Then
 `run.py close` records the verdict and the token counts, runs `tg done`, and
 then follows `merge.mode`. In `local` mode it merges only when a standing-orders
 line starts with `MERGE:`, and only into the checked-out branch of a clean main
@@ -293,7 +297,8 @@ for the pushed head, or dispatches one when it has a manual trigger. `record`
 files the finished run as a `verify` result by `ci` (`test-verified`, or
 `verify-failed`; a cancelled run is `verify-blocked`), once per run id and
 attempt. `artifact-verified` stays a Manager override. On GitHub `<name>` is a
-workflow file or name; on GitLab it is `pipeline` or a job name.
+workflow file or name; on GitLab it is `pipeline` or a job name. A CI
+`test-verified` does not close a `schema` or `design-doc` task.
 
 **Override.** `run.py close <id> --verdict <level> --override-verifier "<why>"`
 changes a verifier's verdict and files the reason. An upgrade needs a run id or
@@ -462,6 +467,12 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
 | `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no live session, clean tree, merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
 
+### `[verify]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `kind` | `"code"`, `"schema"`, `"design-doc"` | `"code"` | The verify kind of a task without a `verify_kind` meta. See Task metadata. |
+
 ### `[notifications]`
 
 | Key | Type | Default | Meaning |
@@ -507,7 +518,9 @@ checkpoint, the previous report of a fix round, and the latest report of each
 task this one depends on. To change the brief for every task, edit the
 template. `run.py verify` fills the same template, with verifier values in
 GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
-REPORT.
+REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta plus
+`templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
+base commit, how it was found, and the head commit.
 
 The worker runs `result add` from its own session, so its permission mode
 must allow that command. Pin `--db` and allow only `--body-file -` if you
@@ -551,13 +564,14 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 23 keys:
+skill. Metadata holds everything else, 24 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
 | `scope`, `verify`, `tier`, `risk` | plan | Brief inputs. `tier` is a tier name or a `models.overrides` key. `risk=high` sends verification to a separate session. |
 | `estimate` | plan | Taskgraph's own estimate in hours. The worker's timebox is twice it. |
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
+| `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
 | `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
@@ -572,6 +586,12 @@ skill. Metadata holds everything else, 23 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.8.x
+
+Version 0.9.0 adds the `verify_kind` meta. A task without it is `code` and
+behaves as before, apart from the base and head lines and the levels list in the
+verifier brief. No migration.
 
 ### Upgrading from 0.7.0
 
@@ -604,7 +624,7 @@ other safe folder.
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
 | `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |
 | `skills/setup/` | `/agentic-team:setup`, which creates the project config |
-| `templates/` | Project config (`agentic-team.toml`), the brief, and standing orders |
+| `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
 | `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |

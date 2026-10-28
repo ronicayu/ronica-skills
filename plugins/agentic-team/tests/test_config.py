@@ -57,6 +57,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge",
                                        "remove_worktrees": True})
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "remove_worktrees"})
+        self.assertEqual(cfg["verify"], {"kind": "code"})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):
@@ -133,6 +134,7 @@ class ConfigTest(unittest.TestCase):
             models.judgement = { effort = "high" }
             merge.mode = "PR"
             merge.method = 3
+            verify.kind = "prose"
         """)
         found = "\n".join(config.problems(config.load(self.root)))
         self.assertIn("sessions.max_parallel must be a positive integer", found)
@@ -141,6 +143,7 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("models.judgement must be a model id", found)
         self.assertIn('merge.mode must be one of "local", "pr", not "PR"', found)
         self.assertIn('merge.method must be one of "merge", "squash", "rebase", not 3', found)
+        self.assertIn('verify.kind must be one of "code", "schema", "design-doc", not "prose"', found)
 
     def test_64_merge_section(self):
         self.write(MINIMAL + '[merge]\nmode = "pr"\nhost = "gitlab"\nremote = "upstream"\nmethod = "squash"\nmethd = 1\n')

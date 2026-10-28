@@ -21,6 +21,11 @@ adds what Taskgraph cannot decide.
    - `--meta verify_mode=ci:<workflow>` when CI on the pushed branch is the
      right verifier (GitLab: `ci:pipeline` or `ci:<job>`); needs
      `merge.mode = "pr"`. Default: a verifier session.
+   - `--meta verify_kind=code|schema|design-doc` (default: the config's
+     `verify.kind`, else `code`). `schema`: a data model, DDL or migration; the
+     verifier recomputes numbers and runs the DDL. `design-doc`: an ADR, RFC or
+     architecture document; the verifier checks sources, completeness and
+     contradictions. Only `artifact-verified` closes these two kinds.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
 4. **Relay context through dependencies.** A task that needs an upstream

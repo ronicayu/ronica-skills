@@ -36,7 +36,9 @@ Manager.
   the task. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
   `WIP task <id> attempt <n>: <status>`. If there is nothing to commit, that is fine. A
   verifier commits nothing. Never push, rebase, merge, reset, delete branches, or check out
-  another branch or commit.
+  another branch or commit. A verifier may create one temporary folder outside its worktree
+  (`mktemp -d`) for a read-only export of the base commit or for a temporary database, as its
+  brief says, and deletes it before it reports; its own worktree stays at the head.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
@@ -98,5 +100,8 @@ Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; bl
 A task report has no `Verdict:` line. A verifier adds one after `Status:`:
 `Verdict: artifact-verified | test-verified | check-only | verify-blocked | verify-failed`.
 A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
+The brief's VERIFY section defines each level for the task's verify kind. Only
+`artifact-verified` closes a `schema` or `design-doc` task. A verifier's finding about a
+decision itself goes under `Follow-ups:` as `decision: <question>`; it is not an issue.
 
 Write `None` for an empty field. Use the time zone label from the brief.
