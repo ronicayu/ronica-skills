@@ -101,9 +101,15 @@ TRUST_HINT = ("Run claude once in the repository and accept the trust prompt; "
               "a trusted parent folder does not count.")
 SANDBOX_HINT = ("claude --bg writes session data under ~/.claude. Run run.py launch and run.py verify outside the "
                 "Bash sandbox, or allow writes to ~/.claude. Either change needs the operator's agreement.")
-PROMPT_HINT = ("claude logs {sid} shows the command it waited on. Remove the need for it: narrow the brief or "
-               "SCOPE, keep the step for the Manager's integration list, or set verify_mode=ci:<workflow> when "
-               "the check needs the runner. Then {cmd}. A pinned old model id is one more possible cause; use an alias.")
+PROMPT_HINT = ("The session asked permission for a step it could not do alone; the BLOCKED row shows its last output "
+               "(claude logs {sid} if the row has none). Remove the need for it: add a standing order, narrow the "
+               "brief or SCOPE, keep the step for the Manager's integration list, or set verify_mode=ci:<workflow> "
+               "when the check needs the runner. Then {cmd}.")
+PINNED_HINT = (" The session ran on the pinned model id {model}; a pinned id can drop auto mode to manual prompts. "
+               "Use an alias such as sonnet.")
+MODEL_LINE = re.compile(r"(?m)^Model:\s*(.*?)\s*$")
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+LOG_LINES, LOG_CHARS = 15, 2000
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
@@ -1030,7 +1036,7 @@ def decision_text(text, task, snap=None, extra=""):
 
 # ------------------------------------------------------------------ launch
 
-def session_entry(run, tid, kind, attempt, name, worktree, said):
+def session_entry(run, tid, kind, attempt, name, worktree, said, model=None):
     """(entry, note) for the session `claude --bg` just started. The entry is what goes into the task's
     `sessions` meta, or None when no id is known. It never fails the launch: the session runs.
 
@@ -1055,7 +1061,22 @@ def session_entry(run, tid, kind, attempt, name, worktree, said):
         sid, note = printed, f"claude agents does not list {printed} yet"
     else:
         return None, "no session id printed; the row is matched by its folder"
-    return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree}, note
+    return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree, "model": model}, note
+
+
+def pinned_model(model):
+    """True for a full model id such as claude-haiku-4-5-20251001; an alias (sonnet, opus[1m]) or None is not."""
+    return str(model).startswith("claude-")
+
+
+def session_model(task, sid):
+    """The model recorded for session `sid` in the task's `sessions` meta, or None."""
+    found = next((e for e in recorded_sessions(task) if e.get("id") == sid), None)
+    return (found or {}).get("model") or None
+
+
+def pinned_hint(model):
+    return PINNED_HINT.format(model=model) if pinned_model(model) else ""
 
 
 def recorded_sessions(task):
@@ -1224,7 +1245,7 @@ def cmd_launch(run, args):
     except Exception as exc:
         started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
-    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said)
+    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model)
     sessions = recorded_sessions(task) + ([entry] if entry else [])
     if task["status"] == "open":
         run.tg("start", str(tid))
@@ -1409,7 +1430,7 @@ def cmd_verify(run, args):
             started_or_cleaned(run, name, ref, exc)
         raise
     drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
-    entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said)
+    entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said, model)
     if entry:  # the only meta verify writes
         run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
     run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind} skill {where}"
@@ -1498,12 +1519,31 @@ def record_row(run, task, session, attempt):
     session.recorded, session.attempt = True, entry["attempt"]
 
 
-def file_stuck(run, tid, attempt, kind, session, label):
+def last_output(run, sid):
+    """The tail of `claude logs <sid>` without ANSI codes: the last LOG_LINES non-empty lines, at most LOG_CHARS
+    characters cut from the front. A failed call gives one line that says so. It never raises."""
+    try:
+        out = run.claude("logs", sid, check=False)
+    except Refused as exc:
+        return [f"claude logs failed: {first_line(str(exc))}"]
+    if out.returncode != 0:
+        why = first_line(out.stderr.strip() or out.stdout.strip()) or f"exit {out.returncode}"
+        return [f"claude logs failed: {why}"]
+    lines = [line.rstrip() for line in ANSI.sub("", out.stdout).replace("\r", "").splitlines()]
+    text = "\n".join([line for line in lines if line.strip()][-LOG_LINES:])[-LOG_CHARS:]
+    return text.splitlines() or ["(no output)"]
+
+
+def file_stuck(run, tid, attempt, kind, session, label, model=None):
     reason = session.waiting or session.state
+    waiting_for = json.dumps(session.waiting) if session.waiting else session.state
+    tail = last_output(run, session.sid)  # before the stop: the evidence is lost afterwards
     run.claude("stop", session.sid)
     run.add_result(tid, kind, attempt, "manager", "BLOCKED",
                    f"Session: {session.sid}\nWorktree: {session.worktree(run.root)}\n"
-                   f"{label} {session.sid} stopped: waiting on {reason}")
+                   f"{label} {session.sid} stopped: waiting on {reason}\n"
+                   f"Waiting for: {waiting_for}\nModel: {model or 'unknown'}\nLast output:\n"
+                   + "\n".join(f"    {line}" for line in tail))
     return "permission prompt" if "prompt" in str(reason).lower() else f"waiting on {reason}"
 
 
@@ -1515,8 +1555,12 @@ def record_arrived(run, snap, task, attempt, result):
         run.emit("gated", tid, attempt, None, f'{status}; waits for decision #{held[0]} "{title}"')
         return
     if status == "BLOCKED" and result.get("author") == "manager":
-        sid = tail_or_none(SESSION_LINE.search(result.get("body") or "")) or "<sid>"
-        run.emit("stuck", tid, attempt, None, "filed earlier", PROMPT_HINT.format(sid=sid, cmd=f"run.py launch {tid}"))
+        body = result.get("body") or ""
+        found = tail_or_none(SESSION_LINE.search(body))
+        model = tail_or_none(MODEL_LINE.search(body))
+        model = None if model == "unknown" else model or (session_model(task, found) if found else None)
+        run.emit("stuck", tid, attempt, None, "filed earlier",
+                 PROMPT_HINT.format(sid=found or "<sid>", cmd=f"run.py launch {tid}") + pinned_hint(model))
         return
     answered = [d for d in task.get("depends_on") or []
                 if d in snap.by_id and snap.by_id[d]["type"] == "decision" and snap.by_id[d]["status"] == "done"]
@@ -1619,9 +1663,10 @@ def record_in_progress(run, snap, task, unmanaged):
         for s in live:
             if s.stuck:
                 record_row(run, task, s, attempt)
-                reason = file_stuck(run, tid, attempt, "verify", s, "Verifier")
+                model = session_model(task, s.sid)
+                reason = file_stuck(run, tid, attempt, "verify", s, "Verifier", model)
                 run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}; filed verify BLOCKED ({reason})",
-                         PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again"))
+                         PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again") + pinned_hint(model))
             else:
                 run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status})")
         return
@@ -1665,9 +1710,10 @@ def record_in_progress(run, snap, task, unmanaged):
         if stuck:
             s = stuck[0]
             record_row(run, task, s, attempt)
-            reason = file_stuck(run, tid, attempt, "task", s, "Session")
+            model = session_model(task, s.sid)
+            reason = file_stuck(run, tid, attempt, "task", s, "Session", model)
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}; filed BLOCKED ({reason})",
-                     PROMPT_HINT.format(sid=s.sid, cmd=f"run.py launch {tid}"))
+                     PROMPT_HINT.format(sid=s.sid, cmd=f"run.py launch {tid}") + pinned_hint(model))
         elif busy:
             run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name})")
         elif unknown:

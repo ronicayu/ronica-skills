@@ -20,9 +20,9 @@ verification, a decision, a plan change) and before every report.
    - `died`: retry by failure mode. Infrastructure failures retry as they are.
      A tool error or a stuck model retries one `--tier` higher. An unknown
      cause retries once.
-   - `stuck`: read the `next:` hint; it names the command the session waited
-     on and the three remedies. `--model sonnet` is not the fix unless the hint
-     says a pinned model id. `stopped`: after the pause,
+   - `stuck`: read the `next:` hint and the BLOCKED row. The row holds the item the session
+     waited for and its last output; the hint lists the remedies. `--model sonnet`
+     is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: after the pause,
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
      session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.

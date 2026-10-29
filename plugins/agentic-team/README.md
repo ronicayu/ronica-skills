@@ -152,8 +152,10 @@ worker.
 `run.py record` finds the result, one line per event. A session that ends with
 no result is filed as `DIED` and retried; a complete report in `claude logs`
 is filed as the worker's own. A session stuck on a permission prompt is
-stopped and filed as `BLOCKED`. Attempt 3 is the last (`launch` refuses a
-fourth): when it fails, `run.py abandon` marks the task abandoned. Its
+stopped and filed as `BLOCKED`; the row holds what it waited for, its model,
+and the last lines of `claude logs`, read before the stop. The `stuck` hint
+names a pinned model id only when the session ran on one. Attempt 3 is the
+last (`launch` refuses a fourth): when it fails, `run.py abandon` marks the task abandoned. Its
 worktree stays, and the report lists it for the operator to remove.
 
 The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
@@ -548,7 +550,7 @@ a `kind`, a `status`, an `attempt`, and an author (`--by`):
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
 | `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, as its last action | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
-| `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt. A worker report that the Manager copied from `claude logs` keeps the worker's own status. |
+| `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that the Manager copied from `claude logs` keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker stopped for a pause (a second row carries the WIP commit `Head:`), or a session `close` stopped. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
 | `task` | `PASS` | The Manager | The evidence for an adopted task (`Worktree: None`, `Ran: not stated (adopted)`). |
@@ -588,6 +590,10 @@ skill. Metadata holds everything else, 24 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.10.0
+
+Version 0.10.1 records the `model` of each session in the `sessions` meta and puts the waiting item, the model, and the last output of `claude logs` in the `BLOCKED` row of a stuck session. The `stuck` hint names a pinned model id only for a session that ran on one. `config.py check` prints one line when `.agentic-team.toml` is missing. No migration: an older session entry has no `model`, and the row shows `Model: unknown`.
 
 ### Upgrading from 0.9.0
 
