@@ -41,7 +41,7 @@ Defaults live in the `config` script; its `show` command prints them. Task tiers
 | `implementation` | Well-scoped build or edit work with a known answer shape |
 | `judgement` | Judgement, evidence classification, review, prose that readers rely on, long unattended runs |
 
-A `--bg` worker in `auto` mode needs a model that supports auto mode. An older pinned model id, such as `claude-haiku-4-5-20251001`, drops to manual mode and waits on a permission prompt that nobody answers. Use model aliases (`haiku`, `sonnet`, `opus`), which resolve to current models. A stuck session is diagnosed by `run record`; read its hint, not this paragraph.
+A `--bg` worker in `auto` mode needs a model that supports auto mode. An older pinned model id, such as `claude-haiku-4-5-20251001`, drops to manual mode and waits on a permission prompt that nobody answers. Use model aliases (`haiku`, `sonnet`, `opus`), which resolve to current models. A stuck session is diagnosed by `run record`: the BLOCKED row holds the waiting item and the last output, and the model hint appears only for a pinned id. Read them, not this paragraph.
 
 Write every time as `YYYY-MM-DD HH:MM <label>`, where `<label>` is the config value `sessions.timezone_label`. Get the current time with `TZ=<zone> date '+%Y-%m-%d %H:%M'`, where `<zone>` is the config value `sessions.timezone`.
 

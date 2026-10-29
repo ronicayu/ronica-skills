@@ -127,10 +127,11 @@ class ConfigError(Exception):
 class Config(dict):
     """The merged config, plus the file-level problems found while loading."""
 
-    def __init__(self, data, root, errors):
+    def __init__(self, data, root, errors, missing=False):
         super().__init__(data)
         self.root = root
         self.errors = errors
+        self.missing = missing  # the tracked file does not exist
 
 
 # ---------------------------------------------------------------- loading
@@ -208,11 +209,12 @@ def load(root="."):
     tracked_path = os.path.join(root, TRACKED)
     local_path = os.path.join(root, LOCAL)
 
-    if os.path.isfile(tracked_path):
-        tracked = read_toml(tracked_path, errors)
-    else:
-        errors.append(f"{TRACKED} not found in {root}; run /agentic-team:setup")
+    missing = not os.path.isfile(tracked_path)
+    if missing:
+        errors.append(f"{TRACKED} not found in {root}; run /agentic-team:setup, or pass --root <repository root>")
         tracked = {}
+    else:
+        tracked = read_toml(tracked_path, errors)
     local = read_toml(local_path, errors) if os.path.isfile(local_path) else {}
     errors += unknown_keys(tracked, TRACKED) + unknown_keys(local, LOCAL)
 
@@ -237,7 +239,7 @@ def load(root="."):
         sessions["timezone"] = system_timezone()
     if not sessions["timezone_label"] and isinstance(sessions["timezone"], str):
         sessions["timezone_label"] = zone_label(sessions["timezone"])
-    return Config(data, root, errors)
+    return Config(data, root, errors, missing)
 
 
 # ------------------------------------------------------------- validation
@@ -279,6 +281,8 @@ def type_ok(kind, value):
 def problems(config):
     """Every problem in a loaded Config, one string each."""
     found = list(getattr(config, "errors", []))
+    if getattr(config, "missing", False):
+        return found  # a missing file makes every other line noise
     for section, keys in SCHEMA.items():
         for key, (kind, _) in keys.items():
             dotted = f"{section}.{key}"

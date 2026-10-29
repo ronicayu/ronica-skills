@@ -116,6 +116,19 @@ class ConfigTest(unittest.TestCase):
         found = config.problems(config.load(self.root))
         self.assertIn("/agentic-team:setup", found[0])
 
+    def test_missing_file_is_one_line(self):
+        loaded = config.load(self.root)
+        self.assertTrue(loaded.missing)
+        found = config.problems(loaded)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("run /agentic-team:setup, or pass --root <repository root>", found[0])
+        self.assertNotIn("taskgraph.project", found[0])
+        code, out, _ = self.run_cli("check")
+        self.assertEqual((code, out), (2, found[0] + "\n"))
+        self.write(MINIMAL)
+        self.assertFalse(config.load(self.root).missing)
+        self.assertEqual(config.problems(config.load(self.root)), [])
+
     def test_unknown_key_with_suggestion(self):
         self.write(MINIMAL + "sessions.max_paralel = 3\n[sesions]\n")
         self.write("models.judgment = \"opus\"\n", local=True)

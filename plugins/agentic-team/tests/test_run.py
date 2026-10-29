@@ -76,6 +76,9 @@ elif cmd == "logs":
     path = os.path.join(folder, argv[1] + ".txt") if folder else ""
     if path and os.path.isfile(path):
         sys.stdout.write(open(path).read())
+    elif os.environ.get("FAKE_CLAUDE_LOGS_FAIL"):
+        sys.stderr.write("no such session\n  try claude agents\n")
+        sys.exit(1)
 elif cmd == "rm":
     table = json.loads(read("FAKE_CLAUDE_RM") or "{}")
     entry = table.get(argv[1], {})
@@ -273,14 +276,15 @@ class Base(unittest.TestCase):
     def finished(self, wtname, attempt=1, **extra):
         return self.row(wtname, attempt, status="idle", state="done", **extra)
 
-    def entry(self, task, attempt=1, kind="task", worktree=None, name=None):
-        """The `sessions` meta entry run.py records for a session it started."""
+    def entry(self, task, attempt=1, kind="task", worktree=None, name=None, model=None):
+        """The `sessions` meta entry run.py records for a session it started (the default model of a launch is
+        sonnet, of a verify opus)."""
         if kind == "verify":
             worktree = worktree or f"verify-{task}-{attempt}"
             return {"id": f"sess-{worktree}", "kind": kind, "attempt": attempt, "name": name or worktree,
-                    "worktree": worktree}
+                    "worktree": worktree, "model": model or "opus"}
         return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
-                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}"}
+                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet"}
 
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
@@ -2990,14 +2994,141 @@ class RunTest(Base):
         self.assertIn("filed verify BLOCKED (permission prompt)", stuck[verifier]["detail"])
         for task, sid, cmd in ((worker, "sess-task-1-1", "run.py launch 1"), (verifier, "sess-verify-2-1", "run.py verify 2 --again")):
             hint = stuck[task]["next"]
-            for text in (f"claude logs {sid}", "verify_mode=ci", "A pinned old model id is one more possible cause", f"Then {cmd}."):
+            for text in (f"claude logs {sid}", "verify_mode=ci", "standing order", "the BLOCKED row shows its last output", f"Then {cmd}."):
                 self.assertIn(text, hint)
             self.assertNotIn("--model sonnet", hint)
+            self.assertNotIn("one more possible cause", hint)
+            self.assertNotIn("pinned model id", hint)  # the sessions ran on the alias sonnet / opus
         self.agents()
         again = {e["task"]: e for e in self.named(self.events("record"), "stuck")}
         self.assertEqual(again[worker]["detail"], "filed earlier")
         self.assertIn("claude logs sess-task-1-1", again[worker]["next"])
         self.assertIn("Then run.py launch 1.", again[worker]["next"])
+
+    def stuck_worker(self, model="sonnet", **row):
+        """A task whose recorded session ran on `model`, now waiting on a permission prompt."""
+        task = self.running_task(sessions=[self.entry(1, model=model)])
+        self.agents(self.row("task-1", status="waiting", state="working", waitingFor="Bash(rm -rf build) permission", **row))
+        return task
+
+    def stuck_row(self, task):
+        return next(r for r in self.results(task) if r["status"] == "BLOCKED")
+
+    def test_80_the_blocked_row_keeps_the_last_output_before_the_stop(self):
+        lines = [f"line {n:02d}" for n in range(1, 21)]
+        lines[17] = "\x1b[31mred\x1b[0m line 18 \x1b]0;title\x07done"
+        lines.insert(10, "")
+        with open(os.path.join(self.logs, "sess-task-1-1.txt"), "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        task = self.stuck_worker()
+        stuck = self.one(self.events("record"), "stuck")
+        self.assertIn("(waiting on Bash(rm -rf build) permission)", stuck["detail"])
+        body = self.stuck_row(task)["body"]
+        head, _, tail = body.partition("Last output:\n")
+        self.assertEqual(head.splitlines()[:3], [
+            "Session: sess-task-1-1", f"Worktree: {self.wt_path('task-1')}",
+            "Session sess-task-1-1 stopped: waiting on Bash(rm -rf build) permission"])
+        self.assertIn('Waiting for: "Bash(rm -rf build) permission"', head)
+        self.assertIn("Model: sonnet", head)
+        kept = tail.splitlines()
+        self.assertEqual(len(kept), 15)
+        self.assertTrue(all(line.startswith("    ") for line in kept))
+        self.assertEqual(kept[0], "    line 06")
+        self.assertEqual(kept[-1], "    line 20")
+        self.assertIn("    red line 18 done", kept)
+        self.assertNotIn("\x1b", body)
+        order = [c[0] for c in self.calls() if c[0] in ("logs", "stop")]
+        self.assertEqual(order, ["logs", "stop"])
+
+    def test_81_the_last_output_is_cut_from_the_front_at_2000_characters(self):
+        with open(os.path.join(self.logs, "sess-task-1-1.txt"), "w") as fh:
+            fh.write("\n".join(f"{n:02d} " + "x" * 197 for n in range(15)) + "\n")
+        task = self.stuck_worker()
+        self.events("record")
+        shown = self.stuck_row(task)["body"].partition("Last output:\n")[2]
+        text = "\n".join(line[4:] for line in shown.splitlines())
+        self.assertEqual(len(text), 2000)
+        self.assertTrue(text.endswith("14 " + "x" * 197))
+
+    def test_82_waiting_for_falls_back_to_the_state(self):
+        task = self.running_task()
+        self.agents(self.row("task-1", status="idle", state="blocked"))
+        self.events("record")
+        body = self.stuck_row(task)["body"]
+        self.assertIn("Waiting for: blocked", body)
+        self.assertIn("stopped: waiting on blocked", body)
+
+    def test_83_a_failed_claude_logs_is_named_and_the_session_is_still_stopped(self):
+        self.env["FAKE_CLAUDE_LOGS_FAIL"] = "1"
+        task = self.stuck_worker()
+        stuck = self.one(self.events("record"), "stuck")
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+        self.assertIn("claude logs sess-task-1-1", stuck["next"])
+        body = self.stuck_row(task)["body"]
+        self.assertTrue(body.endswith("Last output:\n    claude logs failed: no such session"), body)
+        self.assertNotIn("try claude agents", body)
+
+    def test_84_an_empty_log_says_so(self):
+        task = self.stuck_worker()  # no logs file, claude logs exits 0 with no text
+        self.events("record")
+        self.assertTrue(self.stuck_row(task)["body"].endswith("Last output:\n    (no output)"))
+
+    def check_model_hint(self, model, pinned_text):
+        task = self.stuck_worker(model=model)
+        stuck = self.one(self.events("record"), "stuck")
+        self.assertIn(f"Model: {model}", self.stuck_row(task)["body"])
+        self.agents()
+        again = self.one(self.events("record"), "stuck")
+        self.assertEqual(again["detail"], "filed earlier")
+        for event in (stuck, again):
+            if pinned_text:
+                self.assertIn(f"The session ran on the pinned model id {pinned_text}; a pinned id can drop auto mode "
+                              "to manual prompts. Use an alias such as sonnet.", event["next"])
+            else:
+                self.assertNotIn("pinned", event["next"])
+
+    def test_85_a_pinned_model_id_gets_the_model_hint(self):
+        self.check_model_hint("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
+
+    def test_85_an_alias_gets_no_model_hint(self):
+        self.check_model_hint("sonnet", None)
+
+    def test_85_an_alias_with_a_context_suffix_gets_no_model_hint(self):
+        self.check_model_hint("opus[1m]", None)
+
+    def test_86_a_pinned_verifier_gets_the_model_hint(self):
+        pinned = "claude-opus-4-1-20250805"
+        task = self.running_task()
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
+        self.record_sessions(task, self.entry(task), self.entry(task, kind="verify", model=pinned))
+        self.agents(self.row("verify-1-1", status="waiting", state="blocked", waitingFor="permission"))
+        stuck = self.one(self.events("record"), "stuck")
+        self.assertIn(f"The session ran on the pinned model id {pinned}", stuck["next"])
+        self.assertIn(f"Model: {pinned}", next(r for r in self.results(task) if r["kind"] == "verify")["body"])
+
+    def test_87_filed_earlier_reads_the_model_from_the_session_when_the_row_has_none(self):
+        pinned = "claude-haiku-4-5-20251001"
+        task = self.running_task(sessions=[self.entry(1, model=pinned)])
+        self.add_result(task, "BLOCKED", "Session: sess-task-1-1\nWorktree: x\nSession sess-task-1-1 stopped: waiting on a\n", by="manager")
+        self.agents()
+        again = self.one(self.events("record"), "stuck")
+        self.assertIn(f"pinned model id {pinned}", again["next"])
+
+    def test_88_launch_and_verify_record_the_model_of_the_session(self):
+        task = self.add_task()
+        self.ok("launch", str(task), "--model", "claude-haiku-4-5-20251001")
+        self.assertEqual([e["model"] for e in self.meta(task)["sessions"]], ["claude-haiku-4-5-20251001"])
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.agents(self.finished("task-1"))
+        self.ok("verify", str(task), "--model", "haiku")
+        self.assertEqual([(e["kind"], e["model"]) for e in self.meta(task)["sessions"]],
+                         [("task", "claude-haiku-4-5-20251001"), ("verify", "haiku")])
+
+    def test_89_pinned_model(self):
+        import run as runner
+        self.assertTrue(runner.pinned_model("claude-haiku-4-5-20251001"))
+        for model in ("opus", "sonnet", "haiku", "fable", "opus[1m]", "sonnet[1m]", None, ""):
+            self.assertFalse(runner.pinned_model(model), model)
 
     def test_79_a_root_without_the_toml_is_refused_before_the_config_is_read(self):
         other = os.path.join(self.dir, "other")
