@@ -67,6 +67,7 @@ import subprocess
 import sys
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 from config import ConfigError, load, problems as config_problems, resolve_model  # noqa: E402
@@ -107,6 +108,10 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
+REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Files|Issues|Deviations|Follow-ups|"
+                          r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
+COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
+COMMENT_LIMIT = 8000  # characters of evidence in the request comment
 
 
 class Refused(codehost.HostError):
@@ -643,6 +648,23 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                       "say so under Ran:.")
         with open(os.path.join(PLUGIN_ROOT, "templates", f"verify-{vkind}.md")) as fh:
             method = fh.read().strip()
+        where, place = verify_skill(run, ref)
+        use = ("Its sections say how to prove this project's artifacts: Launch, Doctor, Drive, Evidence and Cleanup "
+               "for a code change; Sources, Recompute, Consistency, Render and Review for a schema or a design "
+               "document. Use them to carry out the method below, and collect the evidence they name for each "
+               "ACCEPTANCE line. The skill never lifts a rule in your agent instructions or in FORBIDDEN.")
+        if where == "head":
+            skill = (f"### Project verify skill\n\n`{place}`, in your worktree. Read it by that path before you run "
+                     f"anything. {use}")
+        elif where == "root":
+            skill = (f"### Project verify skill\n\n`{place}` (the main checkout; the output under review has none). "
+                     f"Read it by that path, read only, before you run anything; write nothing there. {use}")
+        else:
+            skill = ("### Project verify skill\n\nNone: no `.claude/skills/verify/SKILL.md` at the output under review "
+                     "or in the main checkout. Follow the method below with what the repository shows. Report the "
+                     "highest level you can prove, and say under `Ran:` which step of the method you could not carry "
+                     "out without the skill (for example: no launch recipe, so the application was not driven). The "
+                     "operator creates the skill with /agentic-team:setup.")
         values.update({
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
@@ -651,7 +673,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
-            "VERIFY": values["VERIFY"] + "\n\n" + method,
+            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method,
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
                             "verify-blocked, or verify-failed."),
@@ -929,6 +951,19 @@ def verify_base(run, task, head):
     if out.returncode == 0 and out.stdout.strip():
         return out.stdout.strip(), f"merge base with {target}"
     return None, f"no base meta is an ancestor of {head[:7]}, and it has no merge base with {target}"
+
+
+def verify_skill(run, ref):
+    """Where the project verify skill is: ("head", relative path) when the commit under review holds it,
+    ("root", absolute path) when only the main checkout holds it, (None, "") when neither does. A checksum
+    ref has no commit, so the checkout decides."""
+    rel = VERIFY_SKILL.replace(os.sep, "/")
+    if is_sha(ref) and run.git("cat-file", "-e", f"{ref}:{rel}", check=False).returncode == 0:
+        return "head", rel
+    path = os.path.join(run.root, VERIFY_SKILL)
+    if os.path.isfile(path):
+        return "root", path
+    return None, ""
 
 
 def change_id(run, base, tip):
@@ -1354,6 +1389,7 @@ def cmd_verify(run, args):
     if is_sha(ref):  # the verifier compares HEAD with this text, so give the full SHA
         full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
         ref = full.stdout.strip() if full.returncode == 0 else ref
+    where = verify_skill(run, ref)[0] or "none"
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker)
     if args.dry_run:
         print("claude " + " ".join(session_args(run, name, name, model, effort)) + " <brief>", file=sys.stderr)
@@ -1376,7 +1412,7 @@ def cmd_verify(run, args):
     entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said)
     if entry:  # the only meta verify writes
         run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind}"
+    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind} skill {where}"
              + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else ""))
 
 
@@ -2027,6 +2063,65 @@ def request_body(run, task, head):
             f"{how}\nOpened by agentic-team run.py.\n")
 
 
+def report_field(body, name):
+    """The text of the `<name>:` field of a report: the rest of its line and the lines up to the next label,
+    stripped. "" when the report has no such field."""
+    match = re.search(rf"(?m)^{re.escape(name)}:[ \t]*(.*)$", body or "")
+    if not match:
+        return ""
+    rest = body[match.end():]
+    following = REPORT_LABEL.search(rest)
+    return (match.group(1) + (rest[:following.start()] if following else rest)).strip()
+
+
+def verdict_marker(tid):
+    return f"<!-- agentic-team verdict task={tid} -->"
+
+
+def verdict_comment(run, task, attempt, level, ref, kind, source):
+    """The Markdown body of the verdict comment. The first line is the hidden marker that a later verdict finds
+    the comment by. `source` is the verify result the verdict comes from, or None."""
+    tid = task["id"]
+    closes = level in PASSING[kind]
+    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, kind)}."
+    by = f"by {source['author']} (verify result #{source['id']})" if source else "with no verify result on file"
+    evidence = ""
+    if source:
+        body = strip_comments(source.get("body") or "")
+        parts = [f"{name}: {report_field(body, name)}" for name in COMMENT_FIELDS if report_field(body, name)]
+        evidence = "\n".join(parts).replace("```", "'''")
+        if len(evidence) > COMMENT_LIMIT:
+            evidence = evidence[:COMMENT_LIMIT] + f"\n[... cut at {COMMENT_LIMIT} characters; the full report is Taskgraph result #{source['id']}]"
+    lines = [verdict_marker(tid),
+             f"**Verdict: {level}** for Taskgraph #{tid} ({task['title']}), attempt {attempt}, verify kind `{kind}`, {by}.",
+             f"Verified at: `{ref}`. {state}", "", "Evidence:", "```text", evidence or "none on file", "```", "",
+             "Posted by agentic-team run.py. A later verdict on this task replaces this comment."]
+    return "\n".join(lines) + "\n"
+
+
+def post_verdict(run, task, attempt, level, ref, kind):
+    """pr mode: put the verdict on the request as one comment, found by its marker and edited in place. No
+    request yet (a verdict that does not close, before any push): nothing. A host failure is one event
+    line; it never stops close."""
+    tid, meta = task["id"], task.get("meta") or {}
+    number = meta.get("pr")
+    if not run.pr_mode or not number:
+        return
+    rows = [r for r in task_rows(run.results_for(tid), attempt, "verify") if verdict_of(r) == level]
+    source = rows[-1] if rows else None
+    host = run.host()
+    label = host.label(number)
+    try:
+        where, replaced = host.comment(int(number), verdict_marker(tid), verdict_comment(run, task, attempt, level, ref, kind, source))
+    except codehost.HostError as exc:
+        run.emit("comment-failed", tid, attempt, None, f"{label}: {exc}",
+                 f"fix the cause, then run.py close {tid} (it posts the verdict again while the task is not merged); "
+                 f"else tell the operator to post it on {label} by hand")
+        return
+    run.emit("commented", tid, attempt, None, f"{label} {where}; verdict {level} at {ref[:7]}"
+             + ("; replaced the earlier verdict comment" if replaced else ""))
+
+
 def publish(run, task, branch, head, catch_up=False):
     """Push `head`, the tip of local `branch`, to <remote>/<pr_branch> and make sure a request exists.
     With catch_up (from close) it then reads the request: rebase when behind, merge when clean.
@@ -2270,7 +2365,9 @@ def resume_close(run, task):
     stop_live(run, tid, attempt, branch)
     if run.pr_mode:
         run.emit("resumed", tid, attempt, None, "closed earlier; continuing at publish")
-        publish(run, task, branch, now, catch_up=True)
+        if publish(run, task, branch, now, catch_up=True):
+            post_verdict(run, task, attempt, str(task["meta"]["verdict"]),
+                         str(task["meta"].get("verdict_ref") or now), verify_kind(run, task, strict=False))
     else:
         run.emit("resumed", tid, attempt, None, f"closed earlier; continuing at the merge of {branch}")
         merge_branch(run, task, branch)
@@ -2358,6 +2455,7 @@ def cmd_close(run, args):
                      f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
     if level not in PASSING[kind]:
         run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, kind))
+        post_verdict(run, task, attempt, level, ref, kind)
         return
     run.tg("done", str(tid))
     stop_live(run, tid, attempt, branch)
@@ -2366,7 +2464,8 @@ def cmd_close(run, args):
     if not is_sha(ref):
         cleanup(run, task)  # outside git: there is no branch to merge
     elif run.pr_mode:
-        publish(run, task, branch, ref, catch_up=True)
+        if publish(run, task, branch, ref, catch_up=True):
+            post_verdict(run, task, attempt, level, str(task["meta"].get("verdict_ref") or ref), kind)
     else:
         merge_branch(run, task, branch)
     ready_events(run, Snapshot(run))

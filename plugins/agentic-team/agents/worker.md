@@ -103,5 +103,6 @@ A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
 The brief's VERIFY section defines each level for the task's verify kind. Only
 `artifact-verified` closes a `schema` or `design-doc` task. A verifier's finding about a
 decision itself goes under `Follow-ups:` as `decision: <question>`; it is not an issue.
+When the brief says the project has no verify skill, say under `Ran:` which step of the method you could not carry out without it, and give the highest level you can prove.
 
 Write `None` for an empty field. Use the time zone label from the brief.

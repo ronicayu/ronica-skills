@@ -53,6 +53,8 @@ asks for the rest, and gitignores `.agentic-team.local.toml`, the run
 directory `.agentic-team/`, and the worktree directory `.claude/worktrees/`. It finishes only when `config.py check` prints
 `ok`. The Manager does not start work while the check fails.
 
+The setup skill also checks for the project verify skill, `.claude/skills/verify/SKILL.md`, which tells the verifier how to prove this project's artifacts: how to launch and drive the application (a code project), or where the sources are and which script recomputes a count (a schema or design-document project). When the file is missing, setup offers to create it from the skeleton for the config's `verify.kind` ([templates/project-verify-skill-code.md](templates/project-verify-skill-code.md) or [templates/project-verify-skill-document.md](templates/project-verify-skill-document.md)) and fills what the repository shows. The file is repository content; commit it when you are satisfied. Without it the verifier still runs, reports the highest level it can prove, and names the method step it could not carry out.
+
 `claude --bg` refuses to start in a workspace that is not trusted. A trusted
 parent folder does not count. Run `claude` once in the repository and accept
 the trust prompt before the Manager launches its first worker.
@@ -158,8 +160,7 @@ The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
 verifier in a worktree of its own, created at the `Head` commit. A `schema` or
 `design-doc` task always goes to `run.py verify`, whatever its `risk`. The brief
-carries the method for the task's verify kind and names the base and head
-commits. Only `artifact-verified` closes those two kinds. Then
+carries the method for the task's verify kind, names the base and head commits, and names the project verify skill (`.claude/skills/verify/SKILL.md` at the commit under review, else in the main checkout, else none). Only `artifact-verified` closes those two kinds. Then
 `run.py close` records the verdict and the token counts, runs `tg done`, and
 then follows `merge.mode`. In `local` mode it merges only when a standing-orders
 line starts with `MERGE:`, and only into the checked-out branch of a clean main
@@ -274,6 +275,7 @@ the operator's standing permission for `run.py` to push task branches to
    approves, force-resolves, or unprotects. A push is made only when our head
    moved. If someone else moved the remote branch while our head stayed, `record`
    prints `pr-changed`; `push-refused` appears when our head moved too.
+5. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
 **Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
 and the push accept a branch at a new head when the change is the same. The
@@ -363,7 +365,7 @@ Manager runs `record` later.
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. |
+| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`). |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker for a pause and files a `STOPPED` result. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
@@ -518,7 +520,7 @@ checkpoint, the previous report of a fix round, and the latest report of each
 task this one depends on. To change the brief for every task, edit the
 template. `run.py verify` fills the same template, with verifier values in
 GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
-REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta plus
+REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Project verify skill` note (where `.claude/skills/verify/SKILL.md` is, or that it is missing), then
 `templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
 base commit, how it was found, and the head commit.
 
@@ -587,6 +589,10 @@ skill. Metadata holds everything else, 24 keys:
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
 
+### Upgrading from 0.9.0
+
+Version 0.10.0 adds the project verify skill and, in `pr` mode, the verdict comment on the request. No migration. A project without `.claude/skills/verify/SKILL.md` runs as before; the verifier brief says the skill is missing, and `/agentic-team:setup` creates it. A task closed under 0.9.0 gets its comment at its next `run.py close`, if any; `record` posts nothing.
+
 ### Upgrading from 0.8.x
 
 Version 0.9.0 adds the `verify_kind` meta. A task without it is `code` and
@@ -624,7 +630,7 @@ other safe folder.
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
 | `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |
 | `skills/setup/` | `/agentic-team:setup`, which creates the project config |
-| `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), and standing orders |
+| `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), the project verify skill skeletons (`project-verify-skill-{code,document}.md`), and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
 | `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |

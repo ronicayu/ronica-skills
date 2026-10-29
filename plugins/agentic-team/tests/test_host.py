@@ -173,6 +173,33 @@ class GitHubTest(unittest.TestCase):
         self.assertEqual(gh((["workflow", "run"], {"exit": 1, "stderr": "HTTP 500: boom\n"}))[0].dispatch("task-1", "ci.yml"),
                          (False, "HTTP 500: boom"))
 
+    def test_67_comment_edits_the_marked_comment_or_creates_one(self):
+        marker = "<!-- agentic-team verdict task=7 -->"
+        base = "repos/{owner}/{repo}/issues/1/comments"
+        client, sh = gh((["issues/1/comments?per_page=100&page=1"], ok([{"id": 9, "body": "a human wrote this"}])),
+                        (["-X", "POST"], ok({"id": 55, "html_url": "https://github.com/o/r/pull/1#issuecomment-55"})))
+        self.assertEqual(client.comment(1, marker, marker + "\nbody"), ("https://github.com/o/r/pull/1#issuecomment-55", False))
+        self.assertEqual(sh.calls[0]["cmd"], ["gh", "api", base + "?per_page=100&page=1"])
+        self.assertEqual(sh.calls[1]["cmd"], ["gh", "api", "-X", "POST", base, "--input", "-"])
+        self.assertEqual(json.loads(sh.calls[1]["input"]), {"body": marker + "\nbody"})
+        client, sh = gh((["issues/1/comments?per_page=100&page=1"], ok([{"id": 9, "body": "x"}, {"id": 55, "body": marker + "\nold"}])),
+                        (["-X", "PATCH"], ok({"id": 55, "html_url": "u55"})))
+        self.assertEqual(client.comment(1, marker, "new"), ("u55", True))
+        self.assertEqual(sh.calls[1]["cmd"], ["gh", "api", "-X", "PATCH", "repos/{owner}/{repo}/issues/comments/55", "--input", "-"])
+        self.assertEqual(json.loads(sh.calls[1]["input"]), {"body": "new"})
+        self.assertFalse([c for c in sh.calls if "POST" in c["cmd"]])
+        client, sh = gh((["&page=1"], ok([{"id": i, "body": "x"} for i in range(100)])),
+                        (["&page=2"], ok([{"id": 200, "body": marker}])),
+                        (["-X", "PATCH"], ok({"id": 200, "html_url": "u200"})))
+        self.assertEqual(client.comment(1, marker, "new"), ("u200", True))
+        self.assertEqual([c["cmd"][2] for c in sh.calls[:2]], [base + "?per_page=100&page=1", base + "?per_page=100&page=2"])
+        self.assertIn("issues/comments/200", sh.calls[2]["cmd"][4])
+        client, _ = gh((["issues/1/comments?per_page=100"], ok([])),
+                       (["-X", "POST"], {"exit": 1, "stderr": "HTTP 403: Resource not accessible by integration\nmore\n"}))
+        with self.assertRaises(host.HostError) as caught:
+            client.comment(1, marker, "body")
+        self.assertEqual(str(caught.exception), "gh api issues/<number>/comments failed: HTTP 403: Resource not accessible by integration")
+
     def test_other_failures_raise_with_the_first_stderr_line(self):
         with self.assertRaises(host.HostError) as caught:
             gh((["pr", "view"], {"exit": 4, "stderr": "To get started with GitHub CLI, please run: gh auth login\nmore\n"}))[0].pr(1)
@@ -264,6 +291,25 @@ class GitLabTest(unittest.TestCase):
         self.assertEqual(gl((["api", "-X", "POST"], none))[0].dispatch("task-7", "pipeline"), (False, "no manual trigger"))
         other = {"exit": 1, "stdout": json.dumps({"message": "403 Forbidden"})}
         self.assertEqual(gl((["api", "-X", "POST"], other))[0].dispatch("task-7", "pipeline"), (False, "403 Forbidden"))
+
+    def test_68_comment_edits_the_marked_note_or_creates_one(self):
+        marker = "<!-- agentic-team verdict task=7 -->"
+        system = {"id": 1, "body": "added 1 commit", "system": True}
+        client, sh = gl((["merge_requests/7/notes?per_page=100&page=1"], ok([system])),
+                        (["-X", "POST", "merge_requests/7/notes"], ok({"id": 302, "body": "..."})))
+        self.assertEqual(client.comment(7, marker, "text"), ("note 302", False))
+        self.assertEqual(sh.calls[1]["cmd"], ["glab", "api", "-X", "POST", "projects/g%2Fp/merge_requests/7/notes", "-f", "body=text"])
+        client, sh = gl((["merge_requests/7/notes?per_page=100&page=1"],
+                         ok([system, {"id": 302, "body": marker + "\nold", "system": False}])),
+                        (["-X", "PUT"], ok({"id": 302})))
+        self.assertEqual(client.comment(7, marker, "new"), ("note 302", True))
+        self.assertEqual(sh.calls[1]["cmd"], ["glab", "api", "-X", "PUT", "projects/g%2Fp/merge_requests/7/notes/302", "-f", "body=new"])
+        self.assertFalse([c for c in sh.calls if "POST" in c["cmd"]])
+        client, _ = gl((["merge_requests/7/notes?per_page=100"], ok([])),
+                       (["-X", "POST"], {"exit": 1, "stdout": json.dumps({"message": "403 Forbidden"})}))
+        with self.assertRaises(host.HostError) as caught:
+            client.comment(7, marker, "text")
+        self.assertEqual(str(caught.exception), "glab api projects/<project>/merge_requests/7/notes failed: 403 Forbidden")
 
     def test_68_blockers_list_the_word_the_pipeline_and_the_approvals(self):
         client, _ = gl((["merge_requests/7/approvals"], ok({"approvals_left": 2})),

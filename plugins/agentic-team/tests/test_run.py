@@ -402,14 +402,21 @@ class Base(unittest.TestCase):
         base, branch, merge_commit, squash_commit, listed (find_pr sees it), checks (buckets), runs (newest
         first: {id, attempt, state: success|failure|cancelled|pending, head}), jobs (GitLab, of the newest
         pipeline), dispatch (ok|none|error), merge (ok or an error message), then (a state change that the
-        next view shows, as after a merge), extra (table entries added last)."""
+        next view shows, as after a merge), comments (the conversation comments the list returns: a list of
+        {"id", "body"}), comment ("ok", or an error message that makes the create and the edit fail with exit 1),
+        extra (table entries added last)."""
         s = {"number": 1, "state": "OPEN", "merge_state": "CLEAN", "head": "f" * 40, "base": "main", "branch": "task-1",
              "merge_commit": None, "squash_commit": None, "listed": False, "checks": (), "runs": (), "jobs": (),
-             "dispatch": "ok", "merge": "ok", "then": None, "extra": {}}
+             "dispatch": "ok", "merge": "ok", "then": None, "comments": (), "comment": "ok", "extra": {}}
         s.update(state)
 
         def out(text="", exit=0, err=""):
             return {"stdout": text, "stderr": err, "exit": exit}
+
+        def posted(text, gitlab=False):
+            if s["comment"] == "ok":
+                return out(text)
+            return out(json.dumps({"message": s["comment"]}), exit=1) if gitlab else out(exit=1, err=s["comment"] + "\n")
 
         def at(run):
             return f"2026-10-26T10:{(run['id'] // 60) % 60:02d}:{run['id'] % 60:02d}Z"
@@ -443,6 +450,13 @@ class Base(unittest.TestCase):
                                              "status": shown[r["state"]][0], "conclusion": shown[r["state"]][1],
                                              "headSha": r.get("head") or s["head"], "url": f"https://ci.example/runs/{r['id']}",
                                              "createdAt": at(r)} for r in runs])),
+                f"api repos/{{owner}}/{{repo}}/issues/{n}/comments?per_page=100&page=1": out(json.dumps(
+                    [{"id": c["id"], "body": c["body"], "html_url": f"https://github.com/o/r/pull/{n}#issuecomment-{c['id']}"}
+                     for c in s["comments"]])),
+                f"api -X POST repos/{{owner}}/{{repo}}/issues/{n}/comments": posted(
+                    json.dumps({"id": 55, "html_url": f"https://github.com/o/r/pull/{n}#issuecomment-55"})),
+                "api -X PATCH repos/{owner}/{repo}/issues/comments/": posted(
+                    json.dumps({"id": 55, "html_url": f"https://github.com/o/r/pull/{n}#issuecomment-55"})),
                 "workflow run": {"ok": out(), "none": out(exit=1, err="HTTP 422: Workflow does not have 'workflow_dispatch' trigger\n"),
                                  "error": out(exit=1, err="HTTP 500: boom\n")}[s["dispatch"]],
             }
@@ -470,6 +484,10 @@ class Base(unittest.TestCase):
             merged = {**view({**s, "state": "MERGED"})}
             table = {
                 api: out(json.dumps({"default_branch": s["base"]})),
+                f"{api}/merge_requests/{n}/notes?": out(json.dumps(
+                    [{"id": c["id"], "body": c["body"], "system": False} for c in s["comments"]])),
+                f"api -X POST {proj}/merge_requests/{n}/notes": posted(json.dumps({"id": 55, "body": ""}), gitlab=True),
+                f"api -X PUT {proj}/merge_requests/{n}/notes/": posted(json.dumps({"id": 55, "body": ""}), gitlab=True),
                 f"{api}/merge_requests?": out(json.dumps([view(s)] if s["listed"] else [])),
                 f"{api}/merge_requests/{n}": views(view),
                 f"{api}/merge_requests/{n}/approvals": out(json.dumps({"approvals_left": 0})),
@@ -515,11 +533,26 @@ class Base(unittest.TestCase):
         return f"PR #{number}" if self.host == "github" else f"MR !{number}"
 
     def merge_calls(self):
-        return self.host_calls("pr merge") if self.host == "github" else self.host_calls("api -X PUT")
+        return (self.host_calls("pr merge") if self.host == "github"
+                else [c for c in self.host_log() if c[:3] == ["api", "-X", "PUT"] and c[3].endswith("/merge")])
 
     def create_calls(self):
         return (self.host_calls("pr create") if self.host == "github"
-                else self.host_calls("api", "-X", "POST", f"projects/{self.project}/merge_requests"))
+                else self.host_calls("api", "-X", "POST", f"projects/{self.project}/merge_requests", "-f"))
+
+    def comment_posts(self):
+        return (self.host_calls("api", "-X", "POST", "repos/{owner}/{repo}/issues/") if self.host == "github"
+                else [c for c in self.host_log() if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/notes")])
+
+    def comment_edits(self):
+        return (self.host_calls("api", "-X", "PATCH") if self.host == "github"
+                else [c for c in self.host_log() if c[:3] == ["api", "-X", "PUT"] and "/notes/" in c[3]])
+
+    def comment_bodies(self):
+        """The bodies posted or edited, in order."""
+        if self.host == "github":
+            return [json.loads(e["stdin"])["body"] for e in self.host_stdin() if "--input" in e["argv"]]
+        return [a[len("body="):] for c in self.comment_posts() + self.comment_edits() for a in c if a.startswith("body=")]
 
     def checkout(self):
         """What a pr-mode command must leave alone: the root's branch, HEAD, and porcelain."""
@@ -747,6 +780,8 @@ class RunTest(Base):
         self.assertIn("Base commit: unknown (", context)
         self.assertIn(f"Head commit: {SHA_A}", context)
         self.assertIn("### Method: code", self.section(text, "VERIFY"))
+        self.assertIn("### Project verify skill", self.section(text, "VERIFY"))
+        self.assertIn("None: no", self.section(text, "VERIFY"))
         self.assertIn("A behaviour change you did not drive is `check-only`", " ".join(self.section(text, "VERIFY").split()))
         self.assertIn("--kind verify --attempt 1 --by verify-1-1 --status <STATUS>", text)
         self.assertIn("`Verdict:` line", self.section(text, "REPORT"))
@@ -809,6 +844,89 @@ class RunTest(Base):
                     self.assertIn("does not lower the verdict", verify)
                 detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
                 self.assertIn(f" kind {kind}", detail)
+
+    skill_text = "---\nname: verify\ndescription: how to verify\n---\n# Verify\n"
+
+    def test_13_verify_brief_names_the_project_verify_skill_at_the_head(self):
+        task = self.running_task()
+        wt = self.task_wt(task)
+        os.makedirs(os.path.join(wt, ".claude", "skills", "verify"))
+        with open(os.path.join(wt, ".claude", "skills", "verify", "SKILL.md"), "w") as fh:
+            fh.write(self.skill_text)
+        wt, head = self.pass_report(task, wt=wt, head=self.wt_commit(wt))
+        _, verify, _ = self.verify_context(task)
+        for want in ("### Project verify skill",
+                     "`.claude/skills/verify/SKILL.md`, in your worktree. Read it by that path before you run anything.",
+                     "collect the evidence they name for each ACCEPTANCE line", "never lifts a rule"):
+            self.assertIn(want, verify)
+        self.assertLess(verify.index("make test"), verify.index("### Project verify skill"))
+        self.assertLess(verify.index("### Project verify skill"), verify.index("### Method: code"))
+        self.assertNotIn("None: no", verify)
+        detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
+        self.assertIn(" kind code skill head", detail)
+
+    def test_13_verify_brief_falls_back_to_the_main_checkout(self):
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        path = os.path.join(self.root, ".claude", "skills", "verify", "SKILL.md")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            fh.write(self.skill_text)
+        _, verify, _ = self.verify_context(task)
+        self.assertIn(f"`{path}` (the main checkout; the output under review has none). Read it by that path, read only, ", verify)
+        self.assertIn("write nothing there", verify)
+        self.assertNotIn("in your worktree", verify)
+        detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
+        self.assertIn(" skill root", detail)
+        self.commit_file(".claude/skills/verify/SKILL.md", self.skill_text)  # now a worktree started from HEAD holds it
+        second = self.running_task()
+        self.pass_report(second)
+        _, verify, _ = self.verify_context(second)
+        self.assertIn("in your worktree", verify)
+        self.assertNotIn("the main checkout", verify)
+        detail = self.one(self.events("verify", str(second)), "verifying")["detail"]
+        self.assertIn(" skill head", detail)
+
+    def test_13_verify_brief_says_when_the_skill_is_missing(self):
+        task = self.running_task()
+        self.pass_report(task)
+        _, verify, _ = self.verify_context(task)
+        for want in ("### Project verify skill",
+                     "None: no `.claude/skills/verify/SKILL.md` at the output under review or in the main checkout.",
+                     "highest level you can prove", "which step of the method you could not carry out without the skill",
+                     "/agentic-team:setup"):
+            self.assertIn(want, " ".join(verify.split()))
+        detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
+        self.assertIn(" skill none", detail)
+        task2 = self.running_task()
+        self.add_result(task2, "PASS", "Task: 2\nStatus: PASS\nFiles: sums.txt\n")
+        self.assertIn("None: no", self.verify_context(task2, "--ref", "sums.txt abc")[1])
+        path = os.path.join(self.root, ".claude", "skills", "verify", "SKILL.md")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            fh.write(self.skill_text)
+        self.assertIn("(the main checkout; the output under review has none)", self.verify_context(task2, "--ref", "sums.txt abc")[1])
+
+    def test_99_the_project_verify_skill_skeletons(self):
+        templates = os.path.join(os.path.dirname(HERE), "templates")
+        headings = {"project-verify-skill-code.md": ("Launch", "Doctor", "Drive", "Evidence", "Cleanup"),
+                    "project-verify-skill-document.md": ("Sources", "Recompute", "Consistency", "Render", "Review")}
+        for name, wanted in headings.items():
+            with self.subTest(name):
+                with open(os.path.join(templates, name)) as fh:
+                    text = fh.read()
+                self.assertTrue(text.startswith("---\nname: verify\n"))
+                front = text.split("---\n")[1]
+                (description,) = [line for line in front.splitlines() if line.startswith("description:")]
+                self.assertLessEqual(len(description[len("description:"):].strip()), 1024)
+                found = re.findall(r"(?m)^## (.+)$", text)
+                self.assertEqual(tuple(found), wanted)
+                self.assertRegex(text, r"(?i)never (stop a process )?by name")
+                self.assertIn("leftover container:", text)
+                self.assertIn("TODO", text)
+                for banned in ("python3" + ' "', '"$PY"', "$PY ", '"$TG"'):
+                    self.assertNotIn(banned, text)
+                self.assertNotRegex(text, r'R="')
 
     def test_13_the_config_default_kind_applies_without_the_meta(self):
         self.write_config('[verify]\nkind = "design-doc"\n')
@@ -2054,6 +2172,15 @@ class RunTest(Base):
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, name), "w") as fh:
             fh.write(transcript(tokens))
+
+    def test_49_local_close_posts_no_comment(self):
+        task = self.verified_by("test-verified")
+        events = self.events("close", str(task))
+        self.one(events, "closed")
+        self.assertEqual(self.named(events, "commented"), [])
+        self.assertEqual(self.named(events, "comment-failed"), [])
+        self.assertEqual(self.host_log("gh"), [])
+        self.assertEqual(self.host_log("glab"), [])
 
     def test_49_tokens_from_the_transcript(self):
         task = self.running_task()
@@ -3735,6 +3862,138 @@ class PrTest(Base):
         (call,) = self.merge_calls()
         return call, head
 
+    def verifier_row(self, task, head, verdict="artifact-verified", ran="make test: 12 passed\ndrove the CLI: ok"):
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nVerdict: {verdict}\nBranch: None\nHead: {head}\nRan: {ran}\n"
+                        "Files: None\nIssues: None\nFollow-ups: None\n", kind="verify", by="verify-1-1")
+
+    @both_hosts
+    def test_97_close_posts_the_verdict_on_the_request(self):
+        task, wt, head = self.pr_task()
+        self.verifier_row(task, head)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = self.checkout()
+        events = self.events("close", str(task))
+        for name in ("closed", "published", "commented"):
+            self.one(events, name)
+        commented = self.one(events, "commented")
+        self.assertTrue(commented["detail"].startswith(f"{self.label()} "))
+        self.assertIn(f"verdict artifact-verified at {head[:7]}", commented["detail"])
+        self.assertNotIn("replaced", commented["detail"])
+        self.assertEqual((commented["task"], commented["attempt"]), (task, 1))
+        self.assertEqual(self.comment_edits(), [])
+        (post,) = self.comment_posts()
+        if self.host == "github":
+            self.assertEqual(len(self.host_calls("api", "repos/{owner}/{repo}/issues/1/comments?per_page=100&page=1")), 1)
+        else:
+            self.assertEqual(len(self.host_calls("api", f"projects/{self.project}/merge_requests/1/notes?per_page=100&page=1")), 1)
+        log = self.host_log()
+        self.assertGreater(log.index(post), log.index(self.create_calls()[0]))
+        (body,) = self.comment_bodies()
+        self.assertEqual(body.splitlines()[0], "<!-- agentic-team verdict task=1 -->")
+        for want in ("**Verdict: artifact-verified** for Taskgraph #1 (Sweep domains), attempt 1, verify kind `code`, "
+                     "by verify-1-1 (verify result #2).",
+                     f"Verified at: `{head}`. The task is closed.", "Ran: make test: 12 passed\ndrove the CLI: ok",
+                     "Issues: None", "Follow-ups: None", "A later verdict on this task replaces this comment."):
+            self.assertIn(want, body)
+        self.assertNotIn("Branch: None", body)
+        self.assertEqual(self.checkout(), before)
+        self.assertEqual(self.status_of(task), "done")
+
+    @both_hosts
+    def test_97_a_later_verdict_replaces_the_comment(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.assertEqual(self.comment_posts() + self.comment_edits(), [])
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}])
+        self.one(self.events("record"), "verified")
+        events = self.events("close", str(task))
+        self.assertEqual(self.one(events, "verdict")["detail"], "verify-blocked; not closed")
+        self.assertIn(f"verdict verify-blocked at {head[:7]}", self.one(events, "commented")["detail"])
+        self.assertNotIn("replaced", self.one(events, "commented")["detail"])
+        (first,) = self.comment_bodies()
+        for want in ("**Verdict: verify-blocked**", "by ci (verify result #2)",
+                     "The task stays in progress; next: retry the check when its cause is fixed, then run.py close 1.",
+                     "Run: 11/1 https://ci.example/", "Conclusion: "):
+            self.assertIn(want, first)
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}],
+                       comments=[{"id": 55, "body": first}])
+        events = self.events("close", str(task), "--verdict", "artifact-verified", "--override-verifier", "drove it",
+                             "--ran", "https://ci.example/runs/11")
+        for name in ("override", "closed", "commented"):
+            self.one(events, name)
+        self.assertTrue(self.one(events, "commented")["detail"].endswith("; replaced the earlier verdict comment"))
+        self.assertEqual(len(self.comment_posts()), 1)
+        (edit,) = self.comment_edits()
+        self.assertTrue(edit[3].endswith("comments/55" if self.host == "github" else "notes/55"), edit)
+        last = self.comment_bodies()[-1]
+        for want in ("**Verdict: artifact-verified**", "by manager (verify result #3)", "The task is closed.",
+                     "Overrides: verify-blocked (result #2 by ci)", "Reason: drove it", "Ran: https://ci.example/runs/11"):
+            self.assertIn(want, last)
+        self.assertEqual(self.status_of(task), "done")
+
+    @both_hosts
+    def test_97_a_failed_comment_does_not_block_close(self):
+        task, wt, head = self.pr_task()
+        self.verifier_row(task, head, verdict="test-verified")
+        self.fake_host(head=head, merge_state="UNKNOWN", comment="HTTP 403: Resource not accessible by integration")
+        out = self.run_cmd("close", str(task), pre=["--json"])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        events = json.loads(out.stdout)
+        self.one(events, "closed")
+        self.one(events, "published")
+        self.assertEqual(self.named(events, "commented"), [])
+        failed = self.one(events, "comment-failed")
+        self.assertTrue(failed["detail"].startswith(f"{self.label()}: "))
+        self.assertIn("HTTP 403", failed["detail"])
+        self.assertEqual(failed["next"], f"fix the cause, then run.py close 1 (it posts the verdict again while the task is not merged); "
+                                         f"else tell the operator to post it on {self.label()} by hand")
+        self.assertEqual(self.status_of(task), "done")
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(self.meta(task)["pr"], 1)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.one(events, "resumed")
+        self.one(events, "commented")
+        self.assertEqual(self.named(events, "published"), [])
+        self.assertEqual(len(self.comment_posts()), 2)
+        self.assertEqual(self.comment_edits(), [])
+
+    @both_hosts
+    def test_97_a_verdict_before_any_request_posts_nothing(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head)
+        events = self.events("close", str(task), "--verdict", "check-only", "--ran", "read the diff")
+        self.one(events, "verdict")
+        self.assertEqual(self.named(events, "commented"), [])
+        self.assertEqual(self.named(events, "comment-failed"), [])
+        self.assertEqual(self.host_log(), [])
+        self.assertIsNone(self.remote_sha())
+        self.assertEqual(self.status_of(task), "in_progress")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        for name in ("closed", "published", "commented"):
+            self.one(events, name)
+        (body,) = self.comment_bodies()
+        self.assertIn("by manager (verify result #", body)
+        self.assertIn("Ran: make test", body)
+
+    @both_hosts
+    def test_97_a_resumed_close_posts_the_verdict(self):
+        self.pr_config()
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt, head = self.pass_report(task)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\nRan: make test ok\n", kind="verify", by="verify-1-1")
+        self.agents(self.finished("task-1"))
+        self.tg("edit", str(task), "--meta", f'verdict_ref="{head}"', "verdict=test-verified")
+        self.tg("done", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        for name in ("resumed", "published", "commented"):
+            self.one(events, name)
+        (body,) = self.comment_bodies()
+        for want in ("**Verdict: test-verified**", "by verify-1-1 (verify result #2)", f"Verified at: `{head}`"):
+            self.assertIn(want, body)
+
     @both_hosts
     def test_80_method_squash(self):
         call, head = self.merge_method("squash")
@@ -4076,7 +4335,7 @@ class PrTest(Base):
         self.assertEqual(self.remote_sha(), head2)
         self.assertEqual((self.meta(task)["pushed"], self.meta(task)["pr"]), (head2, 1))
         self.assertEqual(len(self.create_calls()), 1)
-        lookup = ("pr list", "pr create") if self.host == "github" else (f"api projects/{self.project}/merge_requests?", "api -X POST")
+        lookup = ("pr list", "pr create") if self.host == "github" else (f"api projects/{self.project}/merge_requests?", f"api -X POST projects/{self.project}/merge_requests -f")
         self.assertEqual([c for c in self.host_log()[seen:] if " ".join(c).startswith(lookup)], [])
         self.assertEqual(self.checkout(), before)
 

@@ -36,8 +36,8 @@ verification, a decision, a plan change) and before every report.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` rebases and pushes.
-   - `pr-changed`, `pr-closed`, `pr-unpinned`, `push-refused`, `merge-failed`, `host-error`: tell the operator what the line says; add a
-     decision when they must choose. `published`, `pushed`, `rebased`: no action.
+   - `pr-changed`, `pr-closed`, `pr-unpinned`, `push-refused`, `merge-failed`, `host-error`, `comment-failed`: tell the operator what the line says; add a
+     decision when they must choose. `published`, `pushed`, `rebased`, `commented`: no action.
 
    A result whose attempt is not the task's current attempt is superseded.
    Check it against the current state before you use anything in it, and
@@ -57,6 +57,7 @@ verification, a decision, a plan change) and before every report.
      `artifact-verified` closes it. A `test-verified` verdict, a CI run included, is recorded but does not close;
      run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id> --again`, or upgrade with `--override-verifier` and the run id
      or URL in `--ran`.
+   - A `verifying` line that ends with `skill none`: the project has no `.claude/skills/verify/SKILL.md`. The verifier works without it and names the method step it could not carry out. Tell the operator once that `/agentic-team:setup` creates it; never write it yourself.
    - When the verifier's verdict is weaker than your evidence, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --override-verifier "<why>" --ran "<run id or URL, what you saw>"`.
      An upgrade needs a run id or a link in `--ran`. `verify-failed` is never
@@ -74,8 +75,8 @@ verification, a decision, a plan change) and before every report.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
      `local` it merges only on a `MERGE:` line into a clean checkout, and
-     otherwise lists the branch as ready to merge. In `pr` it pushes the branch
-     and opens the request; `record` merges it under a `MERGE:` line when the
+     otherwise lists the branch as ready to merge. In `pr` it pushes the branch,
+     opens the request, and posts the verdict on it as one comment (a later verdict replaces it); `record` merges it under a `MERGE:` line when the
      host reports it clean, and records a merge anyone did. When the operator
      says a branch is merged and `record` cannot see it, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.

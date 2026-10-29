@@ -125,6 +125,12 @@ class Host:
         why = next((line for line in lines if line.startswith(("!", "error", "fatal"))), lines[0] if lines else "")
         return out.returncode == 0, why
 
+    def comment(self, number, marker, body):
+        """Put `body` on the request as the one comment that holds `marker`: edit that comment when it exists,
+        else create it. Returns (where, replaced): a URL or note id for the event line, and whether an
+        existing comment was edited. Raises HostError when the host refuses."""
+        raise NotImplementedError
+
 
 class GitHub(Host):
     name, cli, noun, prefix = "github", "gh", "PR", "#"
@@ -211,6 +217,29 @@ class GitHub(Host):
             return False, "no manual trigger"
         return False, first_line(out.stderr)
 
+    def comments(self, number):
+        """Every conversation comment of the request (issue comments), oldest first."""
+        found = []
+        for page in range(1, 31):
+            batch = self.json(self.gh("api", f"repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100&page={page}"),
+                              "api issues/<number>/comments") or []
+            found += batch
+            if len(batch) < 100:
+                break
+        return found
+
+    def comment(self, number, marker, body):
+        old = next((c for c in self.comments(number) if marker in (c.get("body") or "")), None)
+        payload = json.dumps({"body": body})
+        if old:
+            made = self.json(self.gh("api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/comments/{old['id']}",
+                                     "--input", "-", input=payload), "api issues/comments/<id>")
+        else:
+            made = self.json(self.gh("api", "-X", "POST", f"repos/{{owner}}/{{repo}}/issues/{number}/comments",
+                                     "--input", "-", input=payload), "api issues/<number>/comments")
+        made = made if isinstance(made, dict) else {}
+        return made.get("html_url") or f"comment {made.get('id')}", bool(old)
+
 
 class GitLab(Host):
     """GitLab through `glab api`, the REST v4 API. UNVERIFIED: glab is not installed on the machine
@@ -228,6 +257,9 @@ class GitLab(Host):
       7. After a fast-forward merge, which of `merge_commit_sha` and `sha` is set.
       8. `merge_requests/<iid>/approvals` returns `approvals_left` and `approval_rules_left` on the
          instance's tier (approval rules are a paid feature).
+      9. `merge_requests/<iid>/notes` takes `per_page` and `page`, lists system notes with `system: true`, and
+         each note has `id` and `body`.
+     10. POST `merge_requests/<iid>/notes` and PUT `merge_requests/<iid>/notes/<id>` take `body` as a form field.
     """
 
     name, cli, noun, prefix = "gitlab", "glab", "MR", "!"
@@ -366,3 +398,27 @@ class GitLab(Host):
         if ".gitlab-ci.yml" in text or "Missing CI config" in text:
             return False, "no manual trigger"
         return False, self.message(out, body)
+
+    def notes(self, number):
+        # UNVERIFIED: merge_requests/<iid>/notes with per_page and page, and the `id` and `body` fields of a note.
+        found = []
+        for page in range(1, 31):
+            batch = self.get(f"/merge_requests/{number}/notes?per_page=100&page={page}") or []
+            found += batch
+            if len(batch) < 100:
+                break
+        return found
+
+    def comment(self, number, marker, body):
+        # UNVERIFIED: POST merge_requests/<iid>/notes and PUT merge_requests/<iid>/notes/<id> with -f body=.
+        old = next((n for n in self.notes(number) if marker in (n.get("body") or "")), None)
+        if old:
+            path = f"/merge_requests/{number}/notes/{old['id']}"
+            out, made = self.api(path, "-f", f"body={body}", method="PUT")
+        else:
+            path = f"/merge_requests/{number}/notes"
+            out, made = self.api(path, "-f", f"body={body}", method="POST")
+        if out.returncode != 0:
+            raise HostError(f"glab api projects/<project>{path} failed: {self.message(out, made) or 'no answer'}")
+        made = made if isinstance(made, dict) else {}
+        return f"note {made.get('id')}", bool(old)
