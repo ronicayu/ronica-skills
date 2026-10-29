@@ -52,7 +52,35 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
 7. **Trust the workspace.** `claude --bg` refuses to start in a workspace that
    is not trusted. A trusted parent folder does not count. Tell the user to
    run `claude` once in the repository and accept the trust prompt.
-8. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
+8. **Check for the project verify skill.** The verifier reads
+   `.claude/skills/verify/SKILL.md` from the repository: it says how to prove
+   this project's artifacts (how to launch and drive the application, or where
+   the sources are and which script recomputes a count). Run
+   `test -f .claude/skills/verify/SKILL.md`. If the file exists, leave it. If
+   it is missing, tell the user, and offer to create it from the skeleton for
+   the project's verify kind (`"${CLAUDE_PLUGIN_ROOT}/scripts/config" get verify.kind`):
+   - `code`: copy `${CLAUDE_PLUGIN_ROOT}/templates/project-verify-skill-code.md`
+     to `.claude/skills/verify/SKILL.md`. Its sections are Launch, Doctor,
+     Drive, Evidence and Cleanup.
+   - `schema` or `design-doc`: copy
+     `${CLAUDE_PLUGIN_ROOT}/templates/project-verify-skill-document.md` to the
+     same path. Its sections are Sources, Recompute, Consistency, Render and
+     Review.
+
+   Then fill each `TODO` from what the repository shows: real commands, paths,
+   selectors and scripts. Do not invent a command; when you cannot find one,
+   leave the `TODO` and say so. A project with tasks of both kinds keeps both
+   section sets in the one file. Keep the Cleanup rule as the skeleton states
+   it: stop only processes the run started, by recorded pid or by a working
+   directory inside the worktree, never by name or pattern. The file is
+   repository content: commit it only when the user asks. The verifier reads
+   it from the commit under review, or from the main checkout when that commit
+   has none, so an uncommitted file still counts. Without the file the
+   verifier still runs; it reports the highest level it can prove and names
+   the method step it could not carry out. When this skill runs inside a
+   Manager session, the Manager does not write the file: it reports the gap
+   to the operator.
+9. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
    prints `ok`; otherwise fix each problem it lists and run it again. Make
    sure neither file holds a credential or secret. Show the user the final
    file and `"${CLAUDE_PLUGIN_ROOT}/scripts/config" show`, and say which keys use their defaults.
