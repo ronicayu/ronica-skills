@@ -56,6 +56,7 @@ bodies are a record, not the match.
 
 import argparse
 import datetime
+import fnmatch
 import glob
 import hashlib
 import json
@@ -70,7 +71,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
-from config import ConfigError, load, problems as config_problems, resolve_model  # noqa: E402
+from config import DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems, resolve_model  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -118,6 +119,8 @@ REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|F
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
 COMMENT_LIMIT = 8000  # characters of evidence in the request comment
+DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
+COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
 
 
 class Refused(codehost.HostError):
@@ -212,6 +215,7 @@ class Run:
         self._host = self._default = None
         self.host_failed = False
         self._fetched = set()
+        self._docker = None  # (what docker_read() returned,) once containers() has asked
 
     def find_tg(self, given):
         if given:
@@ -1924,10 +1928,145 @@ def cwd_users():
     return found
 
 
+def disposable_patterns(config):
+    """DISPOSABLE_DEFAULT without each pattern that merge.disposable turns off with "!", then the other
+    merge.disposable patterns."""
+    extra = config["merge"]["disposable"]
+    off = {p[1:] for p in extra if p.startswith("!")}
+    return [p for p in DISPOSABLE_DEFAULT if p not in off] + [p for p in extra if not p.startswith("!")]
+
+
+def unquoted(path):
+    """A path from `git status --porcelain` without the double quotes that git puts around a name with a space or
+    another special character. Escapes inside stay as they are: such a name matches no pattern, and the folder
+    stays."""
+    return path[1:-1] if len(path) > 1 and path[0] == path[-1] == '"' else path
+
+
+def disposable(path, patterns):
+    """True when an ignored path (relative to the worktree root; a folder ends in "/") is regenerable: the path,
+    or a folder on its path, matches one of `patterns`. A pattern that ends in "/" matches only a folder. A
+    pattern with no other "/" matches one name; a pattern with a "/" inside matches the path from the worktree
+    root down to that name. fnmatch rules, case counts, and "*" matches "/" too."""
+    parts = [part for part in path.split("/") if part]
+    for index, name in enumerate(parts):
+        folder = index < len(parts) - 1 or path.endswith("/")
+        prefix = "/".join(parts[:index + 1])
+        for pattern in patterns:
+            core = pattern.strip("/")
+            if not core or (pattern.endswith("/") and not folder):
+                continue
+            if fnmatch.fnmatchcase(prefix if "/" in core else name, core):
+                return True
+    return False
+
+
+def status_reason(run, path):
+    """Read `git status --porcelain --ignored=matching` in a worktree folder. Returns (reason, ignored): why its
+    files keep the folder (git failed, a change, an ignored path that may be data), else None; and every
+    ignored path. "matching" names each ignored path where its ignore rule matched (src/__pycache__/), not the
+    highest folder that holds only ignored files (src/)."""
+    status = run.git("-c", "core.quotePath=false", "status", "--porcelain", "--ignored=matching", cwd=path, check=False)
+    if status.returncode != 0:
+        return f"git status said: {first_line(status.stderr or status.stdout)}", []
+    lines = status.stdout.splitlines()
+    changed = [line for line in lines if not line.startswith("!!")]
+    if changed:
+        return f"uncommitted changes ({files_text(changed)})", []
+    ignored = [unquoted(line[3:]) for line in lines]
+    patterns = disposable_patterns(run.config)
+    data = [p for p in ignored if not disposable(p, patterns)]
+    if data:
+        return f"ignored files that may be data: {files_text(data)}", ignored
+    return None, ignored
+
+
+def docker_call(*args):
+    """One docker command with a timeout: the finished process, or a short text that says why it did not run."""
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=DOCKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"docker {args[0]} timed out after {DOCKER_TIMEOUT} s"
+    except OSError as exc:
+        return f"cannot run docker: {exc.strerror}"
+
+
+def docker_read():
+    """What Docker says about every container, running or stopped: [(name, state, host path, "mount" or
+    "compose")], one entry per mount source (Mounts[].Source) and one per Compose working directory (the
+    com.docker.compose.project.working_dir label). None when docker is not on PATH: the check is skipped. A
+    short text when docker is on PATH but does not answer: every folder then stays."""
+    if not shutil.which("docker"):
+        return None
+    ps = docker_call("ps", "-a", "-q", "--no-trunc")
+    if isinstance(ps, str):
+        return ps
+    if ps.returncode != 0:
+        return f"docker ps: {first_line(ps.stderr or ps.stdout) or f'exit {ps.returncode}'}"
+    ids = ps.stdout.split()
+    if not ids:
+        return []
+    inspect = docker_call("inspect", *ids)
+    if isinstance(inspect, str):
+        return inspect
+    try:  # a container removed after `docker ps` makes inspect exit 1; the others are still in its list
+        data = json.loads(inspect.stdout)
+    except ValueError:
+        data = None
+    if not isinstance(data, list):
+        return f"docker inspect: {first_line(inspect.stderr) or 'its output is not a JSON list'}"
+    found = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Name") or str(item.get("Id") or "")[:12]).lstrip("/")
+        state = item.get("State") if isinstance(item.get("State"), dict) else {}
+        status = str(state.get("Status") or "unknown")
+        for mount in item.get("Mounts") or []:
+            source = mount.get("Source") if isinstance(mount, dict) else None
+            if isinstance(source, str) and source:
+                found.append((name, status, source, "mount"))
+        config = item.get("Config") if isinstance(item.get("Config"), dict) else {}
+        labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else {}
+        workdir = labels.get(COMPOSE_DIR_LABEL)
+        if isinstance(workdir, str) and workdir:
+            found.append((name, status, workdir, "compose"))
+    return found
+
+
+def containers(run):
+    """docker_read(), asked at most once per run.py command."""
+    if run._docker is None:
+        run._docker = (docker_read(),)
+    return run._docker[0]
+
+
+def container_reason(run, path):
+    """Why Docker keeps a worktree folder, else None: a container, running or stopped, mounts the folder or a
+    path in it, or Docker Compose started it from there. A mount of a folder above it (the main checkout) does
+    not count."""
+    found = containers(run)
+    if found is None:
+        return None
+    if isinstance(found, str):
+        return f"docker did not answer ({found}); start Docker and run run.py record again"
+    uses = []
+    for name, status, where, how in found:
+        if not cwd_in(where, path):
+            continue
+        rel = os.path.relpath(os.path.realpath(where), path)
+        place = "the folder" if rel == "." else rel
+        uses.append(f"container {name} ({status}) mounts {place}" if how == "mount"
+                    else f"container {name} ({status}) was started by docker compose from {place}")
+    return f"used by docker: {files_text(uses, limit=3)}" if uses else None
+
+
 def folder_check(run, task, folder, path, registered, live, locks, users):
-    """Why a worktree folder is not safe to remove, else None. Three checks, in this order: no live session or
-    process uses it, `git status --porcelain` prints nothing, and its HEAD commit is merged. A lock must be
-    Claude Code's own for a session that has ended. Returns (reason, session, head, ignored files)."""
+    """Why a worktree folder is not safe to remove, else None. The checks, in this order: no live session,
+    process or Docker container uses it; `git status` shows no change; every ignored path is disposable; its
+    HEAD commit is merged. A lock must be Claude Code's own for a session that has ended. Returns (reason,
+    session, head, ignored paths)."""
     if path not in registered:
         return "not a registered git worktree; inspect it and remove it yourself if you do not need it", None, None, []
     for s in live:
@@ -1943,20 +2082,19 @@ def folder_check(run, task, folder, path, registered, live, locks, users):
     for pid, command, cwd in users or []:
         if cwd_in(cwd, path):
             return f"process {pid} ({command}) uses it", None, None, []
-    status = run.git("status", "--porcelain", "--ignored", cwd=path, check=False)
-    if status.returncode != 0:
-        return f"git status said: {first_line(status.stderr or status.stdout)}", None, None, []
-    lines = status.stdout.splitlines()
-    changed = [line for line in lines if not line.startswith("!!")]
-    if changed:
-        return f"uncommitted changes ({files_text(changed)})", None, None, []
+    why = container_reason(run, path)
+    if why:
+        return why, None, None, []
+    why, ignored = status_reason(run, path)
+    if why:
+        return why, None, None, []
     head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
     if not head:
         return "cannot read its HEAD commit", None, None, []
     why = not_merged_reason(run, task, head)
     if why:
         return why, None, None, []
-    return None, None, head, [line[3:] for line in lines]
+    return None, None, head, ignored
 
 
 def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, note):
@@ -2002,8 +2140,11 @@ def cleanup(run, task, sweep=False):
 
     `claude rm` locks in the first session that used a worktree (even after it stopped). `claude rm` of any later
     session removes only its row; `claude rm` of the first session removes the folder, when the tree is clean
-    and pushed. So the sessions go newest first and the task's first session goes last. Then every task folder
-    still present goes when it is safe: no live session, a clean `git status`, a merged HEAD (`folder_check`).
+    and pushed. So the sessions go newest first and the task's first session goes last.
+    Then every task folder still present goes when it is safe: no live session, process or container uses it,
+    a clean `git status`, only disposable ignored files, a merged HEAD (`folder_check`). The first pass runs no
+    `claude rm` for a session whose folder fails the container, `git status` or ignored-file check, because
+    `claude rm` of the folder's owner deletes the folder with its ignored files.
     `sweep` is `record` coming back to a task that was merged earlier: it prints a folder's `kept` line only when
     the reason differs from the last one stored in the task's `cleanup_kept` meta."""
     tid = task["id"]
@@ -2034,16 +2175,17 @@ def cleanup(run, task, sweep=False):
         if not (sweep and before.get(folder) == detail):
             run.emit("kept", tid, None, sid, f"{folder}: {detail}")
 
-    dirty = {}  # folder -> has changes
+    held_back = {}  # folder -> its files or a container keep it, so no claude rm may run for it
     held, gone = {}, set()  # folder -> what a refused claude rm said; session ids already removed
     for s in sessions:
         wt = s.worktree(run.root)
         if s.live or s.wtname in in_use:  # claude rm refuses while a live session uses the worktree
             continue
         if os.path.isdir(wt):
-            if s.wtname not in dirty:
-                dirty[s.wtname] = bool(run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip())
-            if dirty[s.wtname]:
+            if s.wtname not in held_back:
+                real = os.path.realpath(wt)
+                held_back[s.wtname] = bool(status_reason(run, real)[0] or container_reason(run, real))
+            if held_back[s.wtname]:
                 continue
         out = run.claude("rm", s.sid, check=False)
         if out.returncode == 0:

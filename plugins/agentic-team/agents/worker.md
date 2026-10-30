@@ -56,6 +56,14 @@ Manager.
     contain the worktree path.
   - When you stop a gate or a test runner, also stop its child processes (its process group or
     their recorded pids). Orphan processes can hold locks and ports.
+  - Do not start shared services from your worktree. A service is shared when it has a fixed
+    container name, a fixed port or a shared database, for example the project's
+    `docker compose up` or `make infra-up`. A Compose file that sets `container_name` is shared
+    even with `-p`. Your worktree is deleted after the merge, and a container that mounts a
+    folder in it loses that data. Use the instance that the project runs from its main checkout,
+    as the project's docs say. If you need your own instance, give it its own project name,
+    container names and ports (`docker compose -p <your worktree name>`), keep its data in a
+    `mktemp -d` folder, and stop and remove it before you report.
 - **Taskgraph is read only,** except the one `result add` command in your brief. The
   Manager runs `tg start`, `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read

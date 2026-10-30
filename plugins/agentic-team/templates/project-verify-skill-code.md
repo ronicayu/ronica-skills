@@ -14,7 +14,15 @@ instructions or in its brief's FORBIDDEN section.
 
 Start the application from an empty data folder to a usable state, with teardown.
 
+Never start the project's shared services from a worktree: a service with a
+fixed container name, a fixed port or a shared database. A Compose file that
+sets `container_name` is shared even with `-p`. The worktree is deleted after
+the merge, and a container that mounts a folder in it loses that data. Use the
+instance that the main checkout runs, or a private instance with its own
+project name, container names and ports, and its data in the data folder.
+
 - Prerequisites: TODO (toolchain, services, environment variables; how to install them in a fresh worktree)
+- Shared services: TODO (the services the main checkout runs and how to reach them; or how to start a private copy, for example `docker compose -p <worktree name> ...` with its data in the data folder)
 - Data folder: TODO (a path under `$(mktemp -d)`; never the developer's own data)
 - Start: TODO (the exact command; record its pid as you start it, for example `cmd ... & pid=$!`)
 - Ready when: TODO (a URL or a log line to wait for, and a timeout)
@@ -51,7 +59,9 @@ when you started it, or by a working directory inside your own worktree
 pattern (`pkill -f`, `killall`): a process of another worktree can match. When
 you stop a server or a test runner, stop its child processes too (its process
 group, or their recorded pids). Remove the data folder and every container or
-temporary file this run created. A leftover goes under `Follow-ups:` as
+temporary file this run created. A container is yours only when this run
+created it under its own project or container name; never stop or remove a
+shared one. A leftover goes under `Follow-ups:` as
 `leftover process: pid <pid> port <port>`, `leftover container: <name>` or
 `leftover file: <path>`.
 
