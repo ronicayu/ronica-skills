@@ -55,8 +55,8 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(cfg["models"]["verifier"])
         self.assertEqual(cfg["constraints"]["forbidden"], [])
         self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge",
-                                       "remove_worktrees": True})
-        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "remove_worktrees"})
+                                       "remove_worktrees": True, "disposable": []})
+        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code"})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
@@ -178,6 +178,30 @@ class ConfigTest(unittest.TestCase):
             found = config.problems(config.load(self.root))
             self.assertEqual(found, [f"merge.remove_worktrees must be true or false, not {bad}"])
             self.assertEqual(self.run_cli("check")[0], 2)
+
+    def test_disposable_is_a_list_of_patterns(self):
+        self.write(MINIMAL + '[merge]\ndisposable = ["infra/.data/", "*.sqlite", "!build/"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "merge.disposable")[:2], (0, '["infra/.data/", "*.sqlite", "!build/"]\n'))
+        self.write(MINIMAL + '[merge]\ndisposable = ["", "/", "**", " x", "!", "!logs/"]\n')
+        usable = 'is not a usable pattern; name files or folders, for example "*.sqlite-journal" or "generated/"'
+        self.assertEqual(config.problems(config.load(self.root)), [
+            f'merge.disposable: "" {usable}',
+            f'merge.disposable: "/" {usable}',
+            f'merge.disposable: "**" {usable}',
+            f'merge.disposable: " x" {usable}',
+            f'merge.disposable: "!" {usable}',
+            'merge.disposable: "!logs/" turns off nothing: "logs/" is not a default pattern'])
+        self.assertEqual(self.run_cli("check")[0], 2)
+        self.write(MINIMAL + '[merge]\ndisposable = "node_modules/"\n')
+        self.assertEqual(config.problems(config.load(self.root)),
+                         ['merge.disposable must be a list of path patterns, not "node_modules/"'])
+        self.write(MINIMAL + '[merge]\ndisposable = ["TODO"]\n')
+        self.assertEqual(config.problems(config.load(self.root)),
+                         ['merge.disposable is TODO; set it, or "" / [] if it does not apply'])
+        self.assertEqual(len(config.DISPOSABLE_DEFAULT), 35)
+        for pattern in config.DISPOSABLE_DEFAULT:
+            self.assertEqual(config.pattern_problems("x", [pattern, "!" + pattern]), [], pattern)
 
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
