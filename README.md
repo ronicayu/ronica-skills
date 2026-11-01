@@ -11,6 +11,7 @@ A marketplace of Claude Code plugins.
 | [`taskgraph`](plugins/taskgraph) | Tracks project tasks and dependencies in a SQLite DAG. Plan backwards from a goal, `ready` shows what can start now, and `graph` opens an interactive view with hover path highlighting and task details. |
 | [`agentic-team`](plugins/agentic-team) | Provides a manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results. |
 | [`telegram-send`](plugins/telegram-send) | Sends a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that reads credentials from a mode-600 file, keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean. |
+| [`evidence-search`](plugins/evidence-search) | Finds and cites evidence in a project's code, requirements, design documents and configuration at low token cost. Searches in tiers (repo map, index pointers, line-range reads, bounded grep), makes a grep cross-check mandatory for enumeration and absence questions, and records an evidence ledger of `path:line` citations for design reviews, system design, and other skills that need evidence. Ships an optional local index: BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for documents, related-chunk search across code and documents, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids; `/evidence-search:setup` builds it. Works on code that does not compile. |
 
 ## Install
 
@@ -23,10 +24,12 @@ A marketplace of Claude Code plugins.
 /plugin install agentic-team@ronica-skills
 /plugin install telegram-send@ronica-skills
 /plugin install taskgraph@ronica-skills
+/plugin install evidence-search@ronica-skills
 ```
 
 Skills then trigger on their own descriptions, or explicitly via
-`/writing-editor`, `/architecture-design`, `/telegram-send`, and `/taskgraph`.
+`/writing-editor`, `/architecture-design`, `/telegram-send`, `/taskgraph`, and
+`/evidence-search`.
 After installing `agentic-team`, select `agentic-team:manager` in the agent
 picker, invoke it with `@agent-agentic-team:manager`, or type
 `/agentic-team:manager` in an existing session. In each repository
