@@ -17,6 +17,13 @@ verification, a decision, a plan change) and before every report.
      evidence can answer it, answer in the task notes or the standing orders
      and relaunch. Otherwise add a decision with `--blocks <id>`. A done
      decision's notes are pasted into the next brief.
+   - `salvaged`: `run` found a report that the session did not file and filed it. The next line
+     (`verified` or `arrived`) says what to do.
+   - `no-verdict`: a verifier ended or went idle with no result, and `run` found no report in its
+     report file, its transcript, or `claude logs`. If you have its report, write it to a file and run
+     the `tg result add` command from the line through `"${CLAUDE_PLUGIN_ROOT}/scripts/tg"`. Keep the verifier's
+     name in `--by`: a row by `manager` is not a verifier's verdict. Otherwise run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id> --again`, which stops the old session. Every drain prints the line until one of the two is done.
    - `died`: retry by failure mode. Infrastructure failures retry as they are.
      A tool error or a stuck model retries one `--tier` higher. An unknown
      cause retries once.
@@ -47,7 +54,7 @@ verification, a decision, a plan change) and before every report.
      a subagent, inside the result's `Worktree:`. Check that
      `git -C <worktree> rev-parse HEAD` equals its `Head:`, spot-check the
      output, and delete only the files your rerun created
-     (`git -C <worktree> status --porcelain`). Never start the project's shared services (a fixed container name or port, a shared database) from the worktree. Then run
+     (`git -C <worktree> status --porcelain`). Never start the project's shared services (a fixed container name or port, a shared database) from the worktree, and never run a setup target there that writes the shared git config (`core.hooksPath`, `git config`). Then run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --ran "<what you ran and saw>"`.
    - `risk=high`, or a check that is expensive or needs judgement: run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; a later `verified` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.

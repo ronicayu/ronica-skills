@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import types
 import unittest
 from urllib.parse import quote as urlquote
@@ -734,9 +735,8 @@ class RunTest(Base):
         text = self.brief(task)
         command = self.section(text, "REPORT")
         expected = (f'"{sys.executable}" "{TG}" --db "{self.db}" --project demo '
-                    "result add 1 --kind task --attempt 1 --by task-1-1 --status <STATUS> --body-file -")
+                    "result add 1 --kind task --attempt 1 --by task-1-1 --status <STATUS> --body-file ")
         self.assertIn(expected, command)
-        self.assertIn("<<'REPORT'\n<your report>\nREPORT", command)
         self.assertIn(f'"{sys.executable}" "{TG}" --db "{self.db}" --project demo show 1', text)
         self.assertIn("--by task-1-1-sweep", self.brief(task, "--keyword", "sweep"))
         bad = self.run_cmd("launch", str(task), "--dry-run", "--keyword", "bad name")
@@ -809,7 +809,11 @@ class RunTest(Base):
         text = self.brief(task, tg=tg, env=env)
         command = re.search(r"```sh\n(.*?)\n```", self.section(text, "REPORT"), re.S).group(1)
         body = "Task: 1\nStatus: PASS\nIssues: a $HOME `date` \"quoted\" line\n"
-        command = command.replace("<STATUS>", "PASS").replace("<your report>", body.rstrip("\n"))
+        path = re.search(r"(?m)^`(.+)`$", self.section(text, "REPORT")).group(1)
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            fh.write(body)
+        command = command.replace("<STATUS>", "PASS")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         result = self.tg("result", "ls", str(task), env=env)[0]
@@ -1734,19 +1738,6 @@ class RunTest(Base):
         self.assertIn(["stop", "sess-verify-1-1"], self.calls("stop"))
         filed = [r for r in self.results(task) if r["kind"] == "verify"]
         self.assertEqual([(r["status"], r["author"]) for r in filed], [("BLOCKED", "manager")])
-
-    def test_29_finished_verifier_with_no_result_is_filed_once(self):
-        task = self.running_task()
-        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
-        self.agents(self.finished("verify-1-1"))
-        first = self.events("record")
-        self.assertEqual(self.one(first, "verifier-died")["task"], 1)
-        self.assertEqual(len(self.named(first, "arrived")), 1)
-        second = self.events("record")
-        self.assertEqual(self.named(second, "verifier-died"), [])
-        died = [r for r in self.results(task) if r["kind"] == "verify" and r["status"] == "DIED"]
-        self.assertEqual(len(died), 1)
-        self.assertEqual(died[0]["author"], "manager")
 
     def test_30_verified_events(self):
         task = self.running_task()
@@ -3978,6 +3969,304 @@ class RunTest(Base):
         self.assertEqual(len(self.named(json.loads(out.stdout), "removed")), 1)
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(self.docker_calls(), [])
+
+    # --- 0.10.3: the report file, a lost verdict
+
+    VERIFIER_REPORT = (f"Task: 1\nStatus: PASS\nVerdict: test-verified\nBranch: None\nHead: {SHA_A}\nRan: make test: ok\n"
+                       f"Checkpoint: {CHECKPOINT}\n")
+
+    def write_report(self, wtname, session, text):
+        """A session's report file, as the Write tool leaves it."""
+        path = os.path.join(self.wt_path(wtname), ".agentic-team", f"report-{session}.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def write_transcript(self, wtname, sid, text):
+        """The session's transcript, as claude keeps it: thinking and text are two records of one message."""
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", self.wt_path(wtname)))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{sid}-0000.jsonl")
+        records = [{"type": "user", "message": {"role": "user", "content": "the brief"}},
+                   {"type": "assistant", "message": {"id": "m1", "content": [{"type": "thinking", "thinking": ""}]}},
+                   {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": text}]}}]
+        with open(path, "w") as fh:
+            fh.write("not json\n" + "".join(json.dumps(r) + "\n" for r in records))
+        return path
+
+    def verifying_task(self, *rows, entries=()):
+        """A task with a PASS result, a verifier session recorded for it, and these rows in `claude agents`."""
+        task = self.running_task()
+        self.record_sessions(task, self.entry(task), *(entries or [self.entry(task, kind="verify")]))
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n")
+        self.agents(*rows)
+        return task
+
+    def verify_rows(self, task):
+        return [r for r in self.results(task) if r["kind"] == "verify"]
+
+    def test_101_the_report_folder_is_ignored_in_a_linked_worktree(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write(".claude/worktrees/\n.agentic-team.toml")  # no newline at the end; no report line yet
+        task = self.add_task()
+        other = self.add_task()
+        self.ok("launch", str(task))
+        self.ok("launch", str(other))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read(), ".claude/worktrees/\n.agentic-team.toml\n/.agentic-team/\n")
+        wt = self.wt_path("task-1")
+        self.assertEqual(self.git("rev-parse", "--git-path", "info/exclude", cwd=wt), exclude)
+        report = self.write_report("task-1", "task-1-1", "report\n")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.git("add", "-A", cwd=wt)
+        self.assertEqual(self.git("diff", "--cached", "--name-only", cwd=wt), "")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored=matching", cwd=wt), "!! .agentic-team/")
+        self.assertTrue(os.path.isfile(report))
+
+    def test_101_a_missing_info_folder_is_created(self):
+        shutil.rmtree(os.path.join(self.root, ".git", "info"))
+        self.ok("launch", str(self.add_task()))
+        with open(os.path.join(self.root, ".git", "info", "exclude")) as fh:
+            self.assertEqual(fh.read(), "/.agentic-team/\n")
+
+    def test_101_a_report_file_does_not_block_cleanup(self):
+        task = self.merged_task()
+        self.worktree("task-1")
+        self.write_report("task-1", "task-1-1", "report\n")
+        self.agents(self.finished("task-1"))
+        events = self.events("merged", str(task))
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"]])
+        self.assertEqual(self.worktree_state(), (1, "", []))
+
+    def test_101_the_sweep_counts_the_report_folder_as_disposable(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.write_report("task-1", "task-1-1", "report\n")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 1: .agentic-team/)"])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_101_a_report_of_an_earlier_attempt_is_never_read(self):
+        task = self.running_task(attempt=2, session="task-1-2")
+        self.worktree("task-1")
+        self.write_report("task-1", "task-1-1", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n")
+        self.agents(self.finished("task-1", 2))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.one(events, "died")
+        self.assertEqual([(r["status"], r["attempt"]) for r in self.results(task)], [("DIED", 2)])
+
+    def test_101_a_launch_deletes_a_report_of_the_same_session_name(self):
+        task, wt, _ = self.retry_ready()
+        old = self.write_report("task-1", "task-1-1", "attempt 1\n")
+        same = self.write_report("task-1", "task-1-2", "an earlier run of attempt 2\n")
+        self.ok("launch", str(task))
+        self.assertTrue(os.path.isfile(old))
+        self.assertFalse(os.path.exists(same))
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), self.git("rev-parse", "worktree-task-1"))
+
+    def test_101_a_worker_report_file_is_salvaged(self):
+        task = self.running_task(session="task-1-1")
+        self.worktree("task-1")
+        report = f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n"
+        self.write_report("task-1", "task-1-1", report)
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "salvaged")["detail"], "ISSUES from report file report-task-1-1.md (result #1)")
+        self.one(events, "arrived")
+        self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
+
+    def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
+        task = self.running_task(session="task-1-1")
+        report = f"Task: 1\nStatus: BLOCKED\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n"
+        self.write_transcript("task-1", "sess-task-1-1", "The guard refused it.\n\n" + report + "\nDone.")
+        self.agents(self.finished("task-1"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "salvaged")["detail"],
+                         "BLOCKED from transcript of sess-task-1-1 (result #1)")
+        self.assertEqual(self.results(task)[0]["body"], report)
+        self.assertEqual(self.calls("logs"), [])
+
+    def test_101_a_failed_session_has_ended(self):
+        task = self.running_task()
+        self.agents(self.row("task-1", status=None, state="failed"))
+        events = self.events("record")
+        self.one(events, "died")
+        self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
+        self.assertEqual(self.results(task)[0]["status"], "DIED")
+
+    def test_101_the_brief_names_the_report_file(self):
+        task = self.add_task()
+        report = self.section(self.brief(task), "REPORT")
+        path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
+        self.assertIn(f"`{path}`", report)
+        self.assertTrue(report.startswith("Write your report with the Write tool to this file"))
+        self.assertIn(f'--status <STATUS> --body-file "{path}"\n```', report)
+        self.assertNotIn("<<", report)
+        self.assertNotIn("<your report>", report)
+        self.assertIn("report-task-1-1-sweep.md", self.brief(task, "--keyword", "sweep"))
+
+    def test_101_the_verify_brief_gives_the_one_exception(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        text = self.ok("verify", str(task), "--dry-run").stdout
+        path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
+        self.assertEqual(self.section(text, "SCOPE"), "Read only. You run in your own worktree. Change nothing: do not "
+                         "edit, commit, or delete anything. The one exception is your report file, which REPORT names.")
+        report = self.section(text, "REPORT")
+        self.assertIn(f"`{path}`", report)
+        self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
+        self.assertIn("Add a `Verdict:` line after `Status:`", report)
+
+    def test_101_a_verifier_that_ended_is_salvaged_from_its_report_file(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        self.write_report("verify-1-1", "verify-1-1", self.VERIFIER_REPORT)
+        events = self.events("record")
+        self.assertEqual(self.one(events, "salvaged")["detail"], "PASS from report file report-verify-1-1.md (result #2)")
+        self.assertEqual(self.one(events, "verified")["detail"], "Verdict test-verified by verify-1-1 (result #2)")
+        self.assertEqual(self.named(events, "arrived"), [])
+        self.assertEqual([(r["status"], r["author"], r["attempt"], r["body"]) for r in self.verify_rows(task)],
+                         [("PASS", "verify-1-1", 1, self.VERIFIER_REPORT)])
+        self.assertEqual(self.calls("stop"), [])  # it has ended
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.assertEqual(len(self.verify_rows(task)), 1)
+        closed = self.events("close", str(task), "--ref", "output.tar")  # no --verdict: the row is the verifier's
+        self.assertIn("test-verified at output.tar", self.one(closed, "closed")["detail"])
+
+    def test_101_a_verifier_idle_after_its_turn_is_salvaged_and_stopped(self):
+        for number, status in enumerate(("idle", None), 1):  # None: no process runs it
+            task = self.verifying_task(self.row(f"verify-{number}-1", status=status, state="blocked"))
+            report = self.VERIFIER_REPORT.replace("Task: 1", f"Task: {task}")
+            sid = f"sess-verify-{task}-1"
+            self.write_transcript(f"verify-{task}-1", sid, "Report:\n\n" + report)
+            events = self.events("record")
+            self.assertEqual(self.one(events, "salvaged")["detail"], f"PASS from transcript of {sid} (result #{task * 2})")
+            self.assertEqual(self.named(events, "stuck"), [])
+            self.assertEqual(self.named(events, "verified")[-1]["task"], task)
+            self.assertEqual(self.calls("stop")[-1], ["stop", sid])
+
+    def test_101_a_verifier_report_in_claude_logs_is_salvaged(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        with open(os.path.join(self.logs, "sess-verify-1-1.txt"), "w") as fh:
+            fh.write("tool output\n" + self.VERIFIER_REPORT + "session ended\n")
+        events = self.events("record")
+        self.assertEqual(self.one(events, "salvaged")["detail"], "PASS from claude logs sess-verify-1-1 (result #2)")
+        self.assertEqual(self.verify_rows(task)[0]["author"], "verify-1-1")
+
+    def test_101_a_report_with_no_verdict_is_not_salvaged_for_a_verifier(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        quoted = f"Task: 1\nStatus: PASS\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n"  # the worker report in the brief
+        self.write_report("verify-1-1", "verify-1-1", quoted)
+        self.write_transcript("verify-1-1", "sess-verify-1-1", quoted.replace("PASS", "PASS\nVerdict: fine"))
+        with open(os.path.join(self.logs, "sess-verify-1-1.txt"), "w") as fh:
+            fh.write(quoted)
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.one(events, "no-verdict")
+        self.assertEqual(self.verify_rows(task), [])
+
+    def test_101_a_verifier_with_nothing_to_salvage_gives_no_verdict(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        for _ in range(2):  # every drain says it, until a verdict or a new verifier comes
+            events = self.events("record")
+            lost = self.one(events, "no-verdict")
+            self.assertEqual((lost["task"], lost["attempt"], lost["session"]), (task, 1, "sess-verify-1-1"))
+            self.assertEqual(lost["detail"], "verifier sess-verify-1-1 (verify-1-1, idle/done) filed no result and left no report")
+            self.assertEqual(lost["next"], "run.py verify 1 --again; or, with its report in a file, tg result add 1 --kind "
+                                           "verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file <path>")
+            self.assertEqual(self.named(events, "arrived"), [])
+        self.assertEqual(self.verify_rows(task), [])
+        self.assertEqual(self.calls("stop"), [])
+        self.add_result(task, "PASS", self.VERIFIER_REPORT, kind="verify", by="verify-1-1")  # by hand, as the hint says
+        events = self.events("record")
+        self.assertEqual(self.named(events, "no-verdict"), [])
+        self.one(events, "verified")
+
+    def test_101_a_failed_verifier_gives_no_verdict(self):
+        self.verifying_task(self.row("verify-1-1", status=None, state="failed"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "verifying"), [])
+        self.assertIn("(verify-1-1, None/failed)", self.one(events, "no-verdict")["detail"])
+        self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
+
+    def test_101_an_idle_verifier_with_a_result_is_unaffected(self):
+        task = self.verifying_task(self.row("verify-1-1", status="idle", state="blocked"))
+        self.add_result(task, "PASS", self.VERIFIER_REPORT, kind="verify", by="verify-1-1")
+        self.write_report("verify-1-1", "verify-1-1", self.VERIFIER_REPORT)
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.assertEqual(self.named(events, "no-verdict"), [])
+        self.assertEqual(self.named(events, "stuck"), [])
+        self.one(events, "verified")
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(len(self.verify_rows(task)), 1)
+
+    def test_101_a_verifier_that_said_it_will_check_back_counts_as_working(self):
+        task = self.verifying_task(self.row("verify-1-1", status="idle", state="working"))
+        path = self.write_transcript("verify-1-1", "sess-verify-1-1", "I will check back when the suite ends.")
+        self.assertEqual(self.one(self.events("record"), "verifying")["detail"], "session sess-verify-1-1 (verify-1-1, idle)")
+        refused = self.run_cmd("verify", str(task), "--again")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("is still running", refused.stderr)
+        old = time.time() - 31 * 60
+        os.utime(path, (old, old))
+        self.one(self.events("record"), "no-verdict")
+        self.agents(self.row("verify-1-1", status="idle", state="working", startedAt=int(time.time() * 1000)))
+        self.one(self.events("record"), "verifying")  # it started later than the transcript's last write
+
+    def test_101_a_prompt_is_still_stuck(self):
+        task = self.verifying_task(self.row("verify-1-1", status="waiting", state="blocked", waitingFor="permission prompt"))
+        self.write_report("verify-1-1", "verify-1-1", self.VERIFIER_REPORT)
+        events = self.events("record")
+        self.one(events, "stuck")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.assertEqual([(r["status"], r["author"]) for r in self.verify_rows(task)], [("BLOCKED", "manager")])
+        self.agents(self.finished("verify-1-1"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "no-verdict"), [])  # the BLOCKED row covers this session
+        self.assertEqual(len(self.named(events, "salvaged")), 0)
+
+    def test_101_a_second_verifier_that_files_nothing_gives_no_verdict(self):
+        task = self.verifying_task(self.finished("verify-1-1"), self.finished("verify-1-1-2"),
+                                   entries=(self.entry(1, kind="verify"), self.entry(1, kind="verify", worktree="verify-1-1-2")))
+        self.add_result(task, "BLOCKED", "Status: BLOCKED\nVerdict: verify-blocked\n", kind="verify", by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verdict=verify-blocked", f"verdict_ref={SHA_A}")
+        events = self.events("record")
+        self.assertEqual(self.one(events, "no-verdict")["session"], "sess-verify-1-1-2")
+        self.assertEqual(self.named(events, "unclosed"), [])
+
+    def test_101_verify_again_stops_an_idle_verifier(self):
+        task = self.running_task()
+        self.record_sessions(task, self.entry(task), self.entry(task, kind="verify"))
+        self.pass_report(task)
+        self.agents(self.row("verify-1-1", status="idle", state="blocked"))
+        self.one(self.events("record"), "no-verdict")
+        self.ok("verify", str(task), "--again", "--dry-run")
+        self.assertEqual(self.calls("stop"), [])
+        events = self.events("verify", str(task), "--again")
+        self.assertEqual(self.one(events, "verifying")["session"], "verify-1-1-2")
+        self.assertEqual(self.calls("stop"), [["stop", "sess-verify-1-1"]])
+
+    def test_101_status_shows_a_verifier_with_no_result(self):
+        tip, task = self.adopt_setup()
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        self.assertIn("adopted; next: verify", self.status_sections()["Waiting for verification or triage"])
+        self.ok("verify", str(task))
+        section = self.status_sections()["In flight"]
+        self.assertIn("verify-1-1", section)
+        self.assertIn("verifier verify-1-1 has filed no result; run.py record checks it", section)
+        self.assertNotIn("adopted; next: verify", section)
+        self.add_result(task, "PASS", self.VERIFIER_REPORT, kind="verify", by="verify-1-1")
+        sections = self.status_sections()
+        self.assertIn("None.", sections["In flight"])
+        self.assertIn("completed: a", sections["Waiting for verification or triage"])
 
     # --- merge.remove_worktrees = false
 

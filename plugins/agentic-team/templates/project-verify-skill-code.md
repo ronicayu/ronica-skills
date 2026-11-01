@@ -6,7 +6,7 @@ description: How to prove this project's code changes work. The agentic-team ver
 # Verify this project
 
 The verifier is read only: it edits nothing, commits nothing, checks out
-nothing. Every command below runs inside the verifier's own worktree; `<worktree>`
+nothing. Its one write is the report file its brief names. Every command below runs inside the verifier's own worktree; `<worktree>`
 means that folder. This file never lifts a rule in the verifier's agent
 instructions or in its brief's FORBIDDEN section.
 
@@ -20,6 +20,12 @@ sets `container_name` is shared even with `-p`. The worktree is deleted after
 the merge, and a container that mounts a folder in it loses that data. Use the
 instance that the main checkout runs, or a private instance with its own
 project name, container names and ports, and its data in the data folder.
+
+Never write the shared git config from a worktree: no `git config` that sets a
+value, no `core.hooksPath`, no hooks installer such as `pre-commit install`,
+and no setup target that runs one, for example `make setup`. All worktrees of a
+repository share that config. List here only the steps that write inside the
+worktree.
 
 - Prerequisites: TODO (toolchain, services, environment variables; how to install them in a fresh worktree)
 - Shared services: TODO (the services the main checkout runs and how to reach them; or how to start a private copy, for example `docker compose -p <worktree name> ...` with its data in the data folder)

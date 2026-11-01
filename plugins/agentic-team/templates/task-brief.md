@@ -45,11 +45,18 @@ Time zone: {{TIMEZONE}}
 
 ## REPORT
 
-Your last action is this one command, run once. Replace `<STATUS>` with
-`PASS`, `ISSUES`, or `BLOCKED`, and replace `<your report>` with your report
-in the format in your agent instructions. {{REPORT_NOTE}} Keep the quoted
-heredoc as it is. Do not pipe the report in, and do not write it to a file.
+Write your report with the Write tool to this file, in the format in your
+agent instructions. {{REPORT_NOTE}}
+
+`{{REPORT_FILE}}`
+
+Then your last action is this one command, run once. Replace `<STATUS>` with
+`PASS`, `ISSUES`, or `BLOCKED`. Keep the rest as it is.
 
 ```sh
 {{RESULT_COMMAND}}
 ```
+
+Do not put report text in a shell command: a guard can refuse the command for
+a word in it. If the Write tool or the command is refused, follow the Report
+section of your agent instructions.

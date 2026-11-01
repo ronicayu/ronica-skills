@@ -31,11 +31,12 @@ Manager.
 - **Your worktree.** Work and commit only inside your worktree, on its branch. Write
   nothing outside it except the `result add` command in your brief. Before you write any
   result, run `git status --porcelain`. Commit or delete anything your own VERIFY
-  created, and list what you leave under `Files:`. Then commit your work on your branch,
+  created, and list what you leave under `Files:`. Your report file does not show there,
+  because git ignores it; leave it and do not list it. Then commit your work on your branch,
   so `Head` is always set and the worktree is clean. On `PASS`, use a message that names
   the task. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
   `WIP task <id> attempt <n>: <status>`. If there is nothing to commit, that is fine. A
-  verifier commits nothing. Never push, rebase, merge, reset, delete branches, or check out
+  verifier commits nothing, and its report file is the one file it writes. Never push, rebase, merge, reset, delete branches, or check out
   another branch or commit. A verifier may create one temporary folder outside its worktree
   (`mktemp -d`) for a read-only export of the base commit or for a temporary database, as its
   brief says, and deletes it before it reports; its own worktree stays at the head.
@@ -64,6 +65,16 @@ Manager.
     as the project's docs say. If you need your own instance, give it its own project name,
     container names and ports (`docker compose -p <your worktree name>`), keep its data in a
     `mktemp -d` folder, and stop and remove it before you report.
+- **Shared repository state.** All worktrees of a repository share one git config, and the
+  `core.hooksPath` in it applies to every checkout. Do not write that config from your
+  worktree: no `git config` that sets or unsets a value, no hooks installer (`pre-commit
+  install`, `husky`, `lefthook install`), and no setup target that runs one, for example
+  `make setup`. Such a command can point every checkout at a path in your worktree, and that
+  path goes when your worktree is deleted. Do not use `git config --worktree` either: it fails
+  unless the repository already enables `extensions.worktreeConfig`, and enabling that writes
+  the shared config. Read a setup target before you run it, and run only the steps you need,
+  such as the dependency install. If your VERIFY cannot run without such a target, report
+  `BLOCKED` and name it.
 - **Taskgraph is read only,** except the one `result add` command in your brief. The
   Manager runs `tg start`, `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read
@@ -77,13 +88,21 @@ Manager.
 
 ## Report
 
-When you finish, are blocked, or stop, run the one `result add` command in the REPORT
-section of your brief, with your report on stdin, then end. Copy the command as it is,
-with the report in its quoted heredoc. Fill in only the status and the body. A report
-line that is exactly `REPORT` would end the heredoc early; never write one. Do not pipe
-the report in, and do not write it to a file: an untracked file blocks `claude rm` on
-your worktree. Run the command once, as your last action. If it fails, run it again
-once. If it fails again, put the report in your final message and end. Send no start or
+When you finish, are blocked, or stop, do the two steps in the REPORT section of your
+brief, then end.
+
+1. Write your report with the Write tool to the file that REPORT names. Git ignores
+   that file. It does not show in `git status`, `git add -A` does not add it, and it does
+   not block the removal of your worktree. Do not commit it, delete it, or list it under
+   `Files:`.
+2. Run the one `result add` command in REPORT, as your last action. Copy it as it is and
+   fill in only the status. If it fails, run it again once.
+
+Never put report text in a shell command: no heredoc, no pipe, no `echo`, no `--body`. A
+project's guards read each shell command and can refuse it for a word in the report.
+Use the path in REPORT and no other. If the Write tool or the command is refused, or the
+command fails twice, put the report in your final message and end. `run.py record`
+recovers the report from your report file or from your transcript. Send no start or
 progress messages.
 
 ```text

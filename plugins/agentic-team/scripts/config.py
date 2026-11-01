@@ -64,6 +64,8 @@ DISPOSABLE_DEFAULT = (
     ".cache/", "dist/", "build/", "target/", ".gradle/",
     # operating system files
     ".DS_Store", "Thumbs.db",
+    # the session report files of agentic-team; each report is in Taskgraph
+    ".agentic-team/",
 )
 
 
