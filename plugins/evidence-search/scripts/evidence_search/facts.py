@@ -19,8 +19,11 @@ Fact types
                the file kind. Patterns are set with `evs index --id-pattern`.
 """
 
+import bisect
 import re
 from dataclasses import dataclass
+
+from . import sql
 
 
 @dataclass
@@ -33,13 +36,20 @@ class Fact:
 
 _LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'')
 
-_SQL = re.compile(
-    r"(?<![<\w/.])(INSERT\s+INTO|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE|"
-    r"DROP\s+TABLE|UPDATE|FROM|JOIN|INTO)\s+([A-Za-z_#][\w.$#]*)", re.IGNORECASE)
-_SQL_WORDS = re.compile(r"\b(select|insert|update|delete|from|where|set|values|join|into|merge|order\s+by|group\s+by)\b",
-                        re.IGNORECASE)
-_SQL_NOT_TABLES = {"select", "where", "set", "values", "the", "a", "an", "table", "if", "exists", "only",
-                   "lateral", "unnest", "this", "that", "to", "and", "or", "in", "on", "with"}
+_CODE_LANGS = ("java", "javascript", "typescript", "jsp", "groovy", "kotlin", "scala")
+_XML_STATEMENT = re.compile(
+    r"<(select|insert|update|delete|sql|statement|procedure|sql-query|named-native-query|query)\b[^>]*>(.*?)</\1\s*>",
+    re.S | re.I)
+_CDATA = re.compile(r"<!\[CDATA\[|\]\]>")
+_TAG = re.compile(r"<[^>]*>")
+_TABLE_ATTR = re.compile(
+    r"<(?:class|joined-subclass|union-subclass|subclass|join|set|bag|list|map|idbag)\b[^>]*?\btable\s*=\s*\"([^\"]+)\"")
+_JPA_TABLE = re.compile(r"@Table\s*\(\s*(?:name\s*=\s*)?\"([^\"]+)\"")
+_CLASS_LINE = re.compile(r"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|abstract|final|static)\s+)*"
+                         r"(?:class|interface|enum|record)\s+\w+")
+# A line that adds to a string being built: sb.append("…"), sql += "…", or a leading +.
+_BUILDS_STRING = re.compile(r"\.append\s*\(|\+=|^\s*\+")
+_TRAILING_COMMENT = re.compile(r"\s*//[^\"']*$")
 
 _MAPPING = re.compile(r"@(Request|Get|Post|Put|Delete|Patch)Mapping\s*\(([^)]*)\)")
 _WEBSERVLET = re.compile(r"@WebServlet\s*\(([^)]*)\)")
@@ -93,23 +103,110 @@ def _is_app_url(value):
     return "/" in value or "." in value
 
 
-def _sql_facts(text, number, out):
-    for keyword, table in _SQL.findall(text):
-        name = table.strip("\"`[]")
-        if name.lower() in _SQL_NOT_TABLES or name.isdigit():
+def _line_starts(text):
+    starts = [0]
+    for index, char in enumerate(text):
+        if char == "\n":
+            starts.append(index + 1)
+    return starts
+
+
+def _line_of(starts, offset):
+    """1-based line holding OFFSET."""
+    return bisect.bisect_right(starts, offset)
+
+
+def _blank(match):
+    return " " * len(match.group(0))
+
+
+def _sql_in_code(text, starts, out):
+    """Tables in SQL held in string literals, across lines of one statement.
+
+    Literals on consecutive lines join while the statement goes on (no ';'),
+    so "SELECT a " + "FROM T" is read as one query. A literal that starts
+    with a clause keyword shortly after a SQL literal, as in a run of
+    StringBuilder.append calls or += concatenation, is read too.
+    """
+    groups = []
+    current = []
+    previous_ended = True
+    for number, line in enumerate(text.split("\n"), 1):
+        base = starts[number - 1]
+        literals = []
+        for match in _LITERAL.finditer(line):
+            group = 1 if match.group(1) is not None else 2
+            literals.append((base + match.start(group), match.group(group)))
+        if not literals:
+            if current:
+                groups.append(current)
+                current = []
+            previous_ended = True
             continue
-        verb = re.sub(r"\s+", " ", keyword.upper())
-        if verb in ("FROM", "JOIN"):
-            detail = "read"
-        elif verb in ("ALTER TABLE", "CREATE TABLE", "DROP TABLE", "TRUNCATE TABLE"):
-            detail = "ddl"
+        if current and not previous_ended:
+            current.extend(literals)
         else:
-            detail = "write"
-        out.append(Fact("sql_table", name, "%s (%s)" % (detail, verb), number))
+            if current:
+                groups.append(current)
+            current = list(literals)
+        previous_ended = _TRAILING_COMMENT.sub("", line).rstrip().endswith((";", "{", "}"))
+    if current:
+        groups.append(current)
+
+    lines = text.split("\n")
+    context_until = 0
+    for group in groups:
+        pieces = []
+        mapping = []  # (offset in joined text, offset in file)
+        position = 0
+        for offset, literal in group:
+            mapping.append((position, offset))
+            pieces.append(literal)
+            position += len(literal) + 1
+        joined = " ".join(pieces)
+        first_line = _line_of(starts, group[0][0])
+        builds_sql = _BUILDS_STRING.search(lines[first_line - 1])
+        continues = first_line <= context_until and builds_sql and sql.CLAUSE_START.match(joined)
+        if not (sql.looks_like_sql(joined) or continues):
+            continue
+        keys = [m[0] for m in mapping]
+        for offset, name, detail in sql.tables(joined):
+            index = bisect.bisect_right(keys, offset) - 1
+            file_offset = mapping[index][1] + offset - mapping[index][0]
+            out.append(Fact("sql_table", name, detail, _line_of(starts, file_offset)))
+        context_until = _line_of(starts, group[-1][0]) + 5
 
 
-def _looks_like_sql(text):
-    return len(_SQL_WORDS.findall(text)) >= 2
+def _sql_in_xml(text, starts, out):
+    """Tables in mapper statements (MyBatis, iBATIS, Hibernate named queries).
+
+    Without statement elements, a line that reads as SQL is used instead.
+    """
+    statements = list(_XML_STATEMENT.finditer(text))
+    if statements:
+        for match in statements:
+            inner = _TAG.sub(_blank, _CDATA.sub(_blank, match.group(2)))
+            for offset, name, detail in sql.tables(inner):
+                out.append(Fact("sql_table", name, detail, _line_of(starts, match.start(2) + offset)))
+        return
+    for number, line in enumerate(text.split("\n"), 1):
+        if sql.looks_like_sql(line):
+            for offset, name, detail in sql.tables(_TAG.sub(_blank, line)):
+                out.append(Fact("sql_table", name, detail, number))
+
+
+def _join_path(prefix, path):
+    if path in ("", "/"):
+        return prefix or path
+    if not prefix:
+        return path
+    return prefix.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _mapping_paths(args):
+    """Path strings in a mapping annotation's arguments; [""] when it names none."""
+    values = [v for v in _strings(args) if "=" not in v and " " not in v]
+    return values or [""]
 
 
 def compile_id_patterns(patterns):
@@ -121,24 +218,43 @@ def extract(lang, text, id_patterns=(), kind=""):
     """Facts found in one file's TEXT. ID_PATTERNS are compiled regexes."""
     out = []
     lines = text.split("\n")
+    starts = _line_starts(text)
+    if lang in _CODE_LANGS:
+        _sql_in_code(text, starts, out)
+    elif lang == "sql":
+        for offset, name, detail in sql.tables(text):
+            out.append(Fact("sql_table", name, detail, _line_of(starts, offset)))
+    elif lang == "xml":
+        _sql_in_xml(text, starts, out)
+    class_seen = False
+    prefixes = []
     for number, line in enumerate(lines, 1):
         for pattern in id_patterns:
             for match in pattern.finditer(line):
                 value = match.group(1) if pattern.groups else match.group(0)
                 out.append(Fact("ref_id", value, kind, number))
 
-        if lang in ("java", "javascript", "typescript", "jsp", "groovy", "kotlin", "scala"):
-            literal_text = " ".join(_strings(line))
-            if literal_text and _looks_like_sql(literal_text):
-                _sql_facts(literal_text, number, out)
-        elif lang in ("sql", "xml"):
-            if _looks_like_sql(line) or lang == "sql":
-                _sql_facts(line, number, out)
-
         if lang in ("java", "groovy", "kotlin"):
+            for name in _JPA_TABLE.findall(line):
+                out.append(Fact("sql_table", name, "mapping (@Table)", number))
+            # A mapping before the class declaration prefixes every method mapping.
             for verb, args in _MAPPING.findall(line):
-                for value in _strings(args):
-                    out.append(Fact("url_handler", value, "@%sMapping" % verb, number))
+                paths = _mapping_paths(args)
+                if not class_seen:
+                    prefixes = [p for p in paths if p]
+                    for path in prefixes:
+                        out.append(Fact("url_handler", path, "@%sMapping (class)" % verb, number))
+                    continue
+                for path in paths:
+                    for prefix in prefixes or [""]:
+                        full = _join_path(prefix, path)
+                        if full:
+                            detail = "@%sMapping" % verb
+                            if prefix:
+                                detail += " (method %s)" % (path or '""')
+                            out.append(Fact("url_handler", full, detail, number))
+            if not class_seen and _CLASS_LINE.match(line):
+                class_seen = True
             for args in _WEBSERVLET.findall(line):
                 for value in _strings(args):
                     if value.startswith("/") or "*" in value:
@@ -147,6 +263,8 @@ def extract(lang, text, id_patterns=(), kind=""):
                 out.append(Fact("url_handler", value, "@Path", number))
 
         if lang == "xml":
+            for name in _TABLE_ATTR.findall(line):
+                out.append(Fact("sql_table", name, "mapping (hbm)", number))
             for value in _URL_PATTERN.findall(line):
                 out.append(Fact("url_handler", value, "url-pattern", number))
             for match in _ACTION.finditer(line):

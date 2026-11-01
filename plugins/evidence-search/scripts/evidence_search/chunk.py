@@ -8,6 +8,7 @@ tree-sitter, the same files use overlapping line windows and regex symbols.
 Markdown and AsciiDoc split by heading. Everything else uses line windows.
 """
 
+import bisect
 import os
 import re
 from dataclasses import dataclass, field
@@ -208,21 +209,6 @@ def _split_treesitter(lang, text, lines):
 
     visit(tree.root_node, [])
 
-    chunks = []
-    covered = [False] * (len(lines) + 1)
-    for start, end, signature in sorted(funcs):
-        first, last = start + 1, end + 1
-        while first <= last and covered[first]:
-            first += 1  # a doc comment that reaches into the previous chunk
-        if first > last or any(covered[first:last + 1]):
-            continue  # overlaps a chunk already taken
-        for i in range(first, last + 1):
-            covered[i] = True
-        if last - first + 1 > MAX_FUNCTION_LINES:
-            chunks.extend(_windows(first, last, signature))
-        else:
-            chunks.append(Chunk(first, last, signature))
-
     def container_at(line):
         best = ""
         best_size = None
@@ -231,6 +217,29 @@ def _split_treesitter(lang, text, lines):
                 best, best_size = name, end - start
         return best
 
+    return _chunks_from_spans(lines, funcs, container_at), symbols
+
+
+def _chunks_from_spans(lines, spans, label_at=lambda line: ""):
+    """One chunk per span (0-based start and end rows, label), windows for the lines between.
+
+    A span that overlaps one already taken is skipped; one longer than
+    MAX_FUNCTION_LINES is split into windows that keep its label.
+    """
+    chunks = []
+    covered = [False] * (len(lines) + 1)
+    for start, end, label in sorted(spans):
+        first, last = start + 1, end + 1
+        while first <= last and covered[first]:
+            first += 1  # a doc comment that reaches into the previous chunk
+        if first > last or any(covered[first:last + 1]):
+            continue
+        for i in range(first, last + 1):
+            covered[i] = True
+        if last - first + 1 > MAX_FUNCTION_LINES:
+            chunks.extend(_windows(first, last, label))
+        else:
+            chunks.append(Chunk(first, last, label))
     line = 1
     while line <= len(lines):
         if covered[line]:
@@ -241,10 +250,47 @@ def _split_treesitter(lang, text, lines):
             line += 1
         gap_end = line - 1
         if not _blank(lines, gap_start, gap_end):
-            chunks.extend(_windows(gap_start, gap_end, container_at(gap_start)))
-
+            chunks.extend(_windows(gap_start, gap_end, label_at(gap_start)))
     chunks.sort(key=lambda c: (c.start, c.end))
-    return chunks, symbols
+    return chunks
+
+
+# ---------------------------------------------------------------------- xml
+
+# Elements worth a chunk of their own: mapper statements, Struts actions, Spring beans.
+_XML_ELEMENT = re.compile(
+    r"<(select|insert|update|delete|sql|resultMap|statement|procedure|sql-query|named-query|named-native-query|"
+    r"action|bean|servlet|filter)\b([^>]*)>", re.I)
+_XML_NAME = re.compile(r"\b(id|name|path)\s*=\s*\"([^\"]+)\"")
+
+
+def _split_xml(text, lines):
+    """Chunks per named element, labelled like "select getAccountByUsername"."""
+    starts = [0]
+    for index, char in enumerate(text):
+        if char == "\n":
+            starts.append(index + 1)
+
+    def row(offset):
+        return bisect.bisect_right(starts, offset) - 1
+
+    spans = []
+    symbols = []
+    for match in _XML_ELEMENT.finditer(text):
+        tag = match.group(1)
+        named = _XML_NAME.search(match.group(2))
+        if not named:
+            continue
+        label = "%s %s" % (tag, named.group(2))
+        first = row(match.start())
+        if match.group(0).endswith("/>"):
+            last = row(match.end() - 1)
+        else:
+            close = re.compile(r"</%s\s*>" % re.escape(tag), re.I).search(text, match.end())
+            last = row(close.end() - 1) if close else first
+        spans.append((first, last, label))
+        symbols.append(Symbol(first + 1, tag, named.group(2)))
+    return _chunks_from_spans(lines, spans), symbols
 
 
 # --------------------------------------------------------------- fallbacks
@@ -359,6 +405,9 @@ def split(lang, text):
     if lang in ("markdown", "asciidoc"):
         chunks, symbols = _split_headings(lang, lines)
         return Split(chunks, symbols, "headings")
+    if lang == "xml":
+        chunks, symbols = _split_xml(text, lines)
+        return Split(chunks, symbols, "elements" if symbols else "lines")
     if lang in ("jsp", "html"):
         symbols = _regex_symbols("javascript", lines)
         return Split(_label_windows(_windows(1, len(lines)), symbols), symbols, "lines")

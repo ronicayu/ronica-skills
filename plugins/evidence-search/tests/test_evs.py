@@ -207,6 +207,46 @@ class FactTest(unittest.TestCase):
         self.assertEqual(found, {("DECLARATION", "read"), ("DECLARATION", "write"),
                                  ("AUDIT_LOG", "write"), ("declaration", "read")})
 
+    def test_sql_across_lines_and_comma_lists(self):
+        java = (
+            'String sql = "SELECT a.ID, p.NAME "\n'
+            '    + "FROM ACCOUNT a, PROFILE p "\n'
+            '    + "LEFT JOIN SIGNON s ON s.ID = a.ID WHERE a.NOTE = \'sold FROM Japan\'";\n'
+            'StringBuilder sb = new StringBuilder("SELECT COUNT(*)");\n'
+            'sb.append(" FROM ORDERS");\n'
+            'sb.append(" WHERE STATUS = ?");\n'
+            'log.info("Update failed");\n')
+        found = {(f.value, f.detail, f.line) for f in facts.extract("java", java)}
+        self.assertEqual(found, {("ACCOUNT", "read (FROM)", 2), ("PROFILE", "read (FROM)", 2),
+                                 ("SIGNON", "read (JOIN)", 3), ("ORDERS", "read (FROM)", 5)})
+
+    def test_mapper_xml_statements(self):
+        xml = (
+            '<mapper namespace="AccountMapper">\n'
+            '  <select id="getAccount" resultType="Account">\n'
+            '    SELECT USERNAME\n'
+            '    FROM ACCOUNT,\n'
+            '         PROFILE\n'
+            '    WHERE <if test="x">NOTE = \'from Australia\'</if>\n'
+            '  </select>\n'
+            '  <update id="updateAccount"><![CDATA[ UPDATE ACCOUNT SET A = 1 ]]></update>\n'
+            '</mapper>\n')
+        found = {(f.value, f.detail, f.line) for f in facts.extract("xml", xml)}
+        self.assertEqual(found, {("ACCOUNT", "read (FROM)", 4), ("PROFILE", "read (FROM)", 5),
+                                 ("ACCOUNT", "write (UPDATE)", 8)})
+        split = chunk.split("xml", xml)
+        self.assertEqual([(c.start, c.end, c.symbol) for c in split.chunks],
+                         [(1, 1, ""), (2, 7, "select getAccount"), (8, 8, "update updateAccount"), (9, 9, "")])
+
+    def test_spring_class_mapping_prefixes_methods(self):
+        java = ('@RequestMapping("/cart")\npublic class CartController {\n'
+                '  @GetMapping({ "", "/" })\n  public String view() {}\n'
+                '  @PostMapping(value = "/update", params = "x=1")\n  public String update() {}\n}\n')
+        found = {(f.value, f.detail) for f in facts.extract("java", java)}
+        self.assertEqual(found, {("/cart", "@RequestMapping (class)"), ("/cart", '@GetMapping (method "")'),
+                                 ("/cart", "@GetMapping (method /)"),
+                                 ("/cart/update", "@PostMapping (method /update)")})
+
     def test_prose_in_strings_is_not_sql(self):
         found = facts.extract("java", 'log("Update failed for the officer");\n')
         self.assertEqual(found, [])
@@ -219,7 +259,7 @@ class FactTest(unittest.TestCase):
         self.assertIn("java.util.List", {f.value for f in jsp if f.type == "jsp_import"})
         handlers = {f.value for f in self.facts("src/main/java/com/acme/clearance/DeclarationController.java")
                     if f.type == "url_handler"}
-        self.assertEqual(handlers, {"/declaration", "/reject.do"})
+        self.assertEqual(handlers, {"/declaration", "/declaration/reject.do"})
         self.assertIn("*.do", {f.value for f in self.facts("src/main/webapp/WEB-INF/web.xml")})
 
     def test_queue_and_config_keys(self):

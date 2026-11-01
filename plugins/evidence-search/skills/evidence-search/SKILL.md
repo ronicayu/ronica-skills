@@ -99,15 +99,19 @@ rg -n -S --max-count 5 --max-columns 200 --max-columns-preview \
 
 **Enumeration.** List candidates from the fact table (`evs facts --type sql_table --match customer`,
 `--summary` for one line per value) or from `evs search <words> --files`. Then run `rg -l` with the
-patterns that define the set. Files grep finds that the candidates miss are a recall gap: read
+patterns that define the set; SQL names are case-insensitive, so cross-check tables and columns
+with `rg -l -i -w`, not smart case. Files grep finds that the candidates miss are a recall gap: read
 their lines, then add them to the evidence. Name the gap in the answer, because it points at a
 fact rule or tokenizer rule the index lacks, or at an excluded file.
 
 Fact types: `sql_table` (detail read, write or ddl), `url_handler`, `url_ref`, `include`,
 `jsp_import`, `taglib`, `queue`, `config_key` (defined or used), and `ref_id` — identifiers that
 match the project's own patterns, such as requirement or use-case ids, wherever they appear (detail
-docs, code or config). They come from regular expressions, so string-built SQL and runtime
-configuration escape them.
+docs, code or config). SQL is read per statement: MyBatis and Hibernate XML statements, `.sql`
+files, and string literals joined across the lines of one Java statement or a run of `append`
+calls. `url_handler` joins a Spring class-level mapping to each method mapping, so its paths line up
+with `url_ref`. SQL assembled from variables, dynamic table names and runtime configuration still
+escape the table.
 
 Shared terms, from `evs search` or `evs similar`, show that two places are related, not that one
 implements the other. Record such a link as inferred.

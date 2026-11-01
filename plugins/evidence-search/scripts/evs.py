@@ -136,6 +136,8 @@ def cmd_status(args):
     counts = index.counts()
     changed, removed = index.pending()
     available, reason = chunk.treesitter_status()
+    if index.upgraded:
+        note("the index format changed in this version; the next query or `evs index` rebuilds it")
     print("root: %s" % index.root)
     print("index: %s" % index.path)
     print("refreshed: %s at commit %s" % (index.meta("refreshed_at"), index.meta("head") or "-"))

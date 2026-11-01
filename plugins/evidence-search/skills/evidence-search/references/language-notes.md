@@ -50,15 +50,18 @@ needs compilation or tree-sitter — and stores each with its `path:line`; `evs 
 
 | Fact type | Where it comes from |
 | --- | --- |
-| `sql_table` | String literals that read as SQL in Java, JavaScript and JSP; SQL files; SQL in XML mappings (MyBatis, Hibernate) |
-| `url_handler` | `@RequestMapping` and its variants, `@WebServlet`, `@Path`; `<url-pattern>` in `web.xml`; Struts `<action>` |
+| `sql_table` | SQL statements in MyBatis, iBATIS and Hibernate XML; `.sql` files; string literals in Java, JavaScript and JSP, joined across the lines of one statement or a run of `append` calls; Hibernate `table=` attributes and JPA `@Table`. String literals inside the SQL are blanked first, so data is never read as a table |
+| `url_handler` | `@RequestMapping` and its variants, with a class-level mapping joined to each method's; `@WebServlet`, `@Path`; `<url-pattern>` in `web.xml`; Struts `<action>` |
 | `url_ref` | JSP and HTML `action` and `href`; jQuery AJAX, `fetch`, `XMLHttpRequest.open`, `location` assignments |
 | `include`, `jsp_import`, `taglib` | JSP directives, `<jsp:include>`, `<jsp:forward>`, `<c:import>` |
 | `queue` | `@JmsListener`, `createQueue`, `createTopic`, Kafka and Rabbit listeners, `jms/` JNDI names |
 | `config_key` | Keys defined in `*.properties`; keys used through `@Value` and `getProperty` |
 
-Not extracted: remote calls (RMI, HTTP clients), file paths, and anything one regular expression
-per line cannot see, such as SQL split across concatenated literals.
+Not extracted: remote calls (RMI, HTTP clients), file paths, SQL assembled from variables or
+constants defined elsewhere, and table names chosen at runtime.
+
+XML files are chunked by named element — mapper statements, Struts actions, Spring beans, servlets
+and filters — so a search hit on a mapper reads `select getAccountByUsername`, not a line window.
 
 The table is best effort. String-built SQL, class names constructed at runtime and configuration
 resolved at runtime escape it, so cross-check enumerations with grep as SKILL.md describes.

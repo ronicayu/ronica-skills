@@ -21,7 +21,7 @@ import time
 
 from . import chunk, discover, facts, tokens
 
-SCHEMA_VERSION = "2"  # 2: English stems added to the terms
+SCHEMA_VERSION = "3"  # 2: English stems. 3: statement-level SQL facts, XML element chunks
 INDEX_DIR = ".evidence-search"
 # Column weights for bm25(): path terms, symbol terms, body terms.
 WEIGHTS = (2.0, 3.0, 1.0)
@@ -114,7 +114,8 @@ class Index:
         self.conn = sqlite3.connect(self.path)
         self.conn.executescript(SCHEMA)
         version = self.meta("schema_version")
-        if version not in (None, SCHEMA_VERSION):
+        self.upgraded = version not in (None, SCHEMA_VERSION)
+        if self.upgraded:
             # Built by an older version: drop the data, keep the settings in
             # meta (exclusions, id patterns). The next refresh re-reads every file.
             for table in ("chunks_fts", "chunks", "symbols", "facts", "files"):
