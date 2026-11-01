@@ -12,7 +12,12 @@ Fact types
   include      page composed into another (JSP include, forward, import)
   jsp_import   Java class a JSP imports
   taglib       tag library a JSP uses
-  queue        queue, topic or JMS JNDI name
+  queue        queue, topic, JMS JNDI name or IBM MQ queue; detail says which
+               listener, descriptor, API call or config key names it
+  entry_point  where work enters the system; detail starts with mdb, http,
+               scheduled, startup, webservice or ejb (see jee.py)
+  component    a class a documentation table binds to a queue without
+               calling it a listener, such as a sender (see tables.py)
   config_key   configuration key; detail is defined or used
   ref_id       an identifier matching a project pattern, such as a
                requirement or use-case id, in code, docs or config; detail is
@@ -23,7 +28,7 @@ import bisect
 import re
 from dataclasses import dataclass
 
-from . import sql
+from . import jee, sql, tables
 
 
 @dataclass
@@ -32,6 +37,7 @@ class Fact:
     value: str
     detail: str
     line: int
+    ref: str = ""  # space-separated link keys; see jee.py
 
 
 _LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'')
@@ -214,8 +220,8 @@ def compile_id_patterns(patterns):
     return [re.compile(p) for p in patterns]
 
 
-def extract(lang, text, id_patterns=(), kind=""):
-    """Facts found in one file's TEXT. ID_PATTERNS are compiled regexes."""
+def extract(lang, text, id_patterns=(), kind="", path=""):
+    """Facts found in one file's TEXT. ID_PATTERNS are compiled regexes; PATH names row keys."""
     out = []
     lines = text.split("\n")
     starts = _line_starts(text)
@@ -310,4 +316,42 @@ def extract(lang, text, id_patterns=(), kind=""):
             for pattern in _CONFIG_USES:
                 for value in pattern.findall(line):
                     out.append(Fact("config_key", value, "used", number))
-    return out
+    found = []
+    if lang in ("java", "groovy", "kotlin"):
+        found = jee.java(text)
+    elif lang == "xml":
+        found = jee.xml(text)
+    elif lang == "properties":
+        found = jee.properties(text)
+    elif lang in ("markdown", "text"):
+        found = tables.markdown(text, path)
+    elif lang == "csv":
+        found = tables.delimited(text, path)
+    for fact_type, value, detail, offset, ref in found:
+        out.append(Fact(fact_type, value, detail, _line_of(starts, offset), _with_simple_names(ref)))
+    return _dedupe(out)
+
+
+def _with_simple_names(ref):
+    """Add cls:<SimpleName> beside every class:<FQN>, so a table naming PermitMDB links to com.x.PermitMDB."""
+    keys = ref.split()
+    for key in list(keys):
+        if key.startswith("class:"):
+            simple = "cls:" + key[6:].split(".")[-1]
+            if simple not in keys:
+                keys.append(simple)
+    return " ".join(keys)
+
+
+def _dedupe(facts_found):
+    """Drop exact repeats, and a detail-less fact where a detailed one says the same."""
+    detailed = {(f.type, f.value, f.line) for f in facts_found if f.detail}
+    seen = set()
+    kept = []
+    for fact in facts_found:
+        key = (fact.type, fact.value, fact.detail, fact.line)
+        if key in seen or (not fact.detail and (fact.type, fact.value, fact.line) in detailed):
+            continue
+        seen.add(key)
+        kept.append(fact)
+    return kept

@@ -1,7 +1,7 @@
 {
   "name": "evidence-search",
-  "description": "Find and cite evidence in a project's code, requirements, design documents and configuration at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for Markdown and AsciiDoc, related-chunk search across code and documents, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids. Works on code that does not compile.",
-  "version": "0.1.0",
+  "description": "Find and cite evidence in a project's code, requirements, design documents and configuration at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for documents, related-chunk search, a repo map, and linked facts: entry points (MDBs, HTTP, scheduled jobs, startup classes), queues from WebLogic descriptors, IBM MQ calls, properties and documentation tables, SQL tables, URLs, JSP includes, config keys and project ids. Works on code that does not compile.",
+  "version": "0.2.0",
   "author": {
     "name": "Yu Rong",
     "url": "https://github.com/ronicayu"
@@ -15,11 +15,14 @@
     "evidence",
     "fts5",
     "grep",
+    "ibm-mq",
+    "jms",
     "legacy-code",
     "requirements",
     "retrieval",
     "sqlite",
     "system-design",
-    "tree-sitter"
+    "tree-sitter",
+    "weblogic"
   ]
 }

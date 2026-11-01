@@ -54,7 +54,9 @@ needs compilation or tree-sitter — and stores each with its `path:line`; `evs 
 | `url_handler` | `@RequestMapping` and its variants, with a class-level mapping joined to each method's; `@WebServlet`, `@Path`; `<url-pattern>` in `web.xml`; Struts `<action>` |
 | `url_ref` | JSP and HTML `action` and `href`; jQuery AJAX, `fetch`, `XMLHttpRequest.open`, `location` assignments |
 | `include`, `jsp_import`, `taglib` | JSP directives, `<jsp:include>`, `<jsp:forward>`, `<c:import>` |
-| `queue` | `@JmsListener`, `createQueue`, `createTopic`, Kafka and Rabbit listeners, `jms/` JNDI names |
+| `entry_point` | MDBs: `ejb-jar.xml` `<message-driven>`, `@MessageDriven`, EJBGen `@ejbgen:message-driven`, `implements MessageListener` or `MessageDrivenBean`, Spring `jms:listener` and listener containers. HTTP: `web.xml` servlets, `extends HttpServlet`, Struts actions, Spring controllers. Scheduled: `@Scheduled`, `@Schedule`, `@Timeout`, Quartz jobs and cron expressions, `TimerTask`, `TimedObject`. Startup: `ServletContextListener`, WebLogic `T3StartupDef` and `ApplicationLifecycleListener`, `@Startup`, `main`. `ejb-jar.xml` session beans, `@WebService` |
+| `queue` | `weblogic-ejb-jar.xml` `destination-jndi-name` and `destination-resource-link`; activation config; WebLogic JMS modules, including foreign-server destinations (local JNDI name to remote MQ queue); IBM MQ `accessQueue`, `MQQueueManager`, `MQQueue`, `queue://` URIs; JNDI `lookup("jms/…")`; `@JmsListener`, `createQueue`, `createTopic`, Kafka and Rabbit listeners; properties keys naming a queue, topic, destination, channel or queue manager; Markdown and CSV tables |
+| `component` | A class in a Markdown or CSV binding table whose column does not name listeners, such as a sender |
 | `config_key` | Keys defined in `*.properties`; keys used through `@Value` and `getProperty` |
 
 Not extracted: remote calls (RMI, HTTP clients), file paths, SQL assembled from variables or
@@ -65,6 +67,24 @@ and filters — so a search hit on a mapper reads `select getAccountByUsername`,
 
 The table is best effort. String-built SQL, class names constructed at runtime and configuration
 resolved at runtime escape it, so cross-check enumerations with grep as SKILL.md describes.
+
+## Finding entry points with grep
+
+Grep for the declaration, not for a method name every listener shares. Use `-i` for XML tags.
+
+| Entry point | Pattern |
+| --- | --- |
+| MDB, descriptor | `<message-driven>` in any XML; `<message-driven-descriptor>` in WebLogic's |
+| MDB, code | `@MessageDriven`, `@ejbgen:message-driven`, `implements\s+[^{]*\bMessage(Listener\|DrivenBean)\b` |
+| Queue binding | `destination-jndi-name`, `destinationLookup`, `remote-jndi-name`, `accessQueue\s*\(` |
+| HTTP | `<servlet-class>`, `extends\s+HttpServlet`, `@(Request\|Get\|Post)Mapping`, `<action\s` |
+| Scheduled | `@Scheduled`, `@Schedule\b`, `@Timeout`, `implements\s+[^{]*\bJob\b`, `<cron-expression>`, `cronExpression` |
+| Startup | `ServletContextListener`, `T3StartupDef`, `ApplicationLifecycleListener`, `<startup-class>`, `static\s+void\s+main\s*\(` |
+
+When the descriptors are not in the repository, the binding between a listener and its queue is
+often recorded in a document. `evs` reads Markdown pipe tables and CSV files whose header names a
+listener (MDB, listener, receiver, consumer), a JNDI name, or a queue (queue, destination, MQ), and
+links each row's cells. A binding written as prose is not extracted: search for it.
 
 ## Exclusions
 

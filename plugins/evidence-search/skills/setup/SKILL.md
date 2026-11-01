@@ -46,15 +46,25 @@ Python 3.10 or later, or to set `EVIDENCE_SEARCH_PYTHON` to its path.
    Keep each pattern specific: a loose one such as `[A-Z]+-\d+` also matches
    `UTF-8` and `SHA-1`. Patterns are remembered, and adding one re-extracts
    facts for every file. Skip this step if the user has no such ids.
-5. **Build the index.** Run `evs index`. The first build reads every file;
+5. **Ask where queue bindings live.** If the WebLogic descriptors
+   (`ejb-jar.xml`, `weblogic-ejb-jar.xml`, JMS modules) are not in the
+   repository, ask where the binding between listeners, JNDI names and MQ
+   queues is recorded. Markdown tables and CSV files are read automatically
+   when their header names a listener column (MDB, listener, receiver,
+   consumer) and a JNDI or queue column; if the record lives outside the
+   repository, index its folder with `--root` as for other documents. A
+   binding written as prose is not extracted; say so.
+6. **Build the index.** Run `evs index`. The first build reads every file;
    expect roughly a minute per ten thousand files. Report the summary it
    prints: files by chunker, chunks, symbols and facts.
-6. **Check it answers.** Run one search the user would recognise, such as a
+7. **Check it answers.** Run one search the user would recognise, such as a
    class name from the repo map (`evs map --types-only -k 20`), and one
-   `evs facts --summary -k 20`. If facts look sparse for a project that
+   `evs facts --summary -k 20`, and `evs facts --type entry_point --match mdb`
+   to confirm that listeners show their queues under `->`. If facts look
+   sparse for a project that
    clearly has SQL or URL mappings, say so: the extraction rules are regular
    expressions and may need a project-specific pattern.
-7. **Tell the user how it stays fresh.** Every query re-reads only files whose
+8. **Tell the user how it stays fresh.** Every query re-reads only files whose
    size or modification time changed, so there is no daemon and no hook.
    `evs index --full` rebuilds from scratch. The index lives in
    `.evidence-search/` at the repository root and is listed in

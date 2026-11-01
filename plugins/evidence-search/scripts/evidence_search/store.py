@@ -21,7 +21,7 @@ import time
 
 from . import chunk, discover, facts, tokens
 
-SCHEMA_VERSION = "3"  # 2: English stems. 3: statement-level SQL facts, XML element chunks
+SCHEMA_VERSION = "4"  # 2: English stems. 3: statement-level SQL, XML element chunks. 4: entry points, links
 INDEX_DIR = ".evidence-search"
 # Column weights for bm25(): path terms, symbol terms, body terms.
 WEIGHTS = (2.0, 3.0, 1.0)
@@ -39,7 +39,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   path_terms, symbol_terms, body_terms, tokenize='unicode61 remove_diacritics 2'%(fts_options)s);
 CREATE TABLE IF NOT EXISTS symbols (path TEXT, line INTEGER, kind TEXT, name TEXT, signature TEXT);
 CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path);
-CREATE TABLE IF NOT EXISTS facts (path TEXT, line INTEGER, type TEXT, value TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS facts (path TEXT, line INTEGER, type TEXT, value TEXT, detail TEXT, ref TEXT);
 CREATE INDEX IF NOT EXISTS facts_path ON facts(path);
 CREATE INDEX IF NOT EXISTS facts_type ON facts(type, value);
 """
@@ -193,9 +193,9 @@ class Index:
             "INSERT INTO symbols(path, line, kind, name, signature) VALUES (?, ?, ?, ?, ?)",
             [(path, s.line, s.kind, s.name, s.signature) for s in split.symbols])
         self.conn.executemany(
-            "INSERT INTO facts(path, line, type, value, detail) VALUES (?, ?, ?, ?, ?)",
-            [(path, f.line, f.type, f.value, f.detail)
-             for f in facts.extract(lang, text, self._id_regexes, kind)])
+            "INSERT INTO facts(path, line, type, value, detail, ref) VALUES (?, ?, ?, ?, ?, ?)",
+            [(path, f.line, f.type, f.value, f.detail, f.ref)
+             for f in facts.extract(lang, text, self._id_regexes, kind, path)])
         self.conn.execute(
             "INSERT OR REPLACE INTO files(path, size, mtime_ns, sha1, lang, kind, chunker) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -408,8 +408,8 @@ class Index:
             where.append("type = ?")
             args.append(fact_type)
         if match:
-            where.append("lower(value) LIKE ?")
-            args.append("%" + match.lower() + "%")
+            where.append("(lower(value) LIKE ? OR lower(detail) LIKE ? OR lower(ref) LIKE ?)")
+            args.extend(["%" + match.lower() + "%"] * 3)
         if path_glob:
             where.append("path GLOB ?")
             args.append(path_glob)
@@ -425,9 +425,37 @@ class Index:
             return rows, total
         total = self.conn.execute("SELECT count(*) FROM facts" + clause, args).fetchone()[0]
         rows = self.conn.execute(
-            "SELECT path, line, type, value, detail FROM facts%s ORDER BY type, lower(value), path, line LIMIT ?"
+            "SELECT path, line, type, value, detail, ref FROM facts%s ORDER BY type, lower(value), path, line LIMIT ?"
             % clause, args + [limit]).fetchall()
         return rows, total
+
+    def linked(self, ref, exclude=(), hops=3, limit=20):
+        """Facts that share a link key with REF, following keys up to HOPS times.
+
+        Returns rows like facts(), nearest first, without the rows in EXCLUDE
+        (a set of (path, line, type, value)).
+        """
+        keys = set(ref.split()) if ref else set()
+        seen_keys = set()
+        found = []
+        seen_rows = set(exclude)
+        for _ in range(hops):
+            new_keys = keys - seen_keys
+            if not new_keys:
+                break
+            seen_keys |= new_keys
+            clause = " OR ".join(["(' ' || ref || ' ') LIKE ?"] * len(new_keys))
+            rows = self.conn.execute(
+                "SELECT path, line, type, value, detail, ref FROM facts WHERE %s ORDER BY type, path, line LIMIT ?"
+                % clause, ["% " + k + " %" for k in new_keys] + [limit * 4]).fetchall()
+            for row in rows:
+                key = tuple(row[:4])
+                keys |= set((row[5] or "").split())  # rows already shown still bridge to others
+                if key in seen_rows:
+                    continue
+                seen_rows.add(key)
+                found.append(row)
+        return found[:limit]
 
     def symbols(self, path_glob=None, kinds=None, match=None, limit=300):
         where = []
