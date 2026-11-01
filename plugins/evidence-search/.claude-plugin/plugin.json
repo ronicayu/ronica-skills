@@ -1,0 +1,26 @@
+{
+  "name": "evidence-search",
+  "description": "Answer questions from a project's code, requirements, design documents and configuration with cited path:line evidence at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, requirement-to-code tracing, and an evidence ledger. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for Markdown and AsciiDoc, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids such as requirement numbers. Works on code that does not compile.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yu Rong",
+    "url": "https://github.com/ronicayu"
+  },
+  "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/evidence-search",
+  "repository": "https://github.com/ronicayu/ronica-skills",
+  "license": "MIT",
+  "keywords": [
+    "bm25",
+    "code-search",
+    "evidence",
+    "fts5",
+    "grep",
+    "legacy-code",
+    "requirements",
+    "retrieval",
+    "sqlite",
+    "system-design",
+    "traceability",
+    "tree-sitter"
+  ]
+}

@@ -1,11 +1,12 @@
 ---
-name: codebase-research
-description: Answer questions about a codebase and its documentation with cited evidence at low token cost — tiered search (repo map, index pointers, line-range reads, bounded grep), mandatory grep cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Use when asked how something works or where it is implemented, what calls, reads, writes or depends on X, what a change would affect, whether the system does Y at all, or to gather evidence for a design review, migration plan or system design. Especially useful in large or legacy codebases, including code that does not compile. Not for writing or changing code.
+name: evidence-search
+description: Answer questions from a project's code, requirements, design documents and configuration with cited path:line evidence at low token cost — tiered search (repo map, index pointers, line-range reads, bounded grep), mandatory grep cross-checks for enumeration and absence questions, and an evidence ledger. Use when asked what a requirement or design document says, whether and where the code implements it, how something works, what calls, reads, writes or depends on X, what a change would affect, whether the system does Y at all, or where documents and code disagree; and to gather evidence for a design review, migration plan or system design. Works on large or legacy codebases, including code that does not compile. Not for writing or changing code or documents.
 ---
 
-# Codebase Research
+# Evidence Search
 
-Find evidence a reviewer can check, spending as few tokens as the question allows. Two rules carry
+Find evidence a reviewer can check — in code, requirements, design documents and configuration —
+spending as few tokens as the question allows. Two rules carry
 the skill: search cheap first and escalate only when that is not enough, and let the question type —
 not the search results — decide whether a grep cross-check is mandatory.
 
@@ -16,9 +17,9 @@ files being read, and search loops run on an expensive model. Control those, not
 
 | Type | Example | Grep's role |
 | --- | --- | --- |
-| Lookup | How is this validation implemented? | Fallback when confidence is low |
-| Enumeration | Which pages submit to this controller? What would changing this table affect? | Mandatory cross-check |
-| Absence | Does the system retry or deduplicate anywhere? | Mandatory exhaustive search |
+| Lookup | How is this validation implemented? What does the design say about retries? | Fallback when confidence is low |
+| Enumeration | Which pages submit to this controller? Which code implements REQ-112? What would changing this table affect? | Mandatory cross-check |
+| Absence | Does the system retry anywhere? Is REQ-207 implemented at all? | Mandatory exhaustive search |
 
 Misclassification costs are lopsided. Calling a lookup an enumeration costs one extra `rg -l`.
 Calling an enumeration a lookup skips the check and silently drops items. So:
@@ -27,7 +28,7 @@ Calling an enumeration a lookup skips the check and silently drops items. So:
    enumeration; "is there, does it, whether, any … at all" leans absence. Apply the same reading to
    the question in any language.
 2. **Your judgement.** Read for intent and catch hidden enumerations: impact analysis, migration
-   scope, dependency mapping.
+   scope, dependency mapping, requirement-to-code tracing.
 3. **Take the stricter of the two.** Absence > enumeration > lookup. A type the user states wins.
 4. **Delegated work can only escalate.** When you hand the search to a subagent, state the type and
    why. The subagent may raise lookup to enumeration (for example, hits spread across many files) and
@@ -38,20 +39,24 @@ direction of error.
 
 ## 2. Search in tiers; escalate only when a tier is not enough
 
-The plugin ships an index tool, `cr`, used through
-`"${CLAUDE_PLUGIN_ROOT}/scripts/cr"`. Every `cr` query returns pointers —
+The plugin ships an index tool, `evs`, used through
+`"${CLAUDE_PLUGIN_ROOT}/scripts/evs"`. Every `evs` query returns pointers —
 `path:start-end`, language, symbol — never code, and re-reads changed files
-first, so its answers match the working tree. If `cr status` exits 3 there is
+first, so its answers match the working tree. If `evs status` exits 3 there is
 no index: carry on with `rg` and mention once that the `setup` skill builds one.
+Documents kept in another folder or repository have their own index; query it
+with `--root <folder>`.
 
-1. **Repo map.** `cr map --types-only --path 'src/main/java/com/acme/billing/*'`
+1. **Repo map.** `evs map --types-only --path 'src/main/java/com/acme/billing/*'`
    lists classes; drop `--types-only` for methods and signatures. Use it to
    narrow scope before searching.
-2. **Index pointers.** `cr search <words> -k 10` ranks chunks by BM25 across
+2. **Index pointers.** `evs search <words> -k 10` ranks chunks by BM25 across
    code, docs and config; narrow with `--kind code|docs|config`, `--lang`,
    `--path`. Identifiers match by part, so `user by id` finds `getUserById`.
-   `cr facts` answers "which tables, URLs, includes, queues, config keys"
-   directly; see section 4. Without an index, use `rg -l` and `rg -c` here.
+   For documents, `--kind docs` returns sections labelled by their heading
+   path. `evs facts` answers "which tables, URLs, includes, queues, config
+   keys, requirement ids" directly; see section 4. Without an index, use
+   `rg -l` and `rg -c` here.
 3. **Line-range reads.** Read only the ranges the pointers name, widening a
    little when the context demands it. Never read a whole large file to find
    one function.
@@ -65,7 +70,7 @@ straight away.
 
 ## 3. Bounded grep
 
-Count first, then narrow, then look at lines. `cr excludes` prints the index's
+Count first, then narrow, then look at lines. `evs excludes` prints the index's
 exclusions as ripgrep flags; use exactly those, so grep and the index search
 the same files. Without an index, use the defaults below and adjust them to
 the ecosystem: vendored libraries, generated code, build output.
@@ -88,15 +93,23 @@ rg -n -S --max-count 5 --max-columns 200 --max-columns-preview \
 
 ## 4. Mandatory checks for enumeration and absence
 
-**Enumeration.** List candidates from the fact table (`cr facts --type sql_table --match customer`,
-`--summary` for one line per value) or from `cr search <words> --files`. Then run `rg -l` with the
+**Enumeration.** List candidates from the fact table (`evs facts --type sql_table --match customer`,
+`--summary` for one line per value) or from `evs search <words> --files`. Then run `rg -l` with the
 patterns that define the set. Files grep finds that the candidates miss are a recall gap: read
 their lines, then add them to the evidence. Name the gap in the answer, because it points at a
 fact rule or tokenizer rule the index lacks, or at an excluded file.
 
 Fact types: `sql_table` (detail read, write or ddl), `url_handler`, `url_ref`, `include`,
-`jsp_import`, `taglib`, `queue`, `config_key` (defined or used). They come from regular
-expressions, so string-built SQL and runtime configuration escape them.
+`jsp_import`, `taglib`, `queue`, `config_key` (defined or used), and `ref_id` — identifiers that
+match the project's own patterns, such as requirement or use-case ids, wherever they appear (detail
+docs, code or config). They come from regular expressions, so string-built SQL and runtime
+configuration escape them.
+
+**Tracing requirements to code.** `evs facts --type ref_id --match REQ-112` lists every document
+section and code line that names the id. Code that implements a requirement without citing its id
+is the usual gap: search the requirement's key terms with `evs search` too, and grep for the
+identifiers it names (fields, screens, error codes). Report which links rest on a cited id and
+which on matching terms; the second kind is inferred, not observed.
 
 **Absence.** Search several spellings: class and method names, annotations, configuration keys,
 SQL keywords, XML or YAML configuration. Write the conclusion as "not found in the searched scope",
@@ -124,7 +137,8 @@ Re-read every cited range before you rely on it and confirm it supports the clai
 get truncated and lose context.
 
 Code shows current behaviour; documentation shows intent or history. When they conflict, show both
-side by side with the document's version or date. Do not silently pick one.
+side by side with the document's version or date. Do not silently pick one. Cite a document by
+`path:start-end` plus its heading path, so the reader can find the section in a rendered view.
 
 ## 6. Save tokens
 
@@ -143,8 +157,7 @@ side by side with the document's version or date. Do not silently pick one.
 
 ## References
 
-- `${CLAUDE_PLUGIN_ROOT}/scripts/cr --help` — every `cr` command and flag.
-
-- `references/language-notes.md` — read when the codebase includes Java, JSP or JavaScript, or when
-  you need identifier-aware search patterns, chunking hints or the facts worth extracting from a
-  legacy web application.
+- `${CLAUDE_PLUGIN_ROOT}/scripts/evs --help` — every `evs` command and flag.
+- `references/language-notes.md` — read when the project includes Java, JSP or JavaScript, or when
+  you need identifier-aware search patterns, chunking hints or the facts extracted from a legacy web
+  application.

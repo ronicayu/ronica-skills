@@ -11,7 +11,7 @@ A marketplace of Claude Code plugins.
 | [`taskgraph`](plugins/taskgraph) | Tracks project tasks and dependencies in a SQLite DAG. Plan backwards from a goal, `ready` shows what can start now, and `graph` opens an interactive view with hover path highlighting and task details. |
 | [`agentic-team`](plugins/agentic-team) | Provides a manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results. |
 | [`telegram-send`](plugins/telegram-send) | Sends a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that reads credentials from a mode-600 file, keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean. |
-| [`codebase-research`](plugins/codebase-research) | Answers questions about a codebase and its documentation with cited `path:line` evidence at low token cost. Searches in tiers (repo map, index pointers, line-range reads, bounded grep), makes a grep cross-check mandatory for enumeration and absence questions, and records an evidence ledger for design reviews and system design. Ships an optional local index: BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, and a fact table of SQL tables, URLs, JSP includes, queues and config keys; `/codebase-research:setup` builds it. Works on code that does not compile. |
+| [`evidence-search`](plugins/evidence-search) | Answers questions from a project's code, requirements, design documents and configuration with cited `path:line` evidence at low token cost. Searches in tiers (repo map, index pointers, line-range reads, bounded grep), makes a grep cross-check mandatory for enumeration and absence questions, traces requirement ids to code, and records an evidence ledger for design reviews and system design. Ships an optional local index: BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for documents, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and requirement ids; `/evidence-search:setup` builds it. Works on code that does not compile. |
 
 ## Install
 
@@ -24,12 +24,12 @@ A marketplace of Claude Code plugins.
 /plugin install agentic-team@ronica-skills
 /plugin install telegram-send@ronica-skills
 /plugin install taskgraph@ronica-skills
-/plugin install codebase-research@ronica-skills
+/plugin install evidence-search@ronica-skills
 ```
 
 Skills then trigger on their own descriptions, or explicitly via
 `/writing-editor`, `/architecture-design`, `/telegram-send`, `/taskgraph`, and
-`/codebase-research`.
+`/evidence-search`.
 After installing `agentic-team`, select `agentic-team:manager` in the agent
 picker, invoke it with `@agent-agentic-team:manager`, or type
 `/agentic-team:manager` in an existing session. In each repository

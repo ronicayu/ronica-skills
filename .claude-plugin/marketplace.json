@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "ronica-skills",
-  "description": "Writing, documentation, notification, planning, code research, and developer-tool plugins for Claude Code.",
+  "description": "Writing, documentation, notification, planning, evidence search, and developer-tool plugins for Claude Code.",
   "version": "1.0.0",
   "owner": {
     "name": "Yu Rong",
@@ -125,15 +125,15 @@
       "category": "productivity"
     },
     {
-      "name": "codebase-research",
-      "source": "codebase-research",
-      "description": "Answer questions about a codebase and its documentation with cited path:line evidence at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, and an evidence ledger. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues and config keys. Built for large or legacy codebases, including code that does not compile.",
-      "version": "0.2.0",
+      "name": "evidence-search",
+      "source": "evidence-search",
+      "description": "Answer questions from a project's code, requirements, design documents and configuration with cited path:line evidence at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, requirement-to-code tracing, and an evidence ledger. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for Markdown and AsciiDoc, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids such as requirement numbers. Works on code that does not compile.",
+      "version": "0.1.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
       },
-      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/codebase-research",
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/evidence-search",
       "repository": "https://github.com/ronicayu/ronica-skills",
       "license": "MIT",
       "keywords": [
@@ -143,9 +143,11 @@
         "fts5",
         "grep",
         "legacy-code",
+        "requirements",
         "retrieval",
         "sqlite",
         "system-design",
+        "traceability",
         "tree-sitter"
       ],
       "category": "development"

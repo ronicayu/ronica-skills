@@ -1,7 +1,7 @@
-"""Tests for the codebase-research index (scripts/cr.py and its package).
+"""Tests for the evidence-search index (scripts/evs.py and its package).
 
-Run: python3 -m unittest discover -s plugins/codebase-research/tests -v
-The tree-sitter tests run only when tree-sitter is importable; `cr deps`
+Run: python3 -m unittest discover -s plugins/evidence-search/tests -v
+The tree-sitter tests run only when tree-sitter is importable; `evs deps`
 installs it into a private virtual environment.
 """
 
@@ -15,10 +15,10 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
-CR = os.path.join(SCRIPTS, "cr.py")
+EVS = os.path.join(SCRIPTS, "evs.py")
 sys.path.insert(0, SCRIPTS)
 
-from codebase_research import chunk, discover, facts, tokens  # noqa: E402
+from evidence_search import chunk, discover, facts, tokens  # noqa: E402
 
 FILES = {
     "src/main/java/com/acme/clearance/DeclarationService.java": '''package com.acme.clearance;
@@ -38,6 +38,7 @@ public class DeclarationService {
         return jdbc.queryForObject(FIND_SQL, declarationId);
     }
 
+    // Implements REQ-112: an officer can reject a declaration.
     public void rejectDeclaration(Long id, String reason) {
         jdbc.update("UPDATE DECLARATION SET status = 'REJECTED', reason = ? WHERE id = ?", reason, id);
         jdbc.update("INSERT INTO AUDIT_LOG (entity, action) VALUES ('DECLARATION', 'REJECT')");
@@ -97,7 +98,7 @@ const formatStatus = (status) => status.toUpperCase();
 
 ## Rejection flow
 
-An officer rejects a declaration. 申报被退回后，系统写入审计日志。
+REQ-112: an officer rejects a declaration. 申报被退回后，系统写入审计日志。
 
 ```
 # not a heading
@@ -142,14 +143,14 @@ class Repo:
     def git(self, *args):
         subprocess.run(["git", "-C", self.root, *args], check=True, capture_output=True)
 
-    def cr(self, *args, treesitter=False, check=True):
+    def evs(self, *args, treesitter=False, check=True):
         env = dict(os.environ)
         if not treesitter:
-            env["CODEBASE_RESEARCH_NO_TREESITTER"] = "1"
-        result = subprocess.run([sys.executable, CR, *args], capture_output=True, text=True,
+            env["EVIDENCE_SEARCH_NO_TREESITTER"] = "1"
+        result = subprocess.run([sys.executable, EVS, *args], capture_output=True, text=True,
                                 cwd=self.root, env=env)
         if check and result.returncode != 0:
-            raise AssertionError("cr %s failed (%d): %s" % (" ".join(args), result.returncode, result.stderr))
+            raise AssertionError("evs %s failed (%d): %s" % (" ".join(args), result.returncode, result.stderr))
         return result
 
     def close(self):
@@ -224,10 +225,10 @@ class FactTest(unittest.TestCase):
 
 class FallbackChunkTest(unittest.TestCase):
     def setUp(self):
-        os.environ["CODEBASE_RESEARCH_NO_TREESITTER"] = "1"
+        os.environ["EVIDENCE_SEARCH_NO_TREESITTER"] = "1"
 
     def tearDown(self):
-        os.environ.pop("CODEBASE_RESEARCH_NO_TREESITTER", None)
+        os.environ.pop("EVIDENCE_SEARCH_NO_TREESITTER", None)
 
     def test_regex_symbols_survive_broken_java(self):
         split = chunk.split("java", FILES["src/main/java/com/acme/clearance/DeclarationService.java"])
@@ -241,7 +242,7 @@ class FallbackChunkTest(unittest.TestCase):
                          ["Clearance design", "Clearance design > Rejection flow", "Clearance design > Retry policy"])
 
 
-@unittest.skipUnless(treesitter_importable(), "tree-sitter not installed (run: cr deps)")
+@unittest.skipUnless(treesitter_importable(), "tree-sitter not installed (run: evs deps)")
 class TreeSitterChunkTest(unittest.TestCase):
     def test_one_chunk_per_method_with_its_doc_comment(self):
         split = chunk.split("java", FILES["src/main/java/com/acme/clearance/DeclarationService.java"])
@@ -263,8 +264,8 @@ class IndexTest(unittest.TestCase):
         self.repo.close()
 
     def test_search_returns_pointers_not_code(self):
-        self.repo.cr("index", "--quiet")
-        out = self.repo.cr("search", "reject", "declaration", "--json").stdout
+        self.repo.evs("index", "--quiet")
+        out = self.repo.evs("search", "reject", "declaration", "--json").stdout
         hits = json.loads(out)
         self.assertTrue(hits)
         self.assertEqual(set(hits[0]), {"path", "start", "end", "lang", "symbol", "score"})
@@ -274,62 +275,81 @@ class IndexTest(unittest.TestCase):
         self.assertNotIn("src/main/webapp/js/lib/jquery.min.js", paths)
 
     def test_cjk_search_finds_docs(self):
-        self.repo.cr("index", "--quiet")
-        out = self.repo.cr("search", "退回", "--kind", "docs").stdout
+        self.repo.evs("index", "--quiet")
+        out = self.repo.evs("search", "退回", "--kind", "docs").stdout
         self.assertIn("docs/design.md:", out)
 
     def test_queries_refresh_changed_and_removed_files(self):
-        self.repo.cr("index", "--quiet")
+        self.repo.evs("index", "--quiet")
         self.repo.write("src/main/java/com/acme/clearance/Archive.java",
                         'class Archive { void purge() { jdbc.update("DELETE FROM ARCHIVE_QUEUE"); } }\n')
         os.remove(os.path.join(self.repo.root, "docs/design.md"))
-        status = self.repo.cr("status").stdout
+        status = self.repo.evs("status").stdout
         self.assertIn("out of date: 1 changed or new, 1 removed", status)
-        out = self.repo.cr("facts", "--type", "sql_table", "--match", "archive").stdout
+        out = self.repo.evs("facts", "--type", "sql_table", "--match", "archive").stdout
         self.assertIn("refreshed 2 file(s) first: 1 added, 0 updated, 1 removed", out)
         self.assertIn("Archive.java:1  sql_table  ARCHIVE_QUEUE  write (DELETE FROM)", out)
-        self.assertIn("out of date: 0 changed or new, 0 removed", self.repo.cr("status").stdout)
+        self.assertIn("out of date: 0 changed or new, 0 removed", self.repo.evs("status").stdout)
 
     def test_files_mode_and_summary(self):
-        self.repo.cr("index", "--quiet")
-        out = self.repo.cr("search", "declaration", "--files", "--lang", "java").stdout
+        self.repo.evs("index", "--quiet")
+        out = self.repo.evs("search", "declaration", "--files", "--lang", "java").stdout
         self.assertIn("DeclarationService.java", out)
         self.assertNotIn(".jsp", out)
-        summary = self.repo.cr("facts", "--summary", "--type", "sql_table").stdout
+        summary = self.repo.evs("facts", "--summary", "--type", "sql_table").stdout
         self.assertIn("sql_table  DECLARATION  read (FROM)  x2 in 1 file(s)", summary)
 
     def test_extra_excludes_persist(self):
-        self.repo.cr("index", "--quiet", "--exclude", "docs/**")
-        self.assertNotIn("docs/design.md", self.repo.cr("map").stdout)
-        self.assertIn("-g '!**/docs/**'", self.repo.cr("excludes").stdout)
+        self.repo.evs("index", "--quiet", "--exclude", "docs/**")
+        self.assertNotIn("docs/design.md", self.repo.evs("map").stdout)
+        self.assertIn("-g '!**/docs/**'", self.repo.evs("excludes").stdout)
 
     def test_index_is_kept_out_of_git(self):
-        self.repo.cr("index", "--quiet")
+        self.repo.evs("index", "--quiet")
         with open(os.path.join(self.repo.root, ".git", "info", "exclude")) as handle:
-            self.assertIn(".codebase-research/", handle.read().split("\n"))
+            self.assertIn(".evidence-search/", handle.read().split("\n"))
         status = subprocess.run(["git", "-C", self.repo.root, "status", "--porcelain"],
                                 capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
-    def test_no_index_exits_3(self):
-        result = self.repo.cr("search", "x", check=False)
-        self.assertEqual(result.returncode, 3)
-        self.assertIn("run: cr index", result.stderr)
+    def test_id_patterns_trace_requirements_to_code(self):
+        self.evs_index_with_ids()
+        out = self.repo.evs("facts", "--type", "ref_id", "--match", "REQ-112").stdout
+        self.assertIn("docs/design.md:5  ref_id  REQ-112  docs", out)
+        self.assertIn("DeclarationService.java:18  ref_id  REQ-112  code", out)
+        self.assertNotIn("UTF", out)
+        self.assertIn(r"id patterns: REQ-\d+", self.repo.evs("status").stdout)
 
-    @unittest.skipUnless(treesitter_importable(), "tree-sitter not installed (run: cr deps)")
+    def evs_index_with_ids(self):
+        self.repo.evs("index", "--quiet")
+        # Adding a pattern to an existing index re-extracts facts for every file.
+        out = self.repo.evs("index", "--quiet", "--id-pattern", r"REQ-\d+").stdout
+        self.assertIn("this run: 7 added, 0 updated, 0 removed, 0 unchanged", out)
+
+    def test_invalid_id_pattern_is_refused(self):
+        result = self.repo.evs("index", "--id-pattern", "REQ-(", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid --id-pattern", result.stderr)
+
+    def test_no_index_exits_3(self):
+        result = self.repo.evs("search", "x", check=False)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("run: evs index", result.stderr)
+
+    @unittest.skipUnless(treesitter_importable(), "tree-sitter not installed (run: evs deps)")
     def test_treesitter_index(self):
-        out = self.repo.cr("index", treesitter=True).stdout
+        out = self.repo.evs("index", treesitter=True).stdout
         self.assertIn("tree-sitter 3", out)
-        hits = self.repo.cr("search", "count", "pending", "-k", "1", treesitter=True).stdout
+        hits = self.repo.evs("search", "count", "pending", "-k", "1", treesitter=True).stdout
         self.assertIn("DeclarationService.countPending()", hits)
 
 
 class WrapperTest(unittest.TestCase):
     def test_wrapper_runs_from_anywhere_and_honours_python_override(self):
         bash = shutil.which("bash") or "/bin/bash"
-        env = dict(os.environ, CODEBASE_RESEARCH_PYTHON=sys.executable,
-                   CODEBASE_RESEARCH_HOME=tempfile.mkdtemp())
-        result = subprocess.run([bash, os.path.join(SCRIPTS, "cr"), "deps", "--check"],
+        env = dict(os.environ, EVIDENCE_SEARCH_PYTHON=sys.executable,
+                   EVIDENCE_SEARCH_HOME=tempfile.mkdtemp())
+        result = subprocess.run([bash, os.path.join(SCRIPTS, "evs"), "deps", "--check"],
                                 capture_output=True, text=True, cwd=tempfile.gettempdir(), env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("interpreter: %s" % sys.executable, result.stdout)

@@ -45,8 +45,8 @@ overloads; confirm by reading the code before writing a call relationship into a
 
 ## Facts in the fact table
 
-Enumeration questions depend on these. `cr index` extracts them with regular expressions — none
-needs compilation or tree-sitter — and stores each with its `path:line`; `cr facts` queries them.
+Enumeration questions depend on these. `evs index` extracts them with regular expressions — none
+needs compilation or tree-sitter — and stores each with its `path:line`; `evs facts` queries them.
 
 | Fact type | Where it comes from |
 | --- | --- |

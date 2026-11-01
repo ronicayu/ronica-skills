@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Run cr.py, the codebase-research index tool, with the interpreter that
+# Run evs.py, the evidence-search index tool, with the interpreter that
 # python-path.sh picks. It finds its own directory, even through a symlink,
 # so it runs from any working directory. Arguments and the exit code pass
 # through unchanged.
 #
-# Usage: "${CLAUDE_PLUGIN_ROOT}/scripts/cr" <command> [args]
+# Usage: "${CLAUDE_PLUGIN_ROOT}/scripts/evs" <command> [args]
 
 set -euo pipefail
 
@@ -25,4 +25,4 @@ done
 script_dir=$(here "$self")
 
 py=$("$script_dir/python-path.sh") || exit 2
-exec "$py" "$script_dir/cr.py" "$@"
+exec "$py" "$script_dir/evs.py" "$@"

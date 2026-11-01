@@ -83,9 +83,9 @@ _TS_STATE = {"checked": False, "ok": False, "error": ""}
 
 
 def treesitter_status():
-    """(available, reason). Set CODEBASE_RESEARCH_NO_TREESITTER=1 to turn it off."""
-    if os.environ.get("CODEBASE_RESEARCH_NO_TREESITTER") == "1":
-        return False, "disabled by CODEBASE_RESEARCH_NO_TREESITTER=1"
+    """(available, reason). Set EVIDENCE_SEARCH_NO_TREESITTER=1 to turn it off."""
+    if os.environ.get("EVIDENCE_SEARCH_NO_TREESITTER") == "1":
+        return False, "disabled by EVIDENCE_SEARCH_NO_TREESITTER=1"
     if not _TS_STATE["checked"]:
         _TS_STATE["checked"] = True
         try:
@@ -94,7 +94,7 @@ def treesitter_status():
             import tree_sitter_javascript  # noqa: F401
             _TS_STATE["ok"] = True
         except ImportError as exc:
-            _TS_STATE["error"] = "not installed (%s); run: cr deps" % exc.name
+            _TS_STATE["error"] = "not installed (%s); run: evs deps" % exc.name
     return _TS_STATE["ok"], _TS_STATE["error"]
 
 

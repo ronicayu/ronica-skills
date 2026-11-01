@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cr: build and query a codebase-research index.
+"""evs: build and query a evidence-search index.
 
 Every query returns pointers (path:line and a symbol), never chunk bodies:
 read the lines you need afterwards. Queries refresh the index first, re-reading
@@ -10,7 +10,7 @@ Commands
   index     build or refresh the index
   status    what is indexed, and what is out of date
   search    BM25 search; prints path:start-end, language and symbol
-  facts     SQL tables, URLs, includes, queues and config keys
+  facts     SQL tables, URLs, includes, queues, config keys and project ids
   map       the repo map: classes, methods, functions and headings
   excludes  the index's exclusions as ripgrep -g flags
 
@@ -20,21 +20,22 @@ Exit codes: 0 ok, 2 usage or environment problem, 3 no index yet.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from codebase_research import chunk, discover, store  # noqa: E402
+from evidence_search import chunk, discover, store  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def home_dir():
-    if os.environ.get("CODEBASE_RESEARCH_HOME"):
-        return os.environ["CODEBASE_RESEARCH_HOME"]
+    if os.environ.get("EVIDENCE_SEARCH_HOME"):
+        return os.environ["EVIDENCE_SEARCH_HOME"]
     cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(cache, "codebase-research")
+    return os.path.join(cache, "evidence-search")
 
 
 def venv_python():
@@ -51,7 +52,7 @@ def open_index(args, create=False):
         return store.Index(root, create=create)
     except store.IndexError_ as exc:
         code = 3 if "no index" in str(exc) else 2
-        print("cr: %s" % exc, file=sys.stderr)
+        print("evs: %s" % exc, file=sys.stderr)
         sys.exit(code)
 
 
@@ -88,14 +89,14 @@ def cmd_deps(args):
     result = subprocess.run([python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                              "-r", os.path.join(HERE, "requirements.txt")])
     if result.returncode != 0:
-        print("cr: pip install failed; indexing still works, with line chunks for Java and JavaScript",
+        print("evs: pip install failed; indexing still works, with line chunks for Java and JavaScript",
               file=sys.stderr)
         return 2
     check = subprocess.run([python, "-c", "import tree_sitter, tree_sitter_java, tree_sitter_javascript"])
     if check.returncode != 0:
-        print("cr: installed, but tree-sitter does not import", file=sys.stderr)
+        print("evs: installed, but tree-sitter does not import", file=sys.stderr)
         return 2
-    print("tree-sitter ready in %s; cr uses this interpreter from now on" % python)
+    print("tree-sitter ready in %s; evs uses this interpreter from now on" % python)
     return 0
 
 
@@ -103,6 +104,14 @@ def cmd_index(args):
     index = open_index(args, create=True)
     if args.exclude:
         index.set_excludes(index.excludes() + args.exclude)
+    full = args.full
+    if args.id_pattern:
+        try:
+            if index.set_id_patterns(index.id_patterns() + args.id_pattern):
+                full = True  # every file needs its ref_id facts extracted again
+        except re.error as exc:
+            print("evs: invalid --id-pattern: %s" % exc, file=sys.stderr)
+            return 2
     available, reason = chunk.treesitter_status()
     if not available and not args.quiet:
         note("tree-sitter %s; Java and JavaScript get line chunks" % reason)
@@ -111,7 +120,7 @@ def cmd_index(args):
         if not args.quiet:
             note("%d/%d files" % (done, total))
 
-    stats = index.refresh(full=args.full, progress=progress)
+    stats = index.refresh(full=full, progress=progress)
     counts = index.counts()
     print("index: %s" % index.path)
     print("files: %d (%s)" % (counts["files"], ", ".join("%s %d" % kv for kv in sorted(counts["chunkers"].items()))))
@@ -135,6 +144,8 @@ def cmd_status(args):
     print("tree-sitter: %s" % ("available" if available else reason))
     if index.excludes():
         print("extra excludes: %s" % ", ".join(index.excludes()))
+    if index.id_patterns():
+        print("id patterns: %s" % ", ".join(index.id_patterns()))
     return 0
 
 
@@ -146,7 +157,7 @@ def cmd_search(args):
         rows, total = index.search(query, limit=args.k, kind=args.kind, lang=args.lang,
                                    path_glob=args.path, files_only=args.files)
     except store.IndexError_ as exc:
-        print("cr: %s" % exc, file=sys.stderr)
+        print("evs: %s" % exc, file=sys.stderr)
         return 2
     if args.json:
         keys = ("path", "best_score", "chunks") if args.files else ("path", "start", "end", "lang", "symbol", "score")
@@ -218,7 +229,7 @@ def cmd_excludes(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="cr", description=__doc__,
+    parser = argparse.ArgumentParser(prog="evs", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -235,6 +246,9 @@ def build_parser():
     p.add_argument("--full", action="store_true", help="re-index every file")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                    help="add an exclusion, kept for later runs (repeatable), e.g. 'legacy/lib/**'")
+    p.add_argument("--id-pattern", action="append", default=[], metavar="REGEX",
+                   help="extract matches as ref_id facts, kept for later runs (repeatable), "
+                        r"e.g. 'REQ-\d+'; a capture group, if present, is the value")
     p.add_argument("--quiet", action="store_true")
 
     add("status", cmd_status, "what is indexed and what is out of date")
@@ -251,7 +265,7 @@ def build_parser():
 
     p = add("facts", cmd_facts, "static facts for enumeration questions")
     p.add_argument("--type", choices=("sql_table", "url_handler", "url_ref", "include", "jsp_import",
-                                      "taglib", "queue", "config_key"))
+                                      "taglib", "queue", "config_key", "ref_id"))
     p.add_argument("--match", help="case-insensitive substring of the value")
     p.add_argument("--path", help="path glob")
     p.add_argument("--summary", action="store_true", help="one line per distinct value, with counts")

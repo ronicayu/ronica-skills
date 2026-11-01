@@ -12,7 +12,7 @@ import subprocess
 
 DEFAULT_EXCLUDES = [
     "target/**", "build/**", "dist/**", "out/**", "node_modules/**",
-    "bower_components/**", "vendor/**", ".git/**", ".codebase-research/**",
+    "bower_components/**", "vendor/**", ".git/**", ".evidence-search/**",
     "**/*.min.js", "**/*.min.css", "**/*.map", "**/*.lock", "**/package-lock.json",
 ]
 

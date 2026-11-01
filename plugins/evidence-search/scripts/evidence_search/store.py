@@ -1,6 +1,6 @@
 """The SQLite index: build, refresh incrementally, and query.
 
-One file, <root>/.codebase-research/index.db, holds
+One file, <root>/.evidence-search/index.db, holds
   files     path, size, mtime, content hash, language, chunker
   chunks    path and line range per chunk, plus its symbol
   chunks_fts  FTS5 over the chunk's path, symbol and body terms (BM25)
@@ -22,7 +22,7 @@ import time
 from . import chunk, discover, facts, tokens
 
 SCHEMA_VERSION = "1"
-INDEX_DIR = ".codebase-research"
+INDEX_DIR = ".evidence-search"
 # Column weights for bm25(): path terms, symbol terms, body terms.
 WEIGHTS = (2.0, 3.0, 1.0)
 
@@ -73,7 +73,7 @@ def _decode(data):
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        fallback = os.environ.get("CODEBASE_RESEARCH_ENCODING", "latin-1")
+        fallback = os.environ.get("EVIDENCE_SEARCH_ENCODING", "latin-1")
         return data.decode(fallback, "replace")
 
 
@@ -106,10 +106,10 @@ class Index:
         self.root = root
         self.path = index_path(root)
         if not os.path.exists(self.path) and not create:
-            raise IndexError_("no index at %s; run: cr index" % self.path)
+            raise IndexError_("no index at %s; run: evs index" % self.path)
         if not fts5_available():
             raise IndexError_("this Python's SQLite has no FTS5; use another Python 3.10+ "
-                              "(set CODEBASE_RESEARCH_PYTHON) or rely on rg")
+                              "(set EVIDENCE_SEARCH_PYTHON) or rely on rg")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.executescript(SCHEMA)
@@ -133,6 +133,25 @@ class Index:
 
     def set_meta(self, key, value):
         self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
+
+    def id_patterns(self):
+        return json.loads(self.meta("id_patterns") or "[]")
+
+    def set_id_patterns(self, patterns):
+        """Store ID patterns. Returns True when they changed, so facts need a full rebuild."""
+        patterns = sorted(set(patterns))
+        facts.compile_id_patterns(patterns)  # raises re.error before anything is stored
+        changed = patterns != self.id_patterns()
+        self.set_meta("id_patterns", json.dumps(patterns))
+        self.conn.commit()
+        self.__dict__.pop("_compiled_ids", None)
+        return changed
+
+    @property
+    def _id_regexes(self):
+        if not hasattr(self, "_compiled_ids"):
+            self._compiled_ids = facts.compile_id_patterns(self.id_patterns())
+        return self._compiled_ids
 
     def excludes(self):
         return json.loads(self.meta("extra_excludes") or "[]")
@@ -171,7 +190,8 @@ class Index:
             [(path, s.line, s.kind, s.name, s.signature) for s in split.symbols])
         self.conn.executemany(
             "INSERT INTO facts(path, line, type, value, detail) VALUES (?, ?, ?, ?, ?)",
-            [(path, f.line, f.type, f.value, f.detail) for f in facts.extract(lang, text)])
+            [(path, f.line, f.type, f.value, f.detail)
+             for f in facts.extract(lang, text, self._id_regexes, kind)])
         self.conn.execute(
             "INSERT OR REPLACE INTO files(path, size, mtime_ns, sha1, lang, kind, chunker) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",

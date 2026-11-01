@@ -14,6 +14,9 @@ Fact types
   taglib       tag library a JSP uses
   queue        queue, topic or JMS JNDI name
   config_key   configuration key; detail is defined or used
+  ref_id       an identifier matching a project pattern, such as a
+               requirement or use-case id, in code, docs or config; detail is
+               the file kind. Patterns are set with `evs index --id-pattern`.
 """
 
 import re
@@ -109,11 +112,21 @@ def _looks_like_sql(text):
     return len(_SQL_WORDS.findall(text)) >= 2
 
 
-def extract(lang, text):
-    """Facts found in one file's TEXT."""
+def compile_id_patterns(patterns):
+    """Compiled ID patterns; raises re.error on an invalid one."""
+    return [re.compile(p) for p in patterns]
+
+
+def extract(lang, text, id_patterns=(), kind=""):
+    """Facts found in one file's TEXT. ID_PATTERNS are compiled regexes."""
     out = []
     lines = text.split("\n")
     for number, line in enumerate(lines, 1):
+        for pattern in id_patterns:
+            for match in pattern.finditer(line):
+                value = match.group(1) if pattern.groups else match.group(0)
+                out.append(Fact("ref_id", value, kind, number))
+
         if lang in ("java", "javascript", "typescript", "jsp", "groovy", "kotlin", "scala"):
             literal_text = " ".join(_strings(line))
             if literal_text and _looks_like_sql(literal_text):
