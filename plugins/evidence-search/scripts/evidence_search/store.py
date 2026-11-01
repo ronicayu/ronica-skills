@@ -21,7 +21,7 @@ import time
 
 from . import chunk, discover, facts, tokens
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # 2: English stems added to the terms
 INDEX_DIR = ".evidence-search"
 # Column weights for bm25(): path terms, symbol terms, body terms.
 WEIGHTS = (2.0, 3.0, 1.0)
@@ -115,10 +115,13 @@ class Index:
         self.conn.executescript(SCHEMA)
         version = self.meta("schema_version")
         if version not in (None, SCHEMA_VERSION):
-            self.conn.close()
-            os.remove(self.path)
-            self.conn = sqlite3.connect(self.path)
+            # Built by an older version: drop the data, keep the settings in
+            # meta (exclusions, id patterns). The next refresh re-reads every file.
+            for table in ("chunks_fts", "chunks", "symbols", "facts", "files"):
+                self.conn.execute("DROP TABLE IF EXISTS %s" % table)
             self.conn.executescript(SCHEMA)
+            self.set_meta("schema_version", SCHEMA_VERSION)
+            self.conn.commit()
         if create:
             self.set_meta("schema_version", SCHEMA_VERSION)
             self.set_meta("root", root)
@@ -266,16 +269,24 @@ class Index:
 
     # -- queries ------------------------------------------------------------
 
-    def search(self, text, limit=20, kind=None, lang=None, path_glob=None, files_only=False):
-        """Best chunks for TEXT as (rows, total hits). Lower bm25 is better."""
+    def search(self, text, limit=20, kind=None, lang=None, path_glob=None, files_only=False,
+               exclude_path=None):
+        """Best chunks for TEXT as (rows, total hits). Lower bm25 is better.
+
+        KIND is one kind or a list of kinds.
+        """
         expression = tokens.as_query(text)
         if not expression:
             raise IndexError_("the query has no searchable terms")
         where = ["chunks_fts MATCH ?"]
         args = [expression]
-        if kind:
-            where.append("c.kind = ?")
-            args.append(kind)
+        kinds = [kind] if isinstance(kind, str) else list(kind or [])
+        if kinds:
+            where.append("c.kind IN (%s)" % ",".join("?" * len(kinds)))
+            args.extend(kinds)
+        if exclude_path:
+            where.append("c.path != ?")
+            args.append(exclude_path)
         if lang:
             where.append("c.lang = ?")
             args.append(lang)
@@ -303,6 +314,91 @@ class Index:
                 "SELECT c.path, c.start, c.end, c.lang, c.symbol, %s AS s %s ORDER BY s LIMIT ?" % (score, base),
                 args + [limit]).fetchall()
         return rows, total
+
+    # -- related chunks ------------------------------------------------------------
+
+    def section(self, path, start=None, end=None, heading=None):
+        """(start, end, label, kind) of a file range: explicit lines, a heading, or the whole file."""
+        row = self.conn.execute("SELECT kind FROM files WHERE path = ?", (path,)).fetchone()
+        if row is None:
+            raise IndexError_("%s is not in the index (check the path, or whether it is excluded)" % path)
+        kind = row[0]
+        if heading:
+            spans = self.conn.execute(
+                "SELECT min(start), max(end) FROM chunks WHERE path = ? AND lower(symbol) LIKE ?",
+                (path, "%" + heading.lower() + "%")).fetchone()
+            if spans[0] is None:
+                raise IndexError_("no heading in %s contains %r; see: evs map --path '%s'" % (path, heading, path))
+            label = self.conn.execute(
+                "SELECT symbol FROM chunks WHERE path = ? AND lower(symbol) LIKE ? ORDER BY start LIMIT 1",
+                (path, "%" + heading.lower() + "%")).fetchone()[0]
+            return spans[0], spans[1], label, kind
+        if start is None:
+            last = self.conn.execute("SELECT max(end) FROM chunks WHERE path = ?", (path,)).fetchone()[0] or 1
+            return 1, last, "", kind
+        label = self.conn.execute(
+            "SELECT symbol FROM chunks WHERE path = ? AND start <= ? AND end >= ? ORDER BY end - start LIMIT 1",
+            (path, start, start)).fetchone()
+        return start, end or start, (label[0] if label else ""), kind
+
+    def read_lines(self, path, start, end):
+        with open(os.path.join(self.root, path), "rb") as handle:
+            lines = _decode(handle.read()).split("\n")
+        return "\n".join(lines[start - 1:end])
+
+    def distinctive_terms(self, text, limit=12, max_share=0.2, kinds=None, exclude_path=None):
+        """The terms of TEXT that best single it out and can reach the target.
+
+        Returns [(term, idf)], best first. A term qualifies when it is in at
+        most MAX_SHARE of chunks (commoner terms point everywhere) and occurs
+        in at least one chunk of KINDS outside EXCLUDE_PATH (a term only the
+        source itself uses cannot lead anywhere, which also drops CJK bigrams
+        that straddle a word boundary).
+        """
+        import math
+        self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_vocab USING fts5vocab(main, chunks_fts, 'row')")
+        total = self.conn.execute("SELECT count(*) FROM chunks").fetchone()[0] or 1
+        counts = {}
+        for term in tokens.terms(text):
+            if term.isdigit() or (len(term) < 3 and term.isascii()):
+                continue
+            counts[term] = counts.get(term, 0) + 1
+        if not counts:
+            return []
+        frequency = {}
+        names = list(counts)
+        for i in range(0, len(names), 500):
+            batch = names[i:i + 500]
+            for term, docs in self.conn.execute(
+                    "SELECT term, doc FROM temp.chunks_vocab WHERE term IN (%s)" % ",".join("?" * len(batch)), batch):
+                frequency[term] = docs
+        scored = []
+        for term, count in counts.items():
+            docs = frequency.get(term, 0)
+            # The share cut-off only bites in a real corpus; in a small one every
+            # useful term is "common".
+            if docs == 0 or (docs > max_share * total and docs > 10):
+                continue
+            idf = math.log((total - docs + 0.5) / (docs + 0.5) + 1)
+            scored.append((idf * (1 + math.log(count)), term, idf))
+        scored.sort(reverse=True)
+        picked = []
+        where = ["chunks_fts MATCH ?"]
+        extra = []
+        if kinds:
+            where.append("c.kind IN (%s)" % ",".join("?" * len(kinds)))
+            extra.extend(kinds)
+        if exclude_path:
+            where.append("c.path != ?")
+            extra.append(exclude_path)
+        reach = ("SELECT 1 FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE %s LIMIT 1"
+                 % " AND ".join(where))
+        for _, term, idf in scored:
+            if self.conn.execute(reach, ['"%s"' % term] + extra).fetchone():
+                picked.append((term, idf))
+                if len(picked) == limit:
+                    break
+        return picked
 
     def facts(self, fact_type=None, match=None, path_glob=None, limit=100, summary=False):
         where = []

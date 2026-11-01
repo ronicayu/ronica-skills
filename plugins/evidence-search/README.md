@@ -1,16 +1,19 @@
 # evidence-search
 
-Answers questions from a project's code, requirements, design documents and
-configuration with cited `path:line` evidence, spending as few tokens as the
-question allows: what a requirement says, whether and where the code
-implements it, how something works, what a change would affect, and where
-documents and code disagree.
+Finds and cites evidence in a project's code, requirements, design documents
+and configuration, spending as few tokens as the question allows: what a
+requirement says, where something is implemented or mentioned, how something
+works, what a change would touch, and where documents and code disagree.
+
+It stops at evidence. Judging whether code satisfies a requirement needs the
+code's business logic understood first; that is analysis, for the caller or an
+analysis skill that uses this plugin to fetch and cite evidence.
 
 Two skills:
 
 - `evidence-search` classifies each question (lookup, enumeration or
-  absence), searches in tiers, cross-checks enumerations with grep, traces
-  requirement ids to code, and records an evidence ledger.
+  absence), searches in tiers, cross-checks enumerations with grep, and
+  records an evidence ledger.
 - `setup` builds the optional index that makes the cheap tiers cheaper.
 
 ## How it saves tokens
@@ -35,7 +38,8 @@ design review most.
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" index    # build, or refresh
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" search reject declaration -k 10
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" facts --type sql_table --match customer
-"${CLAUDE_PLUGIN_ROOT}/scripts/evs" index --id-pattern 'REQ-\d{3,5}'   # track requirement ids
+"${CLAUDE_PLUGIN_ROOT}/scripts/evs" similar docs/design.md --heading 'rejection flow'   # related code
+"${CLAUDE_PLUGIN_ROOT}/scripts/evs" index --id-pattern 'REQ-\d{3,5}'   # index requirement ids
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" facts --type ref_id --match REQ-112
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" map --types-only --path 'src/main/java/*'
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" excludes # the same exclusions as ripgrep flags
@@ -45,7 +49,8 @@ design review most.
 | --- | --- |
 | Storage | One SQLite file at `.evidence-search/index.db`, listed in `.git/info/exclude` |
 | Ranking | SQLite FTS5 `bm25()`, with path, symbol and body weighted 2, 3 and 1 |
-| Terms | Identifiers split by case and underscore and also kept whole; CJK text as bigrams; no stop words |
+| Terms | Identifiers split by case and underscore and also kept whole; English plurals and -ed/-ing endings also stemmed; CJK text as bigrams; no stop words |
+| Related chunks | `similar` takes the source range's rarest terms that also occur on the other side (code for a document, documents for code) and ranks chunks by them, listing the shared terms per hit |
 | Chunks | tree-sitter: one per Java method or JavaScript function, doc comment included, code between them in its own chunks. Without tree-sitter, and for other languages: 60-line windows overlapping by 10 |
 | Facts | SQL tables (read, write or DDL), URL handlers and references, JSP includes, imports and taglibs, queues, config keys, and ids matching the project's own patterns (`ref_id`) |
 | Documents | Markdown and AsciiDoc split by heading, each chunk labelled with its heading path; plain text in line windows. Word and PDF are not indexed |

@@ -127,7 +127,7 @@
     {
       "name": "evidence-search",
       "source": "evidence-search",
-      "description": "Answer questions from a project's code, requirements, design documents and configuration with cited path:line evidence at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, requirement-to-code tracing, and an evidence ledger. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for Markdown and AsciiDoc, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids such as requirement numbers. Works on code that does not compile.",
+      "description": "Find and cite evidence in a project's code, requirements, design documents and configuration at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for Markdown and AsciiDoc, related-chunk search across code and documents, a repo map, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids. Works on code that does not compile.",
       "version": "0.1.0",
       "author": {
         "name": "Yu Rong",
@@ -147,7 +147,6 @@
         "retrieval",
         "sqlite",
         "system-design",
-        "traceability",
         "tree-sitter"
       ],
       "category": "development"

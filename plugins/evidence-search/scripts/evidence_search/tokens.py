@@ -16,6 +16,37 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-
 _CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]+")
 
 
+_VOWELS = set("aeiou")
+
+
+def _stem(word):
+    """A light English stem, so that rejected, rejects and rejecting meet reject.
+
+    Deliberately crude: it only strips plural and -ed/-ing endings. The
+    original word is always kept as a term too, so a wrong stem costs a
+    little precision, never a match.
+    """
+    if len(word) < 5 or not word.isascii() or not word.isalpha():
+        return word
+    if word.endswith("ies") and len(word) > 5:
+        return word[:-3] + "y"
+    if word.endswith("sses"):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    for suffix in ("ed", "ing"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            base = word[:-len(suffix)]
+            if not any(ch in _VOWELS for ch in base):
+                return word
+            if len(base) > 2 and base[-1] == base[-2] and base[-1] not in "lsz":
+                return base[:-1]
+            if base.endswith(("at", "iz", "bl")):
+                return base + "e"
+            return base
+    return word
+
+
 def _identifier_terms(word):
     """Terms for one identifier: its parts, then the whole word joined."""
     parts = []
@@ -24,7 +55,13 @@ def _identifier_terms(word):
             parts.extend(p for p in _CAMEL.split(piece) if p)
     parts = [p.lower() for p in parts]
     joined = "".join(parts)
-    terms = [p for p in parts if len(p) > 1 or p.isdigit()]
+    terms = []
+    for part in parts:
+        if len(part) > 1 or part.isdigit():
+            terms.append(part)
+            stem = _stem(part)
+            if stem != part:
+                terms.append(stem)
     if len(parts) > 1 and joined:
         terms.append(joined)
     return terms

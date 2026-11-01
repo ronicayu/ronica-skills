@@ -1,6 +1,6 @@
 ---
 name: evidence-search
-description: Answer questions from a project's code, requirements, design documents and configuration with cited path:line evidence at low token cost — tiered search (repo map, index pointers, line-range reads, bounded grep), mandatory grep cross-checks for enumeration and absence questions, and an evidence ledger. Use when asked what a requirement or design document says, whether and where the code implements it, how something works, what calls, reads, writes or depends on X, what a change would affect, whether the system does Y at all, or where documents and code disagree; and to gather evidence for a design review, migration plan or system design. Works on large or legacy codebases, including code that does not compile. Not for writing or changing code or documents.
+description: Find and cite evidence in a project's code, requirements, design documents and configuration at low token cost — tiered search (repo map, index pointers, line-range reads, bounded grep), mandatory grep cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Use when asked what a requirement or design document says, where something is implemented, mentioned or configured, how something works, what calls, reads, writes or depends on X, what a change would touch, whether something appears anywhere at all, or where documents and code disagree; and when another skill or a design review, migration plan or system design needs evidence fetched. Works on large or legacy codebases, including code that does not compile. It finds and cites; it does not judge whether code satisfies a requirement. Not for writing or changing code or documents.
 ---
 
 # Evidence Search
@@ -18,8 +18,8 @@ files being read, and search loops run on an expensive model. Control those, not
 | Type | Example | Grep's role |
 | --- | --- | --- |
 | Lookup | How is this validation implemented? What does the design say about retries? | Fallback when confidence is low |
-| Enumeration | Which pages submit to this controller? Which code implements REQ-112? What would changing this table affect? | Mandatory cross-check |
-| Absence | Does the system retry anywhere? Is REQ-207 implemented at all? | Mandatory exhaustive search |
+| Enumeration | Which pages submit to this controller? Where is REQ-112 cited? What reads or writes this table? | Mandatory cross-check |
+| Absence | Does the system retry anywhere? Is this field used at all? | Mandatory exhaustive search |
 
 Misclassification costs are lopsided. Calling a lookup an enumeration costs one extra `rg -l`.
 Calling an enumeration a lookup skips the check and silently drops items. So:
@@ -28,7 +28,7 @@ Calling an enumeration a lookup skips the check and silently drops items. So:
    enumeration; "is there, does it, whether, any … at all" leans absence. Apply the same reading to
    the question in any language.
 2. **Your judgement.** Read for intent and catch hidden enumerations: impact analysis, migration
-   scope, dependency mapping, requirement-to-code tracing.
+   scope, dependency mapping.
 3. **Take the stricter of the two.** Absence > enumeration > lookup. A type the user states wins.
 4. **Delegated work can only escalate.** When you hand the search to a subagent, state the type and
    why. The subagent may raise lookup to enumeration (for example, hits spread across many files) and
@@ -54,9 +54,13 @@ with `--root <folder>`.
    code, docs and config; narrow with `--kind code|docs|config`, `--lang`,
    `--path`. Identifiers match by part, so `user by id` finds `getUserById`.
    For documents, `--kind docs` returns sections labelled by their heading
-   path. `evs facts` answers "which tables, URLs, includes, queues, config
-   keys, requirement ids" directly; see section 4. Without an index, use
-   `rg -l` and `rg -c` here.
+   path. `evs similar <path>:<start>-<end>` (or `--heading` for a document)
+   finds chunks of the other kind that share its rarest terms: code related to
+   a document section, or documents related to code. Pass `--also` with likely
+   identifiers, synonyms, or translations when documents and code use
+   different words or languages. `evs facts` answers "which tables, URLs,
+   includes, queues, config keys, ids" directly; see section 4. Without an
+   index, use `rg -l` and `rg -c` here.
 3. **Line-range reads.** Read only the ranges the pointers name, widening a
    little when the context demands it. Never read a whole large file to find
    one function.
@@ -105,11 +109,8 @@ match the project's own patterns, such as requirement or use-case ids, wherever 
 docs, code or config). They come from regular expressions, so string-built SQL and runtime
 configuration escape them.
 
-**Tracing requirements to code.** `evs facts --type ref_id --match REQ-112` lists every document
-section and code line that names the id. Code that implements a requirement without citing its id
-is the usual gap: search the requirement's key terms with `evs search` too, and grep for the
-identifiers it names (fields, screens, error codes). Report which links rest on a cited id and
-which on matching terms; the second kind is inferred, not observed.
+Shared terms, from `evs search` or `evs similar`, show that two places are related, not that one
+implements the other. Record such a link as inferred.
 
 **Absence.** Search several spellings: class and method names, annotations, configuration keys,
 SQL keywords, XML or YAML configuration. Write the conclusion as "not found in the searched scope",
@@ -140,14 +141,21 @@ Code shows current behaviour; documentation shows intent or history. When they c
 side by side with the document's version or date. Do not silently pick one. Cite a document by
 `path:start-end` plus its heading path, so the reader can find the section in a rendered view.
 
-## 6. Save tokens
+## 6. Where this skill stops
+
+It finds and cites. Whether code satisfies a requirement, which business rules a module enforces,
+or how complete an implementation is needs the code's logic understood first: that is analysis,
+done by the caller or by an analysis skill that uses this one to fetch and cite evidence. Hand
+back the evidence and the gaps; do not turn shared terms into a verdict.
+
+## 7. Save tokens
 
 - If you can start a subagent, run the search loop there, on a cheaper model where available. Ask it
   to return the evidence ledger only, not file contents. Its brief states the question type, the
   reason, and that it may escalate the type but never lower it.
 - Reuse evidence already verified in the session instead of searching again.
 
-## 7. Answer format
+## 8. Answer format
 
 1. Conclusion, in one or two sentences.
 2. Question type and why; if escalated, what triggered it.

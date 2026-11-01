@@ -170,6 +170,12 @@ class TokenTest(unittest.TestCase):
     def test_cjk_becomes_bigrams(self):
         self.assertEqual(tokens.terms("申报退回"), ["申报", "报退", "退回"])
 
+    def test_english_endings_stemmed_and_original_kept(self):
+        self.assertEqual(tokens.terms("rejected"), ["rejected", "reject"])
+        self.assertEqual(tokens.terms("Declarations"), ["declarations", "declaration"])
+        self.assertEqual(tokens.terms("submitted queries"), ["submitted", "submit", "queries", "query"])
+        self.assertEqual(tokens.terms("status"), ["status"])
+
     def test_query_ors_distinct_terms(self):
         self.assertEqual(tokens.as_query("user User"), '"user"')
         self.assertEqual(tokens.as_query("!!!"), "")
@@ -312,7 +318,7 @@ class IndexTest(unittest.TestCase):
                                 capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
-    def test_id_patterns_trace_requirements_to_code(self):
+    def test_id_patterns_find_where_ids_are_cited(self):
         self.evs_index_with_ids()
         out = self.repo.evs("facts", "--type", "ref_id", "--match", "REQ-112").stdout
         self.assertIn("docs/design.md:5  ref_id  REQ-112  docs", out)
@@ -325,6 +331,37 @@ class IndexTest(unittest.TestCase):
         # Adding a pattern to an existing index re-extracts facts for every file.
         out = self.repo.evs("index", "--quiet", "--id-pattern", r"REQ-\d+").stdout
         self.assertIn("this run: 7 added, 0 updated, 0 removed, 0 unchanged", out)
+
+    def test_similar_finds_related_code_for_a_document_section(self):
+        self.repo.evs("index", "--quiet")
+        out = self.repo.evs("similar", "docs/design.md", "--heading", "rejection flow", "-k", "3").stdout
+        self.assertIn("# source: docs/design.md:3-10  Clearance design > Rejection flow (docs)", out)
+        first = [line for line in out.splitlines() if not line.startswith("#")][0]
+        self.assertIn("rejectDeclaration(Long id, String reason)", first)
+        self.assertIn("reject", first.split("matched:")[1])
+        # Terms the code never uses, such as straddling CJK bigrams, are not picked.
+        terms = [line for line in out.splitlines() if line.startswith("# terms:")][0]
+        self.assertNotIn("报被", terms)
+
+    def test_similar_finds_documents_for_code(self):
+        self.repo.evs("index", "--quiet")
+        out = self.repo.evs("similar", "src/main/java/com/acme/clearance/DeclarationService.java:19-24",
+                            "--json").stdout
+        result = json.loads(out)
+        self.assertEqual(result["targets"], ["docs"])
+        self.assertEqual(result["candidates"][0]["path"], "docs/design.md")
+
+    def test_older_index_is_rebuilt_and_keeps_settings(self):
+        self.repo.evs("index", "--quiet", "--exclude", "docs/**")
+        db = os.path.join(self.repo.root, ".evidence-search", "index.db")
+        import sqlite3
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+        conn.commit()
+        conn.close()
+        out = self.repo.evs("search", "reject").stdout
+        self.assertIn("refreshed 6 file(s) first: 6 added", out)
+        self.assertIn("extra excludes: docs/**", self.repo.evs("status").stdout)
 
     def test_invalid_id_pattern_is_refused(self):
         result = self.repo.evs("index", "--id-pattern", "REQ-(", check=False)

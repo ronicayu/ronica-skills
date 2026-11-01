@@ -12,6 +12,7 @@ Commands
   search    BM25 search; prints path:start-end, language and symbol
   facts     SQL tables, URLs, includes, queues, config keys and project ids
   map       the repo map: classes, methods, functions and headings
+  similar   chunks sharing distinctive terms with a file range (more like this)
   excludes  the index's exclusions as ripgrep -g flags
 
 Exit codes: 0 ok, 2 usage or environment problem, 3 no index yet.
@@ -26,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from evidence_search import chunk, discover, store  # noqa: E402
+from evidence_search import chunk, discover, store, tokens  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -177,6 +178,63 @@ def cmd_search(args):
     return 0
 
 
+def parse_source(text):
+    """PATH, PATH:LINE or PATH:START-END."""
+    match = re.match(r"^(.*?):(\d+)(?:-(\d+))?$", text)
+    if match:
+        start = int(match.group(2))
+        return match.group(1), start, int(match.group(3) or start)
+    return text, None, None
+
+
+def cmd_similar(args):
+    index = open_index(args)
+    maybe_refresh(index, args)
+    path, start, end = parse_source(args.source)
+    path = path[2:] if path.startswith("./") else path
+    try:
+        start, end, label, kind = index.section(path, start, end, args.heading)
+        text = index.read_lines(path, start, end)
+    except (store.IndexError_, OSError) as exc:
+        print("evs: %s" % exc, file=sys.stderr)
+        return 2
+    targets = args.to or (["code", "config"] if kind == "docs" else ["docs"])
+    picked = index.distinctive_terms(text, limit=args.terms, kinds=targets, exclude_path=path)
+    also = " ".join(args.also)
+    query = " ".join(term for term, _ in picked) + " " + also
+    if not query.strip():
+        print("evs: no distinctive terms in %s:%d-%d; pass likely code terms with --also" % (path, start, end),
+              file=sys.stderr)
+        return 2
+    rows, total = index.search(query, limit=args.k, kind=targets, path_glob=args.path, exclude_path=path)
+    wanted = set(tokens.terms(query))
+    results = []
+    for hit_path, hit_start, hit_end, lang, symbol, score in rows:
+        try:
+            found = set(tokens.terms(index.read_lines(hit_path, hit_start, hit_end)))
+        except OSError:
+            found = set()
+        matched = [t for t in tokens.terms(query) if t in found and t in wanted]
+        results.append((hit_path, hit_start, hit_end, lang, symbol, -score, list(dict.fromkeys(matched))))
+    if args.json:
+        print(json.dumps({
+            "source": {"path": path, "start": start, "end": end, "label": label, "kind": kind},
+            "terms": [{"term": t, "idf": round(i, 2)} for t, i in picked], "also": args.also,
+            "targets": targets,
+            "candidates": [dict(zip(("path", "start", "end", "lang", "symbol", "score", "matched"), r))
+                           for r in results]}, ensure_ascii=False))
+        return 0
+    note("source: %s:%d-%d%s (%s)" % (path, start, end, "  " + label if label else "", kind))
+    note("terms: %s%s" % (", ".join(t for t, _ in picked) or "-", ("  also: " + also) if also else ""))
+    note("%d chunk(s) in %s share terms with it; best %d. Shared terms show relatedness, not that one "
+         "implements the other" % (total, "/".join(targets), len(results)))
+    for hit_path, hit_start, hit_end, lang, symbol, score, matched in results:
+        print("%s:%d-%d  %s  %s  %.2f  matched: %s" % (hit_path, hit_start, hit_end, lang, symbol or "-",
+                                                      score, ", ".join(matched[:8]) or "-"))
+    more(len(results), total, "raise -k, narrow with --path, or sharpen the terms with --also")
+    return 0
+
+
 def cmd_facts(args):
     index = open_index(args)
     maybe_refresh(index, args)
@@ -278,6 +336,22 @@ def build_parser():
     p.add_argument("--match", help="case-insensitive substring of the name or signature")
     p.add_argument("--types-only", action="store_true", help="classes, interfaces, enums and headings only")
     p.add_argument("-k", type=int, default=300, help="symbols to show (default 300)")
+    p.add_argument("--no-refresh", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    p = add("similar", cmd_similar,
+            "chunks that share distinctive terms with a file range (more like this): related code for a "
+            "document section, or related documents for code")
+    p.add_argument("source", help="PATH, PATH:LINE or PATH:START-END")
+    p.add_argument("--heading", help="for a document: the section whose heading path contains this text")
+    p.add_argument("--also", action="append", default=[], metavar="TERMS",
+                   help="extra terms to search with: likely identifiers, synonyms, or translations when "
+                        "the documents and the code use different languages (repeatable)")
+    p.add_argument("--to", action="append", choices=("code", "docs", "config"),
+                   help="kinds to search (default: code and config from docs, docs from anything else)")
+    p.add_argument("--terms", type=int, default=12, help="distinctive terms to take from the source (default 12)")
+    p.add_argument("--path", help="path glob for candidates")
+    p.add_argument("-k", type=int, default=15, help="candidates to show (default 15)")
     p.add_argument("--no-refresh", action="store_true")
     p.add_argument("--json", action="store_true")
 

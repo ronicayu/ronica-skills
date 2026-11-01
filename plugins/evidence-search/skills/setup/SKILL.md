@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Build or rebuild the evidence-search index for this repository — BM25 search over code, requirements, design documents and configuration, a repo map, and a fact table of SQL tables, URLs, includes, queues, config keys and requirement ids — and install tree-sitter for method-level chunking of Java and JavaScript. Use when setting up evidence-search in a project, when `evs` reports "no index", when the user asks to index, re-index or exclude part of the repository or to track requirement ids, or when the index looks wrong after a large change.
+description: Build or rebuild the evidence-search index for this repository — BM25 search over code, requirements, design documents and configuration, a repo map, and a fact table of SQL tables, URLs, includes, queues, config keys and requirement ids — and install tree-sitter for method-level chunking of Java and JavaScript. Use when setting up evidence-search in a project, when `evs` reports "no index", when the user asks to index, re-index or exclude part of the repository or to index requirement ids, or when the index looks wrong after a large change.
 ---
 
 # Set up the evidence-search index
