@@ -29,12 +29,13 @@ LANG_BY_EXT = {
     ".xml": "xml", ".xsd": "xml", ".wsdl": "xml",
     ".properties": "properties", ".yml": "yaml", ".yaml": "yaml", ".json": "json",
     ".sql": "sql", ".sh": "shell", ".bat": "shell", ".cmd": "shell",
+    ".csv": "csv", ".tsv": "csv",
     ".py": "python", ".groovy": "groovy", ".kt": "kotlin", ".scala": "scala",
     ".c": "c", ".h": "c", ".cpp": "cpp", ".cs": "csharp", ".go": "go", ".rb": "ruby",
     ".css": "css", ".scss": "css", ".less": "css",
 }
 
-DOC_LANGS = {"markdown", "asciidoc", "rst", "text"}
+DOC_LANGS = {"markdown", "asciidoc", "rst", "text", "csv"}
 CONFIG_LANGS = {"xml", "properties", "yaml", "json"}
 
 

@@ -37,6 +37,7 @@ design review most.
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" deps     # optional: tree-sitter in a private venv
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" index    # build, or refresh
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" search reject declaration -k 10
+"${CLAUDE_PLUGIN_ROOT}/scripts/evs" facts --type entry_point --match mdb   # listeners and their queues
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" facts --type sql_table --match customer
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" similar docs/design.md --heading 'rejection flow'   # related code
 "${CLAUDE_PLUGIN_ROOT}/scripts/evs" index --id-pattern 'REQ-\d{3,5}'   # index requirement ids
@@ -52,8 +53,8 @@ design review most.
 | Terms | Identifiers split by case and underscore and also kept whole; English plurals and -ed/-ing endings also stemmed; CJK text as bigrams; no stop words |
 | Related chunks | `similar` takes the source range's rarest terms that also occur on the other side (code for a document, documents for code) and ranks chunks by them, listing the shared terms per hit |
 | Chunks | tree-sitter: one per Java method or JavaScript function, doc comment included, code between them in its own chunks. Without tree-sitter, and for other languages: 60-line windows overlapping by 10 |
-| Facts | SQL tables (read, write or DDL), URL handlers and references, JSP includes, imports and taglibs, queues, config keys, and ids matching the project's own patterns (`ref_id`) |
-| Documents | Markdown and AsciiDoc split by heading, each chunk labelled with its heading path; plain text in line windows. Word and PDF are not indexed |
+| Facts | Entry points (MDBs, HTTP, scheduled jobs, startup classes, EJBs, web services); queues from WebLogic descriptors, JMS modules with foreign MQ servers, annotations, IBM MQ API calls, properties and documentation tables, each linked to the listener and to the MQ queue behind its JNDI name; SQL tables (read, write or DDL); URL handlers and references; JSP includes, imports and taglibs; config keys; and ids matching the project's own patterns (`ref_id`) |
+| Documents | Markdown and AsciiDoc split by heading, each chunk labelled with its heading path; plain text and CSV in line windows. Markdown and CSV tables that bind listeners, JNDI names and queues become linked facts. Word and PDF are not indexed |
 | Freshness | Each query stats every file and re-indexes only those whose size or modification time changed and whose content hash differs |
 
 tree-sitter is error tolerant, so code that does not compile still splits by

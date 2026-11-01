@@ -61,6 +61,17 @@ with `--root <folder>`.
    different words or languages. `evs facts` answers "which tables, URLs,
    includes, queues, config keys, ids" directly; see section 4. Without an
    index, use `rg -l` and `rg -c` here.
+
+   **Entry points** ("where does X come in", "what triggers Y") start from
+   `evs facts --type entry_point --summary`, then `--match <class, queue,
+   mdb, scheduled, http>`. Under each row, `->` lines are linked facts: the
+   queue an MDB listens on, the MQ queue behind a JNDI name, the documentation
+   row that records the binding. No queue linked means the binding is recorded
+   somewhere the index does not read: search the documents for the class and
+   queue names (`evs search <ClassName> --kind docs`), then read the code from
+   the entry point inward. Grep for entry points by their declarations, never
+   by a common method name: `onMessage` or `execute` also match unrelated
+   code. The signatures are in `references/language-notes.md`.
 3. **Line-range reads.** Read only the ranges the pointers name, widening a
    little when the context demands it. Never read a whole large file to find
    one function.
@@ -104,10 +115,20 @@ with `rg -l -i -w`, not smart case. Files grep finds that the candidates miss ar
 their lines, then add them to the evidence. Name the gap in the answer, because it points at a
 fact rule or tokenizer rule the index lacks, or at an excluded file.
 
-Fact types: `sql_table` (detail read, write or ddl), `url_handler`, `url_ref`, `include`,
-`jsp_import`, `taglib`, `queue`, `config_key` (defined or used), and `ref_id` — identifiers that
-match the project's own patterns, such as requirement or use-case ids, wherever they appear (detail
-docs, code or config). SQL is read per statement: MyBatis and Hibernate XML statements, `.sql`
+Fact types: `entry_point` (detail starts with mdb, http, scheduled, startup, webservice or ejb),
+`queue` (detail names the listener, descriptor, API call or config key), `component` (a class a
+documentation table binds to a queue without calling it a listener), `sql_table` (detail read,
+write or ddl), `url_handler`, `url_ref`, `include`, `jsp_import`, `taglib`, `config_key` (defined or
+used), and `ref_id` — identifiers that match the project's own patterns, such as requirement or
+use-case ids, wherever they appear (detail docs, code or config). `--match` searches the value, the
+detail and the link keys.
+
+Queue bindings come from wherever they are recorded: WebLogic descriptors (`ejb-jar.xml`,
+`weblogic-ejb-jar.xml`, JMS modules with foreign MQ servers, recognised by content, not file name),
+annotations and EJBGen tags, IBM MQ API calls (a constant in the same file is resolved), properties
+keys that name queues, and Markdown or CSV tables whose columns name listeners, JNDI names and
+queues. A binding taken from a document is documentation, not configuration: cite it as such, and
+say when code or descriptors disagree with it. SQL is read per statement: MyBatis and Hibernate XML statements, `.sql`
 files, and string literals joined across the lines of one Java statement or a run of `append`
 calls. `url_handler` joins a Spring class-level mapping to each method mapping, so its paths line up
 with `url_ref`. SQL assembled from variables, dynamic table names and runtime configuration still

@@ -10,7 +10,7 @@ Commands
   index     build or refresh the index
   status    what is indexed, and what is out of date
   search    BM25 search; prints path:start-end, language and symbol
-  facts     SQL tables, URLs, includes, queues, config keys and project ids
+  facts     entry points, queues, SQL tables, URLs, includes, config keys and ids
   map       the repo map: classes, methods, functions and headings
   similar   chunks sharing distinctive terms with a file range (more like this)
   excludes  the index's exclusions as ripgrep -g flags
@@ -241,16 +241,29 @@ def cmd_facts(args):
     index = open_index(args)
     maybe_refresh(index, args)
     rows, total = index.facts(args.type, args.match, args.path, args.k, args.summary)
-    if args.json:
-        keys = ("type", "value", "detail", "count", "files") if args.summary else ("path", "line", "type", "value", "detail")
-        print(json.dumps([dict(zip(keys, r)) for r in rows], ensure_ascii=False))
-        return 0
     if args.summary:
+        if args.json:
+            keys = ("type", "value", "detail", "count", "files")
+            print(json.dumps([dict(zip(keys, r)) for r in rows], ensure_ascii=False))
+            return 0
         for fact_type, value, detail, count, files in rows:
             print("%s  %s  %s  x%d in %d file(s)" % (fact_type, value, detail or "-", count, files))
     else:
-        for path, line, fact_type, value, detail in rows:
+        shown = {tuple(r[:4]) for r in rows}
+        records = []
+        for row in rows:
+            links = [] if args.no_links or not row[5] else index.linked(row[5], exclude=shown, limit=args.links)
+            records.append((row, links))
+        if args.json:
+            keys = ("path", "line", "type", "value", "detail")
+            print(json.dumps([dict(zip(keys, row[:5]), linked=[dict(zip(keys, link[:5])) for link in links])
+                              for row, links in records], ensure_ascii=False))
+            return 0
+        for row, links in records:
+            path, line, fact_type, value, detail = row[:5]
             print("%s:%d  %s  %s  %s" % (path, line, fact_type, value, detail or "-"))
+            for link in links:
+                print("    -> %s:%d  %s  %s  %s" % (link[0], link[1], link[2], link[3], link[4] or "-"))
     if not rows:
         note("no facts match; facts are best effort, so confirm with grep")
     more(len(rows), total, "raise -k, or narrow with --type, --match or --path")
@@ -324,9 +337,13 @@ def build_parser():
     p.add_argument("--json", action="store_true")
 
     p = add("facts", cmd_facts, "static facts for enumeration questions")
-    p.add_argument("--type", choices=("sql_table", "url_handler", "url_ref", "include", "jsp_import",
-                                      "taglib", "queue", "config_key", "ref_id"))
-    p.add_argument("--match", help="case-insensitive substring of the value")
+    p.add_argument("--type", choices=("entry_point", "queue", "component", "sql_table", "url_handler", "url_ref", "include",
+                                      "jsp_import", "taglib", "config_key", "ref_id"))
+    p.add_argument("--match", help="case-insensitive substring of the value, detail or link keys, "
+                                   "e.g. a class, a queue, 'mdb' or 'scheduled'")
+    p.add_argument("--no-links", action="store_true",
+                   help="do not list the facts linked to each row (same EJB, class, JNDI name or MQ queue)")
+    p.add_argument("--links", type=int, default=6, help="linked facts to list per row (default 6)")
     p.add_argument("--path", help="path glob")
     p.add_argument("--summary", action="store_true", help="one line per distinct value, with counts")
     p.add_argument("-k", type=int, default=100, help="rows to show (default 100)")
