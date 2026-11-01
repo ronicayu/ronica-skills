@@ -43,18 +43,22 @@ parsing it as Java is an untested idea; try it on real files before relying on i
 Call sites extracted by name are leads, not facts. A method name can match several classes or
 overloads; confirm by reading the code before writing a call relationship into a conclusion.
 
-## Facts worth extracting into a table
+## Facts in the fact table
 
-Enumeration questions depend on these. Extract them with tree-sitter queries and rules — none needs
-compilation — and store each with its `path:line`.
+Enumeration questions depend on these. `cr index` extracts them with regular expressions — none
+needs compilation or tree-sitter — and stores each with its `path:line`; `cr facts` queries them.
 
-| Fact | Where it comes from |
+| Fact type | Where it comes from |
 | --- | --- |
-| SQL statements and table names | Java string literals; MyBatis or Hibernate XML mappings |
-| URL to handler | Servlet annotations, `web.xml`, Spring or Struts configuration; JSP `form action` and AJAX calls |
-| Queues, topics, remote calls | JMS or MQ names, RMI interfaces, HTTP client calls |
-| File paths and configuration keys | String literals, `*.properties` files |
-| Page composition | JSP `include` and custom tags |
+| `sql_table` | String literals that read as SQL in Java, JavaScript and JSP; SQL files; SQL in XML mappings (MyBatis, Hibernate) |
+| `url_handler` | `@RequestMapping` and its variants, `@WebServlet`, `@Path`; `<url-pattern>` in `web.xml`; Struts `<action>` |
+| `url_ref` | JSP and HTML `action` and `href`; jQuery AJAX, `fetch`, `XMLHttpRequest.open`, `location` assignments |
+| `include`, `jsp_import`, `taglib` | JSP directives, `<jsp:include>`, `<jsp:forward>`, `<c:import>` |
+| `queue` | `@JmsListener`, `createQueue`, `createTopic`, Kafka and Rabbit listeners, `jms/` JNDI names |
+| `config_key` | Keys defined in `*.properties`; keys used through `@Value` and `getProperty` |
+
+Not extracted: remote calls (RMI, HTTP clients), file paths, and anything one regular expression
+per line cannot see, such as SQL split across concatenated literals.
 
 The table is best effort. String-built SQL, class names constructed at runtime and configuration
 resolved at runtime escape it, so cross-check enumerations with grep as SKILL.md describes.

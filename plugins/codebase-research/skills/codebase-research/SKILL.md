@@ -38,48 +38,65 @@ direction of error.
 
 ## 2. Search in tiers; escalate only when a tier is not enough
 
-1. **Repo map.** If the project has one (a file, class and method index), read it to narrow scope.
-2. **Index pointers.** If the project provides BM25, vector or fact-table search, use it and take
-   pointers only — `path:line`, signature, score — never whole chunks. Without such tools, use
-   `rg -l` and `rg -c` as the pointer source.
-3. **Line-range reads.** Read only the ranges you need to verify. Never read a whole large file to
-   find one function.
+The plugin ships an index tool, `cr`, used through
+`"${CLAUDE_PLUGIN_ROOT}/scripts/cr"`. Every `cr` query returns pointers —
+`path:start-end`, language, symbol — never code, and re-reads changed files
+first, so its answers match the working tree. If `cr status` exits 3 there is
+no index: carry on with `rg` and mention once that the `setup` skill builds one.
+
+1. **Repo map.** `cr map --types-only --path 'src/main/java/com/acme/billing/*'`
+   lists classes; drop `--types-only` for methods and signatures. Use it to
+   narrow scope before searching.
+2. **Index pointers.** `cr search <words> -k 10` ranks chunks by BM25 across
+   code, docs and config; narrow with `--kind code|docs|config`, `--lang`,
+   `--path`. Identifiers match by part, so `user by id` finds `getUserById`.
+   `cr facts` answers "which tables, URLs, includes, queues, config keys"
+   directly; see section 4. Without an index, use `rg -l` and `rg -c` here.
+3. **Line-range reads.** Read only the ranges the pointers name, widening a
+   little when the context demands it. Never read a whole large file to find
+   one function.
 4. **Bounded grep.** See section 3.
 
-Escalate from tier 3 to tier 4 when an exact identifier gets no hits, when different search methods
-disagree, when the best hit is weak or nothing stands out, or when the question type makes it
-mandatory. When the question contains an exact string — an identifier, error code or quoted
-literal — start with a grep count straight away.
+Escalate from tier 3 to tier 4 when an exact identifier gets no hits, when
+search methods disagree, when the best hit is weak or nothing stands out, or
+when the question type makes it mandatory. When the question contains an exact
+string — an identifier, error code or quoted literal — start with a grep count
+straight away.
 
 ## 3. Bounded grep
 
-Count first, then narrow, then look at lines.
+Count first, then narrow, then look at lines. `cr excludes` prints the index's
+exclusions as ripgrep flags; use exactly those, so grep and the index search
+the same files. Without an index, use the defaults below and adjust them to
+the ecosystem: vendored libraries, generated code, build output.
 
 ```bash
 # 1) Count per file, busiest first
-rg -c -S -g '!target/**' -g '!build/**' -g '!dist/**' -g '!node_modules/**' -g '!*.min.js' 'pattern' \
+rg -c -S -g '!**/target/**' -g '!**/build/**' -g '!**/dist/**' -g '!**/node_modules/**' -g '!*.min.js' 'pattern' \
   | sort -t: -k2,2nr | head -20
 
 # 2) File list only — the enumeration cross-check uses this
-rg -l -S -g '!target/**' -g '!build/**' -g '!dist/**' -g '!node_modules/**' -g '!*.min.js' 'pattern'
+rg -l -S -g '!**/target/**' -g '!**/build/**' -g '!**/dist/**' -g '!**/node_modules/**' -g '!*.min.js' 'pattern'
 
 # 3) Lines, only after narrowing scope: cap hits per file, truncate long lines
 rg -n -S --max-count 5 --max-columns 200 --max-columns-preview \
-  -g '!target/**' -g '!build/**' -g '!dist/**' -g '!node_modules/**' -g '!*.min.js' 'pattern' path/to/scope
+  -g '!**/target/**' -g '!**/build/**' -g '!**/dist/**' -g '!**/node_modules/**' -g '!*.min.js' 'pattern' path/to/scope
 ```
 
-- Use the same exclusions in every call, and the same set the project's indexes use, so the two
-  file sets are comparable. Adjust them to the ecosystem: vendored libraries, generated code, build
-  output, lock files.
 - `-F` for literals, `-w` for whole words.
 - A large count means narrow the pattern or the scope. Do not dump the lines.
 
 ## 4. Mandatory checks for enumeration and absence
 
-**Enumeration.** List candidates from the index, fact table or tier-2 search. Run `rg -l` with the
-same patterns. Files grep finds that the candidates miss are a recall gap: read their lines, then
-add them to the evidence. Report the gap if the project maintains indexes, because it points at a
-tokenizer rule or an unindexed file.
+**Enumeration.** List candidates from the fact table (`cr facts --type sql_table --match customer`,
+`--summary` for one line per value) or from `cr search <words> --files`. Then run `rg -l` with the
+patterns that define the set. Files grep finds that the candidates miss are a recall gap: read
+their lines, then add them to the evidence. Name the gap in the answer, because it points at a
+fact rule or tokenizer rule the index lacks, or at an excluded file.
+
+Fact types: `sql_table` (detail read, write or ddl), `url_handler`, `url_ref`, `include`,
+`jsp_import`, `taglib`, `queue`, `config_key` (defined or used). They come from regular
+expressions, so string-built SQL and runtime configuration escape them.
 
 **Absence.** Search several spellings: class and method names, annotations, configuration keys,
 SQL keywords, XML or YAML configuration. Write the conclusion as "not found in the searched scope",
@@ -125,6 +142,8 @@ side by side with the document's version or date. Do not silently pick one.
 5. Gaps and uncertainty: where reflection, configuration or dynamic behaviour could hide something.
 
 ## References
+
+- `${CLAUDE_PLUGIN_ROOT}/scripts/cr --help` — every `cr` command and flag.
 
 - `references/language-notes.md` — read when the codebase includes Java, JSP or JavaScript, or when
   you need identifier-aware search patterns, chunking hints or the facts worth extracting from a
