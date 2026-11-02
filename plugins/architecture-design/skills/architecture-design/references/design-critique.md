@@ -57,6 +57,7 @@ Each finding cites both places.
 
 ## Step 3: Check the structure
 
+- **Responsibilities are MECE.** Each requirement and main flow has exactly one responsible part. Two parts that claim the same responsibility overlap; a requirement that no part owns is a gap.
 - **Ownership.** Each piece of data has one writer. Shared tables, or two parts writing the same record, are findings.
 - **Coupling.** Find synchronous call chains and cycles between parts. A chain of synchronous calls multiplies latency and failure; a cycle makes independent deployment impossible.
 - **Invariants and transactions.** For each business rule that must always hold, find where it is enforced. A rule that spans two transaction boundaries needs a saga, a reservation or a reconciliation, and the design must say which.
@@ -79,6 +80,7 @@ For each main flow, and for each dependency it calls:
 ## Step 5: Check the decisions
 
 - **Under the ranking, is the chosen option best?** Re-run the comparison with the stated goal order. A choice that only wins under a different order is a finding.
+- **Are the options MECE?** They differ on one real dividing question, and together they cover the realistic choices. Two variants of one shape are not a choice. A realistic option left out is your challenge.
 - **Was the rejected option real?** A strawman alternative means the real choice was not made in the document.
 - **Is there a simpler design** that meets the top goals? Name it as your challenge.
 - **What is hard to reverse?** Data models, public contracts, vendor commitments and identity schemes. Each needs stronger evidence than a reversible choice.
