@@ -57,7 +57,7 @@ Each finding cites both places.
 
 ## Step 3: Check the structure
 
-- **Responsibilities are MECE.** Each requirement and main flow has exactly one responsible part. Two parts that claim the same responsibility overlap; a requirement that no part owns is a gap.
+- **Responsibilities are MECE.** Each requirement, and each step of a main flow, has exactly one accountable part. Several parts taking part in a flow is not overlap. Two parts accountable for the same thing overlap; a requirement with no accountable part is a gap.
 - **Ownership.** Each piece of data has one writer. Shared tables, or two parts writing the same record, are findings.
 - **Coupling.** Find synchronous call chains and cycles between parts. A chain of synchronous calls multiplies latency and failure; a cycle makes independent deployment impossible.
 - **Invariants and transactions.** For each business rule that must always hold, find where it is enforced. A rule that spans two transaction boundaries needs a saga, a reservation or a reconciliation, and the design must say which.
