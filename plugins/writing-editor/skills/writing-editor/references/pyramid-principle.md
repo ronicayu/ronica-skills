@@ -91,7 +91,7 @@ A group is Mutually Exclusive and Collectively Exhaustive when each case belongs
 - **Test for gaps.** Ask what could make the parent false while every item is true. That answer is the missing item.
 - **Treat "Other" as a signal.** A small, named remainder is honest. A large one means the split is wrong.
 
-MECE applies in full to structural order. In time order, it means no missing step. In degree order, every item shares the property being ranked. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents".
+MECE applies in full to structural order. In time order, it means no missing step. In degree order, every item shares the property being ranked. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set.
 
 Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Regroup a long exhaustive list into three to five summaries; do not drop items to reach the number.
 
