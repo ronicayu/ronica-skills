@@ -66,6 +66,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
@@ -121,6 +122,9 @@ COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides
 COMMENT_LIMIT = 8000  # characters of evidence in the request comment
 DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
 COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
+REPORT_DIR = ".agentic-team"  # in a worktree, the folder of the session's report file
+REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it in every worktree
+VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 
 
 class Refused(codehost.HostError):
@@ -413,13 +417,17 @@ class Session:
                     self.kind, self.task_id, self.wtname = "task", int(m.group(1)), folder
                 elif m := VERIFY_WT.match(folder):
                     self.kind, self.task_id, self.attempt, self.wtname = "verify", int(m.group(1)), int(m.group(2)), folder
-        # A row with state "stopped", or state "done" with status idle or none, has ended. (A `claude rm` that
-        # refuses still ends the session and leaves a "done" row with no status.) idle/blocked and the like
+        # A row with state "stopped", or state "done" or "failed" with status idle or none, has ended. (A `claude rm`
+        # that refuses still ends the session and leaves a "done" row with no status.) idle/blocked and the like
         # stay live: the session asked the user.
-        self.finished = self.state == "stopped" or (self.state == "done" and self.status in ("idle", None, ""))
+        self.finished = self.state == "stopped" or (self.state in ("done", "failed") and self.status in ("idle", None, ""))
         self.live = not self.finished
         self.stuck = self.live and (bool(self.waiting) or self.state == "blocked")
         self.unknown = self.live and not self.stuck and self.status != "busy"
+        # A blocked row with no waitingFor finished its turn: claude reads its last message as a question. Only a
+        # row with waitingFor waits on a prompt. No status means that no process runs the session.
+        self.turn_over = self.finished or (self.state == "blocked" and not self.waiting
+                                           and self.status in ("idle", None, ""))
 
     def worktree(self, root):
         """The worktree path, derived from the folder name, never from the row."""
@@ -589,11 +597,40 @@ def describe_result(result):
     return f"result #{result['id']}, {result['status']}{attempt}"
 
 
-def result_command(py, tg, db, project, task_id, kind, attempt, session):
-    """The command the worker runs last. The worker fills in only the status and the body."""
+def report_path(run, worktree, session):
+    """The session's report file: one per session name, so an attempt never reads the report of an earlier one."""
+    return os.path.join(run.wt_dir, worktree, REPORT_DIR, f"report-{session}.md")
+
+
+def ignore_reports(run):
+    """Add the report folder to the repository's info/exclude, once. Every linked worktree reads that file from the
+    common git dir, so `git status` does not show a report file and `git add -A` does not add it."""
+    path = os.path.join(run.root, run.git("rev-parse", "--git-path", "info/exclude").stdout.strip())
+    try:
+        text = ""
+        if os.path.isfile(path):
+            with open(path) as fh:
+                text = fh.read()
+        if REPORT_EXCLUDE in text.splitlines():
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(("" if not text or text.endswith("\n") else "\n") + REPORT_EXCLUDE + "\n")
+    except OSError as exc:
+        raise Refused(f"cannot write {path}: {exc.strerror}")
+
+
+def clear_report(path):
+    """Delete a report file left by an earlier session of the same name. Called right before a session starts."""
+    if os.path.lexists(path):
+        os.remove(path)
+
+
+def result_command(py, tg, db, project, task_id, kind, attempt, session, report):
+    """The command the session runs last. It fills in only the status; the body comes from the report file."""
     return (f"{quote(py)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)} "
             f"result add {task_id} --kind {kind} --attempt {attempt} --by {shlex.quote(session)} "
-            f"--status <STATUS> --body-file - <<'REPORT'\n<your report>\nREPORT")
+            f"--status <STATUS> --body-file {quote(report)}")
 
 
 def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False):
@@ -621,6 +658,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     config = run.config
     forbidden = [f"- {item}" for item in config["constraints"]["forbidden"] if item.strip()]
     orders = run.orders()
+    report = report_path(run, session if kind == "verify" else f"task-{tid}", session)
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -632,7 +670,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "TIMEBOX": timebox,
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
         "STANDING_ORDERS": orders.text,
-        "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session),
+        "REPORT_FILE": report,
+        "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
+                                         report),
     }
     if kind == "verify":
         vkind = verify_kind(run, task)
@@ -678,7 +718,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         values.update({
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
-            "SCOPE": "Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete anything.",
+            "SCOPE": ("Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete "
+                      "anything. The one exception is your report file, which REPORT names."),
             "SETUP": setup,
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
@@ -1244,6 +1285,8 @@ def cmd_launch(run, args):
         add_worktree(run, worktree, base)
     created = mode in ("first", "base", "head")
     try:
+        ignore_reports(run)
+        clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         said = start_session(run, worktree, session, model, effort, text)
     except Exception as exc:
@@ -1386,9 +1429,15 @@ def cmd_verify(run, args):
         raise Refused(f"#{tid} attempt {attempt} already has verify result #{last['id']} "
                       f"(Verdict: {verdict_of(last) or 'none'}); run run.py close {tid}, "
                       "or pass --again once a verify-blocked cause is fixed")
-    running = [s for s in own_sessions(run, tid, "verify", attempt) if s.live]
+    verifiers = own_sessions(run, tid, "verify", attempt)
+    running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
         raise Refused(f"verifier {running[0].describe()} is still running")
+    if not args.dry_run:
+        for s in [s for s in verifiers if s.live]:  # its turn is over and it filed nothing; it only holds a slot
+            record_row(run, task, s, attempt)
+            run.claude("stop", s.sid, check=False)
+            run._sessions = None
     names = {s.wtname for s in own_sessions(run, tid, "verify", attempt)}
     if os.path.isdir(run.wt_dir):
         for entry in os.listdir(run.wt_dir):
@@ -1427,6 +1476,8 @@ def cmd_verify(run, args):
     if is_sha(ref):
         add_worktree(run, name, ref)
     try:
+        ignore_reports(run)
+        clear_report(report_path(run, name, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         said = start_session(run, name, name, model, effort, text)
     except Exception as exc:
@@ -1589,11 +1640,10 @@ def record_arrived(run, snap, task, attempt, result):
     run.emit("arrived", tid, attempt, None, detail, nxt)
 
 
-def salvage(run, tid, attempt, session):
-    text = ""
-    if session is not None:
-        out = run.claude("logs", session.sid, check=False)
-        text = out.stdout if out.returncode == 0 else ""
+def parse_report(text, tid, verifier=False):
+    """(status, report) for the last complete report in a text, else None. A report starts at a line `Task: <id>`
+    and needs a Status line and a Checkpoint line; a verifier's report also needs a Verdict line with a known level.
+    That line keeps out the worker report that a verifier's brief quotes."""
     lines = text.splitlines()
     marks = [i for i, line in enumerate(lines) if line.strip() == f"Task: {tid}"]
     if not marks:
@@ -1604,7 +1654,103 @@ def salvage(run, tid, attempt, session):
     status = STATUS_LINE.search(report)
     if not status or not CHECKPOINT_LINE.search(report):
         return None
+    if verifier and verdict_of({"body": report}) not in VERDICTS:
+        return None
     return status.group(1), report
+
+
+def salvage(run, tid, session, report, verifier=False):
+    """A report that a session wrote but did not file: (status, report, where it came from), else None. The sources,
+    in this order: its report file, the assistant messages of its transcript, `claude logs`. The last works only
+    while the session's process is alive, and it shows a terminal screen, not the text."""
+    try:
+        with open(report, encoding="utf-8") as fh:
+            found = parse_report(fh.read(), tid, verifier)
+    except (OSError, UnicodeDecodeError):
+        found = None
+    if found:
+        return (*found, f"report file {os.path.basename(report)}")
+    if session is None:
+        return None
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0]
+    for text in reversed(transcript_texts(path) if path else []):
+        found = parse_report(text, tid, verifier)
+        if found:
+            return (*found, f"transcript of {session.sid}")
+    out = run.claude("logs", session.sid, check=False)
+    found = parse_report(out.stdout if out.returncode == 0 else "", tid, verifier)
+    return (*found, f"claude logs {session.sid}") if found else None
+
+
+def verifier_rank(name):
+    """The k of a verifier folder verify-<id>-<attempt>[-<k>]: a later verifier of an attempt has a higher k."""
+    m = VERIFY_WT.match(name or "")
+    return int(m.group(3) or 1) if m else 0
+
+
+def verifier_filed(rows, attempt, name, sid):
+    """True when the attempt's verify results cover this verifier session. These rows count: one it filed (--by its
+    folder name), one a person filed under another name, one run.py filed when it stopped the session (its
+    Session: line), and a verdict by the Manager. A row of another verifier folder does not count."""
+    for r in task_rows(rows, attempt, "verify"):
+        author = r.get("author") or ""
+        if author == "manager":
+            if verdict_of(r) or tail_or_none(SESSION_LINE.search(r.get("body") or "")) == sid:
+                return True
+        elif author == name or not VERIFY_WT.match(author):
+            return True
+    return False
+
+
+def verifier_over(run, session):
+    """True when a verifier session will file nothing more by itself. A turn that is over counts at once. A row in
+    no final state (Session.unknown: an idle row with state "working" is a session that said it will check back)
+    can still wake up, so it counts only after VERIFIER_QUIET_MINUTES with no activity: no write to its transcript
+    and no start. A row with neither time counts at once."""
+    if session.turn_over:
+        return True
+    if not session.unknown:
+        return False
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0]
+    times = [os.path.getmtime(path)] if path else []
+    if isinstance(session.row.get("startedAt"), (int, float)):
+        times.append(session.row["startedAt"] / 1000)
+    return not times or time.time() - max(times) >= VERIFIER_QUIET_MINUTES * 60
+
+
+def lost_verifier(verifiers, rows, attempt):
+    """The newest verifier session of the attempt when the results do not cover it, else None."""
+    if not verifiers:
+        return None
+    newest = max(verifiers, key=lambda s: verifier_rank(s.wtname))
+    return None if verifier_filed(rows, attempt, newest.wtname, newest.sid) else newest
+
+
+def pending_verifier(task, rows):
+    """The newest verifier session recorded for the current attempt when the results do not cover it, else None.
+    `status` uses it; it reads Taskgraph only, so it cannot say whether the session still runs."""
+    attempt = wanted_attempt(task)
+    entries = [e for e in recorded_sessions(task) if e.get("kind") == "verify" and e.get("attempt") == attempt]
+    if not entries:
+        return None
+    newest = max(entries, key=lambda e: verifier_rank(e.get("worktree")))
+    return None if verifier_filed(rows, attempt, newest.get("worktree"), newest.get("id")) else newest
+
+
+def salvage_verifier(run, task, attempt, session):
+    """File the report of a verifier that ended without one. Returns the new row, else None. The row is filed by
+    the verifier's name: verifier_rows does not count a row by "manager"."""
+    tid = task["id"]
+    found = salvage(run, tid, session, report_path(run, session.wtname, session.wtname), verifier=True)
+    if found is None:
+        return None
+    record_row(run, task, session, attempt)
+    added = run.add_result(tid, "verify", attempt, session.wtname, found[0], found[1])
+    run.emit("salvaged", tid, attempt, session.sid, f"{found[0]} from {found[2]} (result #{added['id']})")
+    if session.live:  # its turn is over; it only holds a slot
+        run.claude("stop", session.sid, check=False)
+        run._sessions = None
+    return added
 
 
 def commit_stopped(run, tid, attempt, rows, sessions):
@@ -1662,9 +1808,9 @@ def record_in_progress(run, snap, task, unmanaged):
         return
     rows = snap.rows(tid)
     verifiers = own_sessions(run, tid, "verify", attempt)
-    live = [s for s in verifiers if s.live]
-    if live:
-        for s in live:
+    running = [s for s in verifiers if s.live and not verifier_over(run, s)]
+    if running:
+        for s in running:
             if s.stuck:
                 record_row(run, task, s, attempt)
                 model = session_model(task, s.sid)
@@ -1674,6 +1820,17 @@ def record_in_progress(run, snap, task, unmanaged):
             else:
                 run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status})")
         return
+    lost = lost_verifier(verifiers, rows, attempt)
+    if lost:
+        added = salvage_verifier(run, task, attempt, lost)
+        if added is None:
+            record_row(run, task, lost, attempt)
+            run.emit("no-verdict", tid, attempt, lost.sid,
+                     f"verifier {lost.sid} ({lost.wtname}, {lost.status}/{lost.state}) filed no result and left no report",
+                     f"run.py verify {tid} --again; or, with its report in a file, tg result add {tid} --kind verify "
+                     f"--attempt {attempt} --by {lost.wtname} --status <STATUS> --body-file <path>")
+            return
+        rows = rows + [added]
     mode, pushed, worker = str(meta.get("verify_mode") or ""), meta.get("pushed"), latest_worker(rows, attempt)
     seen = tail_or_none(HEAD_ANY.search(worker["body"])) if worker else None
     if (mode.startswith("ci:") and run.pr_mode and pushed and worker and worker["status"] == "PASS"
@@ -1700,11 +1857,6 @@ def record_in_progress(run, snap, task, unmanaged):
     if meta.get("verdict"):
         run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], verify_kind(run, task, strict=False)))
         return
-    finished = [s for s in verifiers if s.finished]
-    if finished and not task_rows(rows, attempt, "verify"):
-        s = finished[-1]
-        run.add_result(tid, "verify", attempt, "manager", "DIED", f"verifier {s.sid} ({s.name}) ended with no result")
-        run.emit("verifier-died", tid, attempt, s.sid, s.name, f"run run.py verify {tid}")
     mine = own_sessions(run, tid, "task", attempt)
     results = task_rows(rows, attempt)
     if not results:
@@ -1726,13 +1878,14 @@ def record_in_progress(run, snap, task, unmanaged):
                      f"claude logs {s.sid}")
         else:
             s = mine[-1] if mine else None
-            found = salvage(run, tid, attempt, s)
+            report = report_path(run, f"task-{tid}", str(meta.get("session") or f"task-{tid}-{attempt}"))
+            found = salvage(run, tid, s, report)
             if s is not None:  # filed for this attempt, either way
                 record_row(run, task, s, attempt)
             if found:
                 added = run.add_result(tid, "task", attempt, "manager", found[0], found[1])
-                run.emit("salvaged", tid, attempt, s.sid,
-                         f"{found[0]} from claude logs {s.sid} (result #{added['id']})")
+                run.emit("salvaged", tid, attempt, s.sid if s else None,
+                         f"{found[0]} from {found[2]} (result #{added['id']})")
                 record_arrived(run, snap, task, attempt, added)
             else:
                 where = (f"session {s.sid} {s.status}/{s.state}" if s
@@ -2477,34 +2630,59 @@ def transcript_usage(path):
                  ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
+def transcript_texts(path):
+    """The text of each assistant message in a transcript, oldest first. A message spans several records."""
+    texts = {}
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if record.get("type") == "assistant" and isinstance(message, dict) and isinstance(message.get("content"), list):
+                for block in message["content"]:
+                    if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                        texts.setdefault(message.get("id"), []).append(block["text"])
+    return ["\n".join(parts) for parts in texts.values()]
+
+
 def find_tokens(run, tid, sid, row):
-    """(out, in, cache-read, cache-write), or the reason there is none. Every session of a task shares its
-    worktree, so they share one transcript folder; the id prefix tells them apart."""
-    cwd = os.path.abspath(task_worktree(run, tid))
+    """(out, in, cache-read, cache-write), or the reason there is none."""
+    path, why = find_transcript(run, task_worktree(run, tid), sid, row)
+    return transcript_usage(path) if path else why
+
+
+def find_transcript(run, worktree, sid, row):
+    """(path of the session's transcript, None), or (None, the reason there is none). Every session of a task
+    shares its worktree, so they share one transcript folder; the id prefix tells them apart."""
+    cwd = os.path.abspath(worktree)
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     folder = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
     row = row or {}
     ids = [str(i) for i in dict.fromkeys(filter(None, (row.get("sessionId"), row.get("id"), sid)))
            if re.fullmatch(r"[0-9A-Za-z-]+", str(i))]
     if not ids:
-        return "no session id recorded"
+        return None, "no session id recorded"
     for prefix in ids:
         found = glob.glob(os.path.join(glob.escape(folder), glob.escape(prefix) + "*.jsonl"))
         if len(found) > 1:
-            return "the session id matches several transcripts"
+            return None, "the session id matches several transcripts"
         if found:
-            return transcript_usage(found[0])
+            return found[0], None
     # The worktree's folder has no transcript. A full session id (a UUID) may be filed under another folder.
     for prefix in ids:
         if UUID.fullmatch(prefix):
             elsewhere = glob.glob(os.path.join(glob.escape(base), "projects", "*", glob.escape(prefix) + ".jsonl"))
             if len(elsewhere) > 1:
-                return f"session id {prefix} matches several transcripts under {os.path.join(base, 'projects')}"
+                return None, f"session id {prefix} matches several transcripts under {os.path.join(base, 'projects')}"
             if elsewhere:
-                return transcript_usage(elsewhere[0])
+                return elsewhere[0], None
     if not os.path.isdir(folder):
-        return f"transcript folder {folder} not found"
-    return f"no transcript {ids[0]}*.jsonl in {folder}"
+        return None, f"transcript folder {folder} not found"
+    return None, f"no transcript {ids[0]}*.jsonl in {folder}"
 
 
 def stop_live(run, tid, attempt, branch):
@@ -2825,8 +3003,13 @@ def cmd_status(run, args):
         last = result_label(rows[-1]) if rows else None
         checkpoint = last_checkpoint(rows)
         attempt = meta.get("attempt")
+        verifier = pending_verifier(task, rows)
         if meta.get("abandoned"):
             failed.append((tid, task["title"], meta.get("abandoned"), attempt, last, checkpoint))
+        elif verifier:
+            in_flight.append((tid, task["title"], verifier.get("name"), verifier.get("model"), attempt,
+                              meta.get("started_at"), last, f"verifier {verifier.get('name')} has filed no result; "
+                              "run.py record checks it"))
         elif unclosed(task):
             closing.append((tid, task["title"], meta.get("verdict"), attempt, last))
         elif arrived(task, rows):
@@ -2907,7 +3090,7 @@ def build_parser():
     p.add_argument("--result", type=int, help="worker result id (default: the latest for the current attempt)")
     p.add_argument("--model")
     p.add_argument("--effort")
-    p.add_argument("--again", action="store_true", help="allow a new verifier after a verify-blocked verdict")
+    p.add_argument("--again", action="store_true", help="start a new verifier after a verify-blocked verdict or a no-verdict line")
     p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("record", help="read the queue and print one line per event")

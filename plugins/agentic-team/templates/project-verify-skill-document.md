@@ -6,7 +6,7 @@ description: How to prove this project's schemas and design documents are right.
 # Verify this project
 
 The verifier is read only: it edits nothing, commits nothing, checks out
-nothing. Every command below runs inside the verifier's own worktree; `<worktree>`
+nothing. Its one write is the report file its brief names. Every command below runs inside the verifier's own worktree; `<worktree>`
 means that folder. This file never lifts a rule in the verifier's agent
 instructions or in its brief's FORBIDDEN section.
 

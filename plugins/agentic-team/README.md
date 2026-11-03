@@ -145,18 +145,34 @@ writes session data under `~/.claude`, so run
 either needs the operator's agreement. Before it files its report, whatever the
 status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
 `ISSUES` or `BLOCKED`), so `Head` is always set and the worktree is clean. It
-files its report with `tg result add`. The report names the `Branch`, the
+writes its report to a file with the Write tool and files it with
+`tg result add --body-file`, so no report text reaches a shell command, where a
+project's guard could refuse it for a word. The report names the `Branch`, the
 `Head` commit SHA, and the `Worktree` path. The Manager never messages a
 worker.
 
 `run.py record` finds the result, one line per event. A session that ends with
-no result is filed as `DIED` and retried; a complete report in `claude logs`
-is filed as the worker's own. A session stuck on a permission prompt is
+no result is filed as `DIED` and retried; a complete report in its report
+file, its transcript or `claude logs` is filed as the worker's own. A session stuck on a permission prompt is
 stopped and filed as `BLOCKED`; the row holds what it waited for, its model,
 and the last lines of `claude logs`, read before the stop. The `stuck` hint
 names a pinned model id only when the session ran on one. Attempt 3 is the
 last (`launch` refuses a fourth): when it fails, `run.py abandon` marks the task abandoned. Its
 worktree stays, and the report lists it for the operator to remove.
+
+A verifier with no result gets the same search, once its turn is over. That
+means state `stopped`, `done` or `failed`, or state `blocked` with no
+`waitingFor`, and a status other than `busy`. A row in another state with no
+`busy` status, for example `idle/working` after the session said that it will
+check back, counts only after 30 minutes with no write to its transcript. A
+report needs a `Verdict:` line with a known level. `record` files it under the
+verifier's name, so it counts as the verifier's verdict, stops the session if
+it is still there, and prints `salvaged`, then `verified`. When nothing is
+found, every drain prints `no-verdict`, until a verdict or a new verifier
+comes. `run.py verify <id> --again` stops the old session and starts a new one.
+`run.py status` shows such a task under "In flight" with the verifier's name.
+`claude logs` works only while the session's process lives, and it shows the
+terminal screen. The report file and the transcript are the sources to rely on.
 
 The Manager then verifies the commit. For a `risk=low` task it reruns VERIFY
 inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
@@ -524,6 +540,7 @@ list:
 - Other build output and caches: `.cache/`, `dist/`, `build/`, `target/`,
   `.gradle/`.
 - Operating system files: `.DS_Store`, `Thumbs.db`.
+- Session report files: `.agentic-team/`.
 
 The list holds nothing that can be data: no `.env` file, log, database or
 editor file. `[merge] disposable` adds this project's patterns, for example
@@ -603,8 +620,8 @@ REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Pr
 base commit, how it was found, and the head commit.
 
 The worker runs `result add` from its own session, so its permission mode
-must allow that command. Pin `--db` and allow only `--body-file -` if you
-write a permission rule for it. In `auto` mode nothing enforces that rule: the
+must allow that command. Pin `--db` and allow only a `--body-file` path in the
+worktree's `.agentic-team/` folder if you write a permission rule for it. In `auto` mode nothing enforces that rule: the
 brief gives the worker the paths to `tg.py` and the database, and only the
 worker's instructions keep it to the one `result add` command.
 
@@ -618,19 +635,27 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
 
+A session's report file is not in this folder. It is
+`.agentic-team/report-<session>.md` in the session's own worktree, one file per
+session name, so a retry never reads the report of an earlier attempt. `run.py`
+adds `/.agentic-team/` to `info/exclude` in the common git dir, once, at each
+launch and verify, so git ignores the file in every worktree. It deletes a file
+of the same session name right before the session starts. The file goes with
+the worktree after the merge: `.agentic-team/` is on the disposable list.
+
 ## Results
 
-Worker reports live in the Taskgraph result log, not in files. Each result has
-a `kind`, a `status`, an `attempt`, and an author (`--by`):
+Worker reports live in the Taskgraph result log. A report file only carries the
+text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`--by`):
 
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
 | `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, as its last action | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
-| `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that the Manager copied from `claude logs` keeps the worker's own status. |
+| `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker stopped for a pause (a second row carries the WIP commit `Head:`), or a session `close` stopped. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
 | `task` | `PASS` | The Manager | The evidence for an adopted task (`Worktree: None`, `Ran: not stated (adopted)`). |
-| `verify` | `PASS`, `ISSUES`, `BLOCKED`, `DIED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. The Manager files its own verdict for a `risk=low` task, and `DIED` for a verifier that ended with no result. |
+| `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt. |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
@@ -666,6 +691,10 @@ skill. Metadata holds everything else, 24 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.10.2
+
+Version 0.10.3 changes how a session reports. The brief now says to write the report to `.agentic-team/report-<session>.md` in the worktree with the Write tool, and `result add` reads it with `--body-file`, so no report text reaches a shell command. `run.py` adds `/.agentic-team/` to `info/exclude`, and that line also ignores the run directory in the main checkout. A verifier with no result is recovered from its report file, its transcript or `claude logs`; if that fails, `record` prints `no-verdict`, which replaces `verifier-died`, and files no `DIED` row. A row with state `failed` now counts as ended, so a worker in that state goes from `unknown` to `died`. A brief that was rendered before the upgrade still works: its heredoc command is valid. No migration.
 
 ### Upgrading from 0.10.1
 
