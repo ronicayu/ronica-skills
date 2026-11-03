@@ -50,7 +50,7 @@ When one document serves two of these, write the body for the primary reader and
 - **Does a template set the shape?** If the document follows a template, check it against the template in pass 1. Flag template sections that do not fit the subject. Do not fill them with placeholders.
 - **How long may it be?** Set a length for the reader's job (Size in `references/drafting.md`). A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
 
-- **Is the text technical?** For documentation, a README, a PR description, a commit message or an issue, read `references/technical-docs.md`. For documentation or a README, pick the Diátaxis mode and apply its shape and heading rules in pass 1. For a PR, commit or issue, skip the mode. Its sentence rules go in passes 4 and 5. A design document or RFC is not technical text in this sense: it uses the pyramid and keeps its voice.
+- **Is the text technical?** For documentation, a README, a design document, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md`. For documentation or a README, pick the Diátaxis mode and apply its shape and heading rules in pass 1. For the others, skip the mode; a design document or RFC uses the pyramid. Its sentence rules, including STE, go in passes 4 and 5.
 
 ### 1. Structure
 
@@ -98,7 +98,7 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 ### 6. Strip the tells of machine-drafted prose
 
-Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check the five most common, then scan the rest: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5). On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 17, 21 and 24.
+Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check the five most common, then scan the rest: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5). On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 21 and 24.
 
 ## Reporting a review
 
@@ -114,7 +114,7 @@ Order findings by cost to the reader: structure, then ambiguity, then bloat, the
 
 - **Preserve voice.** Distinctive phrasing that works is not an error. Edit for comprehension, not toward a house average. For technical text, `references/technical-docs.md` takes precedence over voice.
 - **Cut repetition before meaning.** Compress in this order: duplication, long-windedness, examples, explanation. Flag any loss of content.
-- **Do not bullet by reflex.** Bullets lose *because*, *therefore* and *but*. Use them for parallel items and prose for an argument.
+- **Do not bullet by reflex.** Bullets lose *because*, *therefore* and *but*. Use them for parallel items and prose for an argument. A table needs two or more comparable columns.
 - **Invent nothing.** Editing adds no facts, figures, citations or claims.
 - **Keep the doc's own terms.** Renaming a concept mid-edit splits it.
 - **House style wins.** A project `CLAUDE.md`, style guide or established convention overrides these defaults. Check for one first.

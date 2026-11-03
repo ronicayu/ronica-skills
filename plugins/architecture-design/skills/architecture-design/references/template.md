@@ -165,7 +165,7 @@ Rel(engine, dep, "calls")
 
 ## Runtime view
 
-<!-- CORE. The happy path of each main flow, plus at least three failure modes. For each failure: detection, recovery (retry, compensate, alert) and user-visible impact.
+<!-- CORE. The happy path of each main flow, plus its failure modes (the review checklist sets the minimum). For each failure: detection, recovery (retry, compensate, alert) and user-visible impact.
 Failure modes to choose from: store unreachable; downstream timeout against permanent failure; partial commit or orphaned write; message lag or redelivery; resource exhaustion (thread or connection pools, concurrency limits, throttling, quotas). -->
 
 ### Scenario 1: {name} (happy path)

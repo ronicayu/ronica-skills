@@ -2,7 +2,7 @@
 
 Barbara Minto's method for structuring thought, condensed for editing use. Read this when a draft's opening, order, or grouping is in doubt.
 
-Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Diagnostic questions](#diagnostic-questions) · [Worked example](#worked-example) · [Limits](#limits)
+Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Worked example](#worked-example) · [Limits](#limits)
 
 ## Why a pyramid
 
@@ -105,18 +105,6 @@ Make the pyramid visible so the reader can enter at any depth:
 - Introduce a group by saying how many and what kind — *three reasons* — then keep them together and in the promised order.
 - Use numbering for sequence and dependency; plain bullets for genuinely unordered sets.
 - Close a long section by restating what it established, and pick that thread up at the start of the next.
-
-## Diagnostic questions
-
-Run these against any draft:
-
-1. What single sentence is this document the answer to? Is it in the first paragraph?
-2. Read the headings alone. Do they tell the story? Do any name a category rather than a message?
-3. For each section: which question raised above does it answer? If none, why is it here?
-4. For each group: same kind of thing? MECE? Which of the three orders?
-5. If every support is true, does the parent follow — with nothing left over and nothing missing?
-6. Does the introduction contain anything the reader might dispute? Move it into the body.
-7. Is any group larger than five items, or reliant on a deductive chain longer than four steps?
 
 ## Worked example
 

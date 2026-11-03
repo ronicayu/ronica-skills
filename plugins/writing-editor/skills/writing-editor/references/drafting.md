@@ -18,7 +18,7 @@ This stage is about the reader and the outcome, not the document. Settle these a
 - **The readers.** Real roles. "Stakeholders" is not an audience. What they already know decides what you leave out.
 - **The change.** What differs after reading: a decision, an approval, a belief, an action. "Informed" is not enough. Informed enough to do what?
 - **What the reader is doing.** Use pass 0 of `SKILL.md`. Record the shape it picks.
-- **Technical?** For documentation or a README, apply the technical bullet of pass 0 now and pick the Diátaxis mode. An RFC is a design document and has no mode. For a tutorial, how-to or reference page, the heading forms and shape in `technical-docs.md` override message headings.
+- **Technical?** For documentation or a README, apply the technical bullet of pass 0 now and pick the Diátaxis mode. A design document or RFC has no mode, but its sentence rules apply. For a tutorial, how-to or reference page, the heading forms and shape in `technical-docs.md` override message headings.
 - **Scanning or following.** This sets granularity and is separate from shape. A scanning reader needs short paragraphs, visible counts and a heading every few points. A following reader needs *because*, *therefore* and *but*, which exist only in multi-sentence paragraphs. Name which sections are which now. Retrofitting granularity means rewriting.
 - **Constraints and house style.** Format, deadline, a `CLAUDE.md`, a style guide, a document template or the convention of neighbouring documents. These override every default here.
 - **Size.** Agree a target length now. It sets heading depth. Two pages supports two levels and three or four sections. Twenty pages supports four levels.
@@ -125,10 +125,7 @@ Set `Draft stage: DRAFT COMPLETE`. Then run passes 2 to 6 of `SKILL.md` on the d
 
 - **Drafting during stage 3.** Prose in the outline stage means the gate did not hold. When you want to draft, make the outline more specific instead.
 - **A governing thought that is a topic.** "X readiness" or "an overview of Z" cannot be wrong, so it cannot be useful.
-- **Category headings surviving the interview.** "Background" and "Analysis" look like a document is supposed to look.
 - **Skipping sources because the user seems to know it all.** Stage 4 then asserts what nobody can trace.
 - **Copying the last document's structure.** The template answers a question this reader may not ask.
-- **Nine supports under one heading.** Group them and find the summaries. That is the analytical work.
 - **Outline and file drifting apart.** Write each resolved answer into the skeleton at once.
-- **Headings that cannot be cited.** Sentence-length headings leave cross-references unphraseable, then wrong.
 - **Granularity by habit.** One idea per line costs the connectives. Dense paragraphs lose a scanning reader.

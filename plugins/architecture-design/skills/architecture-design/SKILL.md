@@ -73,7 +73,7 @@ A key decision is written in the section it shapes, not in a separate list. It h
 - **Revisit when**: the measurable condition that reopens it. A date is not a condition.
 - **ADR**: a link, or none.
 
-The "Decisions inside this design" table is an index: one row and a section link per decision. It never restates the reasoning. Where it repeats a status or a name, it must match the body.
+The "Decisions inside this design" table is an index: one row and a section link per decision. It never restates the reasoning.
 
 ## Split out an ADR
 
@@ -83,5 +83,4 @@ Write a separate ADR when a decision is contested, hard to reverse, or shared wi
 
 - **Invent nothing in the document.** No figures, owners, failure modes or alternatives the sources do not give. Mark gaps as gaps. In a review you may raise risks, alternatives and simpler designs, labelled as your challenge; never present them as the document's facts.
 - **Keep the project's terms and template.** House style wins over this skill's defaults.
-- **Depth to review, not to build.** Build detail goes in companion documents, linked from a one-line summary.
 - **History stays in its sections.** The review record and the decisions table are history by design. The rest of the body states the current design.
