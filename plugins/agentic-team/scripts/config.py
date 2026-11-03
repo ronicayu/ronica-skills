@@ -48,6 +48,24 @@ LOCAL = ".agentic-team.local.toml"
 TODO = "TODO"
 TIERS = ("mechanical", "implementation", "judgement", "verifier")
 
+# Ignored paths that run.py may delete with a merged worktree: dependencies, environments, caches, build output
+# and operating-system files that a command rebuilds. Nothing that can be data (an .env file, logs, a database).
+# [merge] disposable adds patterns; an entry "!<pattern>" there turns off one of these.
+DISPOSABLE_DEFAULT = (
+    # dependencies
+    "node_modules/", "bower_components/", ".pnpm-store/",
+    # Python environments, caches and build output
+    ".venv/", "venv/", ".tox/", ".nox/", "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/", ".mypy_cache/",
+    ".ruff_cache/", ".hypothesis/", ".coverage", ".coverage.*", "htmlcov/", "*.egg-info/", ".eggs/",
+    # JavaScript caches and build output
+    ".next/", "next-env.d.ts", ".nuxt/", ".svelte-kit/", ".turbo/", ".parcel-cache/", ".eslintcache",
+    "*.tsbuildinfo", "coverage/",
+    # other build output and caches
+    ".cache/", "dist/", "build/", "target/", ".gradle/",
+    # operating system files
+    ".DS_Store", "Thumbs.db",
+)
+
 
 def system_timezone():
     try:
@@ -65,6 +83,7 @@ def system_timezone():
 # validation, defaults, and `show` all read this table; add new keys here.
 # A default of None means "unset"; callables are evaluated at load time.
 # A type "choice:a,b" holds one of the listed strings.
+# A type "patterns" is a list of path patterns; pattern_problems checks each one.
 SCHEMA = {
     "taskgraph": {"project": ("str", "")},
     "constraints": {"forbidden": ("list", [])},
@@ -92,6 +111,7 @@ SCHEMA = {
         "base": ("str", ""),
         "method": ("choice:merge,squash,rebase", "merge"),
         "remove_worktrees": ("bool", True),
+        "disposable": ("patterns", []),
     },
     "verify": {"kind": ("choice:code,schema,design-doc", "code")},
     "notifications": {"skill": ("str", "")},
@@ -101,6 +121,7 @@ TYPE_NAMES = {
     "str": "a string",
     "nonempty": "a non-empty string",
     "list": "a list of strings",
+    "patterns": "a list of path patterns",
     "posint": "a positive integer",
     "bool": "true or false",
     "timezone": "an IANA time zone name",
@@ -263,6 +284,8 @@ def type_ok(kind, value):
         return isinstance(value, str) and bool(value.strip())
     if kind == "list":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "patterns":
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "bool":
@@ -276,6 +299,20 @@ def type_ok(kind, value):
     if kind == "overrides":
         return isinstance(value, dict) and all(normalize_model(v) == v for v in value.values())
     raise ValueError(kind)
+
+
+def pattern_problems(dotted, patterns):
+    """Problems in a list of disposable path patterns. A pattern names files or folders; an entry "!<pattern>"
+    turns off one pattern of DISPOSABLE_DEFAULT."""
+    found = []
+    for pattern in patterns:
+        name = pattern[1:] if pattern.startswith("!") else pattern
+        if pattern != pattern.strip() or not name.strip("/") or set(name) <= set("*?/"):
+            found.append(f"{dotted}: {json.dumps(pattern)} is not a usable pattern; name files or folders, "
+                         f'for example "*.sqlite-journal" or "generated/"')
+        elif pattern.startswith("!") and name not in DISPOSABLE_DEFAULT:
+            found.append(f"{dotted}: {json.dumps(pattern)} turns off nothing: {json.dumps(name)} is not a default pattern")
+    return found
 
 
 def problems(config):
@@ -298,6 +335,8 @@ def problems(config):
                     ZoneInfo(value)
                 except (ValueError, ZoneInfoNotFoundError):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
+            if kind == "patterns":
+                found += pattern_problems(dotted, value)
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")

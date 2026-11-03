@@ -2,7 +2,7 @@
 
 Each test builds a temporary git repository as the root with a bare origin.git
 beside it, a temporary Taskgraph database, a temporary HOME, the real tg.py from
-plugins/taskgraph, and fakes first on PATH: `claude`, `gh`, and `glab`. Each fake
+plugins/taskgraph, and fakes first on PATH: `claude`, `gh`, `glab`, and `docker`. Each fake
 logs every call and answers from files the test writes. Nothing here starts a
 real Claude session or reaches a real code host.
 """
@@ -130,6 +130,38 @@ sys.stderr.write(value.get("stderr", ""))
 sys.exit(value.get("exit", 0))
 '''
 
+# The fake docker logs argv to $FAKE_DOCKER_LOG and answers from the JSON object in the file $FAKE_DOCKER:
+# "containers" (docker inspect objects), "ghosts" (ids that ps lists and inspect no longer finds), and "fail"
+# ("ps" or "inspect": that command prints "stderr" and exits 1). No file: no containers.
+FAKE_DOCKER = r'''#!/usr/bin/env python3
+import json, os, sys
+
+argv = sys.argv[1:]
+log = os.environ.get("FAKE_DOCKER_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(json.dumps(argv) + "\n")
+path = os.environ.get("FAKE_DOCKER")
+state = json.load(open(path)) if path and os.path.isfile(path) else {}
+containers = state.get("containers") or []
+command = argv[0] if argv else ""
+if command and command == state.get("fail"):
+    sys.stderr.write((state.get("stderr") or "boom") + "\n")
+    sys.exit(1)
+if argv == ["ps", "-a", "-q", "--no-trunc"]:
+    sys.stdout.write("".join(c["Id"] + "\n" for c in containers) + "".join(g + "\n" for g in state.get("ghosts") or []))
+elif command == "inspect":
+    known = {c["Id"]: c for c in containers}
+    sys.stdout.write(json.dumps([known[i] for i in argv[1:] if i in known]) + "\n")
+    missing = [i for i in argv[1:] if i not in known]
+    if missing:
+        sys.stderr.write("".join("error: no such object: %s\n" % i for i in missing))
+        sys.exit(1)
+else:
+    sys.stderr.write("fake docker: no answer for %s\n" % json.dumps(argv))
+    sys.exit(1)
+'''
+
 CHECKPOINT = "2026-10-26 10:00 SGT — completed: a; next: b; blocker: none"
 SHA_A = "a" * 40
 
@@ -179,7 +211,7 @@ class Base(unittest.TestCase):
         self.origin = os.path.join(self.dir, "origin.git")
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True)
         self.git("remote", "add", "origin", self.origin)
-        for name, text in (("claude", FAKE_CLAUDE), ("gh", FAKE_HOST), ("glab", FAKE_HOST)):
+        for name, text in (("claude", FAKE_CLAUDE), ("gh", FAKE_HOST), ("glab", FAKE_HOST), ("docker", FAKE_DOCKER)):
             fake = os.path.join(self.bin, name)
             with open(fake, "w") as fh:
                 fh.write(text)
@@ -195,6 +227,7 @@ class Base(unittest.TestCase):
             "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
             "FAKE_CLAUDE_LOG": self.log, "FAKE_CLAUDE_AGENTS": self.agents_file,
             "FAKE_CLAUDE_LOGS_DIR": self.logs, "FAKE_CLAUDE_RM": self.rm_file,
+            "FAKE_DOCKER": os.path.join(self.dir, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(self.dir, "docker.log"),
             "FAKE_GH": os.path.join(self.dir, "gh.json"), "FAKE_GH_LOG": os.path.join(self.dir, "gh.log"),
             "FAKE_GLAB": os.path.join(self.dir, "glab.json"), "FAKE_GLAB_LOG": os.path.join(self.dir, "glab.log"),
         })
@@ -292,6 +325,36 @@ class Base(unittest.TestCase):
     def agents(self, *rows):
         with open(self.agents_file, "w") as fh:
             json.dump(list(rows), fh)
+
+    def docker(self, *containers, ghosts=(), fail=None, stderr="boom"):
+        """What the fake docker answers: `containers` (from container()) for `ps` and `inspect`; `ghosts`, ids that
+        ps lists and inspect no longer finds; `fail` = "ps" or "inspect" makes that command print `stderr` and
+        exit 1."""
+        with open(os.path.join(self.dir, "docker.json"), "w") as fh:
+            json.dump({"containers": list(containers), "ghosts": list(ghosts), "fail": fail, "stderr": stderr}, fh)
+
+    @staticmethod
+    def container(cid, name, state="running", mounts=(), compose=None):
+        """One `docker inspect` object with the fields run.py reads."""
+        return {"Id": cid, "Name": "/" + name, "State": {"Status": state},
+                "Mounts": [{"Type": "bind", "Source": source, "Destination": "/data"} for source in mounts],
+                "Config": {"Labels": {"com.docker.compose.project.working_dir": compose} if compose else {}}}
+
+    def docker_calls(self):
+        path = os.path.join(self.dir, "docker.log")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    @staticmethod
+    def touch(root, *names):
+        """Write one line to each file, given as a /-separated path under root; make its folders."""
+        for name in names:
+            path = os.path.join(root, *name.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("x\n")
 
     def calls(self, command=None):
         if not os.path.isfile(self.log):
@@ -2699,6 +2762,7 @@ class RunTest(Base):
         bare = os.path.join(self.dir, "claude-only")
         os.makedirs(bare)
         os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
+        os.symlink(os.path.join(self.bin, "docker"), os.path.join(bare, "docker"))
         env = dict(self.env, PATH=bare + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
         self.assertIsNone(shutil.which("gh", path=env["PATH"]))
         self.assertIsNone(shutil.which("glab", path=env["PATH"]))
@@ -3694,17 +3758,226 @@ class RunTest(Base):
         self.assertEqual(self.meta(task)["cleanup_kept"], {})
 
     def test_76_the_removed_line_counts_the_ignored_files_it_took_with_the_folder(self):
-        self.commit_file(".gitignore", "*.log\nbuild/\n")
+        self.commit_file(".gitignore", "*.pyc\nbuild/\n")
         task = self.merged_task()
         wt = self.worktree("task-1")
         for n in range(6):
-            with open(os.path.join(wt, f"f{n}.log"), "w") as fh:
+            with open(os.path.join(wt, f"f{n}.pyc"), "w") as fh:
                 fh.write("x\n")
         self.agents()
         events = self.events("merged", str(task))
         self.assertEqual(self.one(events, "removed")["detail"],
                          f"worktree task-1 (merged at {self.short()}) (ignored files removed: 6: "
-                         "f0.log, f1.log, f2.log, f3.log, f4.log, ...)")
+                         "f0.pyc, f1.pyc, f2.pyc, f3.pyc, f4.pyc, ...)")
+
+    # --- 0.10.2: ignored data and Docker containers keep a merged worktree
+
+    def test_98_ignored_data_keeps_the_worktree_and_its_sessions(self):
+        self.commit_file(".gitignore", "infra/.data/\nnode_modules/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.touch(wt, "infra/.data/redis/dump.rdb", "node_modules/a/index.js")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.agents(self.finished("task-1"))  # its claude rm would delete the folder with the data
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: ignored files that may be data: infra/.data/"])
+        self.assertEqual(self.named(events, "removed"), [])
+        self.assertEqual(self.calls("rm"), [])
+        self.assertTrue(os.path.isfile(os.path.join(wt, "infra", ".data", "redis", "dump.rdb")))
+        self.assertIn("worktree-task-1", self.worktree_state()[1])
+        self.assertEqual(self.meta(task)["cleanup_kept"], {"task-1": "ignored files that may be data: infra/.data/"})
+        self.no_force()
+        shutil.rmtree(os.path.join(wt, "infra", ".data"))  # the operator saved what they needed
+        events = self.events("record")
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"]])
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(self.meta(task)["cleanup_kept"], {})
+
+    def test_98_only_regenerable_ignored_paths_go_with_the_folder(self):
+        self.commit_file(".gitignore", "node_modules/\n.venv/\n__pycache__/\n*.pyc\n.DS_Store\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.touch(wt, "node_modules/a/index.js", ".venv/bin/python", "src/__pycache__/m.cpython-311.pyc",
+                   "src/.DS_Store", "pkg/sub/node_modules/b.js")
+        self.agents(self.finished("task-1"))
+        self.rows_only("sess-task-1-1")
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed") if e["session"] is None],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 5: .venv/, node_modules/, "
+                          "pkg/sub/node_modules/, src/.DS_Store, src/__pycache__/)"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.worktree_state(), (1, "", []))
+
+    def test_98_a_disposable_pattern_in_the_config_lets_ignored_data_go(self):
+        self.commit_file(".gitignore", "infra/.data/\n*.sqlite\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.touch(wt, "infra/.data/redis/dump.rdb", "db/dev.sqlite")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: ignored files that may be data: db/dev.sqlite, infra/.data/"])
+        self.assertTrue(os.path.isdir(wt))
+        self.write_config('[merge]\ndisposable = ["infra/.data/", "*.sqlite"]\n')
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 2: db/dev.sqlite, infra/.data/)"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_98_a_bang_pattern_turns_a_default_off(self):
+        self.write_config('[merge]\ndisposable = ["!node_modules/"]\n')
+        self.commit_file(".gitignore", "node_modules/\n__pycache__/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.touch(wt, "node_modules/a/index.js", "src/__pycache__/m.pyc")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: ignored files that may be data: node_modules/"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_98_each_folder_on_an_ignored_path_is_matched(self):
+        self.commit_file(".gitignore", ".data/\n.venv/\n")
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.touch(wt, "apps/api/.hypothesis/examples/x", "apps/api/.data/pg/base", "my app/.venv/bin/python")
+        with open(os.path.join(wt, "apps", "api", ".hypothesis", ".gitignore"), "w") as fh:
+            fh.write("*\n")  # the tool ignores its own folder, so git names the paths in it
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: ignored files that may be data: apps/api/.data/"])
+        shutil.rmtree(os.path.join(wt, "apps", "api", ".data"))
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 3: "
+                          "apps/api/.hypothesis/.gitignore, apps/api/.hypothesis/examples/, my app/.venv/)"])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_98_the_disposable_matcher(self):
+        import run as runner
+        defaults = list(runner.DISPOSABLE_DEFAULT)
+        for path, expected in (("node_modules/", True), ("pkg/sub/node_modules/", True), ("src/__pycache__/", True),
+                               ("src/a.pyc", True), (".DS_Store", True), ("src/.DS_Store", True), ("dist/", True),
+                               ("apps/api/.hypothesis/.gitignore", True), ("my app/.venv/", True),
+                               ("apps/web/next-env.d.ts", True), ("pkg.egg-info/", True), (".coverage.1234", True),
+                               ("infra/.data/", False), (".env", False), ("apps/api/.env", False), ("a.log", False),
+                               ("build", False), ("db/dev.sqlite", False)):
+            self.assertEqual(runner.disposable(path, defaults), expected, path)
+        for path, patterns, expected in (("infra/.data/", ["infra/.data/"], True),
+                                         ("x/infra/.data/", ["infra/.data/"], False),
+                                         ("apps/api/generated/", ["apps/*/generated/"], True),
+                                         ("cache/x.db", ["cache/"], True),
+                                         ("cache", ["cache/"], False),
+                                         ("data.sqlite", ["*.sqlite"], True),
+                                         ("Data.SQLITE", ["*.sqlite"], False),
+                                         ("a/b/c.txt", ["/a/b/"], True),
+                                         ("node_modules/", [], False)):
+            self.assertEqual(runner.disposable(path, patterns), expected, (path, patterns))
+        self.assertEqual(runner.unquoted('"my app/.venv/"'), "my app/.venv/")
+        self.assertEqual(runner.unquoted("a.log"), "a.log")
+        self.assertEqual(runner.disposable_patterns({"merge": {"disposable": ["!node_modules/", "*.sqlite"]}}),
+                         [p for p in defaults if p != "node_modules/"] + ["*.sqlite"])
+        self.assertEqual(runner.disposable_patterns({"merge": {"disposable": []}}), defaults)
+
+    def test_98_a_container_that_mounts_a_path_in_the_folder_keeps_it(self):
+        task = self.merged_task(self.entry(1, 1), self.entry(1, kind="verify"))
+        wt, verifier = self.worktree("task-1"), self.worktree("verify-1-1")
+        self.docker(self.container("c1", "vmt-redis", mounts=[os.path.join(wt, "infra", ".data", "redis")]),
+                    self.container("c2", "web", mounts=[verifier]))
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))  # their claude rm would delete the folders
+        events = self.events("merged", str(task))
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "kept")), [
+            "task-1: used by docker: container vmt-redis (running) mounts infra/.data/redis",
+            "verify-1-1: used by docker: container web (running) mounts the folder"])
+        self.assertEqual(self.named(events, "removed"), [])
+        self.assertEqual(self.calls("rm"), [])
+        self.assertEqual(self.worktree_state()[2], ["task-1", "verify-1-1"])
+        self.assertEqual(self.docker_calls(), [["ps", "-a", "-q", "--no-trunc"], ["inspect", "c1", "c2"]])  # once
+
+    def test_98_a_compose_project_started_from_the_folder_keeps_it(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.docker(self.container("c1", "vmt-postgres", mounts=["/var/lib/docker/volumes/pg/_data"],
+                                   compose=os.path.join(wt, "infra")))
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: used by docker: container vmt-postgres (running) was started by docker compose from infra"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_98_a_stopped_container_keeps_the_folder_too(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        self.docker(*(self.container(f"c{n}", f"s{n}", state="exited", mounts=[os.path.join(wt, name)])
+                      for n, name in enumerate("abcd", 1)))
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: used by docker: container s1 (exited) mounts a, container s2 (exited) mounts b, "
+                          "container s3 (exited) mounts c, and 1 more"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_98_containers_outside_the_folder_do_not_keep_it(self):
+        task = self.merged_task()
+        self.worktree("task-1")
+        self.worktree("verify-1-1")
+        sibling = os.path.join(self.root, ".claude", "worktrees", "task-10", "data")
+        self.docker(self.container("c1", "app", mounts=[self.root]),  # the main checkout, a folder above
+                    self.container("c2", "other", mounts=[sibling]),  # task-10 starts with task-1 but is not in it
+                    self.container("c3", "pg", state="exited", mounts=["/var/lib/docker/volumes/pg/_data"]),
+                    self.container("c4", "stack", compose=self.root),
+                    ghosts=["gone1"])  # removed after ps: inspect exits 1 and still lists the others
+        self.agents()
+        events = self.events("merged", str(task))
+        short = self.short()
+        self.assertEqual(sorted(e["detail"] for e in self.named(events, "removed")),
+                         [f"worktree task-1 (merged at {short})", f"worktree verify-1-1 (merged at {short})"])
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.docker_calls(),
+                         [["ps", "-a", "-q", "--no-trunc"], ["inspect", "c1", "c2", "c3", "c4", "gone1"]])
+
+    def test_98_docker_on_path_that_does_not_answer_keeps_every_folder(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        daemon = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        self.docker(fail="ps", stderr=daemon)
+        self.agents(self.finished("task-1"))
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         [f"task-1: docker did not answer (docker ps: {daemon}); start Docker and run run.py record again"])
+        self.assertEqual(self.calls("rm"), [])
+        self.assertTrue(os.path.isdir(wt))
+        self.docker(self.container("c1", "app", mounts=["/elsewhere"]), fail="inspect", stderr="error during connect: EOF")
+        events = self.events("record")
+        self.assertEqual([e["detail"] for e in self.named(events, "kept")],
+                         ["task-1: docker did not answer (docker inspect: error during connect: EOF); "
+                          "start Docker and run run.py record again"])
+        self.assertTrue(os.path.isdir(wt))
+        self.docker()
+        events = self.events("record")
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual(self.calls("rm"), [["rm", "sess-task-1-1"]])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_98_without_docker_the_container_check_is_skipped(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        bare = os.path.join(self.dir, "bare")  # git, python and claude only: no docker
+        os.makedirs(bare)
+        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        os.symlink(sys.executable, os.path.join(bare, "python3"))
+        os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
+        self.docker(fail="ps")  # it would keep the folder if run.py called it
+        self.agents()
+        out = self.run_cmd("merged", str(task), pre=["--json"], env=dict(self.env, PATH=bare))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.named(json.loads(out.stdout), "removed")), 1)
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(self.docker_calls(), [])
 
     # --- merge.remove_worktrees = false
 

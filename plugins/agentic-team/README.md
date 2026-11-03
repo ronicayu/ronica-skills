@@ -183,20 +183,41 @@ works in two steps.
    clean and pushed. `claude rm` refuses work that is on no remote, so the
    script passes `--discard-unpushed` only for a commit that
    `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
-   recorded merged head (`pushed`).
+   recorded merged head (`pushed`). `claude rm` deletes the folder with its
+   ignored files, so `run.py` skips every session whose folder fails the
+   container, `git status` or ignored-file check of step 2. Step 2 then names
+   the reason.
 2. It then removes every folder of the task that is still there: `task-<id>`,
    an old `task-<id>-<n>`, and `verify-<id>-<n>[-<k>]`. This covers a task that
    0.6.0 started, a folder whose lock owner has no row, and a row `claude rm`
    refused. It reads `claude agents` again first. A folder is removed only when
-   all three checks hold:
+   all five checks hold, in this order:
    - No live session or process uses it: no live row has it as its working
      directory, and (when `lsof` is installed) no process has its working
      directory inside it. A lock must be Claude Code's own
      (`claude session <folder> (pid <N> ...)`) with a pid that has ended; any
      other lock reason, or a live pid, keeps the folder.
-   - `git status --porcelain` prints nothing. Ignored files such as
-     `node_modules` do not count and go with the folder (the `removed` line
-     counts them and names the first five); untracked or modified files do count.
+   - No Docker container uses it, running or stopped. A container's processes
+     run in the Docker VM, so `lsof` does not see them. When `docker` is on
+     `PATH`, `run.py` runs `docker ps -a -q --no-trunc` and one `docker inspect`
+     of all the containers, once per command, with a 20-second limit for each.
+     A container uses the folder when a mount source (`Mounts[].Source`) or its
+     Compose working directory (the label
+     `com.docker.compose.project.working_dir`) is the folder or a path in it. A
+     mount of a folder above it, such as the main checkout, does not count. When
+     `docker` is on `PATH` but fails or does not answer, every folder stays.
+     Without `docker` on `PATH`, `run.py` skips this check.
+   - `git status --porcelain` shows no change. Untracked or modified files keep
+     the folder.
+   - Every ignored path is disposable. `run.py` reads the ignored paths with
+     `git status --porcelain --ignored=matching`, which names each path where
+     its ignore rule matched (`src/__pycache__/`, `infra/.data/`). The folder
+     goes only when each path, or a folder on its path, matches the disposable
+     list: the defaults (see [Disposable patterns](#disposable-patterns)) plus
+     `[merge] disposable`. Any other ignored path may be data, such as a
+     database folder that a container uses, an `.env` file or logs, and keeps
+     the folder. The `removed` line counts the ignored paths that went with the
+     folder and names the first five.
    - Its `HEAD` commit is merged. `local` mode: it is in the local branch the
      task merges into (the `target` meta, else `merge.base`, else the branch the
      main checkout is on; a detached checkout counts as nothing merged). After a
@@ -215,7 +236,10 @@ works in two steps.
 
 A folder that fails a check stays, with one `kept` line that names the check:
 `still running`, `process <pid> (<command>) uses it`, `locked (<reason>)`,
-`uncommitted changes (<files>)`, `commit <short> is not merged`, or `pushed head
+`used by docker: container <name> (<state>) mounts <path>` (or `... was started
+by docker compose from <path>`), `docker did not answer (<why>); start Docker
+and run run.py record again`, `uncommitted changes (<files>)`, `ignored files
+that may be data: <paths>`, `commit <short> is not merged`, or `pushed head
 <short> is not in this clone; fetch <remote>/<branch>`. If git refuses the removal (for example for a worktree with a
 submodule), the folder and its lock stay and the `kept` line quotes git's first
 line; `run.py` does not retry with force. `run.py` never deletes a file and
@@ -228,6 +252,18 @@ the last one (stored in the task's `cleanup_kept` meta); the merge and
 `run.py merged` always print it. Set `merge.remove_worktrees = false` to keep everything: `run.py`
 then removes no session and no worktree, and prints `kept <folder>:
 merge.remove_worktrees is false` once, at the merge.
+
+What the operator does with a `kept` line about data:
+
+- `ignored files that may be data: <paths>`: look at each path. If the project
+  rebuilds it with a command (a cache or build output), add a pattern for it to
+  `[merge] disposable`. If it is data, copy what you need out of the folder,
+  then delete those paths. The next `run.py record` removes the folder.
+- `used by docker: ...`: stop and remove those containers (for a Compose
+  stack, `docker compose down` in the folder that the line names), or start the
+  stack again from the main checkout, which recreates its containers there.
+  Then run `run.py record`.
+- `docker did not answer`: start Docker, then run `run.py record`.
 
 A question only the operator can answer is a Taskgraph `decision` node that
 `--blocks` the tasks it holds back. Blocked tasks leave `ready` by themselves,
@@ -417,7 +453,7 @@ marks a value someone still has to fill in. Never put credentials or secrets
 in either file.
 
 Model values are either a model id (`"opus"`) or a table
-(`{ model = "sonnet", effort = "high" }`). The config has 7 sections and 19 keys.
+(`{ model = "sonnet", effort = "high" }`). The config has 7 sections and 20 keys.
 
 ### `[taskgraph]`
 
@@ -469,7 +505,47 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `remote` | string | `"origin"` | The git remote the host is reached through. |
 | `base` | string | `""` | The branch requests target. `""` means the host's default branch, asked once per `run.py` command. A task launched with `--base <branch>` targets that branch instead (meta `target`). |
 | `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
-| `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no live session, clean tree, merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
+| `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no session, process or container uses them, a clean tree whose ignored files are all disposable, a merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
+| `disposable` | list of patterns | `[]` | Ignored paths that `run.py` may delete with a merged worktree, added to the default list. An entry `"!<pattern>"` turns off one default pattern. See [Disposable patterns](#disposable-patterns). |
+
+#### Disposable patterns
+
+After a merge, `run.py` deletes a worktree's ignored files only when each one
+is disposable: the project rebuilds it with a command. Any other ignored file
+keeps the worktree (see the cleanup section under Task lifecycle). The default
+list:
+
+- Dependencies: `node_modules/`, `bower_components/`, `.pnpm-store/`.
+- Python: `.venv/`, `venv/`, `.tox/`, `.nox/`, `__pycache__/`, `*.pyc`,
+  `*.pyo`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.hypothesis/`,
+  `.coverage`, `.coverage.*`, `htmlcov/`, `*.egg-info/`, `.eggs/`.
+- JavaScript: `.next/`, `next-env.d.ts`, `.nuxt/`, `.svelte-kit/`, `.turbo/`,
+  `.parcel-cache/`, `.eslintcache`, `*.tsbuildinfo`, `coverage/`.
+- Other build output and caches: `.cache/`, `dist/`, `build/`, `target/`,
+  `.gradle/`.
+- Operating system files: `.DS_Store`, `Thumbs.db`.
+
+The list holds nothing that can be data: no `.env` file, log, database or
+editor file. `[merge] disposable` adds this project's patterns, for example
+`disposable = [".sdk-wheels/", "*.sqlite-journal"]`. An entry `"!<pattern>"`
+turns off that default pattern, for example `"!build/"` when `build/` holds
+files that no command rebuilds. A list in `.agentic-team.local.toml` replaces
+the tracked list.
+
+The pattern rules are close to `.gitignore`:
+
+- A pattern that ends in `/` matches only a folder.
+- A pattern with no other `/` matches a name at any depth: `node_modules/`
+  matches `pkg/sub/node_modules/`.
+- A pattern with a `/` inside matches the path from the worktree root:
+  `apps/*/generated/`. A leading `/` changes nothing.
+- `*` matches any characters, `/` included; `?` matches one character;
+  `[abc]` matches one of a set. Case counts.
+- A path is disposable when it, or a folder on its path, matches a pattern.
+
+`config.py check` reports a pattern that is empty, has spaces at an end, or
+holds only `*`, `?` and `/`, and an entry `"!<pattern>"` that names no default
+pattern.
 
 ### `[verify]`
 
@@ -590,6 +666,10 @@ skill. Metadata holds everything else, 24 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.10.1
+
+Version 0.10.2 keeps a merged worktree that may hold data. `run.py` removes a folder only when every ignored path in it is on the disposable list (the defaults plus the new `[merge] disposable` key), and when no Docker container, running or stopped, uses a path in it. A folder that 0.10.1 would have removed may now stay with a `kept` line, for example for an ignored `.env` file or a project cache such as `.sdk-wheels/`. Add the project's regenerable paths to `[merge] disposable`; the next `run.py record` removes those folders. With `docker` on `PATH` and Docker stopped, every merged folder stays until Docker answers. No migration.
 
 ### Upgrading from 0.10.0
 

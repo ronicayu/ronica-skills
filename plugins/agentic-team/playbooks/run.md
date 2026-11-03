@@ -47,7 +47,7 @@ verification, a decision, a plan change) and before every report.
      a subagent, inside the result's `Worktree:`. Check that
      `git -C <worktree> rev-parse HEAD` equals its `Head:`, spot-check the
      output, and delete only the files your rerun created
-     (`git -C <worktree> status --porcelain`). Then run
+     (`git -C <worktree> status --porcelain`). Never start the project's shared services (a fixed container name or port, a shared database) from the worktree. Then run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --ran "<what you ran and saw>"`.
    - `risk=high`, or a check that is expensive or needs judgement: run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" verify <id>`; a later `verified` line means `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>`.
@@ -81,7 +81,7 @@ verification, a decision, a plan change) and before every report.
      says a branch is merged and `record` cannot see it, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
      After a `kept` line about untracked files, delete only files your rerun
-     created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. Rerun a `close` that stopped.
+     created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete those files, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
 4. **Launch.** For each task `record` lists under `ready`, while `slots` has
    room: skip a task whose work needs a person or an outside party (a drafting
    task may prepare a request but never send it). Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
