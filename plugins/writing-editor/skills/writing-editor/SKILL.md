@@ -16,24 +16,24 @@ Depth on structure, order and openings is in `references/pyramid-principle.md`.
 ## Pick a mode before touching anything
 
 - **Review**: the user wants feedback, comments or a critique. Report findings. Leave the text alone.
-- **Rewrite**: the user wants it edited, tightened, fixed or simplified. Change the text, then say what changed and why. If pass 1 finds the shape, order or scope wrong, stop before any line edit. Report the structural finding and offer a rebuild through `references/drafting.md`, from the outline gate. Tightening a wrong structure makes it harder to rebuild.
+- **Rewrite**: the user wants it edited, tightened, fixed or simplified. Change the text, then say what changed and why. If the fix would move or delete sections, stop before any line edit. Report the structural finding and offer a rebuild through `references/drafting.md`, from the outline gate. Tightening a wrong structure makes it harder to rebuild.
 - **Draft**: the user is writing something new. See Draft mode.
 
 If the request is ambiguous, ask when the text is long. Otherwise review text the user wrote (their voice is theirs to keep) and rewrite text you wrote. Anything you drafted gets a rewrite pass before you hand it over.
 
 ## Draft mode
 
-- **A casual message** (a quick reply, a chat message, an informal note): write it, then run the editing passes on it.
-- **An email or a document** (email, report, design doc, ADR, assessment, proposal, memo, brief, spec, anything over about a page, or an existing draft that needs rebuilding from its structure up): read `references/drafting.md` and follow it. An email runs the same stages at small size.
-- **The gate, for everything except a casual message:** write no body prose until the user approves the outline. If the user says to skip the outline, say once what it costs ("the structure gets decided in the drafting, and rework lands on you"), then comply.
-- A file that opens with a `DRAFT BRIEF` block is a draft in progress. Read `references/drafting.md` and resume from its `Status:` line.
-- Draft mode reuses pass 0 (reader and job), the pyramid reference, and passes 2 to 6 on the result. It does not restate them.
+- **A very casual message** (a quick reply, a chat message, an informal note): write it, then run the editing passes on it.
+- **Any other email:** the stages at small size, without opening `references/drafting.md`. Confirm purpose, reader and sources in one message. Show the outline in the reply: the subject line, the governing thought, and the supports in order. Write the email only after the user approves that outline.
+- **A document** (report, design doc, ADR, assessment, proposal, memo, brief, spec, anything over about a page, or an existing draft that needs rebuilding from its structure up): read `references/drafting.md` and follow it.
+- **The gate, for everything except a very casual message:** write no body prose until the user approves the outline. A request to "write the report" asks for the stages, not for a skipped outline. In a non-interactive session, ask the first questions and stop. If the user explicitly says to skip the outline, say once what it costs ("the structure gets decided in the drafting, and rework lands on you"), then comply.
+- A file that opens with a `DRAFT BRIEF` block is a draft in progress. Read `references/drafting.md` and resume from its `Draft stage:` line.
 
 ## The passes
 
 ### 0. Read it whole, and name the job
 
-Read the entire piece before changing a word. A local fix made blind to the ending is usually wrong. Then answer, out loud if the user is present:
+Read the entire piece before changing a word. A local fix made blind to the ending is usually wrong. Then answer, in one short block at the top of your reply:
 
 - **Who reads this, and what do they already know?**
 - **What should happen after they read it?** A decision, an approval, a change of belief, an action.
@@ -50,7 +50,7 @@ When one document serves two of these, write the body for the primary reader and
 - **Does a template set the shape?** If the document follows a template, check it against the template in pass 1. Flag template sections that do not fit the subject. Do not fill them with placeholders.
 - **How long may it be?** Set a length for the reader's job (Size in `references/drafting.md`). A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
 
-- **Is the text technical?** For documentation, a README, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md`. Pick the Diátaxis mode, apply its shape and heading rules in pass 1, and its sentence rules in passes 4 and 5.
+- **Is the text technical?** For documentation, a README, a PR description, a commit message or an issue, read `references/technical-docs.md`. For documentation or a README, pick the Diátaxis mode and apply its shape and heading rules in pass 1. For a PR, commit or issue, skip the mode. Its sentence rules go in passes 4 and 5. A design document or RFC is not technical text in this sense: it uses the pyramid and keeps its voice.
 
 ### 1. Structure
 
@@ -60,7 +60,7 @@ When one document serves two of these, write the body for the primary reader and
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
 - **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. If one case, or one piece of evidence, fits two items, they overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.
-- **The sum holds.** If every support is true, the top line follows. For a claim the document depends on, ask what could still make it false: the answer is a missing support, an unstated assumption, or a claim that overreaches.
+- **The sum holds.** If every support is true, the governing thought follows. For a claim the document depends on, ask what could still make it false: the answer is a missing support, an unstated assumption, or a claim that overreaches.
 - **Current final state.** The body states what is true now. It holds no review-round history, agent actions, intermediate corrections, prior counts, superseded wording, or account of how the document evolved, including which draft, run, agent or input each idea came from. Text whose job is the change (changelog, release notes, PR description, commit message, decision log, an ADR's status or history section) is exempt. History that must stay goes in its own section or a linked record.
 
 Fix this layer first. In review mode, say plainly that the structure needs reshaping before you give line notes.
@@ -73,7 +73,7 @@ Fix this layer first. In review mode, say plainly that the structure needs resha
 - **Each fact is stated once, and the copies agree.** Elsewhere, point to it instead of restating it. Where a summary, table, glossary or log repeats the body, check counts, lists, statuses and scopes against the body. Copies drift apart, and a line edit does not see it.
 - **Identifiers stay out of the argument.** Requirement, story, control and ticket IDs go in tables and traceability sections. An argued sentence carries at most one. If a sentence cannot be understood without a lookup, rewrite it in words.
 - **A higher section reads completely without a lower one.** Where a lower detail is load-bearing, state it once as a named constraint and point to its definition.
-- **Groups stay at three to five.** Nine items are nine things to hold. Two groups of four with named summaries are two.
+- **Groups stay at five or fewer.** Nine items are nine things to hold. Two groups of four with named summaries are two.
 - **Detail goes where the question arises**, not where it was discovered. Test each inline detail: does it answer a question the reader already had, or open a new one? A detail that opens a question the section never answers fails, even in a sentence at the right level. Parentheticals and inline expansions fail this most often, because they look like clarifications. Cut the detail to the named concept, or keep the name and point to where it is defined.
 
 ### 3. Claims: what the reader has to trust
@@ -98,7 +98,7 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 ### 6. Strip the tells of machine-drafted prose
 
-Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check each numbered tell. Start with the five most common: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5).
+Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check the five most common, then scan the rest: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5). On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 17, 21 and 24.
 
 ## Reporting a review
 

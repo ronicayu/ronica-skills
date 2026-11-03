@@ -1,6 +1,6 @@
 # Technical docs
 
-Extra rules for technical text. They apply to product and developer documentation (tutorials, how-tos, reference, explanation), READMEs, RFCs, PR descriptions, commit messages, and issues. They do not apply to other prose. There, the defaults in `SKILL.md` hold, including "preserve voice". For technical text, these rules take precedence over voice. Where this file and `line-editing-checklist.md` differ, this file wins for technical text.
+Extra rules for technical text. They apply to product and developer documentation (tutorials, how-tos, reference, explanation), READMEs, PR descriptions, commit messages, and issues. They do not apply to other prose. There, the defaults in `SKILL.md` hold, including "preserve voice". For technical text, these rules take precedence over voice. Where this file and `line-editing-checklist.md` differ, this file wins for technical text.
 
 Contents: [Pick the mode first](#pick-the-mode-first-diátaxis) · [Sentences to the reader](#sentences-to-the-reader-google-developer-style) · [One statement at a time](#one-statement-at-a-time-ste) · [No double readings](#no-double-readings-global-english) · [The codebase is the word list](#the-codebase-is-the-word-list) · [PRs, commits, and issues](#prs-commits-and-issues) · [Convention for issues, PRs, and commit message bodies](#convention-for-issues-prs-and-commit-message-bodies) · [Worked example](#worked-example)
 
@@ -32,7 +32,7 @@ Ask the two questions of a whole document or of one sentence. A sentence in the 
 
 Do not mix modes. No reference tables in a tutorial. No tutorial hand-holding in reference. No arguing in a how-to. Split the document and link the parts instead.
 
-**How the mode combines with the pyramid.** Pick the mode first. Explanation uses the pyramid: answer first, then the reasons. A how-to states the goal, then gives the steps in time order. A tutorial runs in time order, with a visible result for each step. Reference mirrors the structure of the thing it describes. Reports, proposals, and design docs are not Diátaxis docs. They use the pyramid alone. RFCs are design docs. Skip the mode step for them.
+**How the mode combines with the pyramid.** Pick the mode first. Explanation uses the pyramid: answer first, then the reasons. A how-to states the goal, then gives the steps in time order. A tutorial runs in time order, with a visible result for each step. Reference mirrors the structure of the thing it describes. Reports, proposals, and design docs are not Diátaxis docs. They use the pyramid alone, and this file does not apply to them. An RFC is a design doc under another name.
 
 ## Sentences to the reader (Google developer style)
 

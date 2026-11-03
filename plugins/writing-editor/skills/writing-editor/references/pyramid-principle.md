@@ -2,7 +2,7 @@
 
 Barbara Minto's method for structuring thought, condensed for editing use. Read this when a draft's opening, order, or grouping is in doubt.
 
-Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Diagnostic questions](#diagnostic-questions) · [Common failures](#common-failures) · [Worked example](#worked-example) · [Limits](#limits)
+Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Diagnostic questions](#diagnostic-questions) · [Worked example](#worked-example) · [Limits](#limits)
 
 ## Why a pyramid
 
@@ -24,7 +24,7 @@ If a group breaks rule 1, the argument does not actually support its claim. If i
 
 **Horizontal relationship — the group holds together.** Each group is either inductive or deductive, never a mix.
 
-**Group size.** Three to five ideas per group. If you have nine, they belong in two or three groups with their own summaries — and finding those summaries is the analytical work, not busywork.
+**Group size.** At most five ideas per group. Two real ideas are better than a padded third. If you have nine, they belong in two or three groups with their own summaries — and finding those summaries is the analytical work, not busywork.
 
 ## The introduction: SCQA
 
@@ -46,17 +46,7 @@ Everything the reader must accept before the answer belongs in the introduction.
 
 **Answer-first has one common exception.** A technical reader evaluating a design must be able to reach the conclusion independently, so a design document often runs problem → options → comparison → recommendation. That is still a pyramid; the governing thought is still stated early, in a summary, and the body earns it. For the document-type split (Diátaxis), see `technical-docs.md`.
 
-**An architecture presented for review follows the same rule at system scale.** The subject is the design. Its decisions are the key choices inside it, not a separate list to approve. Order it so the reviewer can test each choice against what it must achieve:
-
-1. **Context**: what the system is, who uses it, and its boundary, in one paragraph and one context diagram. State what the design is here, as orientation. Do not argue that it is right yet.
-2. **Problem, goals and constraints**: the problem without the solution; the quality goals, ranked; the constraints. The ranking is the tie-breaker every later trade-off appeals to.
-3. **Trade-offs**: for each pair of goals that conflict, the goal that wins and what is given up. "We balance X and Y" is not a trade-off.
-4. **The fundamental options**: the few top-level shapes considered, compared against the goals, and the one chosen.
-5. **The design, top-down**: structure, then runtime with its failure modes, then data, contracts, deployment, operations and security. Each key decision sits in the section it shapes, with its reason and the alternative it rejected.
-6. **Risks and open questions**, each with an owner. Put first the questions the design depends on, which block sign-off.
-7. **The review asks**, at the end.
-
-The decision log, requirement traceability, compliance mapping and glossary go in appendices for lookup. A reader who reads only the context, the goals, the trade-offs and the headings should know what the design is and why it has this shape. If the organisation has an architecture template (arc42 or a house template), it sets the section names. This order is the check that it is filled in to support a review.
+**An architecture presented for review follows the same rule at system scale.** The subject is the design, and its decisions are the key choices inside it. Order it so the reviewer can test each choice against what it must achieve: context as orientation, then the problem and ranked goals, then trade-offs and options, then the design top-down with each decision in the section it shapes, then risks, open questions and the review asks. Lookup material goes in appendices. If the organisation has an architecture template, it sets the section names and order.
 
 ## Grouping: inductive and deductive
 
@@ -92,7 +82,7 @@ A group is Mutually Exclusive and Collectively Exhaustive when each case belongs
 
 MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole.
 
-Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach a group size of three to five.
+Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach a group size.
 
 ## Summarize the message, not the category
 
@@ -127,17 +117,6 @@ Run these against any draft:
 5. If every support is true, does the parent follow — with nothing left over and nothing missing?
 6. Does the introduction contain anything the reader might dispute? Move it into the body.
 7. Is any group larger than five items, or reliant on a deductive chain longer than four steps?
-
-## Common failures
-
-- **Laundry list** — items in the order they occurred to the writer, joined by nothing.
-- **Category headings** — "Background", "Analysis", "Considerations" carrying no message.
-- **No question** — a document that reports activity instead of answering something.
-- **Buried answer** — the recommendation on page 6, after the reasoning.
-- **Mixed group** — reasons and risks and steps under one heading.
-- **Overreaching summary** — a top line the supports do not add up to.
-- **False MECE** — a structural split whose categories overlap, so evidence gets counted twice.
-- **Arguable introduction** — persuasion smuggled into the setup, so the reader is already resisting.
 
 ## Worked example
 

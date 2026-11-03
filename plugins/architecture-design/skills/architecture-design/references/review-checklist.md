@@ -10,7 +10,7 @@ The reviewers cannot judge the design until these are fixed.
 - [ ] Every outcome has a measure, a baseline and a target.
 - [ ] The quality goals are ranked.
 - [ ] The summary and context name no class, table, queue, field, state or ID. A low-level fact that the high-level design depends on is stated once as a named constraint, with a pointer to where it is defined.
-- [ ] Every design-shaping requirement is Committed, or marked Blocking. Every Blocking NFR is also an open question with an owner and a date.
+- [ ] Every design-shaping NFR is Committed, or marked Blocking. Every Blocking NFR is also an open question with an owner and a date.
 - [ ] The fundamental options include doing nothing, or say why that is not possible.
 - [ ] Every key decision names the alternative it rejected.
 - [ ] The runtime view covers at least three failure modes, each with detection, recovery and user-visible impact.
@@ -27,7 +27,7 @@ The design can be judged, but a reviewer will challenge these.
 - [ ] The options comparison uses the ranked goals as its columns.
 - [ ] Every design element traces to a requirement, goal, NFR or constraint. An element with none is flagged as proposed beyond the requirements, or removed.
 - [ ] Requirements say what and why, never how. A requirement that names a technology is a design decision, and is argued as one.
-- [ ] Every quality claim ("scalable", "fast", "secure", "resilient") has a number, a mechanism, or a pointer to where it is proven. Otherwise it is cut.
+- [ ] Every quality claim ("scalable", "fast", "secure", "resilient") has a number, a mechanism, or a pointer to where it is proven. Otherwise flag it.
 - [ ] Sections follow the design's dependencies: requirements and goals, then decisions, then the elements that rely on them. Each section descends one level of detail, and no section sends the reader back up.
 - [ ] Every element in a diagram has a responsibility entry. No element appears in a later section before the building block view introduces it.
 - [ ] Every boundary-crossing arrow has a trust entry.

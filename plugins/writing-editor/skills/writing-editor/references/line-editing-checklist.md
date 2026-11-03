@@ -43,8 +43,6 @@ A participle attaches to the subject that follows it:
 
 **Redundancy and implied words.** *Advance planning*, *end result*, *completely eliminate*, *future plans*, *currently ongoing*, *each and every*, *first and foremost*, *close proximity*, *actual fact*, *very unique*. One word survives.
 
-**Repeated ideas.** The same point restated in a heading, a table, and the paragraph beneath. Pick the one place the reader will look and delete the others. Duplicated content drifts apart on the next edit, and then the reader cannot tell which copy is current.
-
 **Buried lead.** A key idea surrounded by qualifications, provenance and asides gets missed. Give it its own sentence and its own line.
 
 **Excess evidence.** Three examples where one carries it. A caveat already implied by the sentence. A restatement after the point is clear. Stop when the reader is convinced.
@@ -101,7 +99,7 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 ## Language quality
 
-**Jargon.** Two kinds. Domain terms the audience shares are precise and belong. Terms borrowed to sound expert do not. Expand any domain abbreviation on first use — *Full Term (ABBR)*, then the abbreviation — since an unexpanded one is a forward reference to a glossary the reader must go find.
+**Jargon.** Two kinds. Domain terms the audience shares are precise and belong. Terms borrowed to sound expert do not.
 
 **Buzzwords.** *Leverage*, *synergy*, *holistic*, *robust*, *seamless*, *best-in-class*, *utilize*, *operationalize*, *going forward*, *at the end of the day*, *paradigm shift*. Each has a plain equivalent, and most are claims without evidence: *robust* and *seamless* need a number or a mechanism.
 
@@ -113,17 +111,11 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 **That overuse.** Delete *that* where the sentence reads cleanly without it (*we found that the queue drained* → *we found the queue drained*), but keep it where dropping it causes a momentary misreading. Distinguish restrictive *that* from non-restrictive *which*, and use *who* for people.
 
-**House style.** A project `CLAUDE.md`, a style guide, or the settled convention of the surrounding documents outranks every default here. Check first; consistency with neighbours beats local perfection.
-
 ## Audience awareness
-
-**Assumed knowledge.** List what the reader must already know to parse each paragraph. Anything on that list the audience lacks is either defined, cut, or moved behind a pointer.
 
 **Assumed agreement.** Writing that treats a contested position as settled loses a reader who does not share it. State the position, give the reason, and let the reader follow.
 
 **Respect.** Do not explain what the audience knows — it reads as condescension. Do not skip what they do not — it reads as showing off. Where a reader's decision or work is being criticised, address the substance and not the person.
-
-**Intent.** Return to the question the document must answer, and to what should happen after it is read. If a reader could finish it and still not know what to do, it has not done its job, however clean the prose.
 
 **Beauty without pretension.** Aim for prose that is a pleasure to read because it is clear, well-paced, and exactly weighted — not because it is decorated. When you notice your own phrasing being admired, cut it.
 
