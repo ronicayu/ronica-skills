@@ -1,0 +1,34 @@
+flowchart TD
+  READY([Ready task in Taskgraph]) --> LAUNCH{run.py launch}
+  LAUNCH -->|"exit 2: unscoped task,<br/>config problem, live session"| FIX[Fix it in Taskgraph<br/>or the config]
+  FIX --> LAUNCH
+  LAUNCH -->|"exit 3: STOP order"| HALT([Launch nothing])
+  LAUNCH -->|"brief saved,<br/>worker started"| FLIGHT[In flight]
+  FLIGHT --> RECORD{run.py record}
+  RECORD -->|"arrived PASS"| VERIFY{Verify: Manager rerun<br/>or run.py verify}
+  RECORD -->|"ISSUES: defects, or<br/>BLOCKED that evidence answers"| AGAIN[Fix round:<br/>next attempt]
+  RECORD -->|"ISSUES: ran out of time"| SPLIT[Split the work<br/>in Taskgraph]
+  RECORD -->|"BLOCKED: product call"| DECIDE[Decision node<br/>for the operator]
+  RECORD -->|"died"| RETRY{Attempt 3 failed?}
+  RETRY -->|"no"| AGAIN
+  RETRY -->|"yes: run.py abandon"| DECIDE
+  VERIFY --> CLOSE{run.py close}
+  CLOSE -->|"verify-failed"| AGAIN
+  CLOSE -->|"artifact- or test-verified:<br/>tokens, tg done"| MODE{merge.mode?}
+  MODE -->|"local"| MERGE{MERGE: line in<br/>standing orders?}
+  MODE -->|"pr"| PUB[close: push task-id,<br/>open the request]
+  PUB --> REC{record: request state}
+  REC -->|"clean + MERGE: line"| HOSTMERGE[gh/glab merge]
+  HOSTMERGE --> DONE([Done])
+  REC -->|"behind"| CLOSE
+  REC -->|"blocked / pending"| REC
+  REC -->|"merged by someone"| DONE
+  REC -->|"closed, conflict"| DECIDE
+  RECORD -->|"verify_mode ci"| CI[verify: push, request, CI run]
+  CI --> RECORD
+  MERGE -->|"yes: merge,<br/>then claude rm"| DONE
+  MERGE -->|"no: ready to merge"| OPMERGE[Operator merges]
+  OPMERGE -->|"run.py merged,<br/>then claude rm"| DONE
+  AGAIN --> LAUNCH
+  SPLIT --> READY
+  DONE -->|"unblocks"| READY

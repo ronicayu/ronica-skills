@@ -1,0 +1,27 @@
+flowchart TD
+  OP([Operator])
+  M[Manager<br/>playbooks + principles]
+  TG[(Taskgraph<br/>plan, tasks, decisions, metadata, results)]
+  CFG[config.py<br/>reads .agentic-team.toml]
+  RUN[run.py<br/>launch, adopt, record, verify, close,<br/>merged, stop, abandon, status]
+  HOST[host.py<br/>GitHub via gh, GitLab via glab]
+  DIR[(.agentic-team/<br/>standing orders, briefs)]
+  W[Worker sessions<br/>one worktree per task, up to max_parallel]
+  V[Verifier session<br/>high-risk tasks only]
+
+  OP -->|"requests, standing orders"| M
+  M -->|"batched reports, decisions"| OP
+  M <-->|"plan, decisions"| TG
+  M -->|"check, get"| CFG
+  M -->|"standing orders"| DIR
+  M -->|"one command per step"| RUN
+  RUN <-->|"start, meta, results, done"| TG
+  CFG -->|"constraints, autonomy, models"| RUN
+  DIR -->|"standing orders"| RUN
+  RUN -->|"claude --bg with brief"| W
+  RUN -->|"claude --bg with brief"| V
+  W -->|"tg result add: PASS, ISSUES, BLOCKED"| TG
+  V -->|"tg result add: verdict"| TG
+  RUN -->|"one line per event"| M
+  RUN -->|"push, request, checks, merge"| HOST
+  HOST -->|"request and run state"| RUN

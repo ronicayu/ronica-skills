@@ -1,0 +1,45 @@
+# Agentic Team project config. Copy to .agentic-team.toml in the repository
+# root, or run /agentic-team:setup. Replace every "TODO". Omit a key to use
+# its default. Never put credentials or secrets here. Private or
+# machine-specific values go in .agentic-team.local.toml (gitignored); its
+# keys override these. Field reference: plugins/agentic-team/README.md.
+
+[taskgraph]
+project = "TODO"            # required; `tg projects` lists names
+
+[constraints]
+forbidden = ["TODO"]        # one item per rule; [] when none applies. They become FORBIDDEN in every brief.
+
+[autonomy]
+grant = ""                  # "" means no standing full-autonomy grant
+always_pause = []           # decisions that always need the operator
+
+[sessions]
+# max_parallel = 2
+# permission_mode = "auto"
+# timezone = "Asia/Singapore"
+# timezone_label = "SGT"
+
+[models]
+# mechanical = "haiku"
+# implementation = { model = "sonnet", effort = "high" }
+# judgement = "opus"
+# verifier = "opus"         # default: a different model from the worker's
+
+# [models.overrides]
+# "data migration" = { model = "opus", effort = "high" }   # use as a task's `tier`
+
+[notifications]
+# skill = "telegram-send:telegram-send"
+
+[merge]
+# mode = "local"            # "pr": close pushes the task branch and opens a pull/merge request; record merges it under a MERGE: line
+# host = "auto"             # "github" | "gitlab"; "auto" reads the remote URL. A self-managed GitLab needs "gitlab".
+# remote = "origin"
+# base = ""                 # "" = the host's default branch
+# method = "merge"          # "merge" | "squash" | "rebase" (GitLab: the project setting decides; "squash" adds squash=true)
+# remove_worktrees = true # false: keep every worktree and session of a merged task (run.py removes nothing)
+# disposable = []          # ignored paths that run.py may delete with a merged worktree, added to the defaults; "!build/" turns a default off (README: Disposable patterns)
+
+[verify]
+# kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta

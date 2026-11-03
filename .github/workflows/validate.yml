@@ -14,3 +14,20 @@ jobs:
 
       - name: Validate marketplace and plugin manifests
         run: ./scripts/validate.sh
+
+  evidence-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests, line chunker (no tree-sitter)
+        run: python -m unittest discover -s plugins/evidence-search/tests
+
+      - name: Unit tests, tree-sitter chunker
+        run: |
+          python -m pip install --quiet -r plugins/evidence-search/scripts/requirements.txt
+          python -m unittest discover -s plugins/evidence-search/tests

@@ -42,7 +42,33 @@ Three details that are easy to get wrong:
 ## Parameters the script exposes
 
 `chat_id`, `text`, `parse_mode`, `disable_notification`, `message_thread_id`,
-`link_preview_options`. It also calls `getUpdates` for `--chat-ids`.
+`link_preview_options`. It also calls `getUpdates` for `--chat-ids` and `--wait`.
+
+## Reading replies with getUpdates
+
+`--wait` polls `getUpdates` with three parameters: `offset` (the first update id you have not
+acknowledged), `timeout` (server-side long poll, capped at 50 seconds), and
+`allowed_updates=["message"]`.
+
+The offset is the part that bites:
+
+- Requesting an offset **acknowledges every update below it**. Advance it past everything you have
+  seen, matching or not, or the same updates come back forever and the loop never progresses.
+- The script takes its baseline *before* sending, with `offset=-1` — which returns only the most recent
+  update — and then polls from `last + 1`. Messages are additionally filtered on `date` against the
+  send time, which covers the case of a bot with no history at all, where there is no id to skip past.
+- Updates Telegram cannot deliver are dropped after 24 hours.
+
+Two ways it fails, both `409`:
+
+- `terminated by other getUpdates request` — something else is polling the same bot. Telegram permits
+  exactly one consumer, so a second `--wait`, or an unrelated bot process, breaks both.
+- a registered webhook disables `getUpdates` entirely. `getWebhookInfo` shows it; `deleteWebhook`
+  clears it.
+
+A bot does not receive its own messages, so the sent message never comes back as a reply. Note that
+`edited_message` is a separate update type and is not matched — an edit to an earlier message does not
+count as a reply.
 
 ## Parameters it does not
 

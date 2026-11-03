@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "ronica-skills",
-  "description": "Writing, documentation, notification, and planning skills for Claude Code and OpenClaw.",
+  "description": "Writing, documentation, notification, planning, evidence search, and developer-tool plugins for Claude Code.",
   "version": "1.0.0",
   "owner": {
     "name": "Yu Rong",
@@ -12,32 +12,10 @@
   },
   "plugins": [
     {
-      "name": "write-doc",
-      "source": "write-doc",
-      "description": "Author a document through four gated stages — purpose and audience, sources, a stress-tested Minto pyramid outline, then content. Body prose is never written before the outline is signed off.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Yu Rong",
-        "url": "https://github.com/ronicayu"
-      },
-      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/write-doc",
-      "repository": "https://github.com/ronicayu/ronica-skills",
-      "license": "MIT",
-      "keywords": [
-        "writing",
-        "authoring",
-        "outline",
-        "pyramid-principle",
-        "mece",
-        "documentation"
-      ],
-      "category": "documentation"
-    },
-    {
       "name": "writing-editor",
       "source": "writing-editor",
-      "description": "Edit and review prose as an expert editor: argument structure via Barbara Minto's Pyramid Principle, then cognitive load, claim sourcing, line quality, and the tells of machine-drafted text.",
-      "version": "1.0.0",
+      "description": "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use whenever the user asks to write or draft a report, proposal, memo, brief, email or other document, even if they only say 'write the report': drafting runs through gated stages (purpose, sources, an approved outline, then content). Also use to review, edit, proofread, tighten or critique any text, including text you drafted.",
+      "version": "2.4.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -51,9 +29,56 @@
         "review",
         "pyramid-principle",
         "prose",
+        "documentation",
+        "technical-writing",
+        "diataxis",
+        "style-guide",
+        "drafting"
+      ],
+      "category": "documentation"
+    },
+    {
+      "name": "architecture-design",
+      "source": "architecture-design",
+      "description": "Draft and review architecture design documents and ADRs for a design review. Critiques the design itself (right problem first, then each goal traced to its mechanism, contradictions, structure, failure behaviour, decisions, and whether the team can run it), and checks completeness: problem and outcomes, ranked goals, trade-offs, options including doing nothing, decisions with rejected alternatives, migration and the review record. Ships a design document template, an ADR template and a reviewer checklist. Works best with writing-editor for the prose.",
+      "version": "0.4.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/architecture-design",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "architecture",
+        "design-review",
+        "adr",
+        "rfc",
+        "arc42",
+        "c4",
         "documentation"
       ],
       "category": "documentation"
+    },
+    {
+      "name": "agentic-team",
+      "source": "agentic-team",
+      "description": "A project manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results.",
+      "version": "0.10.3",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/agentic-team",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "agents",
+        "project-management",
+        "taskgraph",
+        "delegation"
+      ],
+      "category": "productivity"
     },
     {
       "name": "telegram-send",
@@ -81,7 +106,7 @@
       "name": "taskgraph",
       "source": "taskgraph",
       "description": "Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, add or update tasks and dependencies, or see the plan as a picture — \"work backwards from shipping v1\", \"what's next\", \"what's blocking X\". Agents operate the CLI; humans view the graph.",
-      "version": "1.13.0",
+      "version": "1.14.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -98,6 +123,36 @@
         "sqlite"
       ],
       "category": "productivity"
+    },
+    {
+      "name": "evidence-search",
+      "source": "evidence-search",
+      "description": "Find and cite evidence in a project's code, requirements, design documents and configuration at low token cost: tiered search, bounded grep, mandatory cross-checks for enumeration and absence questions, and an evidence ledger of path:line citations. Ships an optional local index: SQLite FTS5 BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for documents, related-chunk search, a repo map, and linked facts: entry points (MDBs, HTTP, scheduled jobs, startup classes), queues from WebLogic descriptors, IBM MQ calls, properties and documentation tables, SQL tables, URLs, JSP includes, config keys and project ids. Works on code that does not compile.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/evidence-search",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "bm25",
+        "code-search",
+        "evidence",
+        "fts5",
+        "grep",
+        "ibm-mq",
+        "jms",
+        "legacy-code",
+        "requirements",
+        "retrieval",
+        "sqlite",
+        "system-design",
+        "tree-sitter",
+        "weblogic"
+      ],
+      "category": "development"
     }
   ]
 }
