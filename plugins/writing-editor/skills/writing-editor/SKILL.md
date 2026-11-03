@@ -1,6 +1,6 @@
 ---
 name: writing-editor
-description: "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use to review, edit, proofread, tighten or critique any text, including text you drafted, and to draft a new document through gated stages: purpose, sources, an approved outline, then content."
+description: "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use whenever the user asks to write or draft a report, proposal, memo, brief, email or other document, even if they only say 'write the report': drafting runs through gated stages (purpose, sources, an approved outline, then content). Also use to review, edit, proofread, tighten or critique any text, including text you drafted."
 ---
 
 # Writing Editor
