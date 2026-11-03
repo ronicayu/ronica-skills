@@ -67,14 +67,20 @@ Fix this layer first. In review mode, say plainly that the structure needs resha
 
 ### 2. Load: what the reader has to hold
 
+The reader learns each name and fact once:
+
 - **Nothing is used before it is defined.**
 - **Expand every domain abbreviation on first use:** *Full Term (ABBR)*, then the abbreviation alone. Industry-universal terms are exempt. If it would belong in a glossary, expand it.
 - **One name per concept**, in the document and its neighbours. A synonym for variety reads as a second thing.
-- **Each fact is stated once, and the copies agree.** Elsewhere, point to it instead of restating it. Where a summary, table, glossary or log repeats the body, check counts, lists, statuses and scopes against the body. Copies drift apart, and a line edit does not see it.
+- **Each fact is stated once, and the copies agree.** Elsewhere, point to it instead of restating it. Where a summary, table, glossary or log repeats the body, check counts, lists, statuses and scopes against the body. Copies drift apart, and a line edit does not see it. A percentage keeps one base wherever it appears, so a share of requests never turns into a share of users.
 - **Identifiers stay out of the argument.** Requirement, story, control and ticket IDs go in tables and traceability sections. An argued sentence carries at most one. If a sentence cannot be understood without a lookup, rewrite it in words.
-- **A higher section reads completely without a lower one.** Where a lower detail is load-bearing, state it once as a named constraint and point to its definition.
+
+Everything sits where the reader needs it, in groups they can hold:
+
+- **A section reads completely without the sections below or after it.** Where it depends on one, state the result once and point to the detail: "Rollback is ruled out; section 5 gives the test that failed." "See section 5" alone makes the reader carry an open question. Drop a pointer the reader needs nothing from.
 - **Groups stay at five or fewer.** Nine items are nine things to hold. Two groups of four with named summaries are two.
 - **Detail goes where the question arises**, not where it was discovered. Test each inline detail: does it answer a question the reader already had, or open a new one? A detail that opens a question the section never answers fails, even in a sentence at the right level. Parentheticals and inline expansions fail this most often, because they look like clarifications. Cut the detail to the named concept, or keep the name and point to where it is defined.
+- **An idea the reader must carry gets one concrete case where it first appears.** A term or a claim the rest of the document builds on is easier to hold once the reader has seen one instance, such as a real input or a measured number. Where none exists, name the gap; do not supply one. Cut extra examples, never the only one.
 
 ### 3. Claims: what the reader has to trust
 
@@ -113,7 +119,7 @@ Order findings by cost to the reader: structure, then ambiguity, then bloat, the
 ## Restraint
 
 - **Preserve voice.** Distinctive phrasing that works is not an error. Edit for comprehension, not toward a house average. For technical text, `references/technical-docs.md` takes precedence over voice.
-- **Cut repetition before meaning.** Compress in this order: duplication, long-windedness, examples, explanation. Flag any loss of content.
+- **Cut repetition before meaning.** Compress in this order: duplication, long-windedness, examples (never the only one; see pass 2), explanation. Flag any loss of content.
 - **Do not bullet by reflex.** Bullets lose *because*, *therefore* and *but*. Use them for parallel items and prose for an argument. A table needs two or more comparable columns.
 - **Invent nothing.** Editing adds no facts, figures, citations or claims.
 - **Keep the doc's own terms.** Renaming a concept mid-edit splits it.

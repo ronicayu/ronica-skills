@@ -115,6 +115,7 @@ Write section by section in document order, setting `Draft stage: DRAFTING <sect
 
 - **Open each section with its skeleton message,** as a sentence. If expanding it needs a fact you lack, stop and ask. Do not improvise.
 - **Delete each `<!-- msg: -->` comment as you expand it.**
+- **A new term gets its one concrete case as you write it** (pass 2 of `SKILL.md`). If you have no case, ask rather than invent one.
 - **State the conclusion before the reasoning, and name the answer the reader will have thought of.** Where an obvious alternative exists, name it and dispose of it first. Otherwise the reader argues with their own answer and stops listening.
 - **A list shows a count. Prose shows a relation.** Use a list when the items are parallel and their number is the point. Use prose when the point is how they differ, because a list asserts they are equivalent. One idea per line makes a document scannable and doubles its length. Do it where the reader scans, not where they follow.
 - **Use a diagram** where it carries the content better than prose: interactions, flows, sequences, state. Follow the house format.
