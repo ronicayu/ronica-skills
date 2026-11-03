@@ -57,6 +57,7 @@ Each finding cites both places.
 
 ## Step 3: Check the structure
 
+- **Responsibilities are MECE.** Each requirement, and each step of a main flow, has exactly one accountable part. Several parts taking part in a flow is not overlap. Two parts accountable for the same thing overlap; a requirement with no accountable part is a gap.
 - **Ownership.** Each piece of data has one writer. Shared tables, or two parts writing the same record, are findings.
 - **Coupling.** Find synchronous call chains and cycles between parts. A chain of synchronous calls multiplies latency and failure; a cycle makes independent deployment impossible.
 - **Invariants and transactions.** For each business rule that must always hold, find where it is enforced. A rule that spans two transaction boundaries needs a saga, a reservation or a reconciliation, and the design must say which.
@@ -79,8 +80,7 @@ For each main flow, and for each dependency it calls:
 ## Step 5: Check the decisions
 
 - **Under the ranking, is the chosen option best?** Re-run the comparison with the stated goal order. A choice that only wins under a different order is a finding.
-- **Was the rejected option real?** A strawman alternative means the real choice was not made in the document.
-- **Is there a simpler design** that meets the top goals? Name it as your challenge.
+- **Were the options real and complete?** Each is a distinct shape. Two variants of one shape, or a strawman, mean the real choice was not made in the document. A realistic shape left out, including a simpler design that meets the top goals, is your challenge.
 - **What is hard to reverse?** Data models, public contracts, vendor commitments and identity schemes. Each needs stronger evidence than a reversible choice.
 
 ## Step 6: Can this team deliver and run it?

@@ -2,7 +2,7 @@
 
 Barbara Minto's method for structuring thought, condensed for editing use. Read this when a draft's opening, order, or grouping is in doubt.
 
-Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Diagnostic questions](#diagnostic-questions) · [Common failures](#common-failures) · [Worked example](#worked-example) · [Limits](#limits)
+Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Diagnostic questions](#diagnostic-questions) · [Common failures](#common-failures) · [Worked example](#worked-example) · [Limits](#limits)
 
 ## Why a pyramid
 
@@ -76,10 +76,23 @@ Deduction is easier to write and harder to read: it forces the reader through ev
 Pick one of three, and be consistent inside the group:
 
 - **Time order** — cause then effect, first step then next. Use when the group describes a process or a sequence.
-- **Structural order** — the parts of a whole: by system, region, function, org unit. Requires the division to be **MECE** — Mutually Exclusive (no overlap) and Collectively Exhaustive (nothing missing). Overlap means double-counting; a gap means the conclusion does not follow.
+- **Structural order** — the parts of a whole: by system, region, function, org unit. Requires the division to be **MECE** (see below).
 - **Degree order** — ranked by size, severity, or importance, most significant first. Use when the items share a property held in differing amounts.
 
 If you cannot name which order a group uses, it has none, and the reader will feel it as a list.
+
+## MECE: no overlap, no gap
+
+A group is Mutually Exclusive and Collectively Exhaustive when each case belongs to one item and the items together cover the parent. Overlap counts the same evidence twice. A gap means the parent does not follow from its supports.
+
+- **Name the whole first.** "All customers", "every failure after the claim", "the three ways a send can stop". Without a stated whole, nothing can be exhaustive.
+- **Split on one criterion.** "Retail, corporate and overseas customers" mixes type with place, so an overseas retail customer fits twice. Pick one criterion, and use the other at the level below: retail and corporate, each split into domestic and overseas. To test, place a real case: if it fits two items, the criterion is mixed or a boundary is undefined.
+- **Test for gaps.** Ask what could make the parent false while every item is true. That answer names what is missing: an item, a boundary or an unstated assumption.
+- **Treat "Other" as a signal.** A small, named remainder is honest. A large one means the split is wrong.
+
+MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole.
+
+Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach a group size of three to five.
 
 ## Summarize the message, not the category
 
