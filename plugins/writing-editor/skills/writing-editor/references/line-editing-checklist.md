@@ -37,21 +37,19 @@ A participle attaches to the subject that follows it:
 
 ## Concision
 
-**Throat-clearing.** Openings that delay the sentence: *It should be noted that*, *It is important to understand that*, *As mentioned previously*, *In order to*, *The fact that*, *What we found was that*. Delete and start with the subject.
+**Throat-clearing.** Openings that delay the sentence: *It should be noted that*, *It is important to understand that*, *As mentioned previously*, *In order to*, *The fact that*, *What we found was that*, *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete and start with the subject.
 
 **Pretension.** Long words chosen for weight rather than precision — see the [swap tables](#swap-tables). The test is not word length but whether the shorter word means the same thing. It usually does; when it does not, keep the long one.
 
 **Redundancy and implied words.** *Advance planning*, *end result*, *completely eliminate*, *future plans*, *currently ongoing*, *each and every*, *first and foremost*, *close proximity*, *actual fact*, *very unique*. One word survives.
 
-**Repeated ideas.** The same point restated in a heading, a table, and the paragraph beneath. Pick the one place the reader will look and delete the others. Duplicated content drifts apart on the next edit, and then the reader cannot tell which copy is current.
-
 **Buried lead.** A key idea surrounded by qualifications, provenance and asides gets missed. Give it its own sentence and its own line.
 
 **Excess evidence.** Three examples where one carries it. A caveat already implied by the sentence. A restatement after the point is clear. Stop when the reader is convinced.
 
-**Hedging.** *Somewhat*, *fairly*, *arguably*, *it seems*, *in some sense*, *may potentially*, *tends to generally*. A hedge that qualifies a claim honestly is fine — *in most cases*, *under load above 200 TPS* — because it says which cases. A hedge that only lowers confidence weakens the writer without informing the reader. If the claim is uncertain, say what would settle it.
+**Hedging.** Hedge and hype in one sentence ("may potentially deliver significant improvements") fail twice. *Somewhat*, *fairly*, *arguably*, *it seems*, *in some sense*, *may potentially*, *tends to generally*. A hedge that qualifies a claim honestly is fine — *in most cases*, *under load above 200 TPS* — because it says which cases. A hedge that only lowers confidence weakens the writer without informing the reader. If the claim is uncertain, say what would settle it.
 
-**Filler intensifiers.** *Very*, *really*, *quite*, *actually*, *basically*, *essentially*, *truly*, *clearly*, *obviously*. Most add nothing; *clearly* and *obviously* often mark the spot where an argument is missing.
+**Filler intensifiers.** *Very*, *really*, *quite*, *actually*, *basically*, *essentially*, *truly*, *clearly*, *obviously*. An adverb propping up a weak verb ("significantly improves") wants the number or a stronger verb. Most add nothing; *clearly* and *obviously* often mark the spot where an argument is missing.
 
 **Nominalization.** A verb buried inside a noun drags a weak verb and a preposition along with it.
 
@@ -101,9 +99,9 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 ## Language quality
 
-**Jargon.** Two kinds. Domain terms the audience shares are precise and belong. Terms borrowed to sound expert do not. Expand any domain abbreviation on first use — *Full Term (ABBR)*, then the abbreviation — since an unexpanded one is a forward reference to a glossary the reader must go find.
+**Jargon.** Two kinds. Domain terms the audience shares are precise and belong. Terms borrowed to sound expert do not.
 
-**Buzzwords.** *Leverage*, *synergy*, *holistic*, *robust*, *seamless*, *best-in-class*, *utilize*, *operationalize*, *going forward*, *at the end of the day*, *paradigm shift*. Each has a plain equivalent, and most are claims without evidence: *robust* and *seamless* need a number or a mechanism.
+**Buzzwords.** *Leverage*, *synergy*, *holistic*, *robust*, *seamless*, *best-in-class*, *utilize*, *operationalize*, *going forward*, *at the end of the day*, *paradigm shift*. Each has a plain equivalent, and most are claims without evidence: *robust* and *seamless* need a number or a mechanism. Self-praise (*comprehensive*, *thorough*, *rigorous*, *carefully designed*, *best practice*) claims something about the work, not in it.
 
 **Clichés.** *Low-hanging fruit*, *move the needle*, *boil the ocean*, *the elephant in the room*, *a perfect storm*, *tip of the iceberg*. A dead metaphor makes the reader skim.
 
@@ -113,17 +111,11 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 **That overuse.** Delete *that* where the sentence reads cleanly without it (*we found that the queue drained* → *we found the queue drained*), but keep it where dropping it causes a momentary misreading. Distinguish restrictive *that* from non-restrictive *which*, and use *who* for people.
 
-**House style.** A project `CLAUDE.md`, a style guide, or the settled convention of the surrounding documents outranks every default here. Check first; consistency with neighbours beats local perfection.
-
 ## Audience awareness
-
-**Assumed knowledge.** List what the reader must already know to parse each paragraph. Anything on that list the audience lacks is either defined, cut, or moved behind a pointer.
 
 **Assumed agreement.** Writing that treats a contested position as settled loses a reader who does not share it. State the position, give the reason, and let the reader follow.
 
 **Respect.** Do not explain what the audience knows — it reads as condescension. Do not skip what they do not — it reads as showing off. Where a reader's decision or work is being criticised, address the substance and not the person.
-
-**Intent.** Return to the question the document must answer, and to what should happen after it is read. If a reader could finish it and still not know what to do, it has not done its job, however clean the prose.
 
 **Beauty without pretension.** Aim for prose that is a pleasure to read because it is clear, well-paced, and exactly weighted — not because it is decorated. When you notice your own phrasing being admired, cut it.
 
@@ -132,6 +124,8 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 None of these is a grammatical error, which is why the earlier passes leave them standing, and a machine reader would not care about any of them. A human notices them within two paragraphs, concludes that nobody actually wrote this, and discounts the content from there on. Run this pass last, and always on prose you drafted yourself.
 
 The numbers are stable IDs. Other skills cite them as *writing-editor tell N*. A removed tell leaves a gap, and a new tell takes the next free number.
+
+Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in `SKILL.md`), 13 (*Current final state* in `SKILL.md`), 14 (Hedging), 15 (Buzzwords), 16 and 27 (*Claims* in `SKILL.md`), 17 (Vary length), 18 (*Answer early* in `SKILL.md`), 26 (Filler intensifiers).
 
 ### The five most common, with examples
 
@@ -164,8 +158,6 @@ The numbers are stable IDs. Other skills cite them as *writing-editor tell N*. A
 
 ### The rest, one line each
 
-**6. Signposts that signal nothing.** *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete them; a point shows it matters by where it sits.
-
 **7. Sections padded to equal length.** An outline filled in rather than an argument written. Let the section that matters run longer, and delete the one that exists for symmetry.
 
 **8. A summary that adds nothing.** "In summary, the three factors above…" Keep a closing only when it states something new: the consequence, the decision, or who does what next.
@@ -174,21 +166,7 @@ The numbers are stable IDs. Other skills cite them as *writing-editor tell N*. A
 
 **10. Inline-header lists.** A bold label and a colon that restate the line: "**Performance:** Performance improved…". Write it as prose. A bold lead-in that ends in a period, names the item and is followed by new detail is fine.
 
-**11. Tables and bullets by reflex.** A table with one meaningful column, or a bulleted list of what was an argument. Lists for parallel items, tables for two or more comparable columns (see *Restraint* in `SKILL.md`).
-
 **12. Sweeping frames.** *In today's rapidly evolving landscape*, *As organizations increasingly…*, and closings about journeys, foundations, unlocking and empowering. Cut to the specific claim, or cut the sentence.
-
-**13. Revision narration.** *Updated after review*, *previously this said*, *now 115 lines (was 166)*, *as requested, I changed*. State the current fact and cut the history (see *Current final state* in `SKILL.md`).
-
-**14. Hedge and hype in one sentence.** "This may potentially deliver significant improvements." Say what changes, by how much, and how confident you are.
-
-**15. Self-praise about the document.** *Comprehensive*, *robust*, *thorough*, *carefully designed*, *rigorous*, *best practice*. These are claims about the work, not in it.
-
-**16. Faux precision.** "Approximately 40–60% faster" where nothing was measured. Give the basis, or the narrower range you can defend.
-
-**17. Uniform rhythm.** Every sentence fifteen to twenty words, every paragraph three sentences. The fix is under [Vary length](#flow-and-rhythm); the cause is prose assembled without a voice.
-
-**18. Restating the request.** "As requested, this document outlines…" Start with the answer.
 
 **19. Machine vocabulary.** *Delve*, *tapestry*, *pivotal*, *underscore*, *testament*, *intricate*, *garner*, *crucial*, *vibrant*, *interplay*, *landscape* used abstractly, *Additionally* to open a sentence. Use the plain word.
 
@@ -203,10 +181,6 @@ The numbers are stable IDs. Other skills cite them as *writing-editor tell N*. A
 **24. A colon as a connector.** A colon belongs before a list, an example or a definition. Mid-sentence, as a hinge between two clauses, it is a crutch. Make two sentences.
 
 **25. False ranges.** "From X to Y" where X and Y sit on no real scale. List the items.
-
-**26. An adverb propping up a weak verb.** "Runs quickly", "significantly improves". Give the number or the measured change, or find the verb that carries it.
-
-**27. Vague attribution.** *Experts believe*, *industry reports suggest*, *some argue*. Name the source or cut the claim.
 
 ## Swap tables
 

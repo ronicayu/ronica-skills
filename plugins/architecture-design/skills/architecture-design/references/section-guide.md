@@ -11,7 +11,7 @@ What a good section looks like, its most common failure, and a short example. Us
 ## Context
 
 **Good:** the highest level: purpose, users, the major parts and how they connect. A reader can stop here and know what the system is.
-**Failure:** low-level names in the opening sections: a table, a queue, a state such as `PENDING`, a requirement ID. Each one opens a question the section cannot answer. Name the concept instead ("each recipient is claimed before sending"), and point to the section that defines it.
+**Failure:** low-level names in the opening sections (see the review checklist). Name the concept instead ("each recipient is claimed before sending"), and point to the section that defines it.
 
 ## Problem and outcomes
 
@@ -61,7 +61,7 @@ What a good section looks like, its most common failure, and a short example. Us
 
 ## Runtime view
 
-**Good:** the happy path of each main flow, and at least three failure modes, each with detection, recovery and what the user sees.
+**Good:** the happy path of each main flow, and its failure modes, each with detection, recovery and what the user sees.
 **Failure:** only happy paths. Also: "we retry" with no limit and no terminal state.
 **Example:** "Downstream timeout: circuit opens after 5 failures in 30 s; requests queue; the user sees 'confirmation delayed'; an alert fires at 10 minutes."
 

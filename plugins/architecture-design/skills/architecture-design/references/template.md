@@ -165,7 +165,7 @@ Rel(engine, dep, "calls")
 
 ## Runtime view
 
-<!-- CORE. The happy path of each main flow, plus at least three failure modes. For each failure: detection, recovery (retry, compensate, alert) and user-visible impact.
+<!-- CORE. The happy path of each main flow, plus its failure modes (the review checklist sets the minimum). For each failure: detection, recovery (retry, compensate, alert) and user-visible impact.
 Failure modes to choose from: store unreachable; downstream timeout against permanent failure; partial commit or orphaned write; message lag or redelivery; resource exhaustion (thread or connection pools, concurrency limits, throttling, quotas). -->
 
 ### Scenario 1: {name} (happy path)
@@ -181,7 +181,7 @@ sequenceDiagram
 
 ### Failure modes
 
-<!-- One row per failure, at least three. Add a sequence diagram only where the recovery path is not obvious. -->
+<!-- One row per failure. Add a sequence diagram only where the recovery path is not obvious. -->
 
 | Failure | Detection | Recovery | User-visible impact |
 | --- | --- | --- | --- |
@@ -276,7 +276,7 @@ Unit, integration, end-to-end, performance and security verification: {scope, en
 
 ## Migration and cutover
 
-<!-- MANDATORY. CORE: strategy, rollback and decommission criteria. BUILD DETAIL: the data mapping.
+<!-- CORE, never removed: strategy, rollback and decommission criteria. BUILD DETAIL: the data mapping.
 Greenfield: replace this section with one paragraph that starts "Greenfield: no predecessor and no data to move." and cites the evidence. A bare "N/A" is not acceptable. If reference data is copied from an older system, that part is a migration. -->
 
 - **Strategy:** {big-bang, phased, parallel run or strangler, justified against the alternatives}
@@ -290,7 +290,7 @@ Greenfield: replace this section with one paragraph that starts "Greenfield: no 
 
 ## Decisions inside this design
 
-<!-- CORE. An index: one row per key decision, pointing to the section that argues it. Never restate the reasoning here. Status values are those of a key decision: Draft, Proposed, Accepted, Rejected, Withdrawn, Superseded. -->
+<!-- CORE. An index: one row per key decision, pointing to the section that argues it. Never restate the reasoning here. Status values are those of a key decision: Draft, Proposed, Accepted, Rejected, Withdrawn, Superseded. The document's own status list is shorter on purpose. -->
 
 | Decision | Section | ADR | Status |
 | --- | --- | --- | --- |

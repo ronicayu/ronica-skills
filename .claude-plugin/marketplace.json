@@ -14,8 +14,8 @@
     {
       "name": "writing-editor",
       "source": "writing-editor",
-      "description": "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use to review, edit, proofread, tighten or critique any text, including text you drafted, and to draft a new document through gated stages: purpose, sources, an approved outline, then content.",
-      "version": "2.3.0",
+      "description": "Write, review and edit prose as an expert editor: structure by Barbara Minto's Pyramid Principle, then reader load, sourcing, line quality and machine-drafted tells; technical docs, PRs and commits also get Diátaxis, Google style, STE and Global English. Use whenever the user asks to write or draft a report, proposal, memo, brief, email or other document, even if they only say 'write the report': drafting runs through gated stages (purpose, sources, an approved outline, then content). Also use to review, edit, proofread, tighten or critique any text, including text you drafted.",
+      "version": "2.4.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -41,7 +41,7 @@
       "name": "architecture-design",
       "source": "architecture-design",
       "description": "Draft and review architecture design documents and ADRs for a design review. Critiques the design itself (right problem first, then each goal traced to its mechanism, contradictions, structure, failure behaviour, decisions, and whether the team can run it), and checks completeness: problem and outcomes, ranked goals, trade-offs, options including doing nothing, decisions with rejected alternatives, migration and the review record. Ships a design document template, an ADR template and a reviewer checklist. Works best with writing-editor for the prose.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
