@@ -31,6 +31,11 @@ A participle attaches to the subject that follows it:
 
 **Half comparisons.** *Faster*, *more reliable*, *better* need a second term. Faster than what, measured how?
 
+**Numbers that do not compare.** Numbers the reader must compare share a unit, a precision and a base, and sit next to each other. A reader who converts milliseconds to seconds, or a percentage to a count, is doing the writer's arithmetic. Round to what the decision needs. When the comparison is the point, state it. Three or more numbers to compare go in a table.
+
+> "Latency rose from 1,247 ms last quarter to 3.9 s after the change, affecting 18% of the 2,140 requests."
+> → "Latency rose from 1.2 s to 3.9 s, more than three times the old figure. The rise affected 385 of 2,140 requests (18%)."
+
 **Loose word choice.** Where a distinction carries weight, keep it: *may* is permission and *might* is possibility; *fewer* counts and *less* measures; *ensure* guarantees, *insure* indemnifies, *assure* reassures. Do not write *significant* for *large*, *literally* for *figuratively*, or *impact* where *effect* or a verb is meant.
 
 **Sentences that do not follow.** Read consecutive sentences as an argument. If sentence two does not follow from sentence one, either a step is missing or the connective is wrong. *Therefore*, *however*, and *because* make claims — check that each is true.
@@ -45,7 +50,7 @@ A participle attaches to the subject that follows it:
 
 **Buried lead.** A key idea surrounded by qualifications, provenance and asides gets missed. Give it its own sentence and its own line.
 
-**Excess evidence.** Three examples where one carries it. A caveat already implied by the sentence. A restatement after the point is clear. Stop when the reader is convinced.
+**Excess evidence.** Three examples where one carries it. Cut to one, never to none. The only example of an abstract idea stays. A caveat already implied by the sentence. A restatement after the point is clear. Stop when the reader is convinced.
 
 **Hedging.** Hedge and hype in one sentence ("may potentially deliver significant improvements") fail twice. *Somewhat*, *fairly*, *arguably*, *it seems*, *in some sense*, *may potentially*, *tends to generally*. A hedge that qualifies a claim honestly is fine — *in most cases*, *under load above 200 TPS* — because it says which cases. A hedge that only lowers confidence weakens the writer without informing the reader. If the claim is uncertain, say what would settle it.
 
@@ -78,7 +83,19 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 **Front-loaded openings.** A dependent clause before the subject delays the point and, repeated, makes every sentence sound the same shape. *Given the constraints described above, and in light of the timeline, the team will…* → *The team will…* Occasional inversion is good rhythm; a run of it is a tic.
 
+**Subject far from its verb.** The reader holds the subject in mind until the verb arrives. Keep the two close. Move a long modifier after the verb, or into its own sentence.
+
+> "The migration, which the platform team scheduled after the vendor's audit closed and the second-wave budget was approved, starts on 3 November."
+> → "The migration starts on 3 November. The platform team scheduled it after the vendor's audit closed and the second-wave budget was approved."
+
+**News at the end.** Readers put the weight on the end of a sentence. Open with what the reader already has (the other half of [Transitions](#flow-and-rhythm)) and close on what is new or important. A sentence that ends on a source, a date or a qualifier spends its strongest position on its weakest part.
+
+> "A 40% cost reduction is what the pilot showed, according to finance's March figures."
+> → "Finance's March figures show the pilot cut cost by 40%."
+
 **One job per sentence.** A sentence carrying two claims joined by *and* usually wants to be two sentences — or one sentence, once the weaker claim is cut.
+
+**Long sentences.** Outside technical text there is no hard limit, because a long sentence can be built to read well. Check every sentence over about 30 words. Keep it if it runs in reading order, one clause after the next, or is a list the reader can count. Split it if the reader must hold something open across it: a subject waiting for its verb, a condition waiting for its result, or a clause that interrupts the middle. Technical text keeps the stricter limits in `technical-docs.md`.
 
 ## Flow and rhythm
 
