@@ -92,7 +92,7 @@ A group is Mutually Exclusive and Collectively Exhaustive when each case belongs
 
 MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole.
 
-Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach the number.
+Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach a group size of three to five.
 
 ## Summarize the message, not the category
 
