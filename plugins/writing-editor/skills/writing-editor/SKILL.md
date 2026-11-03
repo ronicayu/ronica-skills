@@ -58,9 +58,9 @@ When one document serves two of these, write the body for the primary reader and
 - **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The headings alone should carry the argument. Keep each one short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
 - **Partial reading.** The title, opening and headings alone give the answer and the ask.
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
-- **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. Place one real case: if it fits two items, the split overlaps. Ask what could make the parent false while every item is true: if something can, the group has a gap. See `references/pyramid-principle.md`.
+- **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. If one case, or one piece of evidence, fits two items, they overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.
-- **The sum holds.** If every support is true, the top line follows. If not, the claim overreaches or a support is missing.
+- **The sum holds.** If every support is true, the top line follows. For a claim the document depends on, ask what could still make it false: the answer is a missing support, an unstated assumption, or a claim that overreaches.
 - **Current final state.** The body states what is true now. It holds no review-round history, agent actions, intermediate corrections, prior counts, superseded wording, or account of how the document evolved, including which draft, run, agent or input each idea came from. Text whose job is the change (changelog, release notes, PR description, commit message, decision log, an ADR's status or history section) is exempt. History that must stay goes in its own section or a linked record.
 
 Fix this layer first. In review mode, say plainly that the structure needs reshaping before you give line notes.

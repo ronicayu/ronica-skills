@@ -86,13 +86,13 @@ If you cannot name which order a group uses, it has none, and the reader will fe
 A group is Mutually Exclusive and Collectively Exhaustive when each case belongs to one item and the items together cover the parent. Overlap counts the same evidence twice. A gap means the parent does not follow from its supports.
 
 - **Name the whole first.** "All customers", "every failure after the claim", "the three ways a send can stop". Without a stated whole, nothing can be exhaustive.
-- **Split on one criterion.** "Retail, corporate and overseas customers" mixes type with place, so an overseas retail customer fits twice. Pick one criterion, and use the other at the level below. To test, place a real case: if it fits two items, the criterion is mixed or a boundary is undefined.
+- **Split on one criterion.** "Retail, corporate and overseas customers" mixes type with place, so an overseas retail customer fits twice. Pick one criterion, and use the other at the level below: retail and corporate, each split into domestic and overseas. To test, place a real case: if it fits two items, the criterion is mixed or a boundary is undefined.
 - **Test for gaps.** Ask what could make the parent false while every item is true. That answer names what is missing: an item, a boundary or an unstated assumption.
 - **Treat "Other" as a signal.** A small, named remainder is honest. A large one means the split is wrong.
 
-MECE applies in full to structural order. In time order, it means no missing step. In degree order, every item shares the property being ranked. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set.
+MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole.
 
-Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Regroup a long exhaustive list into three to five summaries; do not drop items to reach the number.
+Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach the number.
 
 ## Summarize the message, not the category
 

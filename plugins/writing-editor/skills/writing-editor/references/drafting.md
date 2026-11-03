@@ -99,7 +99,7 @@ Scope it to the outline, not implementation or wording. Work down the tree, one 
 
 1. Does the governing thought follow if every support is true, with nothing left over and nothing missing?
 2. Is each group the same kind of thing? Reasons mixed with risks mixed with steps mean the thinking is not done.
-3. Is each group MECE, with no overlap and no gap?
+3. Is each group MECE: no overlap, and no gap in what it claims to cover?
 4. Does each section answer a question raised above it?
 5. Read the headings alone. Do they carry the argument? Does any name a category?
 6. Would a reader who stops after the introduction have the answer and the ask?

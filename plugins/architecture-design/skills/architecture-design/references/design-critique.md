@@ -80,9 +80,7 @@ For each main flow, and for each dependency it calls:
 ## Step 5: Check the decisions
 
 - **Under the ranking, is the chosen option best?** Re-run the comparison with the stated goal order. A choice that only wins under a different order is a finding.
-- **Are the options MECE?** They differ on one real dividing question, and together they cover the realistic choices. Two variants of one shape are not a choice. A realistic option left out is your challenge.
-- **Was the rejected option real?** A strawman alternative means the real choice was not made in the document.
-- **Is there a simpler design** that meets the top goals? Name it as your challenge.
+- **Were the options real and complete?** Each is a distinct shape. Two variants of one shape, or a strawman, mean the real choice was not made in the document. A realistic shape left out, including a simpler design that meets the top goals, is your challenge.
 - **What is hard to reverse?** Data models, public contracts, vendor commitments and identity schemes. Each needs stronger evidence than a reversible choice.
 
 ## Step 6: Can this team deliver and run it?
