@@ -2,7 +2,7 @@
 
 Barbara Minto's method for structuring thought, condensed for editing use. Read this when a draft's opening, order, or grouping is in doubt.
 
-Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Worked example](#worked-example) · [Limits](#limits)
+Contents: [Why a pyramid](#why-a-pyramid) · [The three rules](#the-three-rules) · [The introduction: SCQA](#the-introduction-scqa) · [Grouping: inductive and deductive](#grouping-inductive-and-deductive) · [Ordering within a group](#ordering-within-a-group) · [MECE](#mece-no-overlap-no-gap) · [Summarize the message, not the category](#summarize-the-message-not-the-category) · [Showing the structure](#showing-the-structure) · [Worked example](#worked-example)
 
 ## Why a pyramid
 
@@ -73,16 +73,13 @@ If you cannot name which order a group uses, it has none, and the reader will fe
 
 ## MECE: no overlap, no gap
 
-A group is Mutually Exclusive and Collectively Exhaustive when each case belongs to one item and the items together cover the parent. Overlap counts the same evidence twice. A gap means the parent does not follow from its supports.
+MECE stands for Mutually Exclusive, Collectively Exhaustive. Pass 1 of `SKILL.md` states the rule; these are the ways to apply it.
 
 - **Name the whole first.** "All customers", "every failure after the claim", "the three ways a send can stop". Without a stated whole, nothing can be exhaustive.
 - **Split on one criterion.** "Retail, corporate and overseas customers" mixes type with place, so an overseas retail customer fits twice. Pick one criterion, and use the other at the level below: retail and corporate, each split into domestic and overseas. To test, place a real case: if it fits two items, the criterion is mixed or a boundary is undefined.
-- **Test for gaps.** Ask what could make the parent false while every item is true. That answer names what is missing: an item, a boundary or an unstated assumption.
 - **Treat "Other" as a signal.** A small, named remainder is honest. A large one means the split is wrong.
 
-MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole.
-
-Finding a gap does not license filling it. If the sources do not supply the missing item, name the gap. Do not drop items to reach a group size.
+MECE applies in full to a structural split. In time order it means no step missing, repeated or nested in another. Degree order ranks a split or an inductive group, so that group's rule applies. A deductive chain is tested only for a gap: a missing premise. An inductive group of reasons need not list every reason, but the reasons must not overlap and must be enough to carry the claim. If it covers only part of the whole, say which part: "the two largest causes, 80% of incidents". A list of examples need not be exhaustive, but it must read as examples ("such as"), not as the whole set. A count ("three causes") promises the count; "the three causes" or "all" promises the whole. Do not drop items to reach a group size.
 
 ## Summarize the message, not the category
 
@@ -104,7 +101,7 @@ Make the pyramid visible so the reader can enter at any depth:
 - Headings mirror the pyramid levels; parallel levels get parallel grammatical form.
 - Introduce a group by saying how many and what kind — *three reasons* — then keep them together and in the promised order.
 - Use numbering for sequence and dependency; plain bullets for genuinely unordered sets.
-- Close a long section by restating what it established, and pick that thread up at the start of the next.
+- Close a long section on what it changes for the next one, and pick that thread up there. A close that only restates the section is tell 8.
 
 ## Worked example
 
@@ -127,7 +124,3 @@ Make the pyramid visible so the reader can enter at any depth:
 > Automation is the only option that survives all three; headcount fails on the API date, and a contract renegotiation fails on volume. [Comparison follows.]
 
 What changed: the governing thought moved to the top; the workshops became provenance rather than content; three same-kind pressures were grouped and ordered by how binding they are; the summary now follows from the group; and "further analysis is recommended" — a non-answer — became a recommendation that can be argued with.
-
-## Limits
-
-The pyramid organizes an argument. It does not fix a document with nothing to say. If the diagnostic questions produce no answer sentence, the problem is the thinking, and no restructuring will hide it — say so.

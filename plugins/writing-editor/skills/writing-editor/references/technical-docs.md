@@ -1,6 +1,6 @@
 # Technical docs
 
-Extra rules for technical text. They apply to product and developer documentation (tutorials, how-tos, reference, explanation), READMEs, design documents, RFCs, PR descriptions, commit messages, and issues. They do not apply to other prose. There, the defaults in `SKILL.md` hold, including "preserve voice". For technical text, these rules take precedence over voice. Where this file and `line-editing-checklist.md` differ, this file wins for technical text.
+Extra rules for technical text. They apply to product and developer documentation (tutorials, how-tos, reference, explanation), READMEs, design documents, RFCs, PR descriptions, commit messages, and issues. They do not apply to other prose. For technical text, these rules take precedence over voice. Where this file and `line-editing-checklist.md` differ, this file wins for technical text.
 
 Contents: [Pick the mode first](#pick-the-mode-first-diátaxis) · [Sentences to the reader](#sentences-to-the-reader-google-developer-style) · [One statement at a time](#one-statement-at-a-time-ste) · [No double readings](#no-double-readings-global-english) · [The codebase is the word list](#the-codebase-is-the-word-list) · [PRs, commits, and issues](#prs-commits-and-issues) · [Convention for issues, PRs, and commit message bodies](#convention-for-issues-prs-and-commit-message-bodies) · [Worked example](#worked-example)
 
@@ -109,11 +109,4 @@ Write these in ASD-STE100 sentences, structured as a Minto pyramid.
 
 > The service reads the eviction timeout and `max_size` from `cache.toml`. If the cache size exceeds `max_size`, requests fail. `cache --purge` deletes every cached entry. Run it only when the disk is full.
 
-The edit makes these changes:
-
-- The service is now the actor of the first sentence. In the Before, the passive "are set" put the actor at the end.
-- The noun string "configuration file parameters" became the two values the service reads, named once.
-- "It" in "If it is exceeded" could point at the flag, the disk, or the cache. The new sentence names `max_size`.
-- The procedure is one direct command. The sentence that states the risk comes before it.
-- "Only" now sits next to "when the disk is full", the words it limits.
-- "Should only be used" became "Run it only when", a command instead of a passive.
+The "it" in "If it is exceeded" could point at the flag, the disk or the cache, so the After names `max_size`.

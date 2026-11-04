@@ -12,12 +12,10 @@ Contents: [Clarity and precision](#clarity-and-precision) · [Concision](#concis
 > Two readings: notify once, after both; or the report's approval is itself conditional on the migration.
 > → "Once the migration completes and the report is approved, we will notify the team."
 
-**Orphan references.** *This*, *that*, *these*, *it*, *they* must point at one unmistakable noun. When the antecedent is a whole preceding clause, name it.
+**Orphan references.** *This*, *that*, *these*, *it*, *they* must point at one unmistakable noun. When the antecedent is a whole preceding clause, name it (*this delay*, *this constraint*), never a naked *this*.
 
 > "The service retries and the queue drains slowly. This causes duplicate charges."
 > → "The retries cause duplicate charges."
-
-Where a bare pronoun would be ambiguous, prefer `this` plus the noun — *this delay*, *this constraint* — over a naked *this*.
 
 **Misplaced modifiers.** A modifier attaches to whatever it sits next to.
 
@@ -42,7 +40,7 @@ A participle attaches to the subject that follows it:
 
 ## Concision
 
-**Throat-clearing.** Openings that delay the sentence: *It should be noted that*, *It is important to understand that*, *As mentioned previously*, *In order to*, *The fact that*, *What we found was that*, *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete and start with the subject.
+**Throat-clearing.** Openings that delay the sentence: *It should be noted that*, *It is important to understand that*, *As mentioned previously*, *As you may be aware*, *Needless to say*, *In terms of*, *The fact that*, *There is/are … that* (usually recoverable as a verb), *In my opinion* (in a document that is already yours), *What we found was that*, *It's worth noting*, *Importantly*, *Notably*, *That said*, *Ultimately*, *At its core*, *Fundamentally*. Delete and start with the subject.
 
 **Pretension.** Long words chosen for weight rather than precision — see the [swap tables](#swap-tables). The test is not word length but whether the shorter word means the same thing. It usually does; when it does not, keep the long one.
 
@@ -54,14 +52,14 @@ A participle attaches to the subject that follows it:
 
 **Hedging.** Hedge and hype in one sentence ("may potentially deliver significant improvements") fail twice. *Somewhat*, *fairly*, *arguably*, *it seems*, *in some sense*, *may potentially*, *tends to generally*. A hedge that qualifies a claim honestly is fine — *in most cases*, *under load above 200 TPS* — because it says which cases. A hedge that only lowers confidence weakens the writer without informing the reader. If the claim is uncertain, say what would settle it.
 
-**Filler intensifiers.** *Very*, *really*, *quite*, *actually*, *basically*, *essentially*, *truly*, *clearly*, *obviously*. An adverb propping up a weak verb ("significantly improves") wants the number or a stronger verb. Most add nothing; *clearly* and *obviously* often mark the spot where an argument is missing.
+**Filler intensifiers.** *Very*, *really*, *quite*, *actually*, *basically*, *essentially*, *truly*, *clearly*, *obviously*, *of course*. An adverb propping up a weak verb ("significantly improves") wants the number or a stronger verb. Most add nothing; *clearly* and *obviously* often mark the spot where an argument is missing.
 
 **Nominalization.** A verb buried inside a noun drags a weak verb and a preposition along with it.
 
 > "The implementation of the change resulted in a reduction in latency."
 > → "The change reduced latency."
 
-Look for *-tion*, *-ment*, *-ance*, *-ity* paired with *make*, *give*, *provide*, *perform*, *conduct*, *achieve*.
+Look for *-tion*, *-ment*, *-ance*, *-ity* paired with *make*, *give*, *provide*, *perform*, *conduct*, *achieve*: *make a decision* is *decide*, *carry out an assessment* is *assess*.
 
 ## Sentence structure
 
@@ -99,7 +97,7 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 ## Flow and rhythm
 
-**Read it aloud.** Nothing else finds the lumps as reliably. Where you stumble, the reader stumbles.
+**Read it as the reader will.** Read it once, at reading speed and in order, without looking back. Every place where you slow down or look back is a lump the reader hits too.
 
 **Vary length.** A paragraph of uniform medium-length sentences reads as a drone. Follow a long sentence with a short one. Short sentences land hardest, so save them for what matters.
 
@@ -118,7 +116,7 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 **Jargon.** Two kinds. Domain terms the audience shares are precise and belong. Terms borrowed to sound expert do not.
 
-**Buzzwords.** *Leverage*, *synergy*, *holistic*, *robust*, *seamless*, *best-in-class*, *utilize*, *operationalize*, *going forward*, *at the end of the day*, *paradigm shift*. Each has a plain equivalent, and most are claims without evidence: *robust* and *seamless* need a number or a mechanism. Self-praise (*comprehensive*, *thorough*, *rigorous*, *carefully designed*, *best practice*) claims something about the work, not in it.
+**Buzzwords.** *Leverage*, *synergy*, *holistic*, *robust*, *seamless*, *best-in-class*, *operationalize*, *going forward*, *at the end of the day*, *paradigm shift*. Each has a plain equivalent, and most are claims without evidence: *robust* and *seamless* need a number or a mechanism. Self-praise (*comprehensive*, *thorough*, *rigorous*, *carefully designed*, *best practice*) claims something about the work, not in it.
 
 **Clichés.** *Low-hanging fruit*, *move the needle*, *boil the ocean*, *the elephant in the room*, *a perfect storm*, *tip of the iceberg*. A dead metaphor makes the reader skim.
 
@@ -205,7 +203,7 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 
 | Instead of | Write |
 |---|---|
-| utilize, leverage | use |
+| utilize | use |
 | facilitate | help, enable |
 | commence, initiate | start, begin |
 | terminate | end, stop |
@@ -236,22 +234,3 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 | provides support for | supports |
 | in the majority of cases | usually |
 | on a regular basis | regularly, *or how often* |
-
-### Delete outright
-
-*It should be noted that* · *It is important to note that* · *As you may be aware* · *Needless to say* · *In terms of* · *The fact that* · *There is/are … that* (usually recoverable as a verb) · *very*, *really*, *quite*, *basically*, *essentially*, *actually* · *clearly*, *obviously*, *of course* · *going forward* · *at the end of the day* · *in my opinion* (in a document that is already yours)
-
-### Verb buried in a noun
-
-| Instead of | Write |
-|---|---|
-| make a decision | decide |
-| provide a summary of | summarize |
-| perform an analysis of | analyse |
-| conduct a review of | review |
-| give consideration to | consider |
-| reach a conclusion | conclude |
-| take into account | consider |
-| result in a reduction of | reduce |
-| carry out an assessment | assess |
-| is indicative of | indicates |

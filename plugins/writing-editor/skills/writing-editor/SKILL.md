@@ -5,11 +5,11 @@ description: "Write, review and edit prose as an expert editor: structure by Bar
 
 # Writing Editor
 
-Work in the order a good editor works: the shape of the argument, then what the reader has to hold and trust, then paragraphs, then sentences, then words. Polishing a sentence in the wrong section is wasted work, because the fix to the structure deletes it. Diagnose top-down, then edit bottom-up.
+Work in the order a good editor works: the shape of the argument, then what the reader has to hold and trust, then paragraphs, then sentences, then words. Polishing a sentence in the wrong section is wasted work, because the fix to the structure deletes it.
 
 ## The reader is a person
 
-A person reads unevenly, in a hurry, holding about four things at once. A draft can be accurate and complete and still fail. Four tests run through every pass. Could the reader stop a third of the way in and still have the point? Could they follow the argument without scrolling back? Could they tell what is proven from what is proposed? Could they act without asking what was meant?
+A person reads unevenly, in a hurry, holding only a few things at once. A draft can be accurate and complete and still fail. Four tests run through every pass. Could the reader stop a third of the way in and still have the point? Could they follow the argument without scrolling back? Could they tell what is proven from what is proposed? Could they act without asking what was meant?
 
 Depth on structure, order and openings is in `references/pyramid-principle.md`.
 
@@ -48,15 +48,14 @@ Read the entire piece before changing a word. A local fix made blind to the endi
 When one document serves two of these, write the body for the primary reader and give the other their own section. Classify by what the reader does while reading, not by the meeting the document goes to. A design sent to a review is read by evaluators, not approvers.
 
 - **Does a template set the shape?** If the document follows a template, check it against the template in pass 1. Flag template sections that do not fit the subject. Do not fill them with placeholders.
-- **How long may it be?** Set a length for the reader's job (Size in `references/drafting.md`). A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
+- **How long may it be?** Set a length from the reader's job above: an approver reads the first half page, an implementer reads as far as the work needs. A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
 
-- **Is the text technical?** For documentation, a README, a design document, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md`. For documentation or a README, pick the Diátaxis mode and apply its shape and heading rules in pass 1. For the others, skip the mode; a design document or RFC uses the pyramid. Its sentence rules, including STE, go in passes 4 and 5.
+- **Is the text technical?** For documentation, a README, a design document, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md` now. It says which of its rules apply and in which pass.
 
 ### 1. Structure
 
 - **Answer early.** The opening gives the recommendation, finding or main claim, not a tour of the background.
-- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The headings alone should carry the argument. Keep each one short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
-- **Partial reading.** The title, opening and headings alone give the answer and the ask.
+- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The title, opening and headings alone give the answer and the ask. Keep each heading short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
 - **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. If one case, or one piece of evidence, fits two items, they overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.
@@ -104,7 +103,7 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 ### 6. Strip the tells of machine-drafted prose
 
-Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now and check the five most common, then scan the rest: everything in threes (tell 1), not just X but Y (2), a first sentence that restates its heading (3), a sentence that could appear in any project's documents (4), and arrows and fragments in place of sentences (5). On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 21 and 24.
+Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now, check the five most common, then scan the rest. On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 21 and 24.
 
 ## Reporting a review
 
