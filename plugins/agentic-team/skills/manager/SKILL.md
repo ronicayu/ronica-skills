@@ -39,8 +39,8 @@ up).
    Never continue any item yourself as task work. Reply with the list and your
    choice for each, then go on with your choices unless an item needs the
    operator. Do not wait for a reply otherwise.
-4. **Start.** Run the Start steps in `manager.md`: the config check and the
-   standing orders.
+4. **Start.** Run the Start steps in `manager.md`: the config check, the
+   standing orders, and the address (`run notify-to`).
 5. **Act on the list.** Now do the integration steps, create the tasks, and
    launch them.
 6. **Stay in the role.** It ends only when the operator says so.

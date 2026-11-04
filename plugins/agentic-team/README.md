@@ -83,9 +83,11 @@ the trust prompt before the Manager launches its first worker.
 
 Three rules carry the rest:
 
-- Completions are queue events. A worker's last action is one
-  `tg result add`, and it sends no message. The Manager runs `run.py record`
-  at drain points, reads one line per event, and returns to its current step.
+- Completions are queue events. A worker files one `tg result add`, then
+  may send the Manager one line with SendMessage, which only wakes it. The
+  Manager runs `run.py record` at drain points, reads one line per event, and
+  returns to its current step. `run.py wait`, in the background, wakes it when
+  no message comes.
 - A worker cannot ask a question, so the brief is the product. Its task
   content comes only from Taskgraph. `run.py launch` refuses a task with no
   purpose, acceptance criteria, scope, or verify command, and the Manager
@@ -148,8 +150,9 @@ status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>
 writes its report to a file with the Write tool and files it with
 `tg result add --body-file`, so no report text reaches a shell command, where a
 project's guard could refuse it for a word. The report names the `Branch`, the
-`Head` commit SHA, and the `Worktree` path. The Manager never messages a
-worker.
+`Head` commit SHA, and the `Worktree` path. If the Manager set its address
+with `run.py notify-to`, the session then sends it one line with SendMessage.
+The Manager never messages a worker.
 
 `run.py record` finds the result, one line per event. A session that ends with
 no result is filed as `DIED` and retried; a complete report in its report
@@ -410,8 +413,9 @@ run `npm install -g pele` once, then
 runs it from the repository root through the wrapper:
 `"${CLAUDE_PLUGIN_ROOT}/scripts/run" [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command>`.
 A `next:` hint that says `run.py <cmd>` means that wrapper with `<cmd>`.
-Nothing in it waits, sleeps, or polls: `claude --bg` returns at once, and the
-Manager runs `record` later.
+Only `wait` sleeps or polls, and it writes nothing: `claude --bg` returns at
+once, and the Manager runs `record` when a session's message or the end of
+`wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
@@ -424,6 +428,8 @@ Manager runs `record` later.
 | `stop <id>` | Stops a worker for a pause and files a `STOPPED` result. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. |
+| `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--interval` (default 30 seconds), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
+| `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`. `--clear` removes the name; with no argument it prints the name. |
 
 Each event is one line: `<event> #<id> attempt <n>: <detail>`, followed by
 ` | next: <step>` when a step follows. `--json` prints one array of
@@ -604,7 +610,7 @@ one through `scripts/python-path.sh`.
 
 [templates/task-brief.md](templates/task-brief.md) is the one brief template.
 Its sections are GOAL, SCOPE, CONTEXT, ACCEPTANCE, VERIFY, TIMEBOX, FORBIDDEN,
-AUTONOMY, STANDING ORDERS, and REPORT (the command that files the report). The
+AUTONOMY, STANDING ORDERS, and REPORT (the command that files the report, and a notify step while an address is set). The
 report format lives in the worker agent. `run.py` fills the template from
 Taskgraph, the config, and the run directory. Task content is copied from
 Taskgraph, never written by hand: GOAL is the title plus the prose in the
@@ -634,6 +640,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout, or (in `pr` mode) lets `record` merge a clean request. |
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
+| `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
 
 A session's report file is not in this folder. It is
 `.agentic-team/report-<session>.md` in the session's own worktree, one file per
@@ -650,7 +657,7 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
-| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, as its last action | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
+| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker stopped for a pause (a second row carries the WIP commit `Head:`), or a session `close` stopped. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
@@ -691,6 +698,10 @@ skill. Metadata holds everything else, 24 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.10.3
+
+Version 0.11.0 wakes the Manager. `run.py notify-to "<name>"` stores the Manager's session name in the run directory, and each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`: `task <id> attempt <n> <kind> filed <STATUS>; run record`. `run.py wait` polls Taskgraph, `claude agents` and, in `pr` mode, the code host, and exits at the first change or after 30 minutes; it writes nothing. The Manager runs it in the background after each drain that leaves work in flight. Without an address, briefs have no notify step, and only `wait` wakes the Manager. The REPORT text now says "Then run this one command, once." in place of "Then your last action is this one command, run once." A brief rendered before the upgrade still works, with no notify step. No migration.
 
 ### Upgrading from 0.10.2
 
