@@ -7,8 +7,9 @@ that one covers snapshot, claim and `result add`; this one covers push,
 request, checks and merge. Neither depends on the other. The module holds no
 Taskgraph types and runs processes only through the `sh` callback it is given.
 
-GitHub is spoken through `gh` (verified on gh 2.102.0). GitLab is the second
-implementation, spoken through `glab api` (REST v4). Every GitLab line is
+GitHub is spoken through `gh` (verified on gh 2.102.0; `pr update-branch` was
+read from the gh 2.102.0 source and not run against a real PR). GitLab is the
+second implementation, spoken through `glab api` (REST v4). Every GitLab line is
 unverified until the checks in the GitLab class comment are done.
 """
 
@@ -118,12 +119,27 @@ class Host:
             raise HostError(f"{self.cli} {what} failed: output is not JSON")
 
     def push(self, local_ref, branch, expect):
-        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist)."""
+        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist).
+        Returns (ok, why). `why` is git's ref status line (it starts with `!`) when there is one, else the first
+        other line, for example a pre-push hook's message. git's "To <url>", "hint:" and "error: failed to push
+        some refs" lines are used only when nothing else was said."""
         out = self.call(["git", "-C", self.root, "push", self.remote, f"{local_ref}:refs/heads/{branch}",
                          f"--force-with-lease=refs/heads/{branch}:{expect}"])
         lines = [line.strip() for line in out.stderr.splitlines() if line.strip()]
-        why = next((line for line in lines if line.startswith(("!", "error", "fatal"))), lines[0] if lines else "")
+        said = [line for line in lines if not line.startswith(("To ", "hint:", "error: failed to push some refs"))]
+        why = next((line for line in said if line.startswith("!")), said[0] if said else lines[0] if lines else "")
         return out.returncode == 0, why
+
+    def update_branch(self, number):
+        """Ask the host to rebase the request onto its target branch. Returns (kind, why). kind is "ok" (the host
+        took the request; read rebase_status until the head moves), "current" (already up to date), "conflict",
+        "unsupported" (this host or CLI cannot do it), "denied" (this user may not), or "failed"."""
+        raise NotImplementedError
+
+    def rebase_status(self, number):
+        """(busy, error, head) of the request after update_branch: busy while the host still rebases, the host's
+        error text when the rebase failed (else ""), and the request's head SHA."""
+        raise NotImplementedError
 
     def comment(self, number, marker, body):
         """Put `body` on the request as the one comment that holds `marker`: edit that comment when it exists,
@@ -194,6 +210,27 @@ class GitHub(Host):
         out = self.gh("pr", "merge", str(number), f"--{method}", "--match-head-commit", head)
         return out.returncode == 0, first_line(out.stderr) or first_line(out.stdout)
 
+    def update_branch(self, number):
+        # From the gh 2.102.0 source (pkg/cmd/pr/update-branch): exit 0 with "PR branch updated" or "PR branch
+        # already up-to-date" on stdout; exit 1 with "Cannot update PR branch due to conflicts" on stderr; exit 1
+        # with the GraphQL error for any other failure; exit 4 when gh is not logged in.
+        out = self.gh("pr", "update-branch", str(number), "--rebase")
+        why = first_line(out.stderr) or first_line(out.stdout)
+        text = f"{out.stdout}\n{out.stderr}".lower()
+        if out.returncode == 0:
+            return ("current" if "already up-to-date" in text else "ok"), why
+        if "cannot update pr branch due to conflicts" in text or "merge conflict" in text:
+            return "conflict", why
+        if "unknown command" in text or "unknown flag" in text:
+            return "unsupported", why
+        if out.returncode == 4 or any(w in text for w in ("not accessible", "permission", "forbidden", "http 403")):
+            return "denied", why
+        return "failed", why or "no answer"
+
+    def rebase_status(self, number):
+        """GitHub shows no rebase state: the request's head is the answer."""
+        return False, "", self.pr(number).head
+
     def runs(self, branch, head, name):
         args = ("run", "list", "--branch", branch, "--workflow", name, "--json",
                 "databaseId,attempt,status,conclusion,headSha,url,createdAt", "--limit", "20")
@@ -260,6 +297,11 @@ class GitLab(Host):
       9. `merge_requests/<iid>/notes` takes `per_page` and `page`, lists system notes with `system: true`, and
          each note has `id` and `body`.
      10. POST `merge_requests/<iid>/notes` and PUT `merge_requests/<iid>/notes/<id>` take `body` as a form field.
+     11. PUT `merge_requests/<iid>/rebase` answers 202 with `rebase_in_progress: true`, 403 when this user cannot
+         push to the source branch, and 409 when GitLab could not queue the rebase; 404 or 405 means no such
+         endpoint. glab prints the message and exits non-zero on 403 and 409.
+     12. `merge_requests/<iid>?include_rebase_in_progress=true` returns `rebase_in_progress`, and `merge_error`
+         holds why a rebase failed. A `merge_error` left over from an earlier failed merge is not told apart.
     """
 
     name, cli, noun, prefix = "gitlab", "glab", "MR", "!"
@@ -369,6 +411,24 @@ class GitLab(Host):
         if out.returncode == 0 and isinstance(body, dict) and body.get("state") == "merged":
             return True, ""
         return False, self.message(out, body) or "the merge request is not merged"
+
+    def update_branch(self, number):
+        # UNVERIFIED (11): PUT merge_requests/<iid>/rebase, without skip_ci: CI must run on the new head.
+        out, body = self.api(f"/merge_requests/{number}/rebase", method="PUT")
+        why = self.message(out, body)
+        if out.returncode == 0:
+            return "ok", why
+        text = f"{why}\n{out.stdout}\n{out.stderr}".lower()
+        if any(w in text for w in ("404", "405", "not found", "method not allowed")):
+            return "unsupported", why
+        if any(w in text for w in ("403", "forbidden", "cannot push", "protected", "permission")):
+            return "denied", why
+        return "failed", why or "no answer"
+
+    def rebase_status(self, number):
+        # UNVERIFIED (12): the include_rebase_in_progress parameter and the merge_error field.
+        d = self.get(f"/merge_requests/{number}?include_rebase_in_progress=true") or {}
+        return bool(d.get("rebase_in_progress")), str(d.get("merge_error") or ""), str(d.get("sha") or "")
 
     def runs(self, branch, head, name):
         # UNVERIFIED: pipelines?sha=, order_by=id and the pipelines/<id>/jobs endpoint.

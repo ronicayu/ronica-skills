@@ -5005,6 +5005,7 @@ class PrTest(Base):
     @both_hosts
     def test_84_a_behind_request_is_rebased_in_its_worktree_and_pushed_under_the_lease(self):
         task, wt, head = self.published()
+        self.local_catch_up()
         self.fake_host(head=head, merge_state="BEHIND")
         behind = self.one(self.events("record"), "pr-behind")
         self.assertEqual(behind["detail"], f"{self.label()} is behind main")
@@ -5026,6 +5027,7 @@ class PrTest(Base):
     def test_84_a_rebase_conflict_is_aborted(self):
         self.commit_file("f.txt", "one\n")
         task, wt, head = self.pr_task(files=("f.txt", "theirs\n"))
+        self.local_catch_up()
         self.fake_host(head=head, merge_state="UNKNOWN")
         self.ok("close", str(task), "--verdict", "test-verified")
         self.advance_main("f.txt", "ours\n")
@@ -5043,6 +5045,7 @@ class PrTest(Base):
     @both_hosts
     def test_84_a_rebase_that_changes_the_diff_is_undone(self):
         task, wt, head = self.published()
+        self.local_catch_up()
         self.advance_main("out.txt", "x\n")  # the target already holds the task's change
         self.advance_main("later.txt", "y\n")
         self.fake_host(head=head, merge_state="BEHIND")
@@ -5056,6 +5059,7 @@ class PrTest(Base):
     @both_hosts
     def test_84_a_dirty_worktree_or_a_live_session_is_not_rebased(self):
         task, wt, head = self.published()
+        self.local_catch_up()
         self.advance_main()
         self.fake_host(head=head, merge_state="BEHIND")
         with open(os.path.join(wt, "scratch.txt"), "w") as fh:
@@ -5137,6 +5141,7 @@ class PrTest(Base):
     @both_hosts
     def test_87_an_adopted_branch_is_pushed_without_a_worktree_and_a_hand_rebase_keeps_the_pin(self):
         self.pr_config()
+        self.local_catch_up()
         self.fake_host()
         tip = self.feature_branch("feat")
         task = self.add_task()
@@ -5586,6 +5591,7 @@ class PrTest(Base):
     @both_hosts
     def test_84_a_branch_of_two_attempts_is_rebased_twice_and_by_hand(self):
         task, wt, head = self.two_attempt_task()
+        self.local_catch_up()
         for round_ in (1, 2):
             self.advance_main(f"moved{round_}.txt")
             self.fake_host(head=head, merge_state="BEHIND")
@@ -5679,6 +5685,7 @@ class PrTest(Base):
     @both_hosts
     def test_84_a_stacked_task_is_rebased_after_its_dependency_was_squash_merged(self):
         self.pr_config()
+        self.local_catch_up()
         dep = self.feature_branch("dep")  # the dependency's branch: fork0 -> D
         task = self.running_task(base=json.dumps(dep))  # launched with --base dep
         wt = self.worktree("task-1", base=dep)
@@ -5704,6 +5711,282 @@ class PrTest(Base):
         self.assertEqual(out.returncode, 1)
         self.assertIn("ls-remote of origin failed:", out.stderr)
         self.assertNotIn("unset the pr", out.stderr)
+
+    # --- 0.11.1: catch up on the host, and tell a failed push from a refused one
+
+    def local_catch_up(self):
+        """[merge] catch_up = "local": close rebases a behind request in its worktree and pushes it."""
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\ncatch_up = "local"\n')
+
+    def host_rebases(self, branch="task-1"):
+        """Do on origin what the host's rebase does: rebase <branch> onto origin/main in the clone that advance_main
+        made, and force it to origin. Returns the new head."""
+        clone = os.path.join(self.dir, "clone")
+        self.git("fetch", "-q", "origin", cwd=clone)
+        self.git("checkout", "-q", "-B", "host-rebase", f"origin/{branch}", cwd=clone)
+        self.git("rebase", "-q", "origin/main", cwd=clone)
+        self.git("push", "-q", "-f", "origin", f"host-rebase:refs/heads/{branch}", cwd=clone)
+        new = self.git("rev-parse", "HEAD", cwd=clone)
+        self.git("checkout", "-q", "main", cwd=clone)
+        return new
+
+    def update_answer(self, kind):
+        """The fake host's answer to the rebase request, as a fake_host `extra` table: ok, current, conflict (GitHub),
+        unsupported, denied, or failed."""
+        if self.host == "github":
+            return {"pr update-branch": {
+                "ok": {"stdout": "\u2713 PR branch updated\n"},
+                "current": {"stdout": "\u2713 PR branch already up-to-date\n"},
+                "conflict": {"stderr": "X Cannot update PR branch due to conflicts\n", "exit": 1},
+                "unsupported": {"stderr": 'unknown command "update-branch" for "gh pr"\n', "exit": 1},
+                "denied": {"stderr": "GraphQL: Resource not accessible by integration (updatePullRequestBranch)\n", "exit": 1},
+                "failed": {"stderr": "HTTP 502: Bad Gateway\n", "exit": 1}}[kind]}
+        return {f"api -X PUT projects/{self.project}/merge_requests/1/rebase": {
+            "ok": {"stdout": json.dumps({"rebase_in_progress": True})},
+            "unsupported": {"stdout": json.dumps({"message": "404 Not found"}), "exit": 1},
+            "denied": {"stdout": json.dumps({"message": "403 Forbidden - Cannot push to source branch"}), "exit": 1},
+            "failed": {"stdout": json.dumps({"message": "409 Conflict - Failed to enqueue the rebase operation"}), "exit": 1}}[kind]}
+
+    def rebase_polls(self, *answers):
+        """GitLab: the answers to the reads of the merge request with include_rebase_in_progress, in order."""
+        return {f"api projects/{self.project}/merge_requests/1?include_rebase_in_progress=true":
+                [{"stdout": json.dumps(a)} for a in answers]}
+
+    def update_calls(self):
+        return (self.host_calls("pr update-branch") if self.host == "github"
+                else [c for c in self.host_log() if c == ["api", "-X", "PUT", f"projects/{self.project}/merge_requests/1/rebase"]])
+
+    @both_hosts
+    def test_103_a_behind_request_is_rebased_on_the_host_and_the_worktree_is_not_touched(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=head, merge_state="BEHIND", then={"head": new, "merge_state": "UNKNOWN"},
+                       extra=self.update_answer("ok"))
+        before = self.checkout()
+        events = self.events("close", str(task))
+        rebased = self.one(events, "rebased")
+        self.assertEqual((rebased["detail"], rebased["next"]),
+                         (f"onto main at {new[:7]} on the host; same change as {head[:7]}",
+                          "run.py record later; the host's CI tests the new head"))
+        self.assertEqual(self.named(events, "pushed"), [])
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"], meta["caught_up_from"]), (new, new, head))
+        self.assertNotIn("host_rebase", meta)
+        self.assertEqual(self.remote_sha(), new)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)  # the worktree is not touched
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertEqual(self.checkout(), before)
+        self.assertEqual(len(self.update_calls()), 1)
+        if self.host == "github":
+            self.assertEqual(self.update_calls()[0], ["pr", "update-branch", "1", "--rebase"])
+        self.assertIn(f"Verified at: `{new}`.", self.comment_bodies()[-1])
+        # a second close keeps the host's head: the local branch is behind it, and nothing is pushed
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.assertEqual(self.named(events, "pushed") + self.named(events, "rebased"), [])
+        self.assertEqual((self.meta(task)["verdict_ref"], self.meta(task)["pushed"], self.remote_sha()), (new, new, new))
+        # the merge on the host lets record remove the worktree, though its HEAD is the head before the rebase
+        self.fake_host(head=new, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"row_only": True}}, fh)
+        events = self.events("record")
+        self.one(events, "merged")
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         ["session sess-task-1-1 worktree task-1", f"worktree task-1 (merged at {head[:7]})"])
+        self.assertFalse(os.path.isdir(wt))
+
+    @both_hosts
+    def test_103_a_host_rebase_that_changes_the_diff_is_a_decision_and_never_merged(self):
+        task, wt, head = self.published()
+        self.advance_main("out.txt", "x\n")  # the target already holds the task's change
+        self.advance_main("later.txt", "y\n")
+        new = self.host_rebases()
+        self.fake_host(head=head, merge_state="BEHIND", then={"head": new, "merge_state": "CLEAN"},
+                       extra=self.update_answer("ok"))
+        changed = self.one(self.events("close", str(task)), "changed")
+        self.assertEqual(changed["detail"], f"the host rebased {self.label()} onto main at {new[:7]}, and the diff changed "
+                                            f"(different diff); pushed stays {head[:7]}, so run.py does not merge it")
+        self.assertIn(f'tg add "Rebase worktree-task-1 onto main by hand for {self.label()}" --type decision', changed["next"])
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"]), (head, head))
+        self.assertNotIn("host_rebase", meta)
+        self.assertNotIn("caught_up_from", meta)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.orders("MERGE: verified branches into main\n")
+        line = self.one(self.events("record"), "pr-changed")
+        self.assertIn(f"head is {new[:7]}, not the pushed {head[:7]}", line["detail"])
+        self.assertEqual(self.merge_calls(), [])
+
+    @both_hosts
+    def test_103_a_host_conflict_is_a_decision_and_nothing_moves(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        if self.host == "github":
+            extra, why = self.update_answer("conflict"), "X Cannot update PR branch due to conflicts"
+        else:
+            why = "Rebase failed. Please rebase locally"
+            extra = {**self.update_answer("ok"),
+                     **self.rebase_polls({"rebase_in_progress": False, "merge_error": why, "sha": head})}
+        self.fake_host(head=head, merge_state="BEHIND", extra=extra)
+        conflict = self.one(self.events("close", str(task)), "conflict")
+        self.assertEqual(conflict["detail"], f"the host could not rebase {self.label()} onto main: {why}")
+        self.assertIn(f'tg add "Rebase worktree-task-1 onto main for {self.label()}" --type decision', conflict["next"])
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"]), (head, head))
+        self.assertNotIn("host_rebase", meta)
+        self.assertEqual((self.git("rev-parse", "HEAD", cwd=wt), self.remote_sha()), (head, head))
+
+    @both_hosts
+    def test_103_a_host_that_cannot_rebase_falls_back_to_the_local_rebase(self):
+        task, wt, head = self.published()
+        for kind in ("unsupported", "denied"):
+            self.advance_main(f"{kind}.txt")
+            self.fake_host(head=head, merge_state="BEHIND", extra=self.update_answer(kind))
+            events = self.events("close", str(task))
+            new = self.git("rev-parse", "HEAD", cwd=wt)
+            self.assertNotEqual(new, head, kind)
+            local = self.one(events, "catch-up-local")
+            self.assertTrue(local["detail"].startswith(f"the host cannot rebase {self.label()} ({kind}: "), local["detail"])
+            self.assertTrue(local["detail"].endswith("); rebasing it here"), local["detail"])
+            self.assertLess(events.index(local), events.index(self.one(events, "rebased")))
+            self.assertIn(f"onto origin/main at {new[:7]}; same change as {head[:7]}", self.one(events, "rebased")["detail"])
+            self.one(events, "pushed")
+            self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+            self.assertNotIn("host_rebase", self.meta(task))
+            head = new
+        self.assertEqual(len(self.update_calls()), 2)
+
+    @both_hosts
+    def test_103_catch_up_local_rebases_in_the_worktree_and_never_asks_the_host(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND")
+        self.assertEqual(self.one(self.events("record"), "pr-behind")["next"], "run.py close 1 (asks the host to rebase it)")
+        self.local_catch_up()
+        self.assertEqual(self.one(self.events("record"), "pr-behind")["next"],
+                         "run.py close 1 (rebases onto origin/main and pushes again)")
+        events = self.events("close", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertIn(f"onto origin/main at {new[:7]}; same change as {head[:7]}", self.one(events, "rebased")["detail"])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+        self.assertEqual(self.update_calls(), [])
+        self.assertEqual(self.named(events, "catch-up-local"), [])
+
+    def test_103_gitlab_reads_the_request_until_the_rebase_ends(self):
+        self.host = "gitlab"
+        task, wt, head = self.published()
+        self.advance_main()
+        new = self.host_rebases()
+        busy = {"rebase_in_progress": True, "merge_error": None, "sha": head}
+        self.fake_host(head=head, merge_state="BEHIND",
+                       extra={**self.update_answer("ok"),
+                              **self.rebase_polls(busy, busy, {"rebase_in_progress": False, "merge_error": None, "sha": new})})
+        started = time.time()
+        events = self.events("close", str(task))
+        self.assertGreaterEqual(time.time() - started, 6)  # two waits of 3 seconds between three reads
+        self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
+        polls = [c for c in self.host_log() if c == ["api", f"projects/{self.project}/merge_requests/1?include_rebase_in_progress=true"]]
+        self.assertEqual(len(polls), 3)
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+
+    def test_103_github_reads_a_lagging_head_again(self):
+        self.host = "github"
+        task, wt, head = self.published()
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=head, merge_state="BEHIND", then={"head": new, "merge_state": "UNKNOWN"},
+                       extra=self.update_answer("ok"))
+        path = os.path.join(self.dir, "gh.json")
+        with open(path) as fh:
+            table = json.load(fh)
+        table["pr view"].insert(1, table["pr view"][0])  # the first read after the update still shows the old head
+        with open(path, "w") as fh:
+            json.dump(table, fh)
+        reads, started = len(self.host_calls("pr view")), time.time()
+        events = self.events("close", str(task))
+        self.assertGreaterEqual(time.time() - started, 3)
+        self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
+        self.assertEqual(len(self.host_calls("pr view")) - reads, 3)  # publish, then two reads for the new head
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+
+    def test_103_a_request_that_is_already_up_to_date_is_pending(self):
+        self.host = "github"
+        task, wt, head = self.published()
+        self.fake_host(head=head, merge_state="BEHIND", extra=self.update_answer("current"))
+        reads = len(self.host_calls("pr view"))
+        line = self.one(self.events("close", str(task)), "pr-pending")
+        self.assertEqual((line["detail"], line["next"]), ("PR #1: the host says it is up to date with main", "run.py record later"))
+        self.assertNotIn("host_rebase", self.meta(task))
+        self.assertEqual(len(self.host_calls("pr view")) - reads, 1)  # publish's read only: no read for a new head
+
+    @both_hosts
+    def test_103_a_host_rebase_that_ends_late_is_taken_by_the_next_close(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND", extra=self.update_answer("failed"))
+        why = "HTTP 502: Bad Gateway" if self.host == "github" else "409 Conflict - Failed to enqueue the rebase operation"
+        behind = self.one(self.events("close", str(task)), "pr-behind")
+        self.assertEqual((behind["detail"], behind["next"]),
+                         (f"{self.label()} is behind main; the host did not rebase it: {why}",
+                          "run.py close 1 again later; or rebase worktree-task-1 by hand, then run.py close 1"))
+        self.assertEqual(self.meta(task)["host_rebase"], head)
+        new = self.host_rebases()  # the host did the rebase after all
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        line = self.one(self.events("record"), "pr-rebased")
+        self.assertEqual((line["detail"], line["next"]),
+                         (f"{self.label()} head is {new[:7]}: the host rebased {head[:7]}; not checked yet",
+                          "run.py close 1 (checks that the change is the same and records the new head)"))
+        events = self.events("close", str(task))
+        self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"]), (new, new))
+        self.assertNotIn("host_rebase", meta)
+        self.assertEqual(len(self.update_calls()), 1)
+
+    @both_hosts
+    def test_103_a_push_that_a_pre_push_hook_refuses_is_push_failed_with_the_hook_line(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\necho 'pre-push: no recorded make test-affected pass for this tree' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        self.one(events, "rebased")
+        failed = self.one(events, "push-failed")
+        self.assertEqual((failed["detail"], failed["next"]),
+                         (f"the push to origin/task-1 did not reach the remote; origin/task-1 is still at {head[:7]}; "
+                          "git said: pre-push: no recorded make test-affected pass for this tree",
+                          "fix the cause (a pre-push hook, credentials, or a protected branch), then run.py close 1"))
+        self.assertEqual(self.named(events, "push-refused"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+
+    @both_hosts
+    def test_103_a_push_onto_a_moved_remote_branch_says_where_it_is_and_what_git_said(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        other = os.path.join(self.dir, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=other)
+        self.git("checkout", "-q", "-b", "task-1", "origin/task-1", cwd=other)
+        stranger = self.commit_file("stranger.txt", "x\n", cwd=other)
+        self.git("push", "-q", "origin", "task-1", cwd=other)
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        self.one(events, "rebased")
+        refused = self.one(events, "push-refused")
+        self.assertTrue(refused["detail"].startswith(f"origin/task-1 is not at {head[:7]}; someone else pushed; "
+                                                     f"it is at {stranger[:7]} now; git said: ! [rejected]"), refused["detail"])
+        self.assertIn("(stale info)", refused["detail"])
+        self.assertIn("the operator decides", refused["next"])
+        self.assertEqual(self.named(events, "push-failed"), [])
+        self.assertEqual(self.remote_sha(), stranger)
 
 
 if __name__ == "__main__":

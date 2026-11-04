@@ -112,6 +112,7 @@ SCHEMA = {
         "remote": ("nonempty", "origin"),
         "base": ("str", ""),
         "method": ("choice:merge,squash,rebase", "merge"),
+        "catch_up": ("choice:host,local", "host"),
         "remove_worktrees": ("bool", True),
         "disposable": ("patterns", []),
     },

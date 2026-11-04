@@ -243,7 +243,8 @@ works in two steps.
      squash or rebase merge that was recorded, the task's verified commit
      (`verdict_ref`), or a commit with the same change, counts as well. `pr`
      mode: it is in `pushed`, the head the request merged, or in the fetched
-     target branch. The main checkout's `HEAD` is never the test in `pr` mode.
+     target branch, or it is the head that the host rebased (`caught_up_from`).
+     The main checkout's `HEAD` is never the test in `pr` mode.
 
    Then `run.py` runs `git worktree unlock` when the folder is locked (it
    unlocks Claude Code's lock only for a clean, merged folder),
@@ -313,7 +314,7 @@ the operator's standing permission for `run.py` to push task branches to
    as `pushed`. A remote branch that is not ours stops the first push.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
    `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
-   `pr-behind`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
+   `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
    request clean, a `MERGE:` line exists, and `STOP` is absent, `record` merges
    it with `merge.method`. The merge is guarded by the pushed head
    (`--match-head-commit` on GitHub, `sha` on GitLab). A request whose head is
@@ -326,12 +327,29 @@ the operator's standing permission for `run.py` to push task branches to
    `run.py merged <id> --by operator` is for a merge the host cannot show. A
    request closed without a merge is reported at every drain (`pr-closed`).
 4. When the host reports the request behind its target, `run.py close <id>`
-   rebases the branch in its idle worktree, checks that the change is the same,
-   and pushes it again. A conflict is aborted and written as a decision. A
-   worktree that is missing, dirty, or in use is not touched. `run.py` never
-   approves, force-resolves, or unprotects. A push is made only when our head
-   moved. If someone else moved the remote branch while our head stayed, `record`
-   prints `pr-changed`; `push-refused` appears when our head moved too.
+   catches it up. With `[merge] catch_up = "host"` (the default) it asks the
+   host to rebase the request: GitHub `gh pr update-branch <n> --rebase`,
+   GitLab `PUT merge_requests/<iid>/rebase`. Then it reads the request until
+   the head moves (at most 20 reads, 3 seconds apart), fetches the new head,
+   and checks that the change is the same. The same change moves `verdict_ref`
+   and `pushed` to the new head (`rebased ... on the host`). Nothing is pushed
+   from this machine, so a local pre-push hook does not run, and the task
+   worktree is not touched. A changed diff is a decision, and `pushed` stays at
+   the old head, so `record` prints `pr-changed` and never merges the request.
+   A conflict on the host is a decision. A host that cannot rebase (an old `gh`,
+   no endpoint) or that refuses this user falls back to the local rebase
+   (`catch-up-local`). A rebase that the host finishes late is found by the next
+   `record` (`pr-rebased`) and checked by the next `close`. With
+   `catch_up = "local"`, `close` rebases the branch in its idle worktree, checks
+   that the change is the same, and pushes it again. A conflict is aborted and
+   written as a decision. A worktree that is missing, dirty, or in use is not
+   touched. `run.py` never approves, force-resolves, or unprotects. A push is
+   made only when our head moved. A push that fails while the remote branch is
+   still at `pushed` did not reach the remote, for example because of a pre-push
+   hook, credentials, or a protected branch: `push-failed`, with git's line. If
+   someone else moved the remote branch while our head stayed, `record` prints
+   `pr-changed`; `push-refused` appears when our head moved too, with where the
+   remote branch is and git's line.
 5. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
 **Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
@@ -413,9 +431,9 @@ run `npm install -g pele` once, then
 runs it from the repository root through the wrapper:
 `"${CLAUDE_PLUGIN_ROOT}/scripts/run" [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command>`.
 A `next:` hint that says `run.py <cmd>` means that wrapper with `<cmd>`.
-Only `wait` sleeps or polls, and it writes nothing: `claude --bg` returns at
-once, and the Manager runs `record` when a session's message or the end of
-`wait` wakes it.
+Only `wait` and the host catch-up in `close` sleep or poll, and `wait` writes
+nothing: `claude --bg` returns at once, and the Manager runs `record` when a
+session's message or the end of `wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
@@ -423,7 +441,7 @@ once, and the Manager runs `record` when a session's message or the end of
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`). |
+| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker for a pause and files a `STOPPED` result. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
@@ -527,6 +545,7 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `remote` | string | `"origin"` | The git remote the host is reached through. |
 | `base` | string | `""` | The branch requests target. `""` means the host's default branch, asked once per `run.py` command. A task launched with `--base <branch>` targets that branch instead (meta `target`). |
 | `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
+| `catch_up` | `"host"` or `"local"` | `"host"` | How `close` catches up a request that is behind its target, in `pr` mode. `host`: it asks the host to rebase the request (GitHub `gh pr update-branch --rebase`, GitLab `PUT merge_requests/<iid>/rebase`) and pushes nothing; a host that cannot rebase or refuses this user falls back to `local`. `local`: it rebases the branch in its idle worktree and pushes it under the lease. |
 | `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no session, process or container uses them, a clean tree whose ignored files are all disposable, a merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
 | `disposable` | list of patterns | `[]` | Ignored paths that `run.py` may delete with a merged worktree, added to the default list. An entry `"!<pattern>"` turns off one default pattern. See [Disposable patterns](#disposable-patterns). |
 
@@ -676,7 +695,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 24 keys:
+skill. Metadata holds everything else, 26 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -693,11 +712,17 @@ skill. Metadata holds everything else, 24 keys:
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
 | `cleanup_kept` | `cleanup` | A JSON object `{folder: reason}` for the worktree folders of a merged task that `run.py` kept, so `record` repeats a `kept` line only when its reason changes. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
+| `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
+| `caught_up_from` | `close` | The local branch's head when the host first rebased the request. The local branch and worktree stay there. `close` does not push it back over the host's head, and cleanup counts it as merged. |
 | `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager` or `operator`. In `pr` mode `record` sets them from the request state. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.11.0
+
+Version 0.11.1 catches up on the host by default in `pr` mode. When a request is behind its target, `run.py close` now asks the host to rebase it (GitHub `gh pr update-branch <n> --rebase`, GitLab `PUT merge_requests/<iid>/rebase`) and pushes nothing, in place of a rebase in the task worktree and a push. Set `[merge] catch_up = "local"` to keep the 0.11.0 behaviour. A failed push now says why: `push-failed` with git's line when the remote branch did not move (a pre-push hook, credentials, or a protected branch), and `push-refused` only when someone else moved it. No migration.
 
 ### Upgrading from 0.10.3
 
