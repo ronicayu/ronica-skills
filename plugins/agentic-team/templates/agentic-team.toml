@@ -38,6 +38,7 @@ always_pause = []           # decisions that always need the operator
 # remote = "origin"
 # base = ""                 # "" = the host's default branch
 # method = "merge"          # "merge" | "squash" | "rebase" (GitLab: the project setting decides; "squash" adds squash=true)
+# catch_up = "host"         # a request behind its target: "host" asks the host to rebase it; "local" rebases the worktree and pushes
 # remove_worktrees = true # false: keep every worktree and session of a merged task (run.py removes nothing)
 # disposable = []          # ignored paths that run.py may delete with a merged worktree, added to the defaults; "!build/" turns a default off (README: Disposable patterns)
 

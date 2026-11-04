@@ -24,15 +24,19 @@ Usage:
                    tells its session to message after its result
 
 Run from the repository root. Taskgraph is the only source of task content;
-this script copies it and never invents it. Only `wait` sleeps or polls, and
-it writes nothing: `claude --bg` returns at once, and the Manager runs
-`record` when a session's message or the end of `wait` wakes it.
+this script copies it and never invents it. Only `wait` and the host
+catch-up in `close` sleep or poll, and `wait` writes nothing: `claude --bg`
+returns at once, and the Manager runs `record` when a session's message or
+the end of `wait` wakes it.
 
 merge.mode "local" merges a closed branch into the main checkout under a
 MERGE: line. merge.mode "pr" pushes the branch `task-<id>` to merge.remote and
 opens a pull request (gh) or merge request (glab) through host.py; `record`
 merges it under the same MERGE: line once the host reports it clean, and
-records a merge anyone else did. Local mode never runs gh or glab.
+records a merge anyone else did. When the request is behind its target,
+`close` asks the host to rebase it (merge.catch_up "host", the default), or
+rebases the branch in its worktree and pushes it again (merge.catch_up
+"local"). Local mode never runs gh or glab.
 
 Text output is one line per event: `<event> #<id> attempt <n>: <detail>`, with
 ` | next: <step>` when a step follows. `--json` prints one JSON array of
@@ -138,6 +142,8 @@ WAIT_TIMEOUT_MAX = 6600  # 110 minutes: Bash stops a background command after 2 
 WAIT_INTERVAL = 30  # seconds between two reads of Taskgraph and `claude agents`
 WAIT_HOST_INTERVAL = 300  # seconds between two reads of the code host in pr mode; the host limits its rate
 WAKE_NEXT = "run.py record, then run.py wait again while work is in flight"
+CATCH_UP_POLLS = 20  # reads of the request after the host took a rebase, at most
+CATCH_UP_WAIT = 3  # seconds between two of those reads
 
 
 class Refused(codehost.HostError):
@@ -322,6 +328,12 @@ class Run:
 
     def edit_meta(self, tid, **meta):
         self.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in meta.items()])
+
+    def unset_meta(self, task, *keys):
+        """Remove meta keys in Taskgraph and in the task dict this command is holding. A missing key is fine."""
+        self.tg("edit", str(task["id"]), "--unset-meta", *keys)
+        for key in keys:
+            task.setdefault("meta", {}).pop(key, None)
 
     # --- data
 
@@ -2236,6 +2248,8 @@ def not_merged_reason(run, task, head):
     if merged_into(run, task, head):
         return None
     if run.pr_mode:
+        if head == meta.get("caught_up_from"):
+            return None  # the host rebased this commit into the pushed head, with the same change
         pushed = meta.get("pushed")
         if pushed and not commit_of(run, str(pushed)):
             branch = meta.get("pr_branch") or "task-" + str(task["id"])
@@ -2684,7 +2698,8 @@ def publish(run, task, branch, head, catch_up=False):
         if not ok:
             seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False).stdout.split()
             if not seen:
-                raise Refused(f"push of {branch} to {remote}/{pr_branch} failed: {why}", 1)
+                raise Refused(f"push of {branch} to {remote}/{pr_branch} failed: {why}; a pre-push hook, credentials "
+                              f"or a protected branch can stop a push; fix the cause, then run.py close {tid}", 1)
             if seen[0] != head:  # equal: an earlier publish pushed and died before the tg edit
                 raise Refused(f"remote branch {remote}/{pr_branch} is at {seen[0][:7]}, not ours; delete or rename it on the "
                               f"host, then run.py close {tid}; or fetch it and run.py adopt {tid} --branch <b> --head <sha>")
@@ -2698,7 +2713,7 @@ def publish(run, task, branch, head, catch_up=False):
             if not seen.stdout.split():
                 raise Refused(f"remote branch {remote}/{pr_branch} is gone (the host may delete it after a merge or a close); "
                               f"unset the pr, pr_branch and pushed meta of #{tid} to publish again")
-            push_refused(run, task, pushed)
+            push_refused(run, task, pushed, why)
             return False
         run.set_meta(task, pushed=head)
         run.emit("pushed", tid, attempt, None, f"{head[:7]} to {remote}/{pr_branch}", "run.py record")
@@ -2714,18 +2729,117 @@ def publish(run, task, branch, head, catch_up=False):
                  f"{remote}/{pr_branch}, base {target}")
     if catch_up and not pushed_now:  # right after a push the host may still show the old head
         p = host.pr(int(number))
-        if p.state == "OPEN" and p.merge_state == "BEHIND" and p.head == meta["pushed"]:
-            rebase_branch(run, task, branch, head, p)
+        if p.state == "OPEN" and p.head != meta["pushed"] and meta.get("host_rebase") == meta["pushed"]:
+            take_host_head(run, task, branch, p.head, p)  # a host rebase that finished after the last close
+        elif p.state == "OPEN" and p.merge_state == "BEHIND" and p.head == meta["pushed"]:
+            if run.config["merge"]["catch_up"] == "host":
+                host_catch_up(run, task, branch, head, p)
+            else:
+                rebase_branch(run, task, branch, head, p)
         else:
             pr_status(run, None, task, p)
     return True
 
 
-def push_refused(run, task, pushed):
+def push_refused(run, task, pushed, why):
+    """A push to the request branch failed. `why` is the line host.push returned. The remote branch still at
+    `pushed`, or a remote that cannot be read, means the push did not reach the remote (push-failed: a pre-push
+    hook, credentials, a protected branch). A remote branch that moved means someone else pushed (push-refused)."""
     tid, meta = task["id"], task["meta"]
-    run.emit("push-refused", tid, wanted_attempt(task), None,
-             f"{run.config['merge']['remote']}/{meta.get('pr_branch') or f'task-{tid}'} is not at {pushed[:7]}; someone else pushed",
-             f"the operator decides: reset the remote branch to {pushed[:7]}, or merge by hand and run.py merged {tid} --by operator")
+    attempt, remote = wanted_attempt(task), run.config["merge"]["remote"]
+    branch = meta.get("pr_branch") or f"task-{tid}"
+    said = f"; git said: {why}" if why else ""
+    seen = run.git("ls-remote", remote, f"refs/heads/{branch}", check=False)
+    at = seen.stdout.split()[0] if seen.returncode == 0 and seen.stdout.split() else ""
+    if seen.returncode != 0 or at == pushed:
+        where = (f"{remote}/{branch} is still at {pushed[:7]}" if seen.returncode == 0
+                 else f"ls-remote of {remote} failed too: {first_line(seen.stderr)}")
+        run.emit("push-failed", tid, attempt, None, f"the push to {remote}/{branch} did not reach the remote; {where}{said}",
+                 f"fix the cause (a pre-push hook, credentials, or a protected branch), then run.py close {tid}")
+    elif not at:
+        run.emit("push-refused", tid, attempt, None,
+                 f"{remote}/{branch} is gone; the host may delete it after a merge or a close{said}",
+                 f"unset the pr, pr_branch and pushed meta of #{tid} to publish again")
+    else:
+        run.emit("push-refused", tid, attempt, None,
+                 f"{remote}/{branch} is not at {pushed[:7]}; someone else pushed; it is at {at[:7]} now{said}",
+                 f"the operator decides: reset the remote branch to {pushed[:7]}, or merge by hand and run.py merged {tid} --by operator")
+
+
+def host_catch_up(run, task, branch, head, p):
+    """The request is behind its target and merge.catch_up is "host": ask the host to rebase it, then read the
+    request until its head moves. Nothing is pushed from here, and the task worktree is not touched. Only a host
+    that cannot rebase (unsupported) or that refuses this user (denied) falls back to rebase_branch."""
+    tid, meta = task["id"], task["meta"]
+    attempt, host = wanted_attempt(task) or 1, run.host()
+    label, target, old = host.label(p.number), p.base_branch, meta["pushed"]
+    run.set_meta(task, host_rebase=old)  # set first: a later close or record finds a rebase that ends late
+    kind, why = host.update_branch(p.number)
+    if kind in ("unsupported", "denied"):
+        run.unset_meta(task, "host_rebase")
+        run.emit("catch-up-local", tid, attempt, None, f"the host cannot rebase {label} ({kind}: {why}); rebasing it here")
+        rebase_branch(run, task, branch, head, p)
+        return
+    if kind == "conflict":
+        run.unset_meta(task, "host_rebase")
+        run.emit("conflict", tid, attempt, None, f"the host could not rebase {label} onto {target}: {why}",
+                 decision_text(f"Rebase {branch} onto {target} for {label}", task))
+        return
+    if kind == "current":
+        run.unset_meta(task, "host_rebase")
+        run.emit("pr-pending", tid, attempt, None, f"{label}: the host says it is up to date with {target}",
+                 "run.py record later")
+        return
+    if kind == "failed":
+        run.emit("pr-behind", tid, attempt, None, f"{label} is behind {target}; the host did not rebase it: {why}",
+                 f"run.py close {tid} again later; or rebase {branch} by hand, then run.py close {tid}")
+        return
+    for number in range(CATCH_UP_POLLS):
+        if number:
+            time.sleep(CATCH_UP_WAIT)
+        busy, error, new = host.rebase_status(p.number)
+        if busy:
+            continue
+        if new and new != old:
+            take_host_head(run, task, branch, new, p)
+            return
+        if error:
+            run.unset_meta(task, "host_rebase")
+            run.emit("conflict", tid, attempt, None, f"the host could not rebase {label} onto {target}: {error}",
+                     decision_text(f"Rebase {branch} onto {target} for {label}", task))
+            return
+    run.emit("pr-pending", tid, attempt, None,
+             f"{label}: the host has not finished the rebase after {(CATCH_UP_POLLS - 1) * CATCH_UP_WAIT} seconds",
+             f"run.py record later; then run.py close {tid}")
+
+
+def take_host_head(run, task, branch, new, p):
+    """The host rebased the request from the pushed head to `new`. Fetch the request branch; this does not touch
+    the task worktree. Keep `new` when it carries the same change: verdict_ref and pushed move to it. Else pushed
+    stays, so record says pr-changed and never merges it."""
+    tid, meta = task["id"], task["meta"]
+    attempt, remote = wanted_attempt(task) or 1, run.config["merge"]["remote"]
+    label, target, old = run.host().label(p.number), p.base_branch, meta["pushed"]
+    pr_branch = meta.get("pr_branch") or f"task-{tid}"
+    fetched = run.git("fetch", remote, f"refs/heads/{pr_branch}", check=False)
+    if fetched.returncode != 0 or not commit_of(run, new):
+        why = first_line(fetched.stderr) if fetched.returncode != 0 else f"{new[:7]} is not on {remote}/{pr_branch}"
+        run.emit("pr-rebased", tid, attempt, None, f"{label} head is {new[:7]}: the host rebased {old[:7]}; not checked: {why}",
+                 f"fix the cause, then run.py close {tid}")
+        return
+    run.unset_meta(task, "host_rebase")
+    same, reason = same_change(run, task, old, new)
+    if not same:
+        run.emit("changed", tid, attempt, None,
+                 f"the host rebased {label} onto {target} at {new[:7]}, and the diff changed ({reason}); "
+                 f"pushed stays {old[:7]}, so run.py does not merge it",
+                 decision_text(f"Rebase {branch} onto {target} by hand for {label}", task))
+        return
+    tip = commit_of(run, f"refs/heads/{branch}")
+    keep = {"caught_up_from": tip} if tip and tip == commit_of(run, str(meta.get("verdict_ref") or "")) else {}
+    run.set_meta(task, verdict_ref=new, pushed=new, **keep)
+    run.emit("rebased", tid, attempt, None, f"onto {target} at {new[:7]} on the host; same change as {old[:7]}",
+             "run.py record later; the host's CI tests the new head")
 
 
 def rebase_branch(run, task, branch, head, p):
@@ -2761,9 +2875,9 @@ def rebase_branch(run, task, branch, head, p):
         return
     run.set_meta(task, verdict_ref=new)
     run.emit("rebased", tid, attempt, None, f"onto {remote}/{target} at {new[:7]}; same change as {head[:7]}")
-    ok, _ = host.push(f"refs/heads/{branch}", meta["pr_branch"], meta["pushed"])
+    ok, why = host.push(f"refs/heads/{branch}", meta["pr_branch"], meta["pushed"])
     if not ok:
-        push_refused(run, task, meta["pushed"])
+        push_refused(run, task, meta["pushed"], why)
         return
     run.set_meta(task, pushed=new)
     run.emit("pushed", tid, attempt, None, f"{new[:7]} to {remote}/{meta['pr_branch']}")
@@ -2784,6 +2898,9 @@ def pr_status(run, snap, task, p):
     elif p.state == "CLOSED":
         run.emit("pr-closed", tid, None, None, f"{label} closed without a merge",
                  f"reopen it on the host and run.py record, or " + decision_text(f"{label} for #{tid} was closed: redo or drop?", task, snap))
+    elif p.head != pushed and meta.get("host_rebase") == pushed:
+        run.emit("pr-rebased", tid, None, None, f"{label} head is {p.head[:7]}: the host rebased {pushed[:7]}; not checked yet",
+                 f"run.py close {tid} (checks that the change is the same and records the new head)")
     elif p.head != pushed:
         run.emit("pr-changed", tid, None, None, f"{label} head is {p.head[:7]}, not the pushed {pushed[:7]}; not merged by run.py",
                  f"the operator decides: reset the branch to {pushed[:7]} and push, or merge by hand and run.py merged {tid} --by operator")
@@ -2795,8 +2912,9 @@ def pr_status(run, snap, task, p):
         run.emit("conflict", tid, None, None, f"{label} conflicts with {target}",
                  decision_text(f"Resolve {label} conflicts with {target}", task, snap))
     elif p.merge_state == "BEHIND":
-        run.emit("pr-behind", tid, None, None, f"{label} is behind {target}",
-                 f"run.py close {tid} (rebases onto {run.config['merge']['remote']}/{target} and pushes again)")
+        how = ("asks the host to rebase it" if run.config["merge"]["catch_up"] == "host"
+               else f"rebases onto {run.config['merge']['remote']}/{target} and pushes again")
+        run.emit("pr-behind", tid, None, None, f"{label} is behind {target}", f"run.py close {tid} ({how})")
     elif p.merge_state == "BLOCKED":
         run.emit("pr-blocked", tid, None, None, f"{label} {p.raw_state}; {host.blockers(p.number)}",
                  "run.py record later; a failed check is evidence for a fix task")
@@ -2931,7 +3049,12 @@ def resume_close(run, task):
     tid, ref = task["id"], str(task["meta"]["verdict_ref"])
     attempt = wanted_attempt(task) or 1
     worker = latest_worker(run.results_for(tid), attempt)
-    branch, now = branch_at(run, tid, attempt, worker, ref, task)
+    local = (tail_or_none(BRANCH_LINE.search(worker["body"])) if worker else None) or task_branch(tid)
+    held = task["meta"].get("caught_up_from") if run.pr_mode else None
+    if held and commit_of(run, f"refs/heads/{local}") == held:
+        branch, now = local, ref  # the host rebased the request to verdict_ref; the local branch keeps the old head
+    else:
+        branch, now = branch_at(run, tid, attempt, worker, ref, task)
     if now != ref:
         run.emit("rebased", tid, attempt, None, f"same change at {now[:7]} (verified at {ref[:7]}); verdict_ref moves")
         run.set_meta(task, verdict_ref=now)

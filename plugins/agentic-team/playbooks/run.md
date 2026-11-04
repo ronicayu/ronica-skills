@@ -36,16 +36,25 @@ every report, and on every wake (step 6).
      session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.
    - `attempt 3 failed`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`, add a decision if
      the operator must decide, and re-plan around the task.
-   - `conflict`: add the decision the line names. `decision`: carry it into
-     the report with your recommendation.
+   - `conflict`, and `changed` from `close`: add the decision the line names. The task worktree stays
+     as it was. After a host rebase that changed the diff, the request holds the host's new head, and
+     `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your
+     recommendation.
    - `unmerged` and `waits`: say plainly which branch the operator should
      merge and which tasks wait on it.
    - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
-   - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` rebases and pushes.
+   - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` asks the host to rebase the request
+     (`[merge] catch_up = "host"`, the default), or rebases the worktree and pushes (`"local"`). A
+     `pr-behind` line from `close` that says the host did not rebase it: follow its `next:`.
+   - `pr-rebased`: the host rebased the request after an earlier `close`.
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` checks the new head and records it.
+   - `push-failed`: the push did not reach the remote, and nobody else pushed. Tell the operator
+     the `git said:` text. A pre-push hook, credentials, or a protected branch is the usual cause.
+     Never bypass a hook (`--no-verify`).
    - `pr-changed`, `pr-closed`, `pr-unpinned`, `push-refused`, `merge-failed`, `host-error`, `comment-failed`: tell the operator what the line says; add a
-     decision when they must choose. `published`, `pushed`, `rebased`, `commented`: no action.
+     decision when they must choose. `published`, `pushed`, `rebased`, `catch-up-local`, `commented`: no action.
 
    A result whose attempt is not the task's current attempt is superseded.
    Check it against the current state before you use anything in it, and

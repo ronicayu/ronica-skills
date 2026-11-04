@@ -150,6 +150,40 @@ class GitHubTest(unittest.TestCase):
         client, _ = gh((["push"], {"exit": 1, "stderr": "To origin\n ! [rejected] b -> task-1 (stale info)\n"}))
         self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "! [rejected] b -> task-1 (stale info)"))
 
+    def test_103_push_names_the_hook_line_or_the_ref_status(self):
+        hook = "pre-push: no recorded make test-affected pass for this tree"
+        client, _ = gh((["push"], {"exit": 1, "stderr": f"{hook}\nerror: failed to push some refs to '/o.git'\n"}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, hook))
+        server = ("remote: error: GH006: Protected branch update failed\nTo origin\n"
+                  " ! [remote rejected] b -> task-1 (protected branch hook declined)\nerror: failed to push some refs to 'o'\n")
+        client, _ = gh((["push"], {"exit": 1, "stderr": server}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "! [remote rejected] b -> task-1 (protected branch hook declined)"))
+        client, _ = gh((["push"], {"exit": 128, "stderr": "fatal: could not read Username for 'https://github.com'\n"}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "fatal: could not read Username for 'https://github.com'"))
+        client, _ = gh((["push"], {"exit": 1, "stderr": "error: failed to push some refs to 'o'\n"}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "error: failed to push some refs to 'o'"))
+
+    def test_103_update_branch_outcomes(self):
+        answers = {
+            "ok": {"stdout": "\u2713 PR branch updated\n"},
+            "current": {"stdout": "\u2713 PR branch already up-to-date\n"},
+            "conflict": {"exit": 1, "stderr": "X Cannot update PR branch due to conflicts\n"},
+            "unsupported": {"exit": 1, "stderr": 'unknown command "update-branch" for "gh pr"\n'},
+            "denied": {"exit": 1, "stderr": "GraphQL: Resource not accessible by integration (updatePullRequestBranch)\n"},
+            "failed": {"exit": 1, "stderr": "HTTP 502: Bad Gateway\n"},
+        }
+        for kind, answer in answers.items():
+            client, sh = gh((["pr", "update-branch"], answer))
+            self.assertEqual(client.update_branch(3)[0], kind, kind)
+            self.assertEqual(sh.calls[0]["cmd"], ["gh", "pr", "update-branch", "3", "--rebase"])
+        self.assertEqual(gh((["pr", "update-branch"], {"exit": 4, "stderr": "please run: gh auth login\n"}))[0].update_branch(3),
+                         ("denied", "please run: gh auth login"))
+        self.assertEqual(gh((["pr", "update-branch"], answers["conflict"]))[0].update_branch(3),
+                         ("conflict", "X Cannot update PR branch due to conflicts"))
+        view = {"number": 3, "url": "u", "state": "OPEN", "headRefOid": "b" * 40, "headRefName": "task-3", "baseRefName": "main",
+                "mergedAt": None, "mergeCommit": None, "mergeStateStatus": "UNKNOWN"}
+        self.assertEqual(gh((["pr", "view", "3"], ok(view)))[0].rebase_status(3), (False, "", "b" * 40))
+
     def test_67_merge_checks_and_dispatch(self):
         client, sh = gh((["pr", "merge"], {"exit": 1, "stderr": "Pull request is not mergeable\nmore\n"}))
         self.assertEqual(client.merge(3, "squash", "h" * 40), (False, "Pull request is not mergeable"))
@@ -310,6 +344,26 @@ class GitLabTest(unittest.TestCase):
         with self.assertRaises(host.HostError) as caught:
             client.comment(7, marker, "text")
         self.assertEqual(str(caught.exception), "glab api projects/<project>/merge_requests/7/notes failed: 403 Forbidden")
+
+    def test_103_rebase_outcomes(self):
+        put = ["api", "-X", "PUT", "projects/g%2Fp/merge_requests/7/rebase"]
+        client, sh = gl((put, ok({"rebase_in_progress": True})))
+        self.assertEqual(client.update_branch(7)[0], "ok")
+        self.assertEqual(sh.calls[0]["cmd"], ["glab", *put])
+        for message, kind in (("403 Forbidden - Cannot push to source branch", "denied"),
+                              ("Source branch is protected from force push", "denied"),
+                              ("404 Not found", "unsupported"), ("405 Method Not Allowed", "unsupported"),
+                              ("409 Conflict - Failed to enqueue the rebase operation", "failed")):
+            client, _ = gl((put, {"exit": 1, "stdout": json.dumps({"message": message})}))
+            self.assertEqual(client.update_branch(7), (kind, message), message)
+        poll = ["api", "projects/g%2Fp/merge_requests/7?include_rebase_in_progress=true"]
+        for body, wanted in (({"rebase_in_progress": True, "merge_error": None, "sha": "a" * 40}, (True, "", "a" * 40)),
+                             ({"rebase_in_progress": False, "merge_error": None, "sha": "b" * 40}, (False, "", "b" * 40)),
+                             ({"rebase_in_progress": False, "merge_error": "Rebase failed. Please rebase locally", "sha": "a" * 40},
+                              (False, "Rebase failed. Please rebase locally", "a" * 40))):
+            client, sh = gl((poll, ok(body)))
+            self.assertEqual(client.rebase_status(7), wanted)
+            self.assertEqual(sh.calls[0]["cmd"], ["glab", *poll])
 
     def test_68_blockers_list_the_word_the_pipeline_and_the_approvals(self):
         client, _ = gl((["merge_requests/7/approvals"], ok({"approvals_left": 2})),
