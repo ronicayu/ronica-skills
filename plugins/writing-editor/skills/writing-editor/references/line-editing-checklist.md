@@ -12,7 +12,7 @@ Contents: [Clarity and precision](#clarity-and-precision) · [Concision](#concis
 > Two readings: notify once, after both; or the report's approval is itself conditional on the migration.
 > → "Once the migration completes and the report is approved, we will notify the team."
 
-**Orphan references.** *This*, *that*, *these*, *it*, *they* must point at one unmistakable noun. When the antecedent is a whole preceding clause, name it (*this delay*, *this constraint*), never a naked *this*.
+**Orphan references.** *This*, *that*, *these*, *it*, *they* must point at one unmistakable noun. When the antecedent is a whole preceding clause, write *this* plus the noun (*this delay*, *this constraint*), not a naked *this*.
 
 > "The service retries and the queue drains slowly. This causes duplicate charges."
 > → "The retries cause duplicate charges."
@@ -97,7 +97,7 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 ## Flow and rhythm
 
-**Read it as the reader will.** Read it once, at reading speed and in order, without looking back. Every place where you slow down or look back is a lump the reader hits too.
+**Read it as the reader will.** Read it once, in order, at reading speed. Every place where you would slow down or want to look back is a lump the reader hits too.
 
 **Vary length.** A paragraph of uniform medium-length sentences reads as a drone. Follow a long sentence with a short one. Short sentences land hardest, so save them for what matters.
 
@@ -230,6 +230,8 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 | a significant proportion of | most, *or the number* |
 | has the ability to | can |
 | is able to, is in a position to | can |
+| take into account | consider |
+| is indicative of | indicates |
 | it is necessary that | must |
 | provides support for | supports |
 | in the majority of cases | usually |

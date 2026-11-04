@@ -48,14 +48,14 @@ Read the entire piece before changing a word. A local fix made blind to the endi
 When one document serves two of these, write the body for the primary reader and give the other their own section. Classify by what the reader does while reading, not by the meeting the document goes to. A design sent to a review is read by evaluators, not approvers.
 
 - **Does a template set the shape?** If the document follows a template, check it against the template in pass 1. Flag template sections that do not fit the subject. Do not fill them with placeholders.
-- **How long may it be?** Set a length from the reader's job above: an approver reads the first half page, an implementer reads as far as the work needs. A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
+- **How long may it be?** Set a length from the reader's job above. A piece far over that length carries more than one document. So does a piece that needs a reading guide or an ID key before the reader can start.
 
 - **Is the text technical?** For documentation, a README, a design document, an RFC, a PR description, a commit message or an issue, read `references/technical-docs.md` now. It says which of its rules apply and in which pass.
 
 ### 1. Structure
 
 - **Answer early.** The opening gives the recommendation, finding or main claim, not a tour of the background.
-- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). The title, opening and headings alone give the answer and the ask. Keep each heading short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
+- **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). Read alone, they carry the argument; with the title and opening, they give the answer and the ask. Keep each heading short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
 - **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. If one case, or one piece of evidence, fits two items, they overlap.
 - **Ordering.** By time, structure or degree, chosen on purpose. The chronology of the investigation is almost never the right order for the finding.

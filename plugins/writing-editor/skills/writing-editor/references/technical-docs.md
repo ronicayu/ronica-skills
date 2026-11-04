@@ -101,7 +101,7 @@ Write these in ASD-STE100 sentences, structured as a Minto pyramid.
 
 ## Worked example
 
-**Before**: a buried actor, a passive procedure, a noun string, and a misplaced "only".
+**Before**: a buried actor, a passive procedure, a noun string, a misplaced "only", and an orphan "it".
 
 > The cache eviction timeout and `max_size` configuration file parameters are set in `cache.toml` by the service. It is important to remember that the `--purge` flag, which deletes every cached entry, should only be used when the disk is full. If it is exceeded, requests will fail.
 

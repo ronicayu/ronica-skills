@@ -18,9 +18,9 @@ This stage is about the reader and the outcome, not the document. Settle these a
 - **The readers.** Real roles. "Stakeholders" is not an audience. What they already know decides what you leave out.
 - **The change.** What differs after reading: a decision, an approval, a belief, an action. "Informed" is not enough. Informed enough to do what?
 - **What the reader is doing.** Use pass 0 of `SKILL.md`. Record the shape it picks.
-- **Technical?** Read `technical-docs.md` now, as pass 0 of `SKILL.md` says. For a tutorial, how-to or reference page, its heading forms and shape override message headings.
+- **Technical?** If pass 0 of `SKILL.md` calls the text technical, read `technical-docs.md` now. For a tutorial, how-to or reference page, that file's heading forms and shape override message headings.
 - **Scanning or following.** This sets granularity and is separate from shape. A scanning reader needs short paragraphs, visible counts and a heading every few points. A following reader needs *because*, *therefore* and *but*, which exist only in multi-sentence paragraphs. Name which sections are which now. Retrofitting granularity means rewriting.
-- **Constraints and house style.** Format, deadline, a `CLAUDE.md`, a style guide, a document template or the convention of neighbouring documents. These override every default here. Do not copy the last document's structure by habit. Its template answers a question this reader may not ask.
+- **Constraints and house style.** Format, deadline, a `CLAUDE.md`, a style guide, a document template or the convention of neighbouring documents. These override every default here. Do not copy the last document's structure by habit. The last document answered its own reader's question, which may not be this reader's.
 - **Size.** Agree a target length now, from the reader's job (pass 0 of `SKILL.md`). It sets heading depth. Two pages supports two levels and three or four sections. Twenty pages supports four levels.
 
 The brief block is the first thing in the file. Delete it before handover.
@@ -43,7 +43,7 @@ Draft stage: OUTLINE — not approved
 
 ## Stage 2: Sources
 
-Do not skip this stage because the user seems to know it all. Stage 4 would then assert what nobody can trace. Sources can be empty. Then say so in the brief, because it limits what stage 4 may assert.
+Do not skip this stage because the user seems to know it all; stage 4 would then state what nobody can trace. Sources can be empty. If they are, say so in the brief, because an empty list limits what stage 4 may assert.
 
 - **Enumerate before reading.** List candidates and have the user confirm, add and cut.
 - **Mark each source authoritative or indicative.** Authoritative sources settle facts. Indicative ones suggest and need a cross-check. Honour any confidence levels or corrections file the repo keeps.
@@ -54,11 +54,11 @@ Invent nothing, in any stage. No figures, no citations, no attributed positions.
 
 ## Stage 3: Outline
 
-Build the pyramid, write it into the target file as a skeleton, then interview the user on it. The mechanics are in `pyramid-principle.md`. Do not re-derive them.
+Build the pyramid, write it into the target file as a skeleton, then interview the user on it. Read `pyramid-principle.md` now for the mechanics, and do not re-derive them.
 
 ### Build it
 
-1. **Governing thought.** One declarative sentence, not a title or a topic. "Wave 1 can cut over in October" is a governing thought. "Wave 1 cutover readiness" is a filing label. It becomes the H1 or the opening line.
+1. **Governing thought.** One declarative sentence, not a title or a topic. "Wave 1 can cut over in October" is a governing thought. "Wave 1 cutover readiness" is a filing label. A thought that cannot be wrong cannot be useful. The governing thought becomes the H1 or the opening line.
 2. **Introduction.** Write it as Situation, Complication, Question, Answer, in the order `pyramid-principle.md` gives for this reader.
 3. **Supports.** As many as the argument has, at most five, each a claim that answers the question the governing thought raises (usually *why?*, sometimes *how?*).
 4. **Group type and ordering.** Name them for each group: inductive or deductive, and time, structure or degree. If you cannot name the ordering, there is none.
@@ -69,7 +69,7 @@ Build the pyramid, write it into the target file as a skeleton, then interview t
 
 Write it in the real target file, not a separate outline. Each heading states a message. Under it goes one HTML comment with `msg:` (one point, the intent) and `src:`. A comment under the H1 names the intro order, the group type and the ordering. If a heading and its message differ, the heading is wrong. No prose goes below a heading while `Draft stage` is `OUTLINE — not approved`; when you want to draft, make the outline more specific instead. Stage 4 turns each message into the section's first sentence, so the approved structure is the one that ships.
 
-Heading length follows pass 1 of `SKILL.md`. It matters most where house style forbids section numbers, so the heading is the only way to cite a section.
+Heading length follows pass 1 of `SKILL.md`, and matters most where house style forbids section numbers, so the heading is the only way to cite a section. If *Section `<heading>`* cannot sit in a sentence, shorten the heading.
 
 ```markdown
 # Wave 1 can cut over in October, once two gates close
