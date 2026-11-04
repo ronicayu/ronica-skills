@@ -18,10 +18,15 @@ Usage:
     stop <id>      stop a worker for a pause and file a STOPPED result
     abandon <id>   mark a task abandoned after attempt 3 failed
     status         print the status report (tables)
+    wait           poll until something in flight changes, or a time limit
+                   passes; it writes nothing
+    notify-to      set, clear, or show the session name that each new brief
+                   tells its session to message after its result
 
 Run from the repository root. Taskgraph is the only source of task content;
-this script copies it and never invents it. Nothing in it waits, sleeps, or
-polls: `claude --bg` returns at once, and the Manager runs `record` later.
+this script copies it and never invents it. Only `wait` sleeps or polls, and
+it writes nothing: `claude --bg` returns at once, and the Manager runs
+`record` when a session's message or the end of `wait` wakes it.
 
 merge.mode "local" merges a closed branch into the main checkout under a
 MERGE: line. merge.mode "pr" pushes the branch `task-<id>` to merge.remote and
@@ -125,6 +130,14 @@ COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
 REPORT_DIR = ".agentic-team"  # in a worktree, the folder of the session's report file
 REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it in every worktree
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
+NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
+NOTIFY_NAME = re.compile(r"[^\x00-\x1f\x7f`]{1,200}")  # one line, no backtick: the brief shows it in backticks
+NOTIFY_REF = re.compile(r" \[[^\]]*\]$")  # a ListAgents [ref] after the name; a session that did not list it cannot use it
+WAIT_TIMEOUT = 1800  # seconds that `wait` runs at most, by default
+WAIT_TIMEOUT_MAX = 6600  # 110 minutes: Bash stops a background command after 2 hours
+WAIT_INTERVAL = 30  # seconds between two reads of Taskgraph and `claude agents`
+WAIT_HOST_INTERVAL = 300  # seconds between two reads of the code host in pr mode; the host limits its rate
+WAKE_NEXT = "run.py record, then run.py wait again while work is in flight"
 
 
 class Refused(codehost.HostError):
@@ -626,6 +639,29 @@ def clear_report(path):
         os.remove(path)
 
 
+def notify_address(run):
+    """The session name in the run directory's notify-to file, or None when it is not set or not valid."""
+    try:
+        with open(os.path.join(run.run_dir, NOTIFY_FILE), encoding="utf-8") as fh:
+            name = fh.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return name if NOTIFY_NAME.fullmatch(name) and not NOTIFY_REF.search(name) else None
+
+
+def notify_step(name, tid, kind, attempt):
+    """The REPORT text that tells the session to message the Manager after its result, or "" with no address."""
+    if not name:
+        return ""
+    return ("\n\nWhen that command has succeeded, tell the Manager. This is your last action. Load the "
+            "SendMessage tool with ToolSearch (query `select:SendMessage`). Then call SendMessage once, with "
+            f"`to` set to `{name}` and `message` set to this one line, with the status from the command:\n\n"
+            f"```text\ntask {tid} attempt {attempt} {kind} filed <STATUS>; run record\n```\n\n"
+            "This is a tool call, not a shell command. If the command did not succeed, send nothing. If "
+            "ToolSearch or SendMessage fails or is refused, do not try again and send nothing else; end "
+            "normally. Do not wait for a reply. The message only wakes the Manager; your result is in Taskgraph.")
+
+
 def result_command(py, tg, db, project, task_id, kind, attempt, session, report):
     """The command the session runs last. It fills in only the status; the body comes from the report file."""
     return (f"{quote(py)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)} "
@@ -673,6 +709,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "REPORT_FILE": report,
         "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                          report),
+        "NOTIFY": notify_step(notify_address(run), tid, kind, attempt),
     }
     if kind == "verify":
         vkind = verify_kind(run, task)
@@ -1305,10 +1342,11 @@ def cmd_launch(run, args):
            meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), *keep,
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
+    notify = notify_address(run)
     detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree {rel} {where} brief {path}"
               + "".join(f"; {n}" for n in notes)
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
-              + (f"; {drift}" if drift else ""))
+              + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
     run.emit("launched", tid, nxt, session, detail)
 
 
@@ -1488,8 +1526,10 @@ def cmd_verify(run, args):
     entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said, model)
     if entry:  # the only meta verify writes
         run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
+    notify = notify_address(run)
     run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind} skill {where}"
-             + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else ""))
+             + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else "")
+             + (f"; notify {notify}" if notify else ""))
 
 
 def verify_ci(run, args, task, name):
@@ -1795,6 +1835,18 @@ def commit_stopped(run, tid, attempt, rows, sessions):
              f"run.py launch {tid} after the pause")
 
 
+def ci_target(run, task, rows):
+    """(request branch, pushed head, CI name) when `record` reads the CI runs of the task's pushed head: verify_mode
+    ci:<name> in pr mode, and a PASS by the current attempt's worker whose Head the pushed head starts with. Else None."""
+    meta = task.get("meta") or {}
+    mode, pushed, worker = str(meta.get("verify_mode") or ""), meta.get("pushed"), latest_worker(rows, wanted_attempt(task))
+    seen = tail_or_none(HEAD_ANY.search(worker["body"])) if worker else None
+    if (mode.startswith("ci:") and run.pr_mode and pushed and worker and worker["status"] == "PASS"
+            and is_sha(seen) and str(pushed).startswith(seen)):
+        return meta.get("pr_branch") or f"task-{task['id']}", pushed, mode[3:]
+    return None
+
+
 def record_in_progress(run, snap, task, unmanaged):
     tid, meta = task["id"], task.get("meta") or {}
     attempt = wanted_attempt(task)
@@ -1831,17 +1883,15 @@ def record_in_progress(run, snap, task, unmanaged):
                      f"--attempt {attempt} --by {lost.wtname} --status <STATUS> --body-file <path>")
             return
         rows = rows + [added]
-    mode, pushed, worker = str(meta.get("verify_mode") or ""), meta.get("pushed"), latest_worker(rows, attempt)
-    seen = tail_or_none(HEAD_ANY.search(worker["body"])) if worker else None
-    if (mode.startswith("ci:") and run.pr_mode and pushed and worker and worker["status"] == "PASS"
-            and is_sha(seen) and str(pushed).startswith(seen)):
-        pr_branch = meta.get("pr_branch") or f"task-{tid}"
-        runs = run.host().runs(pr_branch, pushed, mode[3:])
+    ci = ci_target(run, task, rows)
+    if ci:
+        pr_branch, pushed, name = ci
+        runs = run.host().runs(pr_branch, pushed, name)
         if not runs:
-            run.emit("ci-waiting", tid, attempt, None, f"no run for {pushed[:7]} on {mode[3:]} yet",
+            run.emit("ci-waiting", tid, attempt, None, f"no run for {pushed[:7]} on {name} yet",
                      f"run.py record later, or run.py verify {tid} --again")
             return
-        rows = ci_evaluate(run, task, rows, attempt, mode[3:], pushed, pr_branch, runs)
+        rows = ci_evaluate(run, task, rows, attempt, name, pushed, pr_branch, runs)
         if rows is None:
             return
     verdicts = verifier_rows(rows, attempt)
@@ -1968,6 +2018,163 @@ def cmd_record(run, args):
                  f"by {d.get('due') or 'no date'} blocks {ids_text(blocks)}")
     run.emit("slots", None, None, None, f"{live_count(run)}/{run.config['sessions']['max_parallel']} live")
     ready_events(run, snap)
+
+
+# -------------------------------------------------------------------- wait
+
+def wait_host(run, snap, watched):
+    """The code host part of what `wait` compares: the request of each closed task that is not merged, and the
+    newest CI run of each watched task that `record` reads runs for. A host failure is the value "error"."""
+    found = {}
+    for task in snap.done:
+        meta = task.get("meta") or {}
+        if meta.get("abandoned") or not unmerged(task) or not meta.get("pr"):
+            continue
+        try:
+            host = run.host()
+            p = host.pr(int(meta["pr"]))
+            blockers = host.blockers(p.number) if p.state == "OPEN" and p.merge_state == "BLOCKED" else None
+            found[("request", task["id"])] = (host.label(p.number), p.state, p.merge_state, p.head, blockers)
+        except Refused:
+            raise
+        except codehost.HostError:
+            found[("request", task["id"])] = "error"
+    for tid, task in watched.items():
+        ci = ci_target(run, task, snap.rows(tid))
+        if not ci:
+            continue
+        try:
+            runs = run.host().runs(*ci)
+            found[("ci", tid)] = (runs[0].id, runs[0].attempt, runs[0].status) if runs else None
+        except Refused:
+            raise
+        except codehost.HostError:
+            found[("ci", tid)] = "error"
+    return found
+
+
+def wait_state(run, host=None):
+    """(state, host part, things in flight) for `wait`. It reads only what `record` reads, and writes nothing.
+
+    The state maps a key to a value: ("results", task) to the task's (result id, kind, status) rows; ("session",
+    task, sid) to the row's (status, state, waitingFor, turn_over, stuck, finished); ("decision", id) to the status
+    of an open decision; in pr mode, ("request", task) and ("ci", task) from wait_host. The watched tasks are the
+    tasks in progress with an attempt, not abandoned and not legacy. `host` is the host part of an earlier read, to
+    reuse; None reads the host now (pr mode only). Things in flight: live sessions of watched tasks, plus each host
+    key."""
+    run._sessions = None  # read `claude agents` again
+    snap = Snapshot(run)
+    watched = {t["id"]: t for t in snap.in_progress if wanted_attempt(t) is not None
+               and not (t.get("meta") or {}).get("abandoned") and not is_legacy(t)}
+    state, flight = {}, 0
+    for tid in watched:
+        state[("results", tid)] = tuple((r["id"], r["kind"], r["status"]) for r in snap.rows(tid))
+    for s in run.sessions():
+        if s.kind and s.task_id in watched:
+            state[("session", s.task_id, s.sid)] = (s.status, s.state, s.waiting, s.turn_over, s.stuck, s.finished)
+            flight += s.live
+    for d in snap.decisions:
+        state[("decision", d["id"])] = d["status"]
+    if run.pr_mode and host is None:
+        host = wait_host(run, snap, watched)
+    host = host or {}
+    state.update(host)
+    return state, host, flight + len(host)
+
+
+def wait_value(kind, value):
+    """One value of wait_state as text."""
+    if value is None:
+        return "not open" if kind == "decision" else "none"
+    if value == "error":
+        return "host error"
+    if kind == "session":
+        status, state, waiting = value[:3]
+        return f"{status}/{state}" + (f", waiting for {waiting}" if waiting else "")
+    if kind == "request":
+        label, state, merge_state, head, blockers = value
+        return f"{label} {state}/{merge_state} at {str(head)[:7]}" + (f"; {blockers}" if blockers else "")
+    if kind == "ci":
+        return f"run {value[0]} attempt {value[1]} {value[2]}"
+    return str(value)
+
+
+def wait_changes(before, after):
+    """(task or decision id, session id, detail) for each key whose value differs, by id, then kind."""
+    found = []
+    for key in sorted(set(before) | set(after), key=lambda k: (k[1], k[0], str(k[2:]))):
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        kind, number = key[0], key[1]
+        if kind == "results":
+            added = [r for r in new or () if r not in (old or ())]
+            found += [(number, None, f"new result #{i}: {k} {status}") for i, k, status in added]
+            if not added:
+                found.append((number, None, "a result was removed"))
+            continue
+        if kind == "session":
+            what, sid = f"session {key[2]}", key[2]
+        else:
+            what, sid = {"decision": f"decision #{number}", "request": "request", "ci": "CI run"}[kind], None
+        found.append((number, sid, f"{what} is {wait_value(kind, new)}; was {wait_value(kind, old)}"))
+    return found
+
+
+def cmd_wait(run, args):
+    """Poll until something in flight changes, or until the time limit. Prints one line per change, or one
+    `timeout` or `nothing-in-flight` line. Writes nothing: no Taskgraph row or meta, no git, no file."""
+    if not 0 < args.timeout <= WAIT_TIMEOUT_MAX:
+        raise Refused(f"--timeout must be more than 0 and at most {WAIT_TIMEOUT_MAX} seconds (110 minutes); "
+                      "Bash stops a background command after 2 hours")
+    if args.interval <= 0 or args.host_interval <= 0:
+        raise Refused("--interval and --host-interval must be more than 0 seconds")
+    start = time.monotonic()
+    before, host, flight = wait_state(run)
+    if not flight:
+        run.emit("nothing-in-flight", None, None, None, "no live session, open request or CI run to watch",
+                 "run.py record")
+        return
+    host_read = start
+    while True:
+        time.sleep(max(0.0, min(args.interval, start + args.timeout - time.monotonic())))
+        now = time.monotonic()
+        if run.pr_mode and now - host_read >= args.host_interval:
+            host, host_read = None, now
+        after, host, _ = wait_state(run, host)
+        changes = wait_changes(before, after)
+        for number, sid, detail in changes:
+            run.emit("changed", number, None, sid, detail, WAKE_NEXT)
+        if changes:
+            return
+        if time.monotonic() >= start + args.timeout:
+            run.emit("timeout", None, None, None, f"no change in {args.timeout:g} seconds", WAKE_NEXT)
+            return
+
+
+def cmd_notify_to(run, args):
+    """Set, clear, or show the session name that each new brief tells its session to message after its result."""
+    path = os.path.join(run.run_dir, NOTIFY_FILE)
+    if args.clear and args.name is not None:
+        raise Refused("give a session name or --clear, not both")
+    if args.clear:
+        if os.path.lexists(path):
+            os.remove(path)
+        run.emit("notify-to", None, None, None, "cleared; new briefs have no notify step")
+        return
+    if args.name is None:
+        name = notify_address(run)
+        run.emit("notify-to", None, None, None, name or "none set",
+                 None if name else 'run.py notify-to "<this session\'s name from ListAgents>"')
+        return
+    name = args.name.strip()
+    if not NOTIFY_NAME.fullmatch(name) or NOTIFY_REF.search(name):
+        raise Refused(f"session name {args.name!r}: give the bare name from the first line of ListAgents, without "
+                      "its [ref]; one line of 1 to 200 characters, with no backtick")
+    os.makedirs(run.run_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(name + "\n")
+    run.emit("notify-to", None, None, None, f"{name}; new briefs tell each session to message it after its result")
 
 
 # ----------------------------------------------------------------- cleanup
@@ -3065,7 +3272,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,wait,notify-to}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -3117,11 +3324,25 @@ def build_parser():
     p.add_argument("--since", help="7d, 2w, or an ISO date (default: last --mark, else 7d)")
     p.add_argument("--limit", type=int, default=25, help="max rows per table (default 25)")
     p.add_argument("--mark", action="store_true", help="save now as the start of the next report")
+
+    p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
+    p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,
+                   help=f"seconds to wait at most (default {WAIT_TIMEOUT}, at most {WAIT_TIMEOUT_MAX})")
+    p.add_argument("--interval", type=float, default=WAIT_INTERVAL,
+                   help=f"seconds between two reads of Taskgraph and claude agents (default {WAIT_INTERVAL})")
+    p.add_argument("--host-interval", type=float, default=WAIT_HOST_INTERVAL,
+                   help=f"pr mode: seconds between two reads of the code host (default {WAIT_HOST_INTERVAL}; "
+                        "the host limits its rate, so keep the default)")
+
+    p = sub.add_parser("notify-to", help="set, clear, or show the session that sessions message after their result")
+    p.add_argument("name", nargs="?", help="the bare session name from the first line of ListAgents")
+    p.add_argument("--clear", action="store_true", help="remove the name; new briefs have no notify step")
     return parser
 
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
-            "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status}
+            "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
+            "wait": cmd_wait, "notify-to": cmd_notify_to}
 
 
 def main(argv=None):

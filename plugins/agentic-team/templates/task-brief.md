@@ -50,8 +50,8 @@ agent instructions. {{REPORT_NOTE}}
 
 `{{REPORT_FILE}}`
 
-Then your last action is this one command, run once. Replace `<STATUS>` with
-`PASS`, `ISSUES`, or `BLOCKED`. Keep the rest as it is.
+Then run this one command, once. Replace `<STATUS>` with `PASS`, `ISSUES`, or
+`BLOCKED`. Keep the rest as it is.
 
 ```sh
 {{RESULT_COMMAND}}
@@ -59,4 +59,4 @@ Then your last action is this one command, run once. Replace `<STATUS>` with
 
 Do not put report text in a shell command: a guard can refuse the command for
 a word in it. If the Write tool or the command is refused, follow the Report
-section of your agent instructions.
+section of your agent instructions.{{NOTIFY}}

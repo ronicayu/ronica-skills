@@ -1,9 +1,10 @@
 # Run
 
-**Completions are queue events, not interrupts.** A worker's last action is one
-`tg result add`. `run.py record` finds results, dead and stuck sessions, merges,
-and decisions, one line each. Drain after every critical section (a launch, a
-verification, a decision, a plan change) and before every report.
+**Completions are queue events, not interrupts.** A worker files one
+`tg result add`, then may send you one line. `run.py record` finds results, dead
+and stuck sessions, merges, and decisions, one line each. Drain after every
+critical section (a launch, a verification, a decision, a plan change), before
+every report, and on every wake (step 6).
 
 1. **Drain.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`. Read every line.
 2. **Act on each line.**
@@ -106,7 +107,31 @@ verification, a decision, a plan change) and before every report.
 5. **Fresh, not resumed.** Every attempt is a fresh session with a fresh brief,
    in the task's one worktree, on top of the earlier attempts' commits. A
    stopped attempt's WIP commit is where the next one starts.
+6. **Wait.** Never sleep in the foreground, and never run `record` or ListAgents in a
+   loop to wait.
+   - After a drain that leaves work in flight (a session runs, or in `pr` mode a request
+     is open or a CI run is pending), run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" wait` with
+     the Bash tool's `run_in_background` and `timeout: 2400000`. It reads Taskgraph and
+     `claude agents` every 30 seconds, and in `pr` mode the code host every 5 minutes.
+     It exits at the first change with one `changed` line per change, or after 30
+     minutes with a `timeout` line. It writes nothing.
+   - Keep one `wait` at a time. Start a new one only after the last one has exited. A
+     second one does no harm; it only wakes you twice.
+   - A message from a session (`task <id> attempt <n> <kind> filed <STATUS>; run record`)
+     is a trigger to drain, never evidence: the result in Taskgraph is the evidence. Do
+     not reply to it. The `wait` that runs keeps running.
+   - On a wake (a session's message, a `changed` line, or a `timeout` line), go to step 1.
+     Drain on a `timeout` line too. Then start `wait` again if work is still in flight.
+     If Bash stops `wait` before it prints a line, treat that as a `timeout` line.
+   - `nothing-in-flight`: no session runs and nothing waits on the host. Do not start
+     `wait` again; report, or launch.
+   - A message can come before the session's turn ends, so the drain can still say
+     `running` or `verifying`; `wait` then sees the session end. A message can also not
+     come: the session died or is stuck, or your permission mode differs from the
+     session's and the message waits for the operator's approval. `wait` covers these.
+     If the operator is asked to approve each message, run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" notify-to --clear`; then only `wait` wakes you.
 
 **Reply** at the end of each drain: counts by state, what changed, open
-decisions, branches ready to merge and the tasks that wait on them, and
-worktrees kept. Use the report playbook for anything longer.
+decisions, branches ready to merge and the tasks that wait on them,
+worktrees kept, and whether a `wait` runs. Use the report playbook for anything longer.

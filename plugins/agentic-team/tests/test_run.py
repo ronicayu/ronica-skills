@@ -651,6 +651,38 @@ class Base(unittest.TestCase):
                 self.git("branch", "--list", "worktree-*"),
                 sorted(os.listdir(folder)) if os.path.isdir(folder) else [])
 
+    def swap_agents(self, *rows):
+        """agents(), in one step: a `claude agents` that runs meanwhile reads the old rows or the new ones."""
+        temp = self.agents_file + ".new"
+        with open(temp, "w") as fh:
+            json.dump(list(rows), fh)
+        os.replace(temp, self.agents_file)
+
+    def start_wait(self, *args):
+        """`run.py --json wait --interval 0.2 <args>` in the background. It returns once the command has read
+        `claude agents` twice: its starting state and its first poll are read, so a change made now is new. The
+        command logs its claude calls to a file of its own, so the polls of another `wait` do not count."""
+        handle, log = tempfile.mkstemp(dir=self.dir, prefix="wait-", suffix=".log")
+        os.close(handle)
+        proc = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--tg", TG, "--json", "wait",
+                                 "--interval", "0.2", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=self.dir, env=dict(self.env, FAKE_CLAUDE_LOG=log))
+        deadline = time.time() + 30
+        while True:
+            with open(log) as fh:
+                if sum(1 for line in fh if line.startswith('["agents"')) >= 2:
+                    return proc
+            if proc.poll() is not None:
+                return proc
+            self.assertLess(time.time(), deadline, "wait did not poll")
+            time.sleep(0.05)
+
+    def end_wait(self, proc):
+        """The events of a `wait` from start_wait, once it has exited 0."""
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        return json.loads(out)
+
 
 class RunTest(Base):
     # --- common
@@ -4268,6 +4300,173 @@ class RunTest(Base):
         self.assertIn("None.", sections["In flight"])
         self.assertIn("completed: a", sections["Waiting for verification or triage"])
 
+    # --- 0.11.0: wake the Manager
+
+    WAKE = "run.py record, then run.py wait again while work is in flight"
+
+    def notify_step(self, kind, attempt=1, task=1, name="manager-7"):
+        """The notify text at the end of REPORT, as the brief gives it."""
+        return ("When that command has succeeded, tell the Manager. This is your last action. Load the SendMessage "
+                "tool with ToolSearch (query `select:SendMessage`). Then call SendMessage once, with `to` set to "
+                f"`{name}` and `message` set to this one line, with the status from the command:\n\n"
+                f"```text\ntask {task} attempt {attempt} {kind} filed <STATUS>; run record\n```\n\n"
+                "This is a tool call, not a shell command. If the command did not succeed, send nothing. If "
+                "ToolSearch or SendMessage fails or is refused, do not try again and send nothing else; end "
+                "normally. Do not wait for a reply. The message only wakes the Manager; your result is in Taskgraph.")
+
+    def test_102_notify_to_sets_shows_and_clears_the_address(self):
+        path = os.path.join(self.root, ".agentic-team", "notify-to")
+        shown = self.one(self.events("notify-to"), "notify-to")
+        self.assertEqual((shown["detail"], shown["next"]),
+                         ("none set", "run.py notify-to \"<this session's name from ListAgents>\""))
+        events = self.events("notify-to", "  manager-7 ")
+        self.assertEqual(self.one(events, "notify-to")["detail"],
+                         "manager-7; new briefs tell each session to message it after its result")
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "manager-7\n")
+        self.assertEqual(self.one(self.events("notify-to"), "notify-to")["detail"], "manager-7")
+        self.ok("notify-to", "the manager")  # a second Manager replaces the name
+        self.assertEqual(self.one(self.events("notify-to"), "notify-to")["detail"], "the manager")
+        for bad in ("", "a`b", "two\nlines", "manager [3fa9c1]", "x" * 201):
+            out = self.run_cmd("notify-to", bad)
+            self.assertEqual(out.returncode, 2, bad)
+            self.assertIn("give the bare name from the first line of ListAgents, without its [ref]", out.stderr)
+        both = self.run_cmd("notify-to", "manager-7", "--clear")
+        self.assertEqual(both.returncode, 2)
+        self.assertIn("give a session name or --clear, not both", both.stderr)
+        self.assertEqual(self.one(self.events("notify-to"), "notify-to")["detail"], "the manager")
+        events = self.events("notify-to", "--clear")
+        self.assertEqual(self.one(events, "notify-to")["detail"], "cleared; new briefs have no notify step")
+        self.assertFalse(os.path.exists(path))
+        self.ok("notify-to", "--clear")  # nothing to clear is fine
+        self.assertEqual(self.one(self.events("notify-to"), "notify-to")["detail"], "none set")
+
+    def test_102_the_brief_has_a_notify_step_only_with_an_address(self):
+        task = self.add_task()
+        report = self.section(self.brief(task), "REPORT")
+        self.assertTrue(report.endswith("follow the Report\nsection of your agent instructions."))
+        self.assertNotIn("SendMessage", self.brief(task))
+        self.assertIn("Then run this one command, once. Replace `<STATUS>` with `PASS`, `ISSUES`, or\n`BLOCKED`.", report)
+        self.ok("notify-to", "manager-7")
+        report = self.section(self.brief(task), "REPORT")
+        self.assertTrue(report.endswith("section of your agent instructions.\n\n" + self.notify_step("task")))
+        self.assertIn("```sh\n", report)  # the command block stays first: the step follows it
+        self.assertLess(report.index("result add"), report.index("SendMessage"))
+        with open(os.path.join(self.root, ".agentic-team", "notify-to"), "w") as fh:
+            fh.write("manager [3fa9c1]\n")  # written by hand with its ref: not used
+        self.assertNotIn("SendMessage", self.brief(task))
+
+    def test_102_the_verify_brief_has_the_notify_step(self):
+        task = self.running_task(attempt=2, session="task-1-2")
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n", attempt=2)
+        self.ok("notify-to", "manager-7")
+        report = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
+        self.assertTrue(report.endswith(self.notify_step("verify", attempt=2)))
+
+    def test_102_launch_and_verify_name_the_address(self):
+        task = self.add_task()
+        self.assertNotIn("notify", self.one(self.events("launch", str(task)), "launched")["detail"])
+        self.ok("notify-to", "manager-7")
+        other = self.add_task()
+        self.assertTrue(self.one(self.events("launch", str(other)), "launched")["detail"].endswith("; notify manager-7"))
+        with open(os.path.join(self.root, ".agentic-team", "briefs", f"task-{other}-1.md")) as fh:
+            self.assertIn(self.notify_step("task", task=other), fh.read())
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.agents(self.finished("task-1"))
+        self.assertTrue(self.one(self.events("verify", str(task)), "verifying")["detail"].endswith("; notify manager-7"))
+
+    def test_102_wait_exits_when_a_result_arrives_and_a_second_wait_is_harmless(self):
+        task = self.running_task()
+        self.agents(self.row("task-1"))
+        first = self.start_wait("--timeout", "30")
+        second = self.start_wait("--timeout", "30")
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        for proc in (first, second):
+            (event,) = self.end_wait(proc)
+            self.assertEqual(event, {"event": "changed", "task": task, "attempt": None, "session": None,
+                                     "detail": "new result #1: task PASS", "next": self.WAKE})
+        self.assertEqual(len(self.results(task)), 1)
+
+    def test_102_wait_exits_when_a_session_changes(self):
+        cases = [
+            ((self.finished("task-1"),), "session sess-task-1-1 is idle/done; was busy/working", "sess-task-1-1"),
+            ((self.row("task-1", status="idle", state="blocked"),),
+             "session sess-task-1-1 is idle/blocked; was busy/working", "sess-task-1-1"),
+            ((self.row("task-1", status="waiting", state="blocked", waitingFor="permission prompt"),),
+             "session sess-task-1-1 is waiting/blocked, waiting for permission prompt; was busy/working", "sess-task-1-1"),
+            ((self.row("task-1", status=None, state="failed"),), "session sess-task-1-1 is None/failed; was busy/working",
+             "sess-task-1-1"),
+            ((), "session sess-task-1-1 is none; was busy/working", "sess-task-1-1"),
+            ((self.row("task-1"), self.row("verify-1-1")), "session sess-verify-1-1 is busy/working; was none",
+             "sess-verify-1-1"),
+        ]
+        task = self.running_task()
+        for rows, detail, sid in cases:
+            with self.subTest(detail=detail):
+                self.agents(self.row("task-1"))
+                proc = self.start_wait("--timeout", "30")
+                self.swap_agents(*rows)
+                (event,) = self.end_wait(proc)
+                self.assertEqual((event["event"], event["task"], event["session"], event["detail"], event["next"]),
+                                 ("changed", task, sid, detail, self.WAKE))
+
+    def test_102_wait_exits_when_a_decision_is_answered(self):
+        self.running_task()
+        self.agents(self.row("task-1"))
+        decision = self.tg("add", "Which way?", "--type", "decision")["id"]
+        proc = self.start_wait("--timeout", "30")
+        self.tg("done", str(decision))
+        (event,) = self.end_wait(proc)
+        self.assertEqual((event["event"], event["task"], event["detail"]),
+                         ("changed", decision, f"decision #{decision} is not open; was open"))
+
+    def test_102_wait_times_out(self):
+        self.running_task()
+        self.agents(self.row("task-1"))
+        started = time.time()
+        out = self.ok("wait", "--timeout", "0.5", "--interval", "0.2")
+        self.assertGreaterEqual(time.time() - started, 0.5)
+        self.assertEqual(out.stdout, f"timeout: no change in 0.5 seconds | next: {self.WAKE}\n")
+        (event,) = self.events("wait", "--timeout", "0.5", "--interval", "0.2")
+        self.assertEqual((event["event"], event["detail"]), ("timeout", "no change in 0.5 seconds"))
+
+    def test_102_wait_with_nothing_in_flight_exits_at_once(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        self.agents(self.finished("task-1"))
+        self.tg("add", "Which way?", "--type", "decision")  # an open decision alone is not in flight
+        started = time.time()
+        (event,) = self.events("wait", "--timeout", "60")
+        self.assertLess(time.time() - started, 30)
+        self.assertEqual(event, {"event": "nothing-in-flight", "task": None, "attempt": None, "session": None,
+                                 "detail": "no live session, open request or CI run to watch", "next": "run.py record"})
+        self.assertEqual(len(self.calls("agents")), 1)
+
+    def test_102_wait_writes_nothing(self):
+        died = self.running_task()  # its session ended with no result: record files DIED
+        self.worktree("task-1")
+        live = self.running_task()
+        self.agents(self.finished("task-1"), self.row("task-2"))
+        run_dir = os.path.join(self.root, ".agentic-team")
+
+        def state():
+            return ([self.tg("show", str(t)) for t in (died, live)], [self.results(t) for t in (died, live)],
+                    self.git("status", "--porcelain"), self.git("worktree", "list", "--porcelain"),
+                    self.git("branch", "--list"), sorted(os.listdir(run_dir)) if os.path.isdir(run_dir) else [])
+
+        before = state()
+        (event,) = self.events("wait", "--timeout", "0.5", "--interval", "0.2")
+        self.assertEqual(event["event"], "timeout")
+        self.assertEqual(state(), before)
+        self.assertEqual({c[0] for c in self.calls()}, {"agents"})
+        self.one(self.events("record"), "died")  # what wait left for record
+
+    def test_102_wait_refuses_a_bad_limit(self):
+        for args in (("--timeout", "0"), ("--timeout", "6601"), ("--interval", "0"), ("--host-interval", "-1")):
+            out = self.run_cmd("wait", *args)
+            self.assertEqual(out.returncode, 2, args)
+        self.assertIn("at most 6600 seconds (110 minutes)", self.run_cmd("wait", "--timeout", "7200").stderr)
+
     # --- merge.remove_worktrees = false
 
     def test_71_remove_worktrees_false_removes_nothing_and_says_so_once(self):
@@ -5036,6 +5235,65 @@ class PrTest(Base):
 
     def ci_rows(self, task):
         return [r for r in self.results(task) if r["kind"] == "verify" and r["author"] == "ci"]
+
+    # --- 0.11.0: wait in pr mode
+
+    def host_then(self, first, then):
+        """The fake host answers as fake_host(**first) on the first call of each command, and as
+        fake_host(**then) from the second call on. Neither may pass `then`."""
+        path = os.path.join(self.dir, "gh.json" if self.host == "github" else "glab.json")
+        self.fake_host(**then)
+        with open(path) as fh:
+            later = json.load(fh)
+        self.fake_host(**first)
+        with open(path) as fh:
+            table = json.load(fh)
+        for key, value in later.items():
+            if table.get(key) != value:  # an answer may be a list of one (fake_host's views)
+                table[key] = [table[key][0] if isinstance(table[key], list) else table[key],
+                              value[0] if isinstance(value, list) else value]
+        with open(path, "w") as fh:
+            json.dump(table, fh)
+
+    def request_reads(self):
+        if self.host == "github":
+            return self.host_calls("pr", "view")
+        return [c for c in self.host_log() if c[:2] == ["api", f"projects/{self.project}/merge_requests/1"]]
+
+    @both_hosts
+    def test_102_wait_exits_when_the_request_changes(self):
+        task, wt, head = self.published()
+        self.host_then({"head": head, "merge_state": "UNKNOWN"},
+                       {"head": head, "state": "MERGED", "merge_state": "UNKNOWN", "merge_commit": "c" * 40})
+        (event,) = self.end_wait(self.start_wait("--timeout", "30", "--host-interval", "0.1"))
+        label = self.label()
+        self.assertEqual((event["event"], event["task"], event["detail"]),
+                         ("changed", task, f"request is {label} MERGED/UNKNOWN at {head[:7]}; "
+                                           f"was {label} OPEN/UNKNOWN at {head[:7]}"))
+        self.assertNotIn("merged_at", self.meta(task))  # record merges and records it, not wait
+        self.assertEqual(self.merge_calls(), [])
+
+    @both_hosts
+    def test_102_wait_reads_the_host_once_per_host_interval(self):
+        task, wt, head = self.published()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        before = len(self.request_reads())
+        (event,) = self.events("wait", "--timeout", "1", "--interval", "0.2")
+        self.assertEqual(event["event"], "timeout")
+        self.assertEqual(len(self.request_reads()) - before, 1)
+        self.assertGreaterEqual(len(self.calls("agents")), 2)
+
+    @both_hosts
+    def test_102_wait_exits_when_the_ci_run_changes(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.host_then({"head": head, "merge_state": "UNKNOWN", "runs": [{"id": 11, "state": "pending"}]},
+                       {"head": head, "merge_state": "UNKNOWN", "runs": [{"id": 11, "state": "success"}]})
+        (event,) = self.end_wait(self.start_wait("--timeout", "30", "--host-interval", "0.1"))
+        self.assertEqual((event["event"], event["task"], event["detail"]),
+                         ("changed", task, "CI run is run 11 attempt 1 success; was run 11 attempt 1 pending"))
+        self.assertEqual(self.ci_rows(task), [])  # record files the CI row, not wait
 
     def dispatch_calls(self):
         if self.host == "github":
