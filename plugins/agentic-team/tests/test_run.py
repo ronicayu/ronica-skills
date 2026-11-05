@@ -2059,6 +2059,37 @@ class RunTest(Base):
         self.assertEqual(self.named(events, "died"), [])
         self.assertEqual(self.results(task), [])
 
+    def test_105_an_old_ghost_worker_counts_as_ended(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        old = int((time.time() - 31 * 60) * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=old))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "unknown"), [])
+        self.assertEqual(self.one(events, "died")["task"], task)
+        self.assertEqual([r["status"] for r in self.results(task)], ["DIED"])
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+
+    def test_105_a_new_ghost_worker_stays_unknown(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        new = int(time.time() * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=new))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual(self.results(task), [])
+        refused = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("has a live session", refused.stderr)
+
+    def test_105_an_old_ghost_verifier_counts_as_ended(self):
+        old = int((time.time() - 31 * 60) * 1000)
+        self.verifying_task(self.row("verify-1-1", status=None, state="working", startedAt=old))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "verifying"), [])
+        self.one(events, "no-verdict")
+
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()

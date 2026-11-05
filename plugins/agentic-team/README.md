@@ -497,6 +497,9 @@ stopped by hand, belongs to nobody. The `Session: <id>` lines in result bodies
 are a record, not the match. A row with no status and no pid has no process
 now. It does not count toward the session cap, and cleanup removes it once its
 task is merged. While its task is in progress, `record` reports it as `unknown`.
+After 30 minutes with no transcript write it counts as ended, as a quiet
+verifier does: `launch` no longer waits for it, and `record` salvages its report
+or files `DIED`.
 
 ## Configuration
 
@@ -738,7 +741,7 @@ request across attempts.
 
 ### Upgrading from 0.12.0
 
-Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
+Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. Such a row counts as ended after 30 minutes with no transcript write, as a quiet verifier does. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
 
 ### Upgrading from 0.11.3
 

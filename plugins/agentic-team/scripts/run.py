@@ -361,6 +361,9 @@ class Run:
                         index[str(entry["id"])] = (task["id"], entry.get("kind"), entry.get("attempt"),
                                                    entry.get("worktree") or f"task-{task['id']}")
             self._sessions = [Session(r, self.wt_dir, index) for r in rows if isinstance(r, dict)]
+            for s in self._sessions:  # a ghost row that stays quiet has ended; until then the CLI may start it again
+                if s.ghost and quiet_for(self, s, VERIFIER_QUIET_MINUTES):
+                    s.finished, s.live, s.stuck, s.unknown, s.turn_over = True, False, False, False, True
         return self._sessions
 
     def orders(self):
@@ -1814,6 +1817,16 @@ def verifier_filed(rows, attempt, name, sid):
         elif author == name or not VERIFY_WT.match(author):
             return True
     return False
+
+
+def quiet_for(run, session, minutes):
+    """True when the session's newest sign of activity, its transcript's last write or its start, is at least
+    `minutes` old. False when the row gives neither time."""
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0] if session.wtname else None
+    times = [os.path.getmtime(path)] if path else []
+    if isinstance(session.row.get("startedAt"), (int, float)):
+        times.append(session.row["startedAt"] / 1000)
+    return bool(times) and time.time() - max(times) >= minutes * 60
 
 
 def verifier_over(run, session):
