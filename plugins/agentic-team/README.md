@@ -208,10 +208,11 @@ works in two steps.
    clean and pushed. `claude rm` refuses work that is on no remote, so the
    script passes `--discard-unpushed` only for a commit that
    `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
-   recorded merged head (`pushed`). `claude rm` deletes the folder with its
-   ignored files, so `run.py` skips every session whose folder fails the
-   container, `git status` or ignored-file check of step 2. Step 2 then names
-   the reason.
+   recorded merged head (`pushed`). A commit also counts as merged when the
+   target holds the same patch, as after a rebase merge. `claude rm` deletes
+   the folder with its ignored files, so `run.py` skips every session whose
+   folder fails the container, `git status` or ignored-file check of step 2.
+   Step 2 then names the reason.
 2. It then removes every folder of the task that is still there: `task-<id>`,
    an old `task-<id>-<n>`, and `verify-<id>-<n>[-<k>]`. This covers a task that
    0.6.0 started, a folder whose lock owner has no row, and a row `claude rm`
@@ -493,7 +494,9 @@ stopped row cannot be matched by its directory: `run.py` ties it to a task only
 through its recorded id, counts it as exited, and derives the worktree path from
 the task. A stopped row that is not recorded, such as a worker the operator
 stopped by hand, belongs to nobody. The `Session: <id>` lines in result bodies
-are a record, not the match.
+are a record, not the match. A row with no status and no pid has no process
+now. It does not count toward the session cap, and cleanup removes it once its
+task is merged. While its task is in progress, `record` reports it as `unknown`.
 
 ## Configuration
 
@@ -732,6 +735,10 @@ skill. Metadata holds everything else, 26 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.12.0
+
+Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
 
 ### Upgrading from 0.11.3
 

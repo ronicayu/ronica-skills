@@ -1234,6 +1234,24 @@ class RunTest(Base):
         self.agents(self.row("verify-9-1"))
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 2)
 
+    def test_21_a_ghost_row_does_not_fill_the_cap(self):
+        self.write_config(sessions="max_parallel = 1\n")
+        task = self.add_task()
+        self.agents(self.row("task-9", status=None, state="working"))
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+        self.agents(self.row("task-9", status="busy", state="working", pid=1234))
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("cap full: 1/1", out.stderr)
+
+    def test_21_a_working_row_with_a_pid_and_no_status_counts(self):
+        self.write_config(sessions="max_parallel = 1\n")
+        task = self.add_task()
+        self.agents(self.row("task-9", status=None, state="working", pid=1234))
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("cap full", out.stderr)
+
     def test_22_untrusted_workspace(self):
         task = self.add_task()
         env = dict(self.env, FAKE_CLAUDE_UNTRUSTED="1")
@@ -2032,6 +2050,15 @@ class RunTest(Base):
         self.assertIn(f"Head: {head}", latest["body"])
         self.assertFalse(os.path.exists(os.path.join(self.dir, "elsewhere")))
 
+    def test_36_a_ghost_worker_of_an_open_attempt_is_unknown_not_died(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.agents(self.row("task-1", status=None, state="working"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual(self.results(task), [])
+
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
@@ -2122,6 +2149,22 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "operator")
         self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+
+    def test_105_merged_into_accepts_a_rebased_commit(self):
+        task = self.add_task(attempt=1)
+        wt = self.worktree("task-1")
+        head = self.wt_commit(wt)
+        self.tg("edit", str(task), "--meta", f"verdict_ref={head}", "verdict=test-verified")
+        self.tg("done", str(task))
+        self.assertEqual(self.one(self.events("record"), "unmerged")["task"], task)
+        self.assertNotIn("merged_at", self.meta(task))
+        self.git("cherry-pick", head)
+        self.git("commit", "--amend", "-q", "-m", "rebased task 1")  # the same patch, a new SHA
+        self.assertNotEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertNotEqual(self.git("merge-base", "HEAD", head), head)
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertIn("merged_at", self.meta(task))
 
     def test_39_recorded_merge_runs_cleanup(self):
         task = self.add_task(attempt=1, sessions="[]")
@@ -2718,6 +2761,18 @@ class RunTest(Base):
         again = self.run_cmd("launch", str(task))
         self.assertEqual(again.returncode, 2)
         self.assertIn("has a live session", again.stderr)
+
+    def test_105_cleanup_removes_a_ghost_row_of_a_merged_task(self):
+        task = self.add_task(attempt=1, sessions=json.dumps([self.entry(1)]))
+        wt = self.worktree("task-1")
+        head = self.wt_commit(wt)
+        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1")
+        self.tg("edit", str(task), "--meta", f"verdict_ref={head}")
+        self.tg("done", str(task))
+        self.agents(self.row("task-1", status=None, state="working", cwd=self.root))
+        events = self.events("record")
+        self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
+        self.assertEqual(self.one(events, "removed")["session"], "sess-task-1-1")
 
     def test_60_cleanup_skips_a_session_that_is_still_running(self):
         task = self.closed_task(merged=True)

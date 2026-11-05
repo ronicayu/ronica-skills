@@ -448,6 +448,9 @@ class Session:
         # stay live: the session asked the user.
         self.finished = self.state == "stopped" or (self.state in ("done", "failed") and self.status in ("idle", None, ""))
         self.live = not self.finished
+        # A live row with no status and no pid has no process now (seen after the process is killed). The CLI can
+        # start it again, so it is not finished: it is a ghost. The cap does not count it, and cleanup removes it.
+        self.ghost = self.live and not self.status and not row.get("pid")
         self.stuck = self.live and (bool(self.waiting) or self.state == "blocked")
         self.unknown = self.live and not self.stuck and self.status != "busy"
         # A blocked row with no waitingFor finished its turn: claude reads its last message as a question. Only a
@@ -471,7 +474,7 @@ def own_sessions(run, tid, kind=None, attempt=None):
 
 
 def live_count(run):
-    return sum(1 for s in run.sessions() if s.kind and s.live)
+    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost)
 
 
 def wanted_attempt(task):
@@ -2313,9 +2316,18 @@ def merge_refs(run, task):
 
 
 def merged_into(run, task, commit):
-    """True when `commit` is an ancestor of one of merge_refs."""
-    return any(run.git("merge-base", "--is-ancestor", commit, ref, check=False).returncode == 0
-               for ref in merge_refs(run, task))
+    """True when `commit` is an ancestor of one of merge_refs, or when a commit with the same patch is in it (a
+    rebase or cherry-pick merge gives the change a new SHA). `git cherry <ref> <commit> <commit>^` prints
+    `- <sha>` when <ref> holds an equivalent patch."""
+    for ref in merge_refs(run, task):
+        if run.git("merge-base", "--is-ancestor", commit, ref, check=False).returncode == 0:
+            return True
+        parent = run.git("rev-parse", "--verify", "-q", f"{commit}^", check=False).stdout.strip()
+        if parent:
+            out = run.git("cherry", ref, commit, parent, check=False)
+            if out.returncode == 0 and out.stdout.strip().startswith("-"):
+                return True
+    return False
 
 
 def not_merged_reason(run, task, head):
@@ -2617,7 +2629,7 @@ def cleanup(run, task, sweep=False):
     recorded = sorted((s for s in rows if s.recorded and s.sid in order),
                       key=lambda s: (s.sid == first, -order.index(s.sid)))
     sessions = [s for s in rows if s not in recorded] + recorded
-    in_use = {s.wtname for s in rows if s.live}
+    in_use = {s.wtname for s in rows if s.live and not s.ghost}
     meta = task.get("meta") or {}
     before = meta.get("cleanup_kept") if isinstance(meta.get("cleanup_kept"), dict) else {}
     after = {}  # folder -> why it was kept this time
@@ -2631,7 +2643,7 @@ def cleanup(run, task, sweep=False):
     held, gone = {}, set()  # folder -> what a refused claude rm said; session ids already removed
     for s in sessions:
         wt = s.worktree(run.root)
-        if s.live or s.wtname in in_use:  # claude rm refuses while a live session uses the worktree
+        if (s.live and not s.ghost) or s.wtname in in_use:  # claude rm refuses while a live session uses the worktree
             continue
         if os.path.isdir(wt):
             if s.wtname not in held_back:
@@ -2663,7 +2675,7 @@ def cleanup(run, task, sweep=False):
             held.setdefault(s.wtname, (s.sid, f"claude rm said: {first_line(message)}"))
     run._sessions = None  # the pass changed the rows; look again before the sweep
     registered, locks = registered_worktrees(run), worktree_locks(run)
-    live = [s for s in run.sessions() if s.live]
+    live = [s for s in run.sessions() if s.live and not s.ghost]
     present = [f for f in sum(task_folders(run, tid), []) if os.path.isdir(os.path.join(run.wt_dir, f))]
     users = cwd_users() if present else None
     swept = set()
