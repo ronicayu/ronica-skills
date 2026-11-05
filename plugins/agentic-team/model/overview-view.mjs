@@ -38,7 +38,11 @@ export const step = (action, from, to) => {
     case "Launch": return from.attempt === 0 ? "you launch the first attempt" : "you launch the next attempt";
     case "VerifyPlain": case "VerifyAgain": return "you start a verifier";
     case "CloseAuto": case "CloseManual": return to.status === "done" ? "you close" : "you close: the verdict does not pass";
-    case "Stop": return from.worker === "busy" ? "the operator orders a pause" : "you stop the worker";
+    // The README chart draws the pause only from "Worker working", where it normally happens. A pause from a
+    // verifying or verdict state also leads to "Paused"; hiding those arrows keeps the chart readable.
+    case "Stop":
+      if (state(from) !== "Worker working") return null;
+      return from.worker === "busy" ? "the operator orders a pause" : "you stop the worker";
     case "LaunchStopsIdleThenRefuses": return "launch stops the idle session, then refuses";
     case "Abandon": return "you abandon the task";
     case "Record": return recordLabel(from, to);
