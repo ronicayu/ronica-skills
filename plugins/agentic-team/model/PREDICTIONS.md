@@ -69,3 +69,25 @@ Written before the run. Changes since the section above: the operator's free mov
 | overview-pr.cfg | none | none | all; a full chart with the request states |
 
 If check.cfg again reports no dead end, the gate is wrong: look for a step out of "Worker idle" other than `Stop` with `ALLOW_IDLE_WORKER`.
+
+# agentic-team 0.12.0 (the six fixes: #56, #57, #58, #59, #61, #62)
+
+Written from the model before any run. The ALLOW_* switches are gone with the breaks they covered; `AttemptCap` is now an action property that states the owner's rule (the attempt passes the cap only by a launch after an ordered pause). MAX_ATTEMPTS = 2, HIGH_RISK = TRUE.
+
+| Config | Expect |
+|---|---|
+| check.cfg | Every rule holds and there is no dead end. The idle worker gets `stop` from the `unknown` hint (#58), a recovery stop counts toward the cap (#59: `stopped_next` says launch below the cap, abandon at it), every retry hint says abandon at the cap (#56), a worker on a prompt after its result is stopped by launch (#61), a verifier on a prompt after its verdict is stopped by record and the verdict stands (#62), close and abandon stop the verifier (#57). More than 500 states, so no chart. |
+| check-pr.cfg | as check.cfg, with the request states |
+| pause.cfg | every rule holds. The ordered pause at the cap passes it (STOPPEDhead with Reason: pause), which AttemptCap allows; a stop of an idle worker under a STOP order is a pause too (the rule as stated). No dead end, by design of the operator's free moves. |
+| pause-pr.cfg | as pause.cfg |
+| overview.cfg, overview-pr.cfg | every rule holds; under 500 states, a full chart of about 14 states |
+| regress-42.cfg | VerdictNotLost, 4 steps: launch, PASS, verifier, the verifier fails (live, record says `verifying`). NoDeadlock, 5 steps: the same, then the worker ends (verify refused "still running", no hint). The failed worker is no longer a dead end: the `unknown` hint names `stop`, which 0.10.2's live row accepts, and launch stops a failed-but-live worker whose result is filed (its status is idle). |
+| regress-54.cfg (OPERATOR_PAUSES on) | PauseFinishedFirst, 6 steps: launch, PASS, verifier, the operator writes a STOP order, orders a pause, the stopped worker exits; record says `verifying` and the WIP waits. No dead end (the operator's moves), VerdictNotLost holds (a pending pause is allowed). |
+| regress-56.cfg | NoDeadlock, 6 steps: launch, the worker ends, record files DIED, launch (attempt 2), the worker ends its turn with a question, record files BLOCKED; the hint says launch, `refuse_past_cap` refuses. Ties with the BLOCKED report at the cap (launch, ends, DIED, launch, reports BLOCKED, ends). |
+| regress-57.cfg | NoSessionLeftAtEnd, 6 steps: launch, PASS, verifier, files passes, the verifier goes idle, close: merged with the verifier still live. |
+| regress-58.cfg | NoDeadlock, 2 steps: launch, the worker goes idle for good; the hint is `claude logs` only. |
+| regress-59.cfg | AttemptCap, 9 steps: launch, the worker ends, record files DIED, launch (attempt 2), the worker goes idle, you stop the idle worker (the at-cap hint's second alternative, which REGRESS_59 takes; Reason: recover), the stopped worker exits, record commits the WIP (hint launch, the old "after the pause"), launch (attempt 3): the step past the cap follows a recovery stop, not an ordered pause. |
+| regress-61.cfg | NoDeadlock, 3 steps: launch, the worker reports ISSUES, the worker hits a permission prompt; the hint says launch, launch refuses the waiting row. |
+| regress-62.cfg | NoDeadlock, 7 steps: launch, PASS, verifier, files a verdict, hits a prompt, record files BLOCKED (the row outranks the verdict), the worker ends; the hint is plain `verify`, refused. |
+
+If check.cfg reports a dead end or a break, it is either a path the fixes missed (confirm it in run.py at the line) or a model artifact; either way it goes in NOTES.md before a switch is added.
