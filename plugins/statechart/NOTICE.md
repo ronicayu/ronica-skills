@@ -1,0 +1,96 @@
+# Notice: vendored code
+
+This plugin packages the statechart skill from poteto's pstack. Most of its
+files are upstream files, copied unchanged. This file records what comes from
+where, what we changed, and how to update the copy.
+
+## Source
+
+| Item | Value |
+| --- | --- |
+| Repository | https://github.com/cursor/plugins |
+| Path | `pstack/skills/statechart` |
+| Commit | `bb68f2365eceafa0cb2d253112f675acf5f144cc` (2026-11-03) |
+| Author | Lauren Tan (poteto) |
+| License | MIT, "Copyright (c) 2026 Lauren Tan" (`pstack/LICENSE`) |
+
+`LICENSE` in this folder keeps the upstream MIT text and copyright line, and
+adds a copyright line for our additions.
+
+## What is vendored
+
+All paths are under `skills/statechart/`.
+
+| File | Status |
+| --- | --- |
+| `SKILL.md` | Upstream, with additions (see below) |
+| `references/render.md` | Upstream, unchanged |
+| `scripts/statechart` (the runner) | Upstream, unchanged |
+| `scripts/statechart.ts`, `run.ts`, `worker.ts`, `pipeline.ts`, `ir.ts` | Upstream, unchanged |
+| `scripts/frontends/`, `scripts/passes/`, `scripts/backends/` | Upstream, unchanged |
+| `scripts/package.json`, `scripts/tsconfig.json` | Upstream, unchanged |
+| `scripts/setup.sh` | Ours |
+| `scripts/render.mjs` | Ours |
+
+Left out: `scripts/test/`. It is a large test corpus, and it needs Java.
+`scripts/package.json` still names its `test` script and the `fast-check`
+dev dependency. We left that file unchanged. Do not run `npm test` here.
+
+## What we changed
+
+Upstream code is unchanged. The only changed upstream file is `SKILL.md`:
+
+- The frontmatter is unchanged: name `statechart`, upstream description,
+  `disable-model-invocation: true`.
+- An attribution paragraph after the `# Statechart` heading.
+- A new section "Setup without mise" after "Run". It uses the runner's own
+  `TLA2TOOLS` and `JAVA` variables, and points to `scripts/setup.sh`.
+- Five new sections after "Hand off": "Model code you maintain", "Peel one
+  dead end per round", "Keep the state space small", "Render with the bundled
+  script", and "Run it from Claude Code".
+
+No upstream line is removed or edited. To see our additions, diff our
+`SKILL.md` against the upstream file at the commit above.
+
+Our two scripts:
+
+- `scripts/setup.sh` downloads tla2tools.jar v1.7.4, checks the sha256 that
+  upstream `scripts/run.ts` gives mise, checks for Java and a TypeScript
+  runtime, and prints the `TLA2TOOLS` and `JAVA` exports.
+- `scripts/render.mjs` renders a `chart.mmd` with Pele. It uses the CSS of
+  `references/render.md` with the bug marks moved after `bugPath`. It
+  leaves out the `bugPath` border when `report.md` says that the chart draws
+  only the bug paths.
+
+## Update the vendored copy
+
+1. Fetch the new upstream commit with a sparse checkout, outside this repo:
+
+   ```sh
+   git clone --filter=blob:none --no-checkout https://github.com/cursor/plugins cursor-plugins
+   cd cursor-plugins
+   git sparse-checkout set pstack/skills/statechart pstack/LICENSE
+   git checkout <new-sha>
+   ```
+
+2. Read the upstream diff since `bb68f23`, mainly for `SKILL.md`, `run.ts`
+   (the TLC version and checksum), and `references/render.md` (the CSS).
+3. Copy `references/render.md` and every file in `scripts/` except `test/`
+   over ours. Leave `scripts/setup.sh` and `scripts/render.mjs` in place.
+4. Check that only our two scripts differ:
+
+   ```sh
+   diff -r --exclude=test <upstream>/pstack/skills/statechart/scripts plugins/statechart/skills/statechart/scripts
+   diff <upstream>/pstack/skills/statechart/references/render.md plugins/statechart/skills/statechart/references/render.md
+   ```
+
+   The first command must list only `setup.sh` and `render.mjs`. The second
+   must print nothing.
+5. Merge the upstream `SKILL.md` changes into ours. Keep our attribution and
+   sections, and check them against the new upstream text.
+6. If upstream changes the TLC version or checksum in `run.ts`, change
+   `scripts/setup.sh` and the "Setup without mise" section to match. If it
+   changes the CSS in `references/render.md`, change `scripts/render.mjs`.
+7. Update the commit and date in this file, in `README.md`, and in the
+   `SKILL.md` attribution link. Bump the plugin version in
+   `.claude-plugin/plugin.json` and in the marketplace entry.

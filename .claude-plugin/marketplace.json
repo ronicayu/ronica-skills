@@ -153,6 +153,29 @@
         "weblogic"
       ],
       "category": "development"
+    },
+    {
+      "name": "statechart",
+      "source": "statechart",
+      "description": "Check a TLA+ model of a system that moves between states with TLC, and draw it as a Mermaid statechart that shows the shortest path to each state that breaks a rule. Adapted from the statechart skill in poteto's pstack (Lauren Tan, MIT). Adds a setup script that needs no mise, a Pele render script, and a method for modelling code you maintain: fixed-commit models, one dead end per round, and a state space small enough that every rule is checked.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/statechart",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "tla+",
+        "tlc",
+        "model-checking",
+        "statechart",
+        "state-machine",
+        "mermaid",
+        "pele"
+      ],
+      "category": "development"
     }
   ]
 }
