@@ -81,6 +81,15 @@ elif cmd == "stop":
                     row.pop("status", None)
                     row["state"] = "stopped"
             open(path, "w").write(json.dumps(rows))
+    if os.environ.get("FAKE_CLAUDE_STOP_CLEARS_STATUS"):  # like the real CLI: the state stays, status and pid go
+        path = os.environ.get("FAKE_CLAUDE_AGENTS")
+        if path and os.path.isfile(path):
+            rows = json.load(open(path))
+            for row in rows:
+                if row.get("id") == argv[1]:
+                    row.pop("status", None)
+                    row.pop("pid", None)
+            open(path, "w").write(json.dumps(rows))
 elif cmd == "logs":
     folder = os.environ.get("FAKE_CLAUDE_LOGS_DIR")
     path = os.path.join(folder, argv[1] + ".txt") if folder else ""
@@ -1234,6 +1243,24 @@ class RunTest(Base):
         self.agents(self.row("verify-9-1"))
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 2)
 
+    def test_21_a_ghost_row_does_not_fill_the_cap(self):
+        self.write_config(sessions="max_parallel = 1\n")
+        task = self.add_task()
+        self.agents(self.row("task-9", status=None, state="working"))
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+        self.agents(self.row("task-9", status="busy", state="working", pid=1234))
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("cap full: 1/1", out.stderr)
+
+    def test_21_a_working_row_with_a_pid_and_no_status_counts(self):
+        self.write_config(sessions="max_parallel = 1\n")
+        task = self.add_task()
+        self.agents(self.row("task-9", status=None, state="working", pid=1234))
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("cap full", out.stderr)
+
     def test_22_untrusted_workspace(self):
         task = self.add_task()
         env = dict(self.env, FAKE_CLAUDE_UNTRUSTED="1")
@@ -2032,6 +2059,97 @@ class RunTest(Base):
         self.assertIn(f"Head: {head}", latest["body"])
         self.assertFalse(os.path.exists(os.path.join(self.dir, "elsewhere")))
 
+    def test_36_a_ghost_worker_of_an_open_attempt_is_unknown_not_died(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.agents(self.row("task-1", status=None, state="working"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual(self.results(task), [])
+
+    def test_105_an_old_ghost_worker_counts_as_ended(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        old = int((time.time() - 31 * 60) * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=old))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "unknown"), [])
+        self.assertEqual(self.one(events, "died")["task"], task)
+        self.assertEqual([r["status"] for r in self.results(task)], ["DIED"])
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+
+    def test_105_a_new_ghost_worker_stays_unknown(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        new = int(time.time() * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=new))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual(self.results(task), [])
+        refused = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("has a live session", refused.stderr)
+
+    def test_105_an_old_ghost_verifier_counts_as_ended(self):
+        old = int((time.time() - 31 * 60) * 1000)
+        self.verifying_task(self.row("verify-1-1", status=None, state="working", startedAt=old))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "verifying"), [])
+        self.one(events, "no-verdict")
+
+    def test_106_launch_after_stopping_an_idle_working_worker(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="idle", state="working", pid=1234))
+        env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
+        events = self.events("launch", str(task), env=env)
+        self.assertEqual(self.one(events, "stopped-idle")["session"], "sess-task-1-1")
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+        path = os.path.join(self.root, ".agentic-team", "stopped-sessions")
+        with open(path) as fh:
+            self.assertEqual(fh.read().split(), ["sess-task-1-1"])
+
+    def test_106_close_then_launch_after_a_verify_failed_verdict(self):
+        task = self.running_task()
+        self.pass_report(task)
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.agents(self.row("task-1", status="idle", state="working", pid=1234))
+        env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
+        self.ok("close", str(task), "--verdict", "verify-failed", env=env)
+        out = self.run_cmd("launch", str(task), "--dry-run", env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("has a live session", out.stderr)
+
+    def test_106_an_unstopped_ghost_stays_unknown(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        new = int(time.time() * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=new))
+        self.assertFalse(os.path.isfile(os.path.join(self.root, ".agentic-team", "stopped-sessions")))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        refused = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("has a live session", refused.stderr)
+
+    def test_106_stop_session_notes_only_a_successful_stop(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("half\n")
+        self.agents(self.row("task-1"))
+        out = self.run_cmd("stop", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_FAIL="1"))
+        self.assertNotEqual(out.returncode, 0)
+        path = os.path.join(self.root, ".agentic-team", "stopped-sessions")
+        noted = ""
+        if os.path.isfile(path):
+            with open(path) as fh:
+                noted = fh.read()
+        self.assertNotIn("sess-task-1-1", noted)
+
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
@@ -2122,6 +2240,22 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "operator")
         self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+
+    def test_105_merged_into_accepts_a_rebased_commit(self):
+        task = self.add_task(attempt=1)
+        wt = self.worktree("task-1")
+        head = self.wt_commit(wt)
+        self.tg("edit", str(task), "--meta", f"verdict_ref={head}", "verdict=test-verified")
+        self.tg("done", str(task))
+        self.assertEqual(self.one(self.events("record"), "unmerged")["task"], task)
+        self.assertNotIn("merged_at", self.meta(task))
+        self.git("cherry-pick", head)
+        self.git("commit", "--amend", "-q", "-m", "rebased task 1")  # the same patch, a new SHA
+        self.assertNotEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertNotEqual(self.git("merge-base", "HEAD", head), head)
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["task"], task)
+        self.assertIn("merged_at", self.meta(task))
 
     def test_39_recorded_merge_runs_cleanup(self):
         task = self.add_task(attempt=1, sessions="[]")
@@ -2718,6 +2852,18 @@ class RunTest(Base):
         again = self.run_cmd("launch", str(task))
         self.assertEqual(again.returncode, 2)
         self.assertIn("has a live session", again.stderr)
+
+    def test_105_cleanup_removes_a_ghost_row_of_a_merged_task(self):
+        task = self.add_task(attempt=1, sessions=json.dumps([self.entry(1)]))
+        wt = self.worktree("task-1")
+        head = self.wt_commit(wt)
+        self.git("merge", "--no-ff", "-q", "-m", "merge", "worktree-task-1")
+        self.tg("edit", str(task), "--meta", f"verdict_ref={head}")
+        self.tg("done", str(task))
+        self.agents(self.row("task-1", status=None, state="working", cwd=self.root))
+        events = self.events("record")
+        self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
+        self.assertEqual(self.one(events, "removed")["session"], "sess-task-1-1")
 
     def test_60_cleanup_skips_a_session_that_is_still_running(self):
         task = self.closed_task(merged=True)

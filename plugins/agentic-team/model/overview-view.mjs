@@ -1,7 +1,7 @@
 // Overview of Lifecycle.tla for the README: the main flow in about a dozen states.
 // Use it with overview.cfg (FULL_ENV = FALSE, OPERATOR_PAUSES = TRUE).
 
-export const title = "Task attempt lifecycle (agentic-team 0.12.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.12.1)";
 
 const LEVEL = {
   "artifact-verified": "passes",

@@ -39,6 +39,7 @@ every report, and on every wake (step 6).
      session has stopped working, follow the rest of the `next:`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. This stop is a recovery
      stop: the attempt counts, and at attempt 3 the hint names `abandon` instead.
+     A row with no status and no pid (a ghost) counts as ended after 30 quiet minutes; `run.py stop` does not clear it before that.
    - A `next:` that names `abandon` (the cap is 3 attempts): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
      add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
      in the same hint only when the operator says so.

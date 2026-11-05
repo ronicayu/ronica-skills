@@ -208,10 +208,11 @@ works in two steps.
    clean and pushed. `claude rm` refuses work that is on no remote, so the
    script passes `--discard-unpushed` only for a commit that
    `git merge-base --is-ancestor` finds in `HEAD` or, in `pr` mode, in the
-   recorded merged head (`pushed`). `claude rm` deletes the folder with its
-   ignored files, so `run.py` skips every session whose folder fails the
-   container, `git status` or ignored-file check of step 2. Step 2 then names
-   the reason.
+   recorded merged head (`pushed`). A commit also counts as merged when the
+   target holds the same patch, as after a rebase merge. `claude rm` deletes
+   the folder with its ignored files, so `run.py` skips every session whose
+   folder fails the container, `git status` or ignored-file check of step 2.
+   Step 2 then names the reason.
 2. It then removes every folder of the task that is still there: `task-<id>`,
    an old `task-<id>-<n>`, and `verify-<id>-<n>[-<k>]`. This covers a task that
    0.6.0 started, a folder whose lock owner has no row, and a row `claude rm`
@@ -493,7 +494,12 @@ stopped row cannot be matched by its directory: `run.py` ties it to a task only
 through its recorded id, counts it as exited, and derives the worktree path from
 the task. A stopped row that is not recorded, such as a worker the operator
 stopped by hand, belongs to nobody. The `Session: <id>` lines in result bodies
-are a record, not the match.
+are a record, not the match. A row with no status and no pid has no process
+now. It does not count toward the session cap, and cleanup removes it once its
+task is merged. While its task is in progress, `record` reports it as `unknown`.
+After 30 minutes with no transcript write it counts as ended, as a quiet
+verifier does: `launch` no longer waits for it, and `record` salvages its report
+or files `DIED`. A row that `run.py` stopped counts as ended at once.
 
 ## Configuration
 
@@ -673,6 +679,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
+| `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
 
 A session's report file is not in this folder. It is
 `.agentic-team/report-<session>.md` in the session's own worktree, one file per
@@ -732,6 +739,10 @@ skill. Metadata holds everything else, 26 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.12.0
+
+Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. Such a row counts as ended after 30 minutes with no transcript write, as a quiet verifier does. A session that `run.py` stops now counts as ended at once, so `launch` after a `close` that stopped an idle worker no longer refuses. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
 
 ### Upgrading from 0.11.3
 
