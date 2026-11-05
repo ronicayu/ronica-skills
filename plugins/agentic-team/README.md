@@ -499,7 +499,7 @@ now. It does not count toward the session cap, and cleanup removes it once its
 task is merged. While its task is in progress, `record` reports it as `unknown`.
 After 30 minutes with no transcript write it counts as ended, as a quiet
 verifier does: `launch` no longer waits for it, and `record` salvages its report
-or files `DIED`.
+or files `DIED`. A row that `run.py` stopped counts as ended at once.
 
 ## Configuration
 
@@ -679,6 +679,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
+| `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
 
 A session's report file is not in this folder. It is
 `.agentic-team/report-<session>.md` in the session's own worktree, one file per
@@ -741,7 +742,7 @@ request across attempts.
 
 ### Upgrading from 0.12.0
 
-Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. Such a row counts as ended after 30 minutes with no transcript write, as a quiet verifier does. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
+Version 0.12.1 stops counting session rows with no process (no status, no pid) toward the session cap, and cleanup removes them once their task is merged. Such a row counts as ended after 30 minutes with no transcript write, as a quiet verifier does. A session that `run.py` stops now counts as ended at once, so `launch` after a `close` that stopped an idle worker no longer refuses. A commit whose patch the target already holds, as after a rebase merge, now counts as merged. No migration.
 
 ### Upgrading from 0.11.3
 

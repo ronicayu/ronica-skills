@@ -136,6 +136,7 @@ REPORT_DIR = ".agentic-team"  # in a worktree, the folder of the session's repor
 REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it in every worktree
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
+STOPPED_FILE = "stopped-sessions"  # in the run directory: the session ids that run.py stopped, one per line
 NOTIFY_NAME = re.compile(r"[^\x00-\x1f\x7f`]{1,200}")  # one line, no backtick: the brief shows it in backticks
 NOTIFY_REF = re.compile(r" \[[^\]]*\]$")  # a ListAgents [ref] after the name; a session that did not list it cannot use it
 WAIT_TIMEOUT = 1800  # seconds that `wait` runs at most, by default
@@ -361,8 +362,16 @@ class Run:
                         index[str(entry["id"])] = (task["id"], entry.get("kind"), entry.get("attempt"),
                                                    entry.get("worktree") or f"task-{task['id']}")
             self._sessions = [Session(r, self.wt_dir, index) for r in rows if isinstance(r, dict)]
-            for s in self._sessions:  # a ghost row that stays quiet has ended; until then the CLI may start it again
-                if s.ghost and quiet_for(self, s, VERIFIER_QUIET_MINUTES):
+            stopped = set()
+            try:
+                with open(os.path.join(self.run_dir, STOPPED_FILE), encoding="utf-8") as fh:
+                    stopped = {line.strip() for line in fh if line.strip()}
+            except OSError:
+                pass
+            for s in self._sessions:
+                # run.py stopped it: claude stop keeps the state and removes status and pid, so the row has ended.
+                # Else a ghost row that stays quiet has ended; until then the CLI may start it again.
+                if s.live and not s.status and (s.sid in stopped or (s.ghost and quiet_for(self, s, VERIFIER_QUIET_MINUTES))):
                     s.finished, s.live, s.stuck, s.unknown, s.turn_over = True, False, False, False, True
         return self._sessions
 
@@ -467,6 +476,21 @@ class Session:
 
     def describe(self):
         return f"{self.sid} ({self.name}, {self.status}/{self.state})"
+
+
+def stop_session(run, sid, check=True):
+    """`claude stop <sid>`, and on success note the id in the run directory's stopped-sessions file. `claude stop`
+    keeps the row's state and removes its status and pid, so a stopped `working` row looks like a row whose
+    process died; Run.sessions reads this file to tell them apart."""
+    out = run.claude("stop", sid, check=check)
+    if out.returncode == 0:
+        try:
+            os.makedirs(run.run_dir, exist_ok=True)
+            with open(os.path.join(run.run_dir, STOPPED_FILE), "a", encoding="utf-8") as fh:
+                fh.write(f"{sid}\n")
+        except OSError:
+            pass  # the 30-minute rule still ends the row
+    return out
 
 
 def own_sessions(run, tid, kind=None, attempt=None):
@@ -1290,7 +1314,7 @@ def cmd_launch(run, args):
     if live and current and all(idle_and_filed(run, tid, current, rows, s) for s in live):
         for s in live:
             if not args.dry_run:
-                run.claude("stop", s.sid, check=False)
+                stop_session(run, s.sid, check=False)
                 record_row(run, task, s, current)
             run.emit("stopped-idle", tid, current, s.sid,
                      f"session {s.describe()} was {f'waiting on {s.waiting}' if s.waiting else 'idle'} "
@@ -1552,7 +1576,7 @@ def cmd_verify(run, args):
     if not args.dry_run:
         for s in [s for s in verifiers if s.live]:  # its turn is over and it filed nothing; it only holds a slot
             record_row(run, task, s, attempt)
-            run.claude("stop", s.sid, check=False)
+            stop_session(run, s.sid, check=False)
             run._sessions = None
     names = {s.wtname for s in own_sessions(run, tid, "verify", attempt)}
     if os.path.isdir(run.wt_dir):
@@ -1711,7 +1735,7 @@ def file_stuck(run, tid, attempt, kind, session, label, model=None):
     reason = session.waiting or session.state
     waiting_for = json.dumps(session.waiting) if session.waiting else session.state
     tail = last_output(run, session.sid)  # before the stop: the evidence is lost afterwards
-    run.claude("stop", session.sid)
+    stop_session(run, session.sid)
     run.add_result(tid, kind, attempt, "manager", "BLOCKED",
                    f"Session: {session.sid}\nWorktree: {session.worktree(run.root)}\n"
                    f"{label} {session.sid} stopped: waiting on {reason}\n"
@@ -1875,7 +1899,7 @@ def salvage_verifier(run, task, attempt, session):
     added = run.add_result(tid, "verify", attempt, session.wtname, found[0], found[1])
     run.emit("salvaged", tid, attempt, session.sid, f"{found[0]} from {found[2]} (result #{added['id']})")
     if session.live:  # its turn is over; it only holds a slot
-        run.claude("stop", session.sid, check=False)
+        stop_session(run, session.sid, check=False)
         run._sessions = None
     return added
 
@@ -1963,7 +1987,7 @@ def record_in_progress(run, snap, task, unmanaged):
             if s.stuck and work_filed(rows, attempt, s):
                 # its verdict is filed, so the prompt is for a step after it: stop it, and the verdict stands
                 record_row(run, task, s, attempt)
-                run.claude("stop", s.sid)
+                stop_session(run, s.sid)
                 run._sessions = None
                 run.emit("stopped-idle", tid, attempt, s.sid,
                          f"verifier {s.describe()} waited on {s.waiting or s.state} with its verdict filed; stopped it")
@@ -3123,7 +3147,7 @@ def stop_live(run, task, attempt, branch):
             continue
         if s.kind == "verify":
             record_row(run, task, s, attempt)
-        out = run.claude("stop", s.sid, check=False)
+        out = stop_session(run, s.sid, check=False)
         if out.returncode != 0:
             run.emit("kept", tid, attempt, s.sid,
                      f"session {s.sid} still live; claude stop said: {first_line(out.stderr or out.stdout)}")
@@ -3334,7 +3358,7 @@ def cmd_stop(run, args):
     # A STOP order makes this a pause, which does not use an attempt. Without one it recovers a session that went
     # quiet or broke, and the attempt counts toward the cap, as DIED does.
     reason = "pause" if run.orders().stop else "recover"
-    run.claude("stop", s.sid)
+    stop_session(run, s.sid)
     wt = s.worktree(run.root)
     files = run.git("status", "--porcelain", cwd=wt, check=False).stdout.rstrip("\n") if os.path.isdir(wt) else ""
     branch = (run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() if os.path.isdir(wt) else "") or "None"
@@ -3356,13 +3380,13 @@ def cmd_abandon(run, args):
     attempt = wanted_attempt(task)
     for s in own_sessions(run, tid, "task"):
         if s.live:
-            run.claude("stop", s.sid)
+            stop_session(run, s.sid)
             run.add_result(tid, "task", attempt, "manager", "ABANDONED",
                            f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nAbandoned: {args.mode}")
     for s in own_sessions(run, tid, "verify"):  # a verifier gets no row, only its session recorded
         if s.live:
             record_row(run, task, s, attempt)
-            run.claude("stop", s.sid)
+            stop_session(run, s.sid)
     run.edit_meta(tid, abandoned=args.mode)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):

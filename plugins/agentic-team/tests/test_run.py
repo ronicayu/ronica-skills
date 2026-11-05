@@ -81,6 +81,15 @@ elif cmd == "stop":
                     row.pop("status", None)
                     row["state"] = "stopped"
             open(path, "w").write(json.dumps(rows))
+    if os.environ.get("FAKE_CLAUDE_STOP_CLEARS_STATUS"):  # like the real CLI: the state stays, status and pid go
+        path = os.environ.get("FAKE_CLAUDE_AGENTS")
+        if path and os.path.isfile(path):
+            rows = json.load(open(path))
+            for row in rows:
+                if row.get("id") == argv[1]:
+                    row.pop("status", None)
+                    row.pop("pid", None)
+            open(path, "w").write(json.dumps(rows))
 elif cmd == "logs":
     folder = os.environ.get("FAKE_CLAUDE_LOGS_DIR")
     path = os.path.join(folder, argv[1] + ".txt") if folder else ""
@@ -2089,6 +2098,57 @@ class RunTest(Base):
         events = self.events("record")
         self.assertEqual(self.named(events, "verifying"), [])
         self.one(events, "no-verdict")
+
+    def test_106_launch_after_stopping_an_idle_working_worker(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="idle", state="working", pid=1234))
+        env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
+        events = self.events("launch", str(task), env=env)
+        self.assertEqual(self.one(events, "stopped-idle")["session"], "sess-task-1-1")
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+        path = os.path.join(self.root, ".agentic-team", "stopped-sessions")
+        with open(path) as fh:
+            self.assertEqual(fh.read().split(), ["sess-task-1-1"])
+
+    def test_106_close_then_launch_after_a_verify_failed_verdict(self):
+        task = self.running_task()
+        self.pass_report(task)
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.agents(self.row("task-1", status="idle", state="working", pid=1234))
+        env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
+        self.ok("close", str(task), "--verdict", "verify-failed", env=env)
+        out = self.run_cmd("launch", str(task), "--dry-run", env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("has a live session", out.stderr)
+
+    def test_106_an_unstopped_ghost_stays_unknown(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        new = int(time.time() * 1000)
+        self.agents(self.row("task-1", status=None, state="working", startedAt=new))
+        self.assertFalse(os.path.isfile(os.path.join(self.root, ".agentic-team", "stopped-sessions")))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "unknown")["task"], task)
+        refused = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("has a live session", refused.stderr)
+
+    def test_106_stop_session_notes_only_a_successful_stop(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("half\n")
+        self.agents(self.row("task-1"))
+        out = self.run_cmd("stop", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_FAIL="1"))
+        self.assertNotEqual(out.returncode, 0)
+        path = os.path.join(self.root, ".agentic-team", "stopped-sessions")
+        noted = ""
+        if os.path.isfile(path):
+            with open(path) as fh:
+                noted = fh.read()
+        self.assertNotIn("sess-task-1-1", noted)
 
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
