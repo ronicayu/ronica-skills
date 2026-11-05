@@ -108,6 +108,7 @@ WORKTREE_LINE = re.compile(r"(?m)^Worktree:\s*(.*?)\s*$")
 SESSION_LINE = re.compile(r"(?m)^Session:\s*(.*?)\s*$")
 VERDICT_LINE = re.compile(r"(?m)^Verdict:\s*(\S+)\s*$")
 STATUS_LINE = re.compile(r"(?m)^Status:\s*(PASS|ISSUES|BLOCKED)\s*$")
+STOP_REASON = re.compile(r"(?m)^Reason:\s*(pause|recover|close)\s*$")  # the Reason: line of a STOPPED row
 TRUST_HINT = ("Run claude once in the repository and accept the trust prompt; "
               "a trusted parent folder does not count.")
 SANDBOX_HINT = ("claude --bg writes session data under ~/.claude. Run run.py launch and run.py verify outside the "
@@ -531,6 +532,40 @@ def verdict_of(row):
     return match.group(1) if match else None
 
 
+def retry_next(tid, attempt, mode="<mode>", lead="", before=""):
+    """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
+    run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
+    or `before` and the launch with the --attempt override. Every next: hint that retries a task uses it, except
+    the hint after a pause (stopped_next): refuse_past_cap lets a pause pass the cap."""
+    if attempt < MAX_ATTEMPTS:
+        return f"{lead}{before}run.py launch {tid}"
+    return (f"run.py abandon {tid} {mode} (the cap is {MAX_ATTEMPTS} attempts), "
+            f"or {before}run.py launch {tid} --attempt {attempt + 1} to override")
+
+
+def stop_reason(row):
+    """The Reason: line of a STOPPED row: "pause" (run.py stop under a STOP order), "recover" (run.py stop
+    without one), "close" (close stopped the session), or None (no Reason: line)."""
+    match = STOP_REASON.search(row.get("body") or "")
+    return match.group(1) if match else None
+
+
+def stopped_next(tid, attempt, row, before=""):
+    """The next step after the STOPPED row `row`. A pause does not use an attempt; any other stop does."""
+    if stop_reason(row) == "pause":
+        return f"{before}run.py launch {tid} after the pause"
+    return retry_next(tid, attempt, before=before)
+
+
+def work_filed(rows, attempt, s):
+    """True when the attempt's results hold the work of session `s`: a task row that is not STOPPED for a worker,
+    a verify row that covers it (verifier_filed) for a verifier. Stopping such a session loses nothing, even
+    when it waits on a prompt: the prompt is for a step after its result."""
+    if s.kind == "verify":
+        return verifier_filed(rows, attempt, s.wtname, s.sid)
+    return any(r["status"] != "STOPPED" for r in task_rows(rows, attempt))
+
+
 def arrived(task, rows):
     """The current attempt has a result that is not a pause marker, and no verdict is recorded."""
     attempt = wanted_attempt(task)
@@ -548,11 +583,11 @@ def unmerged(task):
     return task["status"] == "done" and is_sha(meta.get("verdict_ref")) and not meta.get("merged_at")
 
 
-def unclosed_next(task_id, verdict, kind="code"):
+def unclosed_next(task_id, verdict, attempt, kind="code"):
     if verdict == "verify-blocked":
         return f"retry the check when its cause is fixed, then run.py close {task_id}"
     if verdict == "verify-failed":
-        return f"fix round: run.py launch {task_id}"
+        return retry_next(task_id, attempt, lead="fix round: ")
     if verdict == "test-verified" and verdict not in PASSING[kind]:
         return (f"test-verified does not close a {kind} task; run.py verify {task_id} --again for artifact-verified, "
                 f'or run.py close {task_id} --verdict artifact-verified --override-verifier "<why>" --ran "<run id or URL>"')
@@ -1179,14 +1214,13 @@ def recorded_sessions(task):
 
 
 def idle_and_filed(run, tid, attempt, rows, s):
-    """True for a live session of the task that is idle, waits on nothing, and whose work for the attempt is
-    filed: a task row that is not STOPPED for a worker, any verify row for a verifier. launch stops such a
-    session itself instead of refusing."""
-    if s.status != "idle" or s.waiting:
-        return False
+    """True for a live session of the task whose work for the attempt is filed. launch stops such a session itself
+    instead of refusing. A verifier counts when it is idle, waits on nothing, and the attempt has a verify row
+    (record stops a verifier that waits on a prompt after its verdict). A worker counts when it is idle or waits
+    on a prompt (Session.stuck), and work_filed: its report is filed, so the prompt is for a step after it."""
     if s.kind == "verify":
-        return bool(task_rows(rows, attempt, "verify"))
-    return any(r["status"] != "STOPPED" for r in task_rows(rows, attempt))
+        return s.status == "idle" and not s.waiting and bool(task_rows(rows, attempt, "verify"))
+    return (s.status == "idle" or s.stuck) and work_filed(rows, attempt, s)
 
 
 def cmd_launch(run, args):
@@ -1253,7 +1287,8 @@ def cmd_launch(run, args):
                 run.claude("stop", s.sid, check=False)
                 record_row(run, task, s, current)
             run.emit("stopped-idle", tid, current, s.sid,
-                     f"session {s.describe()} was idle with its work filed; stopped it"
+                     f"session {s.describe()} was {f'waiting on {s.waiting}' if s.waiting else 'idle'} "
+                     "with its work filed; stopped it"
                      + (" (dry run: not stopped)" if args.dry_run else ""))
         run._sessions = None
         live = [] if args.dry_run else [s for s in run.sessions() if s.task_id == tid and s.live]
@@ -1384,7 +1419,11 @@ def cmd_launch(run, args):
 
 
 def refuse_past_cap(tid, nxt, latest, override):
-    if not override and nxt > MAX_ATTEMPTS and not (latest and latest[-1]["status"] == "STOPPED"):
+    """Refuse a launch past MAX_ATTEMPTS without --attempt. Only a pause the operator ordered does not use an
+    attempt: the newest row is STOPPED with Reason: pause. A recovery stop counts, as DIED does, and so does a
+    STOPPED row with no Reason: line."""
+    paused = bool(latest) and latest[-1]["status"] == "STOPPED" and stop_reason(latest[-1]) == "pause"
+    if not override and nxt > MAX_ATTEMPTS and not paused:
         raise Refused(f"#{tid}: attempt {MAX_ATTEMPTS} has failed; run run.py abandon {tid} "
                       f"<died|tool-error|stuck|unknown>, or pass --attempt {nxt} to override")
 
@@ -1626,7 +1665,7 @@ def emit_verified(run, tid, attempt, row, kind):
     level = verdict_of(row)
     nxt = f"run run.py close {tid}"
     if row["author"] == "ci" and level == "verify-failed":
-        nxt += f" (records verify-failed), then fix round: run.py launch {tid}"
+        nxt += " (records verify-failed), then " + retry_next(tid, attempt, lead="fix round: ")
     elif row["author"] == "ci" and level == "verify-blocked":
         nxt = f"run.py verify {tid} --again"
     if level == "test-verified" and kind != "code":
@@ -1688,14 +1727,14 @@ def record_arrived(run, snap, task, attempt, result):
         model = tail_or_none(MODEL_LINE.search(body))
         model = None if model == "unknown" else model or (session_model(task, found) if found else None)
         run.emit("stuck", tid, attempt, None, "filed earlier",
-                 PROMPT_HINT.format(sid=found or "<sid>", cmd=f"run.py launch {tid}") + pinned_hint(model))
+                 PROMPT_HINT.format(sid=found or "<sid>", cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
         return
     answered = [d for d in task.get("depends_on") or []
                 if d in snap.by_id and snap.by_id[d]["type"] == "decision" and snap.by_id[d]["status"] == "done"]
     meta = task.get("meta") or {}
     if status == "BLOCKED" and answered:
         run.emit("arrived", tid, attempt, None, f"BLOCKED by {result.get('author') or 'unknown'} (result #{result['id']})",
-                 f"decision #{answered[0]} answered; run.py launch {tid}")
+                 f"decision #{answered[0]} answered; " + retry_next(tid, attempt))
         return
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
@@ -1705,10 +1744,9 @@ def record_arrived(run, snap, task, attempt, result):
         adopted = WORKTREE_LINE.search(result.get("body") or "")
         detail += "; adopted" if adopted and adopted.group(1).strip() == "None" else ""
     elif status == "ISSUES":
-        nxt = (f"fix round: run.py launch {tid}" if attempt < MAX_ATTEMPTS
-               else f"attempt {MAX_ATTEMPTS} failed: run.py abandon {tid} <mode>")
+        nxt = retry_next(tid, attempt, lead="fix round: ")
     else:
-        nxt = (f'answer it and run.py launch {tid}, or tg add "<question>" --type decision '
+        nxt = (retry_next(tid, attempt, before="answer it and ") + ', or tg add "<question>" --type decision '
                f"--meta decider=operator --blocks {tid}")
     run.emit("arrived", tid, attempt, None, detail, nxt)
 
@@ -1827,8 +1865,11 @@ def salvage_verifier(run, task, attempt, session):
 
 
 def commit_stopped(run, tid, attempt, rows, sessions):
-    """Phase 2 of a pause: commit the WIP of a stopped worker that has exited."""
+    """Phase 2 of a pause: commit the WIP of a stopped worker that has exited. The row it files copies the
+    Reason: line of the row that run.py stop filed."""
     stopped = [r for r in task_rows(rows, attempt) if r["status"] == "STOPPED"]
+    why = stop_reason(stopped[-1])
+    reason = f"Reason: {why}\n" if why else ""
     if any(s.status in ("busy", "waiting") for s in sessions):
         run.emit("stopping", tid, attempt, None, f"session {sessions[0].sid} has not exited yet")
         return
@@ -1836,24 +1877,25 @@ def commit_stopped(run, tid, attempt, rows, sessions):
     wt = task_worktree(run, tid)
     if not os.path.isdir(wt):
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                       f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\nFiles: None")
+                       f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\n{reason}Files: None")
         run.emit("stopped", tid, attempt, sid, "worktree missing; nothing to commit")
         return
     rel = f".claude/worktrees/task-{tid}"
     if os.path.realpath(wt) not in registered_worktrees(run):  # git would find the main checkout from here
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                       f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\nFiles: None")
+                       f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\n{reason}Files: None")
         run.emit("stopped", tid, attempt, sid, f"folder {rel} is a plain folder, not a git worktree; move or delete "
-                 "it yourself; nothing committed", f"run.py launch {tid} after the pause")
+                 "it yourself; nothing committed", stopped_next(tid, attempt, stopped[-1]))
         return
     on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
     if on != task_branch(tid):  # a commit here would not be on the task branch
         at = run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
         where = f"on {on}" if on else f"on a detached HEAD at {at[:7]}"
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                       f"Session: {sid}\nWorktree: {wt}\nBranch: {on or 'None'}\nHead: None\nFiles: None")
+                       f"Session: {sid}\nWorktree: {wt}\nBranch: {on or 'None'}\nHead: None\n{reason}Files: None")
         run.emit("stopped", tid, attempt, sid, f"{rel} is {where}, not {task_branch(tid)}; nothing committed; "
-                 "its uncommitted work stays there", f"fix the branch (launch says how), then run.py launch {tid}")
+                 "its uncommitted work stays there",
+                 stopped_next(tid, attempt, stopped[-1], before="fix the branch (launch says how), then "))
         return
     porcelain = run.git("status", "--porcelain", cwd=wt).stdout.rstrip("\n")
     if porcelain:
@@ -1862,10 +1904,10 @@ def commit_stopped(run, tid, attempt, rows, sessions):
     head = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
     branch = run.git("branch", "--show-current", cwd=wt).stdout.strip() or "None"
     run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                   f"Session: {sid}\nWorktree: {wt}\nBranch: {branch}\nHead: {head}\nFiles: {porcelain or 'None'}")
+                   f"Session: {sid}\nWorktree: {wt}\nBranch: {branch}\nHead: {head}\n{reason}Files: {porcelain or 'None'}")
     run.emit("stopped", tid, attempt, sid,
              (f"WIP committed {head} on {branch}" if porcelain else f"worktree clean at {head} on {branch}"),
-             f"run.py launch {tid} after the pause")
+             stopped_next(tid, attempt, stopped[-1]))
 
 
 def ci_target(run, task, rows):
@@ -1900,16 +1942,27 @@ def record_in_progress(run, snap, task, unmanaged):
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
+        held = False  # a verifier that still runs, or one stopped with no verdict: report it and wait
         for s in running:
-            if s.stuck:
+            if s.stuck and work_filed(rows, attempt, s):
+                # its verdict is filed, so the prompt is for a step after it: stop it, and the verdict stands
+                record_row(run, task, s, attempt)
+                run.claude("stop", s.sid)
+                run._sessions = None
+                run.emit("stopped-idle", tid, attempt, s.sid,
+                         f"verifier {s.describe()} waited on {s.waiting or s.state} with its verdict filed; stopped it")
+            elif s.stuck:
+                held = True
                 record_row(run, task, s, attempt)
                 model = session_model(task, s.sid)
                 reason = file_stuck(run, tid, attempt, "verify", s, "Verifier", model)
                 run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}; filed verify BLOCKED ({reason})",
                          PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again") + pinned_hint(model))
             else:
+                held = True
                 run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status})")
-        return
+        if held:
+            return
     lost = lost_verifier(verifiers, rows, attempt)
     if lost:
         added = salvage_verifier(run, task, attempt, lost)
@@ -1933,8 +1986,11 @@ def record_in_progress(run, snap, task, unmanaged):
         if rows is None:
             return
     verdicts = verifier_rows(rows, attempt)
-    newest_manager = max((r["id"] for r in task_rows(rows, attempt, "verify") if r.get("author") == "manager"), default=0)
-    with_verdict = [r for r in verdicts if verdict_of(r) and r["id"] > newest_manager]  # an override outranks older rows
+    # A Manager verdict (close --verdict, an override) outranks older verifier rows. A Manager row with no verdict,
+    # the BLOCKED row of a stuck verifier, does not hide a verdict filed before it.
+    newest_manager = max((r["id"] for r in task_rows(rows, attempt, "verify")
+                          if r.get("author") == "manager" and verdict_of(r)), default=0)
+    with_verdict = [r for r in verdicts if verdict_of(r) and r["id"] > newest_manager]
     if with_verdict and (not meta.get("verdict") or verdict_of(with_verdict[-1]) != meta.get("verdict")):
         emit_verified(run, tid, attempt, with_verdict[-1], verify_kind(run, task, strict=False))
         return
@@ -1943,7 +1999,7 @@ def record_in_progress(run, snap, task, unmanaged):
                  f"run run.py close {tid} --verdict L")
         return
     if meta.get("verdict"):
-        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], verify_kind(run, task, strict=False)))
+        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], attempt, verify_kind(run, task, strict=False)))
         return
     results = task_rows(rows, attempt)
     if not results:
@@ -1956,13 +2012,14 @@ def record_in_progress(run, snap, task, unmanaged):
             model = session_model(task, s.sid)
             reason = file_stuck(run, tid, attempt, "task", s, "Session", model)
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}; filed BLOCKED ({reason})",
-                     PROMPT_HINT.format(sid=s.sid, cmd=f"run.py launch {tid}") + pinned_hint(model))
+                     PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
         elif busy:
             run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name})")
         elif unknown:
             s = unknown[0]
             run.emit("unknown", tid, attempt, s.sid, f"session {s.sid} status={s.status} state={s.state}; not filed as DIED",
-                     f"claude logs {s.sid}")
+                     f"claude logs {s.sid}; if it has stopped working, "
+                     + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and "))
         else:
             s = mine[-1] if mine else None
             report = report_path(run, f"task-{tid}", str(meta.get("session") or f"task-{tid}-{attempt}"))
@@ -1978,21 +2035,17 @@ def record_in_progress(run, snap, task, unmanaged):
                 where = (f"session {s.sid} {s.status}/{s.state}" if s
                          else f"no session recorded for attempt {attempt}")
                 run.add_result(tid, "task", attempt, "manager", "DIED", f"{where}, no result")
-                nxt = (f"run.py launch {tid}" if attempt < MAX_ATTEMPTS
-                       else f"attempt {MAX_ATTEMPTS} failed: run.py abandon {tid} died")
-                run.emit("died", tid, attempt, s.sid if s else None, "filed DIED", nxt)
+                run.emit("died", tid, attempt, s.sid if s else None, "filed DIED", retry_next(tid, attempt, "died"))
         return
     latest = results[-1]
     if latest["status"] == "STOPPED":
         if HEAD_ANY.search(latest["body"]):
             run.emit("stopped", tid, attempt, None, f"head {tail_or_none(HEAD_ANY.search(latest['body'])) or 'None'}",
-                     f"run.py launch {tid} after the pause")
+                     stopped_next(tid, attempt, latest))
         else:
             commit_stopped(run, tid, attempt, rows, mine)
     elif latest["status"] == "DIED":
-        nxt = (f"run.py launch {tid}" if attempt < MAX_ATTEMPTS
-               else f"attempt {MAX_ATTEMPTS} failed: run.py abandon {tid} died")
-        run.emit("died", tid, attempt, None, "filed earlier", nxt)
+        run.emit("died", tid, attempt, None, "filed earlier", retry_next(tid, attempt, "died"))
     else:
         record_arrived(run, snap, task, attempt, latest)
 
@@ -2670,7 +2723,7 @@ def verdict_comment(run, task, attempt, level, ref, kind, source):
     the comment by. `source` is the verify result the verdict comes from, or None."""
     tid = task["id"]
     closes = level in PASSING[kind]
-    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, kind)}."
+    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, attempt, kind)}."
     by = f"by {source['author']} (verify result #{source['id']})" if source else "with no verify result on file"
     evidence = ""
     if source:
@@ -3035,19 +3088,25 @@ def find_transcript(run, worktree, sid, row):
     return None, f"no transcript {ids[0]}*.jsonl in {folder}"
 
 
-def stop_live(run, tid, attempt, branch):
-    """Stop the task's live worker sessions, of any attempt. A failure is housekeeping: report it and go on."""
-    for s in own_sessions(run, tid, "task"):
-        if not s.live:
+def stop_live(run, task, attempt, branch):
+    """Stop the task's live worker and verifier sessions, of any attempt. A worker gets a STOPPED row with
+    Reason: close; a verifier gets no row, only its session recorded (record_row), so that cleanup can remove it.
+    A failure is housekeeping: report it and go on."""
+    tid = task["id"]
+    for s in own_sessions(run, tid):
+        if not s.live or s.kind not in ("task", "verify"):
             continue
+        if s.kind == "verify":
+            record_row(run, task, s, attempt)
         out = run.claude("stop", s.sid, check=False)
         if out.returncode != 0:
             run.emit("kept", tid, attempt, s.sid,
                      f"session {s.sid} still live; claude stop said: {first_line(out.stderr or out.stdout)}")
             continue
-        run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                       f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nBranch: {branch}\n"
-                       f"Stopped: {run.now()}\nFiles: None")
+        if s.kind == "task":
+            run.add_result(tid, "task", attempt, "manager", "STOPPED",
+                           f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nBranch: {branch}\n"
+                           f"Stopped: {run.now()}\nReason: close\nFiles: None")
         run._sessions = None  # the stopped row no longer counts as live
 
 
@@ -3083,7 +3142,7 @@ def resume_close(run, task):
     if now != ref:
         run.emit("rebased", tid, attempt, None, f"same change at {now[:7]} (verified at {ref[:7]}); verdict_ref moves")
         run.set_meta(task, verdict_ref=now)
-    stop_live(run, tid, attempt, branch)
+    stop_live(run, task, attempt, branch)
     if run.pr_mode:
         run.emit("resumed", tid, attempt, None, "closed earlier; continuing at publish")
         if publish(run, task, branch, now, catch_up=True):
@@ -3175,11 +3234,11 @@ def cmd_close(run, args):
             run.emit("tokens", tid, None, sid or None,
                      f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
     if level not in PASSING[kind]:
-        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, kind))
+        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind))
         post_verdict(run, task, attempt, level, ref, kind)
         return
     run.tg("done", str(tid))
-    stop_live(run, tid, attempt, branch)
+    stop_live(run, task, attempt, branch)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}")
     meta.update(verdict=level, verdict_ref=ref)
     if not is_sha(ref):
@@ -3247,13 +3306,19 @@ def cmd_stop(run, args):
     if not live:
         raise Refused(f"#{tid} attempt {attempt or 0} has no live session")
     s = live[0]
+    # A STOP order makes this a pause, which does not use an attempt. Without one it recovers a session that went
+    # quiet or broke, and the attempt counts toward the cap, as DIED does.
+    reason = "pause" if run.orders().stop else "recover"
     run.claude("stop", s.sid)
     wt = s.worktree(run.root)
     files = run.git("status", "--porcelain", cwd=wt, check=False).stdout.rstrip("\n") if os.path.isdir(wt) else ""
     branch = (run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() if os.path.isdir(wt) else "") or "None"
     run.add_result(tid, "task", attempt, "manager", "STOPPED",
-                   f"Session: {s.sid}\nWorktree: {wt}\nBranch: {branch}\nStopped: {run.now()}\nFiles: {files or 'None'}")
-    run.emit("stopped", tid, attempt, s.sid, f"session {s.sid}; run.py record commits its WIP once it has exited")
+                   f"Session: {s.sid}\nWorktree: {wt}\nBranch: {branch}\nStopped: {run.now()}\nReason: {reason}\n"
+                   f"Files: {files or 'None'}")
+    counts = ("a pause: the attempt does not count" if reason == "pause"
+              else f"no STOP order: attempt {attempt} counts toward the cap of {MAX_ATTEMPTS}")
+    run.emit("stopped", tid, attempt, s.sid, f"session {s.sid} ({counts}); run.py record commits its WIP once it has exited")
 
 
 def cmd_abandon(run, args):
@@ -3269,6 +3334,10 @@ def cmd_abandon(run, args):
             run.claude("stop", s.sid)
             run.add_result(tid, "task", attempt, "manager", "ABANDONED",
                            f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nAbandoned: {args.mode}")
+    for s in own_sessions(run, tid, "verify"):  # a verifier gets no row, only its session recorded
+        if s.live:
+            record_row(run, task, s, attempt)
+            run.claude("stop", s.sid)
     run.edit_meta(tid, abandoned=args.mode)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):

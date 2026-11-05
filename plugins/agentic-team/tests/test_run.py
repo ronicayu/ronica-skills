@@ -1205,7 +1205,7 @@ class RunTest(Base):
         self.assertIn("--attempt 4 --by task-1-4", override.stdout)
         paused = self.running_task(attempt=3)
         self.worktree("task-2")
-        self.add_result(paused, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {SHA_A}\nFiles: None\n",
+        self.add_result(paused, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {SHA_A}\nReason: pause\nFiles: None\n",
                         attempt=3, by="manager")
         self.assertIn("--attempt 4 --by task-2-4", self.run_cmd("launch", str(paused), "--dry-run").stdout)
         retry = self.running_task(attempt=2)
@@ -1982,9 +1982,9 @@ class RunTest(Base):
         self.fresh()
         task = self.running_task()
         self.worktree("task-1")
-        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
         self.agents(self.row("task-1", status="idle", state="blocked", waitingFor="permission prompt"))
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
+        self.assertEqual(self.calls("stop"), [])
 
     def test_20_launch_stops_an_idle_verifier_after_its_verdict(self):
         task = self.running_task()
@@ -2443,6 +2443,7 @@ class RunTest(Base):
         stopped = [r for r in self.results(task) if r["status"] == "STOPPED"]
         self.assertEqual(len(stopped), 1)
         self.assertIn("Session: sess-task-1-1", stopped[0]["body"])
+        self.assertIn("Reason: close", stopped[0]["body"])
         self.assertEqual(self.one(events, "ready")["detail"], "none")
 
     def merge_setup(self):
@@ -4747,6 +4748,203 @@ class RunTest(Base):
         out = self.run_cmd("launch", str(task))
         self.assertIn(f"{text} (in pr mode, --base replaces the pushed branch task-1)", out.stderr)
 
+    # --- 0.12.0: every hint leads out (#56, #57, #58, #59, #61, #62)
+
+    def test_104_retry_hints_name_launch_below_the_cap_and_abandon_at_it(self):
+        for attempt in (2, 3):
+            with self.subTest(attempt=attempt):
+                self.fresh()
+                issues, blocked, answered, filed, failed, died, stuck = (self.running_task(attempt=attempt)
+                                                                         for _ in range(7))
+                self.add_result(issues, "ISSUES", "Task: 1\nStatus: ISSUES\n", attempt=attempt)
+                self.add_result(blocked, "BLOCKED", "Task: 2\nStatus: BLOCKED\n", attempt=attempt)
+                self.add_result(answered, "BLOCKED", "Task: 3\nStatus: BLOCKED\n", attempt=attempt)
+                gate = self.tg("add", "Which API?", "--type", "decision", "--blocks", str(answered))["id"]
+                self.tg("done", str(gate))
+                self.add_result(filed, "BLOCKED", f"Session: sess-task-4-{attempt}\nWaiting for: \"permission\"\n"
+                                "Model: sonnet\nLast output:\n    x\n", attempt=attempt, by="manager")
+                self.tg("edit", str(failed), "--meta", "verdict=verify-failed")
+                self.add_result(failed, "PASS", "Task: 5\nStatus: PASS\n", attempt=attempt)
+                self.add_result(died, "DIED", "no session, no result", attempt=attempt, by="manager")
+                self.agents(self.row("task-7", attempt, status="waiting", state="working", waitingFor="permission"))
+                hint = {e["task"]: e["next"] for e in self.events("record") if e["event"] in
+                        ("arrived", "stuck", "unclosed", "died")}
+                closed = self.one(self.events("close", str(failed), "--verdict", "verify-failed", "--ref", "sum-1"),
+                              "verdict")["next"]
+                if attempt == 2:
+                    self.assertEqual(hint[issues], "fix round: run.py launch 1")
+                    self.assertEqual(hint[blocked], 'answer it and run.py launch 2, or tg add "<question>" --type decision '
+                                                    "--meta decider=operator --blocks 2")
+                    self.assertEqual(hint[answered], f"decision #{gate} answered; run.py launch 3")
+                    self.assertTrue(hint[filed].endswith(" Then run.py launch 4."), hint[filed])
+                    self.assertEqual(hint[failed], "fix round: run.py launch 5")
+                    self.assertEqual(closed, "fix round: run.py launch 5")
+                    self.assertEqual(hint[died], "run.py launch 6")
+                    self.assertTrue(hint[stuck].endswith(" Then run.py launch 7."), hint[stuck])
+                    continue
+                cap = "(the cap is 3 attempts), or "
+                self.assertEqual(hint[issues], f"run.py abandon 1 <mode> {cap}run.py launch 1 --attempt 4 to override")
+                self.assertEqual(hint[blocked], f"run.py abandon 2 <mode> {cap}answer it and run.py launch 2 --attempt 4 "
+                                                'to override, or tg add "<question>" --type decision '
+                                                "--meta decider=operator --blocks 2")
+                self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <mode> {cap}"
+                                                 "run.py launch 3 --attempt 4 to override")
+                self.assertTrue(hint[filed].endswith(f" Then run.py abandon 4 stuck {cap}run.py launch 4 --attempt 4 "
+                                                     "to override."), hint[filed])
+                self.assertEqual(hint[failed], f"run.py abandon 5 <mode> {cap}run.py launch 5 --attempt 4 to override")
+                self.assertEqual(closed, hint[failed])
+                self.assertEqual(hint[died], f"run.py abandon 6 died {cap}run.py launch 6 --attempt 4 to override")
+                self.assertTrue(hint[stuck].endswith(f" Then run.py abandon 7 stuck {cap}run.py launch 7 --attempt 4 "
+                                                     "to override."), hint[stuck])
+                self.worktree("task-1")
+                refused = self.run_cmd("launch", str(issues), "--dry-run")
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn("attempt 3 has failed", refused.stderr)
+                self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(issues), "--dry-run", "--attempt", "4").stdout)
+
+    def test_104_an_idle_worker_with_no_result_gets_a_run_py_step(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.agents(self.row("task-1", status="idle", state="working"))
+        unknown = self.one(self.events("record"), "unknown")
+        self.assertEqual(unknown["next"], "claude logs sess-task-1-1; if it has stopped working, run.py stop 1, "
+                                          "then run.py record and run.py launch 1")
+        self.ok("stop", str(task))
+        self.assertIn("Reason: recover", self.results(task)[-1]["body"])
+        self.agents()
+        self.assertEqual(self.one(self.events("record"), "stopped")["next"], "run.py launch 1")
+        self.assertIn("--attempt 2 --by task-1-2", self.ok("launch", str(task), "--dry-run").stdout)
+        self.fresh()
+        self.running_task(attempt=3)
+        self.agents(self.row("task-1", 3, status="idle", state="working"))
+        unknown = self.one(self.events("record"), "unknown")
+        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 unknown "
+                                          "(the cap is 3 attempts), or run.py stop 1, then run.py record and "
+                                          "run.py launch 1 --attempt 4 to override")
+
+    def test_104_a_pause_at_the_last_attempt_does_not_use_it(self):
+        task = self.running_task(attempt=3)
+        self.worktree("task-1")
+        self.agents(self.row("task-1", 3))
+        self.orders("STOP: paused by operator 2026-11-05 10:00 UTC\n")
+        stopped = self.one(self.events("stop", str(task)), "stopped")
+        self.assertIn("(a pause: the attempt does not count)", stopped["detail"])
+        self.assertIn("\nReason: pause\n", self.results(task)[-1]["body"])
+        self.agents()
+        self.assertEqual(self.one(self.events("record"), "stopped")["next"], "run.py launch 1 after the pause")
+        body = self.results(task)[-1]["body"]
+        self.assertIn("\nReason: pause\n", body)
+        self.assertIn("Head: ", body)
+        self.orders("None yet.\n")
+        self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(task), "--dry-run").stdout)
+
+    def test_104_a_recovery_stop_at_the_last_attempt_counts(self):
+        task = self.running_task(attempt=3)
+        self.worktree("task-1")
+        self.agents(self.row("task-1", 3))
+        stopped = self.one(self.events("stop", str(task)), "stopped")
+        self.assertIn("(no STOP order: attempt 3 counts toward the cap of 3)", stopped["detail"])
+        self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
+        self.agents()
+        self.assertEqual(self.one(self.events("record"), "stopped")["next"],
+                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+        self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("attempt 3 has failed", out.stderr)
+        self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(task), "--dry-run", "--attempt", "4").stdout)
+
+    def test_104_a_stopped_row_with_no_reason_counts_as_an_attempt(self):
+        task = self.running_task(attempt=3)
+        self.worktree("task-1")
+        self.add_result(task, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {SHA_A}\nFiles: None\n",
+                        attempt=3, by="manager")
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("attempt 3 has failed", out.stderr)
+        self.assertEqual(self.one(self.events("record"), "stopped")["next"],
+                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+
+    def test_104_launch_stops_a_worker_on_a_prompt_after_its_result(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="waiting", state="working", waitingFor="permission prompt"))
+        events = self.events("record")
+        self.assertEqual(self.one(events, "arrived")["next"], "fix round: run.py launch 1")
+        self.assertEqual(self.named(events, "stuck"), [])
+        self.assertEqual([r["status"] for r in self.results(task)], ["ISSUES"])
+        events = self.events("launch", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        stopped = self.one(events, "stopped-idle")
+        self.assertEqual(stopped["session"], "sess-task-1-1")
+        self.assertIn("was waiting on permission prompt with its work filed; stopped it", stopped["detail"])
+        self.assertEqual(self.one(events, "launched")["attempt"], 2)
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+
+    def test_104_a_worker_on_a_prompt_with_no_result_is_still_stuck(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.agents(self.row("task-1", status="waiting", state="working", waitingFor="permission prompt"))
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("has a live session sess-task-1-1", out.stderr)
+        self.assertEqual(self.calls("stop"), [])
+        self.one(self.events("record"), "stuck")
+        self.assertEqual([(r["status"], r["author"]) for r in self.results(task)], [("BLOCKED", "manager")])
+
+    def test_104_a_verifier_on_a_prompt_after_its_verdict_keeps_it(self):
+        task = self.verifying_task(self.row("verify-1-1", status="waiting", state="blocked", waitingFor="permission prompt"))
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\nRan: make test\n", kind="verify",
+                        by="verify-1-1")
+        events = self.events("record")
+        stopped = self.one(events, "stopped-idle")
+        self.assertEqual(stopped["session"], "sess-verify-1-1")
+        self.assertIn("waited on permission prompt with its verdict filed; stopped it", stopped["detail"])
+        verified = self.one(events, "verified")
+        self.assertIn("Verdict test-verified by verify-1-1", verified["detail"])
+        self.assertEqual(verified["next"], "run run.py close 1")
+        self.assertEqual(self.named(events, "stuck"), [])
+        self.assertIn(["stop", "sess-verify-1-1"], self.calls("stop"))
+        self.assertEqual([(r["status"], r["author"]) for r in self.verify_rows(task)], [("PASS", "verify-1-1")])
+
+    def test_104_a_blocked_row_does_not_hide_an_earlier_verdict(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        self.add_result(task, "BLOCKED", "Session: sess-verify-1-1\nVerifier sess-verify-1-1 stopped: waiting on "
+                        "permission prompt\nModel: opus\n", kind="verify", by="manager")
+        events = self.events("record")
+        verified = self.one(events, "verified")
+        self.assertIn("Verdict test-verified by verify-1-1", verified["detail"])
+        self.assertEqual(verified["next"], "run run.py close 1")
+        self.assertEqual(self.named(events, "arrived"), [])
+
+    def test_104_close_stops_a_live_verifier_and_cleanup_removes_its_worktree(self):
+        task = self.running_task(sessions=[self.entry(1), self.entry(1, kind="verify")])
+        wt, head = self.pass_report(task)
+        self.worktree("verify-1-1", head)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\nRan: make test\n", kind="verify",
+                        by="verify-1-1")
+        self.agents(self.finished("task-1"), self.row("verify-1-1", status="idle", state="blocked"))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.one(events, "merged")
+        self.assertIn(["stop", "sess-verify-1-1"], self.calls("stop"))
+        self.assertIn(["rm", "sess-verify-1-1"], self.calls("rm"))
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertFalse(os.path.isdir(self.wt_path("verify-1-1")))
+        self.assertEqual([r for r in self.results(task) if r["status"] == "STOPPED"], [])
+
+    def test_104_abandon_stops_a_live_verifier(self):
+        task = self.running_task(attempt=3, sessions=[self.entry(1, 3), self.entry(1, 3, kind="verify")])
+        self.worktree("task-1")
+        self.agents(self.row("task-1", 3), self.row("verify-1-3", status="idle", state="blocked"))
+        self.ok("abandon", str(task), "stuck")
+        self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
+        self.assertIn(["stop", "sess-verify-1-3"], self.calls("stop"))
+        filed = [r for r in self.results(task) if r["status"] == "ABANDONED"]
+        self.assertEqual(len(filed), 1)
+        self.assertIn("Session: sess-task-1-3", filed[0]["body"])
+
 
 
 class PrTest(Base):
@@ -6075,6 +6273,19 @@ class PrTest(Base):
         self.assertIn("the operator decides", refused["next"])
         self.assertEqual(self.named(events, "push-failed"), [])
         self.assertEqual(self.remote_sha(), stranger)
+
+    def test_104_a_failed_run_at_the_last_attempt_names_abandon(self):
+        self.pr_config()
+        task = self.running_task(attempt=3, base=json.dumps(self.git("rev-parse", "HEAD")), verify_mode=f"ci:{self.ci}")
+        wt = self.task_wt(task)
+        wt, head = self.pass_report(task, attempt=3, wt=wt, head=self.wt_commit(wt))
+        self.agents(self.finished("task-1", 3))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        verified = self.one(self.events("record"), "verified")
+        self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <mode> "
+                                           "(the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
 
 
 if __name__ == "__main__":
