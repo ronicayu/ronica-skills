@@ -91,3 +91,21 @@ Written from the model before any run. The ALLOW_* switches are gone with the br
 | regress-62.cfg | NoDeadlock, 7 steps: launch, PASS, verifier, files a verdict, hits a prompt, record files BLOCKED (the row outranks the verdict), the worker ends; the hint is plain `verify`, refused. |
 
 If check.cfg reports a dead end or a break, it is either a path the fixes missed (confirm it in run.py at the line) or a model artifact; either way it goes in NOTES.md before a switch is added.
+
+# agentic-team 0.12.1 (ghost rows, #65, parts 1 and 2)
+
+Written from the model before any run. New: the session values `ghost` (young: no process, live and `unknown`; the CLI may start it again; `claude stop` leaves it) and `ghostGone` (30 quiet minutes: `Run.sessions` counts it as ended, `finished` and `turn_over`); `REGRESS_65` (a ghost never ends and cleanup skips it). The part-1 dead end the model predicted is fixed by part 2, so check.cfg is expected to hold again.
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg | every rule holds, no dead end. A young ghost worker with no result: the `unknown` hint's stop ends the row (the probe) or leaves it (the field); record commits the WIP (STOPPEDhead, Reason: recover) and hints launch; an ended row lets the launch through at once, a left row refuses it until its 30 quiet minutes end it (no return after a stop). A young ghost with a filed result refuses the launch until it comes back (then launch stops it) or goes quiet (ended). A quiet ghost verifier is lost: `no-verdict`, `verify --again`. A young ghost at the end is allowed (cleanup removes it). |
+| pause.cfg, pause-pr.cfg | every rule holds |
+| regress-65.cfg | NoDeadlock, 4 steps: launch, the worker reports ISSUES, the worker's process dies (a ghost row), 30 quiet minutes pass (the row stays live under REGRESS_65): the hint says launch, `cmd_launch` refuses on the live row, `idle_and_filed` needs a status, `claude stop` does not change it, no hint names `claude rm`. NoSessionLeftAtEnd, 6 steps: launch, PASS, verifier, files passes, the verifier's process dies, close (merged with the ghost left; before 0.12.1 cleanup skipped it as live). |
+| regress-42, -54, -56, -57, -58, -59, -61, -62 | as in the 0.12.0 section (a young ghost always has a step out, so the ghost steps add no shorter dead end) |
+| overview.cfg, overview-pr.cfg | every rule holds; no ghost steps (FULL_ENV off), so the chart is the 0.12.0 one, 106 states |
+
+If check.cfg reports a ghost dead end anyway, the path to look at first is a ghost the stop left (`ghostStuck`) that never goes quiet: in the model the quiet step is always available to it, so a dead end there means a hint or a guard reads the row wrongly (`idle_and_filed` is not consulted for a finished row; a `ghostStuck` row has no status, so it is never idle-and-filed).
+
+## Results (run by the coordinator, 2026-11-06, code at 4798d50)
+
+Every prediction matched. check.cfg (11,092 states), check-pr.cfg (12,820), pause.cfg (43,112), pause-pr.cfg (48,728), overview.cfg (106) and overview-pr.cfg (130) hold every rule with no dead end. All nine regress configs break as predicted; regress-65.cfg breaks NoDeadlock and NoSessionLeftAtEnd.

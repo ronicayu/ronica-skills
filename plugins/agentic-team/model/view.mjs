@@ -1,7 +1,7 @@
 // Full view of Lifecycle.tla (agentic-team 0.12.0): every state the Manager can tell apart in `record` and `status`.
 // State labels are in the operator's words; step labels say what happens.
 
-export const title = "Task attempt lifecycle (agentic-team 0.12.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.12.1)";
 
 const LEVEL = {
   "artifact-verified": "passes",
@@ -16,6 +16,9 @@ const sessionNote = (who, s) => {
   if (s === "prompt") return `, ${who} on a prompt`;
   if (IDLE.includes(s)) return `, ${who} idle`;
   if (s === "failed") return `, ${who} failed`;
+  if (s === "ghost") return `, ${who} is a ghost row`;
+  if (s === "ghostStuck") return `, ${who} is a ghost row the stop left`;
+  if (s === "ghostGone") return `, ${who} is a ghost row gone quiet`;
   return "";
 };
 
@@ -37,6 +40,9 @@ export const state = (v) => {
     if (v.vManager === "BLOCKED") return "Verifier stuck, filed BLOCKED";
     if (STUCK.includes(v.verifier)) return "Verifier stuck";
     if (IDLE.includes(v.verifier)) return "Verifier idle";
+    if (v.verifier === "ghost") return "Verifier ghost row (no process)";
+    if (v.verifier === "ghostStuck") return "Verifier ghost row, the stop left it";
+    if (v.verifier === "ghostGone") return v.vfiled ? "Verifier ghost row gone quiet, verdict filed" : "Verifier ghost row gone quiet, no verdict";
     if (v.verifier === "failed") return "Verifier failed, no verdict";
     if (v.verifier === "finished") return v.vfiled ? "Verifier gone, verdict filed" : "Verifier gone, no verdict";
     return "Verifier working";
@@ -44,6 +50,9 @@ export const state = (v) => {
   if (v.lastTask === "none") {
     if (STUCK.includes(v.worker)) return "Worker stuck";
     if (IDLE.includes(v.worker)) return "Worker idle";
+    if (v.worker === "ghost") return "Worker ghost row (no process)";
+    if (v.worker === "ghostStuck") return "Worker ghost row, the stop left it";
+    if (v.worker === "ghostGone") return "Worker ghost row gone quiet, no result";
     if (v.worker === "failed") return "Worker failed, no result";
     if (v.worker === "finished") return "Worker gone, no result";
     return "Worker working";
@@ -82,7 +91,9 @@ export const step = (action, from, to) => {
     case "VerifyAgain": return "you start a verifier (--again)";
     case "CloseAuto": return "you close";
     case "CloseManual": return `you close with verdict ${LEVEL[to.verdict]}`;
-    case "Stop": return from.worker === "busy" ? "the operator orders a pause" : "you stop the idle worker (record's hint)";
+    case "Stop": return from.worker === "busy" ? "the operator orders a pause"
+      : from.worker === "ghost" ? (to.worker === "finished" ? "you stop the ghost worker (record's hint): the row ends" : "you stop the ghost worker (record's hint): the row stays")
+      : "you stop the idle worker (record's hint)";
     case "Abandon": return "you abandon the task";
     case "Merged": return "you record the merge";
     case "Record": return recordLabel(from, to);
@@ -93,6 +104,12 @@ export const step = (action, from, to) => {
     case "WorkerIdles": return "the worker goes idle for good";
     case "WorkerAsks": return "the worker ends its turn with a question";
     case "WorkerPrompted": return "the worker hits a permission prompt";
+    case "WorkerGhosts": return "the worker's process dies (a ghost row)";
+    case "WorkerGhostReturns": return "the CLI starts the worker again";
+    case "WorkerGhostStays": return "30 quiet minutes pass: the ghost row counts as ended";
+    case "VerifierGhosts": return "the verifier's process dies (a ghost row)";
+    case "VerifierGhostReturns": return "the CLI starts the verifier again";
+    case "VerifierGhostStays": return "30 quiet minutes pass: the ghost row counts as ended";
     case "WorkerFilesPass": return "the worker reports PASS";
     case "WorkerFilesIssues": return "the worker reports ISSUES";
     case "WorkerFilesBlocked": return "the worker reports BLOCKED";
