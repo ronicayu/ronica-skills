@@ -1,7 +1,7 @@
 // Overview of Lifecycle.tla for the README: the main flow in about a dozen states.
-// Use it with overview.cfg (FULL_ENV = FALSE, every ALLOW_* switch TRUE).
+// Use it with overview.cfg (FULL_ENV = FALSE, OPERATOR_PAUSES = TRUE).
 
-export const title = "Task attempt lifecycle (agentic-team 0.11.2)";
+export const title = "Task attempt lifecycle (agentic-team 0.12.0)";
 
 const LEVEL = {
   "artifact-verified": "passes",
@@ -42,7 +42,7 @@ export const step = (action, from, to) => {
     // verifying or verdict state also leads to "Paused"; hiding those arrows keeps the chart readable.
     case "Stop":
       if (state(from) !== "Worker working") return null;
-      return from.worker === "busy" ? "the operator orders a pause" : "you stop the worker";
+      return from.worker === "busy" ? "the operator orders a pause" : "you stop the idle worker (record's hint)";
     case "LaunchStopsIdleThenRefuses": return "launch stops the idle session, then refuses";
     case "Abandon": return "you abandon the task";
     case "Record": return recordLabel(from, to);

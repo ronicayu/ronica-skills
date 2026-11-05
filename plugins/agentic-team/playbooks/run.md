@@ -30,13 +30,18 @@ every report, and on every wake (step 6).
      cause retries once.
    - `stuck`: read the `next:` hint and the BLOCKED row. The row holds the item the session
      waited for and its last output; the hint lists the remedies. `--model sonnet`
-     is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: after the pause,
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
-   - `stopped-idle` (from `launch`): a session of the task was idle with its work filed, so `launch` stopped it and went on. Nothing to do.
+     is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: follow its
+     `next:`. After a pause it is `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>` once the pause ends. After a
+     recovery stop the attempt counts, so at attempt 3 the hint names `abandon`.
+   - `stopped-idle`: a session of the task was idle, or waited on a prompt, with its work filed, so `launch`
+     (or `record`, for a verifier after its verdict) stopped it and went on. Nothing to do.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
-     session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.
-   - `attempt 3 failed`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`, add a decision if
-     the operator must decide, and re-plan around the task.
+     session has stopped working, follow the rest of the `next:`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. This stop is a recovery
+     stop: the attempt counts, and at attempt 3 the hint names `abandon` instead.
+   - A `next:` that names `abandon` (the cap is 3 attempts): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
+     add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
+     in the same hint only when the operator says so.
    - `conflict`, and `changed` from `close`: add the decision the line names. The task worktree stays
      as it was. After a host rebase that changed the diff, the request holds the host's new head, and
      `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your

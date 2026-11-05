@@ -19,5 +19,10 @@
 To resume, remove the `STOP:` line, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then follow the run
 playbook. Each stopped task relaunches as a fresh attempt in the same worktree, on top of its WIP commit.
 
+**A pause does not use an attempt.** `run stop` reads the standing orders: under the `STOP:` line it files
+`Reason: pause`, and the relaunch may pass attempt 3. So write the `STOP:` line (step 1) before any
+`run stop`. A `run stop` without the `STOP:` line is a recovery stop (`Reason: recover`): it counts as an
+attempt, as `died` does.
+
 **Reply:** what stopped where, what is on disk, and the first action on
 resume. This is a pause, not a final report.

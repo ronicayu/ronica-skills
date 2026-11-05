@@ -159,8 +159,14 @@ no result is filed as `DIED` and retried; a complete report in its report
 file, its transcript or `claude logs` is filed as the worker's own. A session stuck on a permission prompt is
 stopped and filed as `BLOCKED`; the row holds what it waited for, its model,
 and the last lines of `claude logs`, read before the stop. The `stuck` hint
-names a pinned model id only when the session ran on one. Attempt 3 is the
-last (`launch` refuses a fourth): when it fails, `run.py abandon` marks the task abandoned. Its
+names a pinned model id only when the session ran on one. A session that waits
+on a prompt after its result is filed is not stuck: its work is done. `launch`
+stops such a worker (`stopped-idle`), and `record` stops such a verifier and
+keeps its verdict. A worker that stays idle with no result is `unknown`; the
+hint names `claude logs`, then `run.py stop`, `run.py record` and `run.py launch`. Attempt 3 is the
+last (`launch` refuses a fourth): when it fails, `run.py abandon` marks the task abandoned. At attempt 3,
+every `next:` hint that would retry the task names `run.py abandon <id> <mode>` and the
+`--attempt 4` override instead of a plain `launch`. Its
 worktree stays, and the report lists it for the operator to remove.
 
 A verifier with no result gets the same search, once its turn is over. That
@@ -294,13 +300,16 @@ stops a worker that cannot finish soon and files a `STOPPED` result. Once the
 session has exited, `run.py record` commits the worktree's uncommitted work as
 a WIP commit and files a second `STOPPED` row with its `Head`. The next
 attempt is a fresh session in the same worktree, on top of that commit; there
-is no resume. A stopped attempt does not count as a failure.
+is no resume. A stop under the `STOP` line is a pause (`Reason: pause`) and
+does not use an attempt. A stop without it recovers a session that went quiet
+or broke (`Reason: recover`), and the attempt counts toward the cap, as a
+`DIED` attempt does.
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
 
-The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, and the attempt cap holds. The chart shows the operator's pause only from "Worker working". It leaves out decisions, splits, CI verify and the request states that the diagram above shows. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
+The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
 
-![The checked lifecycle of one task's attempts: launch, report, verify, verdict, close, merge, retry, pause and abandon](assets/diagrams/attempt-statechart.svg)
+![The checked lifecycle of one task's attempts: launch, report, verify, verdict, close, merge, retry and abandon](assets/diagrams/attempt-statechart.svg)
 
 ### Merging through pull or merge requests
 
@@ -441,14 +450,14 @@ session's message or the end of `wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed (`stopped-idle`) instead of refusing. |
+| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). |
+| `close <id>` | Records the verdict and tokens, runs `tg done`, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
-| `stop <id>` | Stops a worker for a pause and files a `STOPPED` result. |
-| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
+| `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
+| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--interval` (default 30 seconds), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`. `--clear` removes the name; with no argument it prints the name. |
@@ -682,10 +691,10 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 |------|--------|------------|---------|
 | `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
-| `task` | `STOPPED` | The Manager | A worker stopped for a pause (a second row carries the WIP commit `Head:`), or a session `close` stopped. |
+| `task` | `STOPPED` | The Manager | A worker that `stop` stopped (a second row carries the WIP commit `Head:`), or a worker session `close` stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), or `close`. Only `Reason: pause` keeps the attempt from counting toward the cap; a row with no `Reason:` line counts. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
 | `task` | `PASS` | The Manager | The evidence for an adopted task (`Worktree: None`, `Ran: not stated (adopted)`). |
-| `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt. |
+| `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt before it filed a verdict. A `BLOCKED` row has no `Verdict:` line, so it does not hide a verdict filed before it. |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
@@ -723,6 +732,10 @@ skill. Metadata holds everything else, 26 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.11.3
+
+Version 0.12.0 makes every `record` hint lead to a command that works. At attempt 3, a hint that would retry names `run.py abandon <id> <mode>` and the `--attempt 4` override. `run.py stop` writes a `Reason:` line: only `Reason: pause`, written under a `STOP` line, lets the next launch pass attempt 3. A `STOPPED` row with no `Reason:` line, such as one filed by 0.11.3, counts as an attempt. `close` and `abandon` also stop a live verifier session. `launch` stops a worker that waits on a prompt after its result, and `record` stops a verifier that waits on a prompt after its verdict and keeps the verdict; a Manager `BLOCKED` verify row no longer hides an earlier verdict. An idle worker with no result gets a `run.py stop` step. No migration: to relaunch a task at attempt 3 that a 0.11.3 pause stopped, pass `--attempt 4`.
 
 ### Upgrading from 0.11.1
 

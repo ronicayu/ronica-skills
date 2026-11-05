@@ -1,7 +1,7 @@
-// Full view of Lifecycle.tla: every state the Manager can tell apart in `record` and `status`.
+// Full view of Lifecycle.tla (agentic-team 0.12.0): every state the Manager can tell apart in `record` and `status`.
 // State labels are in the operator's words; step labels say what happens.
 
-export const title = "Task attempt lifecycle (agentic-team 0.11.2)";
+export const title = "Task attempt lifecycle (agentic-team 0.12.0)";
 
 const LEVEL = {
   "artifact-verified": "passes",
@@ -30,7 +30,7 @@ export const state = (v) => {
     return "Closed, request open";
   }
   if (v.status === "open") return "Not started";
-  if (v.lastTask === "STOPPED") return "Paused, WIP not committed yet";
+  if (v.lastTask === "STOPPED") return v.stopReason === "pause" ? "Paused, WIP not committed yet" : "Stopped, WIP not committed yet";
   if (v.verdict !== "none") return `Verdict ${LEVEL[v.verdict]} recorded, not closed${sessionNote("verifier", v.verifier)}`;
   if (v.verifier !== "none") {
     if (v.vv !== "none") return `Verdict ${LEVEL[v.vv]} filed${sessionNote("verifier", v.verifier)}`;
@@ -49,7 +49,7 @@ export const state = (v) => {
     return "Worker working";
   }
   if (v.lastTask === "DIED") return "Died, no result";
-  if (v.lastTask === "STOPPEDhead") return "Paused, WIP committed";
+  if (v.lastTask === "STOPPEDhead") return v.stopReason === "pause" ? "Paused, WIP committed" : "Stopped, WIP committed";
   if (v.lastTask === "BLOCKEDmgr") return "Worker stopped, filed BLOCKED";
   return `Reported ${v.lastTask}${sessionNote("worker", v.worker)}`;
 };
@@ -57,6 +57,8 @@ export const state = (v) => {
 const recordLabel = (from, to) => {
   if (to.merged && !from.merged) return from.pr === "clean" ? "record merges the request" : "record finds it merged";
   if (to.vManager === "BLOCKED" && from.vManager !== "BLOCKED") return "record stops the stuck verifier, files BLOCKED";
+  if (from.verifier !== to.verifier && to.verifier === "finished" && from.vv !== "none" && to.vManager === from.vManager)
+    return "record stops the waiting verifier, the verdict stands";
   if (to.vv !== from.vv) return "record salvages the verifier's report";
   if (to.lastTask === "DIED" && from.lastTask !== "DIED") return "record files DIED";
   if (to.lastTask === "BLOCKEDmgr" && from.lastTask !== "BLOCKEDmgr") return "record stops the stuck worker, files BLOCKED";
@@ -80,7 +82,7 @@ export const step = (action, from, to) => {
     case "VerifyAgain": return "you start a verifier (--again)";
     case "CloseAuto": return "you close";
     case "CloseManual": return `you close with verdict ${LEVEL[to.verdict]}`;
-    case "Stop": return from.worker === "busy" ? "the operator orders a pause" : "you stop the worker (the operator's way out)";
+    case "Stop": return from.worker === "busy" ? "the operator orders a pause" : "you stop the idle worker (record's hint)";
     case "Abandon": return "you abandon the task";
     case "Merged": return "you record the merge";
     case "Record": return recordLabel(from, to);
