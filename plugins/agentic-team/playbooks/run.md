@@ -32,6 +32,7 @@ every report, and on every wake (step 6).
      waited for and its last output; the hint lists the remedies. `--model sonnet`
      is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: after the pause,
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
+   - `stopped-idle` (from `launch`): a session of the task was idle with its work filed, so `launch` stopped it and went on. Nothing to do.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
      session is gone, run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stop <id>`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`.
    - `attempt 3 failed`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`, add a decision if

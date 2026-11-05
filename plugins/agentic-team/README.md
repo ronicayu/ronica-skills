@@ -437,7 +437,7 @@ session's message or the end of `wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). |
+| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed (`stopped-idle`) instead of refusing. |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
@@ -719,6 +719,10 @@ skill. Metadata holds everything else, 26 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.11.1
+
+Version 0.11.2 finishes a pause before it reports a verdict, so `run.py stop` after `verify-failed` no longer leaves a task that `launch` refuses. `launch` stops an idle session whose work is filed instead of asking for `run.py stop`. No migration: a task already stuck this way is fixed by the next `record`.
 
 ### Upgrading from 0.11.0
 

@@ -72,6 +72,15 @@ elif cmd == "stop":
     if os.environ.get("FAKE_CLAUDE_STOP_FAIL"):
         sys.stderr.write("boom\n")
         sys.exit(1)
+    if os.environ.get("FAKE_CLAUDE_STOP_STOPS_ROW"):  # like the real CLI: the row reads state "stopped" after it
+        path = os.environ.get("FAKE_CLAUDE_AGENTS")
+        if path and os.path.isfile(path):
+            rows = json.load(open(path))
+            for row in rows:
+                if row.get("id") == argv[1]:
+                    row.pop("status", None)
+                    row["state"] = "stopped"
+            open(path, "w").write(json.dumps(rows))
 elif cmd == "logs":
     folder = os.environ.get("FAKE_CLAUDE_LOGS_DIR")
     path = os.path.join(folder, argv[1] + ".txt") if folder else ""
@@ -1907,6 +1916,85 @@ class RunTest(Base):
         self.ok("record")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), base)
         self.assertIn(f"Head: {base}", self.results(task)[-1]["body"])
+
+    def test_36_a_pause_after_a_verdict_files_its_head(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        base = self.git("rev-parse", "HEAD", cwd=wt)
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {base}\n")
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verdict=verify-failed", f"verdict_ref={base}")
+        self.add_result(task, "STOPPED", f"Session: s\nWorktree: {wt}\nBranch: b\nStopped: now\nFiles: None\n",
+                        by="manager")
+        self.agents()
+        events = self.events("record")
+        self.assertEqual(len(self.named(events, "stopped")), 1)
+        self.assertEqual(self.named(events, "unclosed"), [])
+        self.assertIn(f"Head: {base}", self.results(task)[-1]["body"])
+        self.assertEqual(len(self.named(self.events("record"), "unclosed")), 1)
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+
+    def test_36_a_pause_after_a_verdict_commits_a_dirty_worktree(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        base = self.git("rev-parse", "HEAD", cwd=wt)
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("half\n")
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {base}\n")
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verdict=verify-failed", f"verdict_ref={base}")
+        self.add_result(task, "STOPPED", f"Session: s\nWorktree: {wt}\nBranch: b\nStopped: now\nFiles: ?? wip.txt\n",
+                        by="manager")
+        self.agents()
+        self.events("record")
+        head = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertNotEqual(head, base)
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt), "WIP task 1 attempt 1: stopped by pause")
+        self.assertIn(f"Head: {head}", self.results(task)[-1]["body"])
+
+    def test_20_launch_stops_an_idle_worker_whose_result_is_filed(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="idle", state="blocked"))
+        dry = self.events("launch", str(task), "--dry-run")
+        stopped = self.one(dry, "stopped-idle")
+        self.assertEqual(stopped["session"], "sess-task-1-1")
+        self.assertIn("dry run: not stopped", stopped["detail"])
+        self.assertEqual(self.calls("stop"), [])
+        events = self.events("launch", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(self.one(events, "stopped-idle")["session"], "sess-task-1-1")
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+
+    def test_20_launch_still_refuses_a_busy_or_unfiled_worker(self):
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="busy", state="working"))
+        busy = self.run_cmd("launch", str(task))
+        self.assertEqual(busy.returncode, 2)
+        self.assertIn("has a live session", busy.stderr)
+        self.fresh()
+        task = self.running_task()
+        self.worktree("task-1")
+        self.agents(self.row("task-1", status="idle", state="blocked"))
+        self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
+        self.fresh()
+        task = self.running_task()
+        self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents(self.row("task-1", status="idle", state="blocked", waitingFor="permission prompt"))
+        self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
+
+    def test_20_launch_stops_an_idle_verifier_after_its_verdict(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        base = self.git("rev-parse", "HEAD", cwd=wt)
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {base}\n")
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.agents(self.row("verify-1-1", status="idle", state="blocked"))
+        events = self.events("launch", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(self.one(events, "stopped-idle")["session"], "sess-verify-1-1")
 
     def test_36_missing_worktree_files_head_none(self):
         task = self.running_task()

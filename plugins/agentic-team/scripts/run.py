@@ -1178,6 +1178,17 @@ def recorded_sessions(task):
     return [e for e in found if isinstance(e, dict)] if isinstance(found, list) else []
 
 
+def idle_and_filed(run, tid, attempt, rows, s):
+    """True for a live session of the task that is idle, waits on nothing, and whose work for the attempt is
+    filed: a task row that is not STOPPED for a worker, any verify row for a verifier. launch stops such a
+    session itself instead of refusing."""
+    if s.status != "idle" or s.waiting:
+        return False
+    if s.kind == "verify":
+        return bool(task_rows(rows, attempt, "verify"))
+    return any(r["status"] != "STOPPED" for r in task_rows(rows, attempt))
+
+
 def cmd_launch(run, args):
     tid = args.id
     orders = run.orders()
@@ -1235,9 +1246,19 @@ def cmd_launch(run, args):
                  f"recorded the start", "run.py record")
         return
     live = [s for s in run.sessions() if s.task_id == tid and s.live]
+    rows = run.results_for(tid)
+    if live and current and all(idle_and_filed(run, tid, current, rows, s) for s in live):
+        for s in live:
+            if not args.dry_run:
+                run.claude("stop", s.sid, check=False)
+                record_row(run, task, s, current)
+            run.emit("stopped-idle", tid, current, s.sid,
+                     f"session {s.describe()} was idle with its work filed; stopped it"
+                     + (" (dry run: not stopped)" if args.dry_run else ""))
+        run._sessions = None
+        live = [] if args.dry_run else [s for s in run.sessions() if s.task_id == tid and s.live]
     if live:
         raise Refused(f"#{tid} has a live session {live[0].describe()}; run run.py record, or run.py stop {tid}")
-    rows = run.results_for(tid)
     latest = task_rows(rows, current)
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
@@ -1871,6 +1892,11 @@ def record_in_progress(run, snap, task, unmanaged):
         run.emit("legacy", tid, attempt, None, legacy_detail(task), LEGACY_NEXT.format(tid=tid))
         return
     rows = snap.rows(tid)
+    mine = own_sessions(run, tid, "task", attempt)
+    paused = task_rows(rows, attempt)
+    if paused and paused[-1]["status"] == "STOPPED" and not HEAD_ANY.search(paused[-1]["body"]):
+        commit_stopped(run, tid, attempt, rows, mine)  # finish the pause first: launch needs its Head line
+        return
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
@@ -1919,7 +1945,6 @@ def record_in_progress(run, snap, task, unmanaged):
     if meta.get("verdict"):
         run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], verify_kind(run, task, strict=False)))
         return
-    mine = own_sessions(run, tid, "task", attempt)
     results = task_rows(rows, attempt)
     if not results:
         stuck = [s for s in mine if s.stuck]
