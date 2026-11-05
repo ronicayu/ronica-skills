@@ -12,6 +12,7 @@ The method comes from poteto's statechart skill in the pstack plugin (https://gi
 - Two hints are read, not copied: `unclosed_next` for check-only ("verify --again for a stronger verdict, or accept it") maps to `verify --again`; verify-blocked is left out (it acts like check-only in every modelled decision).
 - Sessions keep their state until something acts on them. An idle verifier may wake up or go quiet (30 minutes, `VERIFIER_QUIET_MINUTES`); an idle worker, and every quiet, blocked, prompted, failed or finished session, changes only when a command stops it. A worker files one result per attempt, as its last step (worker.md), and its row may stay live for a while after that.
 - The pause (`run.py stop`) is the operator's order: a STOP first line in the standing orders (`Orders.stop`, 365-372), which also refuses launches (1194-1195, exit 3) and holds merges (3198-3200, 2948-2949). The code accepts `stop` for any live worker row (3246); the model fires it from a working session under a STOP order, and with a switch as the Manager's way out of an idle worker or a worker on a prompt after its result, which no `next:` hint names. A stop without a STOP order is a recovery stop (#59): the model remembers it (`recoveryStop`) because the owner's rule says it counts as an attempt.
+- The operator's free moves (write a STOP order, lift it, order a pause) are behind `OPERATOR_PAUSES`. With them on, every state has a step out (order, pause, lift, launch), so TLC's deadlock check would find nothing: the check configs keep them off, so that "no dead end" means "following record's hints leads out". `pause.cfg` turns them on to check the pause flow itself. The recovery stop stays a Manager move (a switch's way out) in every config.
 
 ## Actions and the code they model (scripts/run.py, 0.11.2)
 
@@ -59,7 +60,7 @@ The method comes from poteto's statechart skill in the pstack plugin (https://gi
 
 ## Rules
 
-- `VerdictNotLost`: once the verifier's session ended or its turn ended, a verify row covers it, or record is about to write one, or record says no-verdict. An invariant, not a liveness property: the model has no fairness.
+- `VerdictNotLost`: once the verifier's session ended or its turn ended, a verify row covers it, or record is about to write one, or record says no-verdict, or a pause is pending (a STOPPED row without a Head line: record finishes it first by design, 1898, and the record after the commit finds the lost verifier). An invariant, not a liveness property: the model has no fairness (a PROPERTY would need weak fairness on `Record` and on the paused worker's exit), and a state is easier to read than a lasso. The pause-first transient was the only false break the invariant gave.
 - `NoMergeWithoutPassingVerdict`: done or merged implies the verdict meta is passing and a verify row of the attempt carries it.
 - `AttemptCap`: the attempt never passes MAX_ATTEMPTS. `refuse_past_cap` (1386) exempts any STOPPED row, so a stop at the last attempt lets the next launch pass the cap. The owner's rule (#59): only a pause the operator ordered (a STOP line when `run.py stop` ran) is exempt; a stop that recovers a quiet or broken session counts as an attempt. The rule as written cannot tell the two apart and breaks on both: `ALLOW_PAUSE_PAST_CAP` takes the intended one out (an ordered pause at the cap ends in abandon in the model), `ALLOW_RECOVERY_STOP_PAST_CAP` the bug.
 - `PausedWipCommitted`, from "Phase 2 of a pause: commit the WIP of a stopped worker that has exited" (commit_stopped, 1830).
@@ -89,20 +90,35 @@ Fixed in 0.11.2 and no longer reported (the model shows them gone): a pause whil
 
 | # | Config | View | Switches | Expect |
 |---|---|---|---|---|
-| 1 | `check.cfg` | `view.mjs` | all FALSE | the #58 dead end (2 steps); AttemptCap (an ordered pause at the cap, 10 steps) and NoSessionLeftAtEnd (#57, 6 steps) break |
-| 2 | `peel-1.cfg` | `view.mjs` | + ALLOW_IDLE_WORKER | the prompt-after-result dead end (3 steps); AttemptCap now also by #59 (a recovery stop of an idle worker at the cap) |
+| 1 | `check.cfg` | `view.mjs` | all FALSE, OPERATOR_PAUSES = FALSE | the #58 dead end (2 steps); NoSessionLeftAtEnd (#57, 6 steps) breaks |
+| 2 | `peel-1.cfg` | `view.mjs` | + ALLOW_IDLE_WORKER | the prompt-after-result dead end (3 steps); AttemptCap breaks by #59 (a recovery stop of an idle worker at the cap, 9 steps) |
 | 3 | `peel-2.cfg` | `view.mjs` | + ALLOW_PROMPT_AFTER_RESULT | the #56 dead end (6 steps) |
 | 4 | `peel-3.cfg` | `view.mjs` | + ALLOW_STUCK_AT_CAP | the BLOCKED-row dead end (7 steps) |
-| 5 | `peel-4.cfg` | `view.mjs` | + ALLOW_BLOCKED_ROW_HIDES_VERDICT | no dead end; AttemptCap and NoSessionLeftAtEnd still break |
+| 5 | `peel-4.cfg` | `view.mjs` | + ALLOW_BLOCKED_ROW_HIDES_VERDICT | no dead end; AttemptCap (#59) and NoSessionLeftAtEnd still break |
 | 6 | `peel-5.cfg` | `view.mjs` | + ALLOW_VERIFIER_LEFT_AT_END, ALLOW_RECOVERY_STOP_PAST_CAP, ALLOW_PAUSE_PAST_CAP (all TRUE) | nothing breaks |
 | 7 | `check-pr.cfg` | `view.mjs` | all FALSE, pr mode | as 1 |
 | 8 | `peel-pr-all.cfg` | `view.mjs` | all TRUE, pr mode | nothing breaks |
-| 9 | `overview.cfg` | `overview-view.mjs` | all TRUE, FULL_ENV = FALSE | nothing breaks; under the 500-state budget, so a full chart: the README diagram |
-| 10 | `overview-pr.cfg` | `overview-view.mjs` | all TRUE, FULL_ENV = FALSE, pr mode | as 9, with the request states |
+| 9 | `pause.cfg` | `view.mjs` | all TRUE, OPERATOR_PAUSES = TRUE | nothing breaks. With ALLOW_PAUSE_PAST_CAP = FALSE it shows the ordered pause at the cap (AttemptCap, 10 model steps), which the owner's rule allows |
+| 10 | `pause-pr.cfg` | `view.mjs` | as 9, pr mode | nothing breaks |
+| 11 | `regress-54.cfg` | `view.mjs` | peel-5 + REGRESS_54 | must break: PauseFinishedFirst and NoDeadlock (see below) |
+| 12 | `regress-42.cfg` | `view.mjs` | peel-5 + REGRESS_42 | must break: NoDeadlock and VerdictNotLost (see below) |
+| 13 | `overview.cfg` | `overview-view.mjs` | all TRUE, OPERATOR_PAUSES = TRUE, FULL_ENV = FALSE | nothing breaks; under the 500-state budget, so a full chart: the README diagram |
+| 14 | `overview-pr.cfg` | `overview-view.mjs` | as 13, pr mode | as 13, with the request states |
 
-A TLC run reports one dead end per config (the shortest). The statechart command removes a broken invariant itself and runs again, so the other rules need no peeling. The constants `MAX_ATTEMPTS`, `MERGE_MODE`, `HIGH_RISK` and `FULL_ENV` are set in each config.
+A TLC run reports one dead end per config (the shortest). The statechart command removes a broken invariant itself and runs again, so the other rules need no peeling. The constants `MAX_ATTEMPTS`, `MERGE_MODE`, `HIGH_RISK`, `FULL_ENV`, `OPERATOR_PAUSES`, `REGRESS_54` and `REGRESS_42` are set in each config.
 
 `FULL_ENV = FALSE` keeps only the main flow of the environment: a worker reports and ends, a stopped worker exits, a verifier files and ends, the operator merges, the host moves the request. No idle, blocked, prompted or failed sessions, no dirty worktree, no unfiled report. It is for the overview chart, not for the check.
+
+## Sensitivity checks
+
+Run these when you change the model: if they stop breaking, the model has gone blind. Each `REGRESS_*` constant, when TRUE, restores a bug the code has fixed, so the check must find the old path again.
+
+| Config | Restores | Must break | The old path |
+|---|---|---|---|
+| `regress-54.cfg` | `record` no longer finishes a pause first (before 0.11.2, #54): the STOPPED row is handled only after the verifier and verdict checks | `PauseFinishedFirst` (6 steps: a recovery stop while a verifier runs; record says `verifying`, the WIP waits), `NoDeadlock` (9 steps: a verify-failed verdict recorded, then a recovery stop; record says `unclosed ... launch`, launch refuses "WIP is not committed yet" for ever) | NOTES of the 0.11.1 study: "A8" |
+| `regress-42.cfg` | a failed row counts as live (before 0.10.3, #42) | `NoDeadlock` (2 steps: the worker fails; `record` says `unknown`, no run.py step, and the #58 way out stops only an idle row), `VerdictNotLost` (4 steps: the verifier fails; `record` says `verifying` for ever) | the 0.10.2 study: "B1", "B2" |
+
+Add one when a listed issue is fixed: keep its switch's path as a `REGRESS_*` constant that undoes the fix, and a config that must break.
 
 ## How to run
 

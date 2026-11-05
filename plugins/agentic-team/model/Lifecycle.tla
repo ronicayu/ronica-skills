@@ -17,6 +17,10 @@ CONSTANTS MAX_ATTEMPTS,  \* line 89: MAX_ATTEMPTS = 3; the configs use 2
           MERGE_MODE,    \* "local" or "pr": merge.mode of .agentic-team.toml
           HIGH_RISK,     \* TRUE: risk meta "high", so a PASS goes to a verifier session (line 1702)
           FULL_ENV,      \* FALSE: only the main environment steps (overview.cfg), see NOTES.md
+          OPERATOR_PAUSES, \* TRUE: the operator may write or lift a STOP order and order a pause at any time
+          \* Sensitivity checks: TRUE restores a fixed bug, so the check must break again (NOTES.md):
+          REGRESS_54,    \* record no longer finishes a pause first (before 0.11.2, #54)
+          REGRESS_42,    \* a failed row counts as live (before 0.10.3, #42)
           \* Known breaks. TRUE takes the path out of the check:
           ALLOW_PAUSE_PAST_CAP,          \* refuse_past_cap (1386) lets a launch pass MAX_ATTEMPTS after an ordered pause (intended)
           ALLOW_STUCK_AT_CAP,            \* #56: launch hints at the last attempt ignore the cap: read them as abandon
@@ -82,11 +86,11 @@ Hints == {"launch", "verify", "verifyAgain", "close", "closeManual", "abandon", 
 
 PrMode == MERGE_MODE = "pr"
 
-\* Session class, lines 448-455.
-Finished(s) == s \in {"finished", "failed"}
-Live(s) == s \in {"busy", "idle", "idleQuiet", "idleBlocked", "prompt", "stopping"}
+\* Session class, lines 448-455. With REGRESS_42 a failed row is live and unknown, as before 0.10.3.
+Finished(s) == s = "finished" \/ (s = "failed" /\ ~REGRESS_42)
+Live(s) == s \in {"busy", "idle", "idleQuiet", "idleBlocked", "prompt", "stopping"} \/ (s = "failed" /\ REGRESS_42)
 Stuck(s) == s \in {"idleBlocked", "prompt"}
-Unknown(s) == s \in {"idle", "idleQuiet"}
+Unknown(s) == s \in {"idle", "idleQuiet"} \/ (s = "failed" /\ REGRESS_42)
 TurnOver(s) == Finished(s) \/ s = "idleBlocked"
 \* verifier_over, lines 1778-1791: a turn that is over, or an unknown row quiet for 30 minutes.
 VerifierOver(s) == TurnOver(s) \/ s = "idleQuiet"
@@ -122,6 +126,14 @@ Same == [lastTask |-> lastTask, workerResult |-> workerResult, vv |-> vv, vManag
          vreport |-> vreport, wtDirty |-> wtDirty, merged |-> merged, pr |-> pr,
          ev |-> "none", nx |-> "none"]
 
+\* commit_stopped, lines 1829-1873: a STOPPED row without a Head line gets its WIP committed once the stopped
+\* worker has exited. record_in_progress runs it first, lines 1895-1899 (the #54 fix); before 0.11.2 it ran
+\* only after the verifier and verdict checks (REGRESS_54).
+PauseOutOf(b) ==
+  IF worker = "stopping" THEN [b EXCEPT !.ev = "stopping", !.nx = "none"]           \* 1832-1834
+  ELSE [b EXCEPT !.lastTask = "STOPPEDhead", !.wtDirty = FALSE, !.ev = "stopped", !.nx = "launch"]  \* 1858-1868
+PauseOut == PauseOutOf(Same)
+
 \* record_in_progress from line 1948 on: the task rows of the attempt.
 TaskRowsOut(b) ==
   IF lastTask = "none" THEN
@@ -131,6 +143,7 @@ TaskRowsOut(b) ==
      ELSE IF Unknown(worker) THEN [b EXCEPT !.ev = "unknown", !.nx = "none"]   \* 1964: next: claude logs
      ELSE [b EXCEPT !.lastTask = "DIED", !.ev = "died", !.nx = RetryNext]       \* lines 1980-1983
   ELSE IF lastTask = "STOPPEDhead" THEN [b EXCEPT !.ev = "stopped", !.nx = "launch"]   \* lines 1986-1989
+  ELSE IF lastTask = "STOPPED" THEN PauseOutOf(b)                     \* 1990-1991: only reached with REGRESS_54
   ELSE IF lastTask = "DIED" THEN [b EXCEPT !.ev = "died", !.nx = RetryNext]            \* lines 1992-1995
   ELSE IF lastTask = "BLOCKEDmgr" THEN [b EXCEPT !.ev = "stuck", !.nx = "launch"]      \* 1685-1692
   ELSE [b EXCEPT !.ev = "arrived", !.nx = ArrivedNext(lastTask)]
@@ -142,12 +155,6 @@ Verdicts(b) ==
   ELSE IF verdict # "none" THEN [b EXCEPT !.ev = "unclosed", !.nx = UnclosedNext(verdict)]
   ELSE TaskRowsOut(b)
 
-\* commit_stopped, lines 1829-1873, from record_in_progress lines 1895-1899: a STOPPED row without a Head
-\* line is finished first, before the verifier and verdict checks (the #54 fix).
-PauseOut ==
-  IF worker = "stopping" THEN [Same EXCEPT !.ev = "stopping", !.nx = "none"]           \* 1832-1834
-  ELSE [Same EXCEPT !.lastTask = "STOPPEDhead", !.wtDirty = FALSE, !.ev = "stopped", !.nx = "launch"]  \* 1858-1868
-
 \* record_in_progress lines 1883-1998.
 RecInProgress ==
   LET vRunning == Live(verifier) /\ ~VerifierOver(verifier)             \* line 1901
@@ -155,7 +162,7 @@ RecInProgress ==
       salvaged == [Same EXCEPT !.vv = "artifact-verified", !.vNewer = TRUE, !.vfiled = TRUE,
                    !.vreport = FALSE,
                    !.verifier = IF Live(verifier) THEN "finished" ELSE verifier]   \* salvage_verifier, 1813-1826
-  IN IF lastTask = "STOPPED" THEN PauseOut
+  IN IF lastTask = "STOPPED" /\ ~REGRESS_54 THEN PauseOut
      ELSE IF vRunning THEN
         IF Stuck(verifier)                                              \* lines 1904-1909
         THEN [Same EXCEPT !.verifier = "finished", !.vManager = "BLOCKED", !.vNewer = FALSE,
@@ -365,7 +372,7 @@ CloseManual ==
 \* result, which no `next:` hint names. A stop without a STOP order is a recovery stop (#59).
 Stop ==
   /\ status = "in_progress" /\ Live(worker)
-  /\ \/ (stopOrder /\ worker = "busy")
+  /\ \/ (OPERATOR_PAUSES /\ stopOrder /\ worker = "busy")
      \/ (ALLOW_IDLE_WORKER /\ worker = "idle")
      \/ (ALLOW_PROMPT_AFTER_RESULT /\ worker = "prompt" /\ WorkerFiled)
   /\ worker' = "stopping"
@@ -468,11 +475,11 @@ OperatorMerges ==
 \* The operator's standing orders: a STOP first line pauses launches and merges (Orders.stop); the operator
 \* lifts it later. A pause is `run.py stop` under that line.
 OperatorOrdersStop ==
-  /\ ~End /\ ~stopOrder /\ stopOrder' = TRUE
+  /\ ~End /\ OPERATOR_PAUSES /\ ~stopOrder /\ stopOrder' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, workerResult,
                  vv, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, recoveryStop>>
 OperatorLiftsStop ==
-  /\ ~End /\ stopOrder /\ stopOrder' = FALSE
+  /\ ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, workerResult,
                  vv, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, recoveryStop>>
 
@@ -517,9 +524,13 @@ TypeOK ==
   /\ Hint \in Hints
 
 \* Once the verifier's session ended or its turn ended, the attempt has a verify row that covers it, or
-\* record is about to write one, or record says that the verdict is missing (no-verdict).
+\* record is about to write one, or record says that the verdict is missing (no-verdict). A pending pause
+\* (a STOPPED row without a Head line) is allowed: record finishes it first by design (1898), and the lost
+\* verifier is found by the record that follows the commit. An invariant, not a liveness property: the model
+\* has no fairness, and a state is easier to read than a lasso.
 VerdictNotLost ==
-  (verifier # "none" /\ Over(verifier) /\ ~vfiled) => (RecordHasEffect \/ Event = "no-verdict")
+  (verifier # "none" /\ Over(verifier) /\ ~vfiled)
+    => (RecordHasEffect \/ Event = "no-verdict" \/ lastTask = "STOPPED")
 
 \* A done or merged task has a passing verdict, and a verify row of the attempt carries it.
 NoMergeWithoutPassingVerdict ==

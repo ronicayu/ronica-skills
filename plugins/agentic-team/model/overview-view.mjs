@@ -38,12 +38,13 @@ export const step = (action, from, to) => {
     case "Launch": return from.attempt === 0 ? "you launch the first attempt" : "you launch the next attempt";
     case "VerifyPlain": case "VerifyAgain": return "you start a verifier";
     case "CloseAuto": case "CloseManual": return to.status === "done" ? "you close" : "you close: the verdict does not pass";
-    case "Stop": return from.lastTask === "none" ? "the operator orders a pause" : null;
+    case "Stop": return from.worker === "busy" ? "the operator orders a pause" : "you stop the worker";
+    case "LaunchStopsIdleThenRefuses": return "launch stops the idle session, then refuses";
     case "Abandon": return "you abandon the task";
     case "Record": return recordLabel(from, to);
     case "Done": return "nothing more to do";
     case "WorkerEnds": return "the worker ends";
-    case "WorkerExits": return null;
+    case "WorkerExits": return "the stopped worker exits";
     case "WorkerFilesPass": return "the worker reports PASS";
     case "WorkerFilesIssues": return "the worker reports ISSUES";
     case "WorkerFilesBlocked": return "the worker reports BLOCKED";
