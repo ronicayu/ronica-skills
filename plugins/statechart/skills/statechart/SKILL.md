@@ -134,6 +134,15 @@ Set `ALLOW_LOST_WAKE = FALSE` in the config of round 2. A guard on the action, a
 
 Never weaken a rule to make it hold. An `ALLOW_` constant removes a break that you confirmed in the code. It does not change a rule. In the hand-off, say which `ALLOW_` constants each round sets to FALSE, because each one hides a real bug.
 
+## Check that the model can still see bugs
+
+A model can go blind. Then each rule holds, and the report looks like good news. Two causes are common:
+
+- An action that is always enabled gives every state a way out. For example, when the operator can pause the system at any time, a pause leads out of each dead end, and the deadlock rule holds even where the code is stuck. Put such free actions behind a constant. Check the main flow with the constant FALSE, and check the free actions in their own config.
+- When you update the model for new code, a change can remove the branch that a rule needs.
+
+So keep sensitivity checks. For each bug that a commit fixed, add a constant `REGRESS_<NAME>`. When it is TRUE, the model acts as the code did before the fix. Give each constant a config that sets it TRUE, and write the path that it must break in NOTES. Run these configs each time that you change the model. When one of them stops breaking, the model has gone blind. Find out why before you trust a run where every rule holds.
+
 ## Keep the state space small
 
 After the first break, the command stops each rerun at 100,000 distinct states. A rule that a stopped rerun did not check goes under "Rules not checked", and it can hold or break. So keep the model under 100,000 distinct states. The report gives the count. Then each rerun finishes, and TLC checks every rule. Under 500 states, the chart also draws the whole graph.
