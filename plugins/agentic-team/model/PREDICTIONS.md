@@ -109,3 +109,29 @@ If check.cfg reports a ghost dead end anyway, the path to look at first is a gho
 ## Results (run by the coordinator, 2026-11-06, code at 4798d50)
 
 Every prediction matched. check.cfg (11,092 states), check-pr.cfg (12,820), pause.cfg (43,112), pause-pr.cfg (48,728), overview.cfg (106) and overview-pr.cfg (130) hold every rule with no dead end. All nine regress configs break as predicted; regress-65.cfg breaks NoDeadlock and NoSessionLeftAtEnd.
+
+# agentic-team 0.12.1 part 3 (a session that run.py stopped counts as ended, #65)
+
+Written from the model before any run. New: every run.py stop (`stop`, close's `stop_live`, `abandon`, launch's stopped-idle, record's stuck and salvage stops) leaves the row finished at once (`stop_session` notes the id; `Run.sessions` reads the note); the `ghostStuck` value is gone; `REGRESS_65B` restores the pre-part-3 stop (an idle/working row becomes a young ghost); the rule `StoppedIdleNeverRefuses` (an action property, from the idle_and_filed docstring) is checked in every config.
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg | every rule holds, no dead end. The field's path: launch, PASS, verifier, files verify-failed, the verifier ends, the worker goes idle, close (verdict recorded, not closed; hint launch), launch: it stops the idle worker (its result is filed), the row counts as ended, and the next attempt starts. |
+| pause.cfg, pause-pr.cfg | every rule holds |
+| regress-65b.cfg | StoppedIdleNeverRefuses, 4 steps: launch, the worker reports ISSUES, the worker goes idle for good, launch stops the idle worker; the row turns into a ghost and launch refuses on it (attempt stays 1). No dead end: the ghost ends after 30 quiet minutes (then launch starts attempt 2), or comes back idle and is stopped again. Every other rule holds. |
+| regress-65.cfg | as before: NoDeadlock (4 steps) and NoSessionLeftAtEnd (6 steps) |
+| regress-42, -54, -56, -57, -58, -59, -61, -62 | as in the 0.12.0 section |
+| overview.cfg, overview-pr.cfg | every rule holds; 106 and 130 states, unchanged |
+
+Line numbers at b7608bb: `STOPPED_FILE` 139, the `Run.sessions` loop 365-375, `stop_session` 481-494.
+
+## Part 3, revised after the first run (model0121c-runs)
+
+Two changes, written before the second run:
+- `StoppedIdleNeverRefuses` now counts only the launch step itself (`Launch` or `LaunchStopsIdleThenRefuses`): the first form broke in pause.cfg, pause-pr.cfg and regress-54.cfg on the operator writing a STOP order in such a state (launch exits 3 before it stops anything). Expected now: pause.cfg, pause-pr.cfg hold every rule; regress-54.cfg breaks PauseFinishedFirst only.
+- A stop-induced ghost under REGRESS_65B is `ghostStopped`: live, unknown, it does not come back, it goes quiet after 30 minutes. The extra breaks of the first regress-65b run (NoDeadlock, NoMergeWithoutPassingVerdict, NoSessionLeftAtEnd) came from the model letting that ghost come back as idle, which the probe does not support. Expected now: regress-65b.cfg breaks StoppedIdleNeverRefuses only (4 steps: launch, ISSUES, the worker goes idle for good, launch stops it and refuses on its ghost row); no dead end.
+- check.cfg, check-pr.cfg, the overviews and the other regress configs: unchanged from the part-3 section.
+
+## Results (part 3, rerun by the coordinator after the revision, code at b7608bb)
+
+Every config matches the revised predictions: check.cfg, check-pr.cfg, pause.cfg, pause-pr.cfg, overview.cfg and overview-pr.cfg hold every rule; regress-42 breaks VerdictNotLost and NoDeadlock; regress-54 PauseFinishedFirst; regress-56, -58, -61, -62 and -65 NoDeadlock; regress-57 NoSessionLeftAtEnd; regress-59 AttemptCap; regress-65b StoppedIdleNeverRefuses.

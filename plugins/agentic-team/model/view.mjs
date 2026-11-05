@@ -16,8 +16,7 @@ const sessionNote = (who, s) => {
   if (s === "prompt") return `, ${who} on a prompt`;
   if (IDLE.includes(s)) return `, ${who} idle`;
   if (s === "failed") return `, ${who} failed`;
-  if (s === "ghost") return `, ${who} is a ghost row`;
-  if (s === "ghostStuck") return `, ${who} is a ghost row the stop left`;
+  if (s === "ghost" || s === "ghostStopped") return `, ${who} is a ghost row`;
   if (s === "ghostGone") return `, ${who} is a ghost row gone quiet`;
   return "";
 };
@@ -40,8 +39,7 @@ export const state = (v) => {
     if (v.vManager === "BLOCKED") return "Verifier stuck, filed BLOCKED";
     if (STUCK.includes(v.verifier)) return "Verifier stuck";
     if (IDLE.includes(v.verifier)) return "Verifier idle";
-    if (v.verifier === "ghost") return "Verifier ghost row (no process)";
-    if (v.verifier === "ghostStuck") return "Verifier ghost row, the stop left it";
+    if (v.verifier === "ghost" || v.verifier === "ghostStopped") return "Verifier ghost row (no process)";
     if (v.verifier === "ghostGone") return v.vfiled ? "Verifier ghost row gone quiet, verdict filed" : "Verifier ghost row gone quiet, no verdict";
     if (v.verifier === "failed") return "Verifier failed, no verdict";
     if (v.verifier === "finished") return v.vfiled ? "Verifier gone, verdict filed" : "Verifier gone, no verdict";
@@ -50,8 +48,7 @@ export const state = (v) => {
   if (v.lastTask === "none") {
     if (STUCK.includes(v.worker)) return "Worker stuck";
     if (IDLE.includes(v.worker)) return "Worker idle";
-    if (v.worker === "ghost") return "Worker ghost row (no process)";
-    if (v.worker === "ghostStuck") return "Worker ghost row, the stop left it";
+    if (v.worker === "ghost" || v.worker === "ghostStopped") return "Worker ghost row (no process)";
     if (v.worker === "ghostGone") return "Worker ghost row gone quiet, no result";
     if (v.worker === "failed") return "Worker failed, no result";
     if (v.worker === "finished") return "Worker gone, no result";
@@ -86,13 +83,15 @@ export const step = (action, from, to) => {
   switch (action) {
     case "Launch": return from.worker !== "none" && (from.worker !== "finished" || from.verifier === "idle" || from.verifier === "idleQuiet" || from.verifier === "idleBlocked")
       ? "you launch an attempt (it stops the idle session)" : "you launch an attempt";
-    case "LaunchStopsIdleThenRefuses": return "launch stops the idle session, then refuses";
+    case "LaunchStopsIdleThenRefuses": return (to.worker === "ghostStopped" || to.verifier === "ghostStopped")
+      ? "launch stops the idle session; the row turns into a ghost, and launch refuses on it"
+      : "launch stops the idle session, then refuses";
     case "VerifyPlain": return "you start a verifier";
     case "VerifyAgain": return "you start a verifier (--again)";
     case "CloseAuto": return "you close";
     case "CloseManual": return `you close with verdict ${LEVEL[to.verdict]}`;
     case "Stop": return from.worker === "busy" ? "the operator orders a pause"
-      : from.worker === "ghost" ? (to.worker === "finished" ? "you stop the ghost worker (record's hint): the row ends" : "you stop the ghost worker (record's hint): the row stays")
+      : from.worker === "ghost" ? "you stop the ghost worker (record's hint): the row ends"
       : "you stop the idle worker (record's hint)";
     case "Abandon": return "you abandon the task";
     case "Merged": return "you record the merge";
