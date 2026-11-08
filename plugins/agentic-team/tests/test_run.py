@@ -5125,6 +5125,24 @@ class PrTest(Base):
     # --- close and publish
 
     @both_hosts
+    def test_close_opens_the_request_as_a_draft_only_under_merge_draft(self):
+        for draft in (False, True):
+            if draft:
+                self.fresh()
+            task, wt, head = self.pr_task()
+            if draft:
+                self.pr_config("draft = true\n")
+            self.fake_host(head=head, merge_state="UNKNOWN")
+            self.one(self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test"), "published")
+            if self.host == "github":
+                (create,) = self.host_calls("pr", "create")
+                self.assertEqual("--draft" in create, draft)
+            else:
+                (create,) = [c for c in self.host_log() if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/merge_requests")]
+                titles = [a for a in create if a.startswith("title=")]
+                self.assertEqual(titles[0].startswith("title=Draft: "), draft)
+
+    @both_hosts
     def test_80_close_pushes_and_opens_the_request_and_record_merges_it_under_the_merge_line(self):
         task, wt, head = self.pr_task()
         self.fake_host(head=head, merge_state="UNKNOWN")

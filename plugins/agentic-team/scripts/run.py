@@ -2849,7 +2849,8 @@ def publish(run, task, branch, head, catch_up=False):
     if not number:
         found = host.find_pr(pr_branch)
         request = found if found and found.state == "OPEN" else host.create_pr(
-            pr_branch, target, f"{task['title']} (task #{tid})", request_body(run, task, head))
+            pr_branch, target, f"{task['title']} (task #{tid})", request_body(run, task, head),
+            draft=run.config["merge"]["draft"])
         number = request.number
         run.set_meta(task, pr=number, pr_branch=pr_branch)
         run.emit("published", tid, attempt, None, f"{host.label(number)} {request.url}; head {head[:7]} on "

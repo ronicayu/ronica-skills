@@ -326,6 +326,10 @@ the operator's standing permission for `run.py` to push task branches to
    pushes `worktree-task-<id>` to the same `task-<id>`. Every push after the
    first carries a lease on the last pushed head (`--force-with-lease`), recorded
    as `pushed`. A remote branch that is not ours stops the first push.
+   With `[merge] draft = true` the request opens as a draft (GitHub
+   `gh pr create --draft`, GitLab a `Draft: ` title), so it starts no full
+   CI run until someone marks it ready. `record` then reports `pr-draft`
+   until it is ready. The default is `false`.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
    `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
    `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
