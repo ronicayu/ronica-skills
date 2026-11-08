@@ -5123,6 +5123,115 @@ class RunTest(Base):
         self.assertEqual(len(filed), 1)
         self.assertIn("Session: sess-task-1-3", filed[0]["body"])
 
+    # --- check-report and the Follow-ups counts (issue #69)
+
+    def check_report(self, follow_ups):
+        """Write a full report with this Follow-ups field and run check-report on it."""
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+                     f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: {follow_ups}\nCheckpoint: {CHECKPOINT}\n")
+        return self.run_cmd("check-report", path)
+
+    def test_107_check_report_accepts_labelled_listed_and_empty_follow_ups(self):
+        cases = {
+            "labelled": "\ncaller: src/b.py:12: calls the old name\ndoc: README.md: names the old flag\n"
+                        "test: tests/test_b.py: covers the old name\nother: setup.cfg: lists the module\n"
+                        "found: src/c.py: off by one in the loop\nsplit: timebox: the second endpoint",
+            "listed": "\n- caller: src/b.py:12: calls the old name\n* found: src/c.py: off by one\n  - doc: README.md: names it",
+            "none": "None",
+            "leftover": "\nleftover process: pid 4242 port 8080\n- leftover container: demo-db\nleftover file: /tmp/x",
+            "decision": "decision: should the flag keep its old name?",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                out = self.check_report(text)
+                self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
+
+    def test_107_check_report_refuses_an_unlabelled_line(self):
+        out = self.check_report("\ncaller: src/b.py: calls the old name\n- fix the README too\nBug: src/c.py: wrong")
+        self.assertEqual((out.returncode, out.stdout), (2, ""))
+        hint = ("start it with one of caller, doc, test, other, found, split, decision, "
+                "as `<label>: <path or question>: <why>`")
+        self.assertEqual(out.stderr.splitlines(), [
+            f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
+            f"run.py: Follow-ups line with no label: `Bug: src/c.py: wrong`; {hint}"])
+
+    def test_107_check_report_names_a_missing_status_and_checkpoint(self):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS | ISSUES | BLOCKED\nFollow-ups: None\n")
+        out = self.run_cmd("check-report", path)
+        self.assertEqual((out.returncode, out.stdout), (2, ""))
+        self.assertEqual(out.stderr.splitlines(), ["run.py: no `Status:` line that says PASS, ISSUES or BLOCKED",
+                                                   "run.py: no `Checkpoint:` line"])
+        missing = self.run_cmd("check-report", os.path.join(self.dir, "nothing.md"))
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("run.py: cannot read ", missing.stderr)
+        self.assertNotIn("Traceback", missing.stderr)
+
+    def test_107_check_report_needs_no_config(self):
+        empty = os.path.join(self.dir, "empty")  # not a repository, no .agentic-team.toml
+        os.makedirs(empty)
+        with open(os.path.join(empty, "report.md"), "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        out = self.run_cmd("check-report", os.path.join("empty", "report.md"), root=empty, tg=None)
+        self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
+        self.assertEqual(self.run_cmd("status", root=empty, tg=None).returncode, 2)  # a command that builds Run refuses
+
+    def test_107_the_brief_names_check_report_with_the_report_file(self):
+        task = self.add_task()
+        report = self.section(self.brief(task), "REPORT")
+        path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
+        command = f'"{sys.executable}" "{RUN}" check-report "{path}"'
+        self.assertIn(f"\n`{command}`\n", report)
+        self.assertLess(report.index("check-report"), report.index("result add"))
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- caller: src/b.py: calls it\nCheckpoint: {CHECKPOINT}\n")
+        out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
+        self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- fix the docs\nCheckpoint: {CHECKPOINT}\n")
+        out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("`- fix the docs`", out.stderr)
+
+    def test_107_the_verify_brief_names_check_report_with_its_report_file(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        report = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
+        path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
+        self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}"`\n', report)
+
+    def test_107_status_counts_worker_follow_ups_by_label_and_the_mean_attempts(self):
+        first = self.add_task("First", attempt=3)
+        self.add_result(first, "ISSUES", "Task: 1\nStatus: ISSUES\nFollow-ups:\n- caller: src/b.py: calls the old name\n"
+                        "- found: src/c.py: off by one\n- leftover process: pid 4242 port 8080\n", attempt=1)
+        for status in ("DIED", "STOPPED", "BLOCKED"):  # the Manager's rows are not worker reports
+            self.add_result(first, status, "Session: s\nFollow-ups: caller: not a report\n", attempt=2, by="manager")
+        self.add_result(first, "PASS", "Task: 1\nStatus: PASS\nFollow-ups: None\n", attempt=3)
+        self.add_result(first, "PASS", "Status: PASS\nVerdict: test-verified\nFollow-ups: decision: keep the name?\n"
+                        "doc: README.md: a verifier line\n", kind="verify", attempt=3, by="verify-1-3")
+        self.tg("done", str(first))
+        second = self.add_task("Second", attempt=1)
+        self.add_result(second, "PASS", "Task: 2\nStatus: PASS\nFollow-ups:\ncaller: src/d.py: calls it\nfix the docs\n")
+        self.tg("done", str(second))
+        third = self.running_task()  # not done: its report counts, its attempt does not
+        self.add_result(third, "BLOCKED", "Task: 3\nStatus: BLOCKED\nFollow-ups: test: tests/test_d.py: needs a case\n")
+        data = json.loads(self.ok("status", pre=["--json"]).stdout)
+        self.assertEqual(data["follow_ups"], [{"Label": "caller", "Lines": 2}, {"Label": "test", "Lines": 1},
+                                              {"Label": "found", "Lines": 1}, {"Label": "unlabelled", "Lines": 1}])
+        self.assertEqual(data["attempts"], {"tasks": 2, "mean": 2.0})
+        section = self.status_sections()["Follow-ups by label"]
+        self.assertEqual(section.splitlines()[0], "Follow-ups by label (4)")
+        for line in ("| caller | 2 |", "| test | 1 |", "| found | 1 |", "| unlabelled | 1 |",
+                     "Attempts per task done in the period: mean 2.00 over 2 tasks."):
+            self.assertIn(line, section)
+        later = json.loads(self.ok("status", "--since", "2099-01-01", pre=["--json"]).stdout)
+        self.assertEqual((later["follow_ups"], later["attempts"]), ([], {"tasks": 0, "mean": None}))
+        self.assertIn("Attempts per task done in the period: no task done.",
+                      self.status_sections("--since", "2099-01-01")["Follow-ups by label"])
 
 
 class PrTest(Base):

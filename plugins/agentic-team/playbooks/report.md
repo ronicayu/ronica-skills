@@ -10,7 +10,9 @@ data, then add only the judgement the data cannot give.
    - work in flight, with each task's latest result status and checkpoint;
    - work waiting for verification, and verdicts not closed;
    - done tasks whose branch is not merged;
-   - failed or abandoned tasks, open decisions, and ready tasks.
+   - failed or abandoned tasks, open decisions, and ready tasks;
+   - the `Follow-ups:` lines of the worker reports in the period, counted by
+     label, and the mean attempts of the tasks done in the period.
 
    `--mark` records this report's time for the next one. Pass `--since 7d` or a
    date for a different period.

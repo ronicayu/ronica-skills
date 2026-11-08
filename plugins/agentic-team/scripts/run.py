@@ -17,7 +17,13 @@ Usage:
     merged <id>    record that the operator merged a task branch
     stop <id>      stop a worker for a pause and file a STOPPED result
     abandon <id>   mark a task abandoned after attempt 3 failed
-    status         print the status report (tables)
+    status         print the status report (tables), with the Follow-ups
+                   lines of the worker reports counted by label and the mean
+                   attempts of the tasks done in the period
+    check-report <file>
+                   check a report file before a session files it: Status,
+                   Checkpoint, a label on each Follow-ups line; needs no
+                   config, Taskgraph or repository
     wait           poll until something in flight changes, or a time limit
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
@@ -129,6 +135,9 @@ EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
 REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
+FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision")  # decision: a verifier's line
+FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
+FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
 COMMENT_LIMIT = 8000  # characters of evidence in the request comment
 DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
 COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
@@ -784,6 +793,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
+        "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
+                          f"check-report {quote(report)}"),
         "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                          report),
         "NOTIFY": notify_step(notify_address(run), tid, kind, attempt),
@@ -2763,6 +2774,22 @@ def report_field(body, name):
     return (match.group(1) + (rest[:following.start()] if following else rest)).strip()
 
 
+def follow_ups(body):
+    """(label, line) for each line of a report's Follow-ups field. `line` is the line as written, stripped. A
+    leading `- ` or `* ` is dropped before the label is read. The label is one of FOLLOW_UP_LABELS, else
+    "unlabelled". A line that says None, an empty field, a report with no Follow-ups field, and `leftover ...`
+    lines (the process and verify rules ask for them in their own form) give nothing."""
+    found = []
+    for raw in report_field(strip_comments(body or ""), "Follow-ups").splitlines():
+        line = raw.strip()
+        text = FOLLOW_UP_BULLET.sub("", line)
+        if not text or text.rstrip(".").lower() == "none" or text.startswith("leftover "):
+            continue
+        match = FOLLOW_UP_LINE.match(text)
+        found.append((match.group(1) if match and match.group(1) in FOLLOW_UP_LABELS else "unlabelled", line))
+    return found
+
+
 def verdict_marker(tid):
     return f"<!-- agentic-team verdict task={tid} -->"
 
@@ -3435,6 +3462,34 @@ def cmd_abandon(run, args):
 
 # ------------------------------------------------------------------ status
 
+def cmd_check_report(args):
+    """Check a report file before a session files it: a Status: line that STATUS_LINE reads, a Checkpoint: line,
+    and a label on each Follow-ups line (follow_ups). Prints `ok`, or prints one problem per line to stderr and
+    exits 2. main() calls it before it builds Run: a session runs it in its worktree, which has no
+    .agentic-team.local.toml and may not find tg.py, so it needs no config, no Taskgraph and no repository. It
+    reads the file and writes nothing."""
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            body = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        print(f"run.py: cannot read {args.file}: {reason}", file=sys.stderr)
+        sys.exit(2)
+    problems = []
+    if not STATUS_LINE.search(body):
+        problems.append("no `Status:` line that says PASS, ISSUES or BLOCKED")
+    if not CHECKPOINT_LINE.search(body):
+        problems.append("no `Checkpoint:` line")
+    for label, line in follow_ups(body):
+        if label == "unlabelled":
+            problems.append(f"Follow-ups line with no label: `{line}`; start it with one of "
+                            f"{', '.join(FOLLOW_UP_LABELS)}, as `<label>: <path or question>: <why>`")
+    if problems:
+        print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
+        sys.exit(2)
+    print("ok")
+
+
 def cell(value):
     text = "" if value is None else str(value)
     return text.replace("|", "\\|").replace("\n", " ") or "—"
@@ -3485,7 +3540,7 @@ def cmd_status(run, args):
     if not snap.by_id:
         raise Refused(f"project '{run.project}' has no tasks (check the name with `tg projects`)")
     summary = run.tg("report", "--since", since.date().isoformat()) or {}
-    done, in_flight, waiting, failed, closing, unmerged_rows = [], [], [], [], [], []
+    done, in_flight, waiting, failed, closing, unmerged_rows, attempts = [], [], [], [], [], [], []
     gitlab = (run.pr_mode and any(unmerged(t) and (t.get("meta") or {}).get("pr") for t in snap.done)
               and run.host_class()[0].prefix == "!")
     for task in snap.done:
@@ -3496,6 +3551,8 @@ def cmd_status(run, args):
             stamp = datetime.datetime.fromisoformat(task["done_at"].replace("Z", "+00:00"))
         if stamp and stamp >= since:
             attempt = wanted_attempt(task)
+            if attempt:
+                attempts.append(attempt)
             verifiers = task_rows(snap.rows(task["id"]), attempt, "verify")
             tokens = " / ".join(str(meta["tokens"]).split("/", 1)) if meta.get("tokens") else None
             done.append((tid, task["title"], meta.get("started_at"), run.zone_time(task.get("done_at")), tokens,
@@ -3533,6 +3590,17 @@ def cmd_status(run, args):
     free, waits = snap.ready_tasks()
     ready = [(f"#{i}", snap.by_id[i]["title"] if i in snap.by_id else "") for i in free]
     ready += [(f"#{c}", f"waits: dependency #{d} not merged") for c, d in waits]
+    counts = {}
+    for rows in snap.results.values():
+        for row in rows:
+            at = row.get("at")
+            if not (at and is_worker_result(row)):
+                continue
+            if datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) >= since:
+                for label, _ in follow_ups(row.get("body")):
+                    counts[label] = counts.get(label, 0) + 1
+    follow = [(label, counts[label]) for label in (*FOLLOW_UP_LABELS, "unlabelled") if counts.get(label)]
+    mean = round(sum(attempts) / len(attempts), 2) if attempts else None
     limit = args.limit
     sections = [
         ("done", "Done since last report", ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"], done),
@@ -3543,12 +3611,17 @@ def cmd_status(run, args):
         ("unmerged", "Done, branch not merged", ["Task", "Title", "Commit", "Request", "Verdict"], unmerged_rows),
         ("decisions", "Open decisions", ["Decision", "Decider", "By", "Blocks"], decisions),
         ("ready", "Ready", ["Task", "Title"], ready),
+        ("follow_ups", "Follow-ups by label", ["Label", "Lines"], follow),
     ]
     overall = str(summary.get("overall", "unknown")).upper()
     out = [f"# Status: {run.project}\n", f"Overall: {overall}. Since {since:%Y-%m-%d %H:%M} UTC: {change_text}.\n"]
     for key, title, headers, rows in sections:
         out.append(f"## {title} ({len(rows)})\n")
         out.append(table(headers, rows, 10 if key == "ready" else limit))
+    out.append("Follow-ups by label counts the lines of the worker reports filed in the period. "
+               + (f"Attempts per task done in the period: mean {mean:.2f} over {len(attempts)} "
+                  f"task{'' if len(attempts) == 1 else 's'}." if attempts else
+                  "Attempts per task done in the period: no task done."))
     for key in ("risks", "issues", "asks"):
         items = summary.get(key) or []
         if items:
@@ -3556,7 +3629,8 @@ def cmd_status(run, args):
     out.append("Token counts cover each session's own transcript only, not its sub-agents.")
     run.text = "\n".join(out) + "\n"
     run.payload = {"project": run.project, "overall": overall, "since": since.isoformat(), "changes": changes,
-                   **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in sections}}
+                   **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in sections},
+                   "attempts": {"tasks": len(attempts), "mean": mean}}
     if args.mark:
         os.makedirs(run.run_dir, exist_ok=True)
         with open(os.path.join(run.run_dir, "last-report"), "w") as fh:
@@ -3572,7 +3646,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,wait,notify-to}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,check-report,wait,notify-to}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -3625,6 +3699,10 @@ def build_parser():
     p.add_argument("--limit", type=int, default=25, help="max rows per table (default 25)")
     p.add_argument("--mark", action="store_true", help="save now as the start of the next report")
 
+    p = sub.add_parser("check-report", help="check a report file before a session files it; needs no config, "
+                                            "Taskgraph or repository")
+    p.add_argument("file", help="the report file that the brief's REPORT section names")
+
     p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,
                    help=f"seconds to wait at most (default {WAIT_TIMEOUT}, at most {WAIT_TIMEOUT_MAX})")
@@ -3647,6 +3725,9 @@ COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "rec
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.command == "check-report":  # before Run: a session runs it in its worktree, with no config or Taskgraph
+        cmd_check_report(args)
+        return
     run = None
     try:
         run = Run(args)
