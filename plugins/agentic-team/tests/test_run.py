@@ -2150,6 +2150,38 @@ class RunTest(Base):
                 noted = fh.read()
         self.assertNotIn("sess-task-1-1", noted)
 
+    def test_107_local_close_with_no_commit_records_no_change(self):
+        base = self.git("rev-parse", "HEAD")
+        task = self.running_task(base=json.dumps(base))
+        self.pass_report(task, head=base)
+        self.agents(self.finished("task-1"))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        line = self.one(events, "no-change")
+        self.assertEqual(line["task"], task)
+        self.assertIn(f"{base[:7]} holds no commit beyond {base[:7]}", line["detail"])
+        self.assertEqual(self.named(events, "merged"), [])
+        self.assertEqual(self.named(events, "ready-to-merge"), [])
+        self.assertEqual(self.status_of(task), "done")
+        meta = self.meta(task)
+        self.assertEqual(meta["merged_by"], "no-change")
+        self.assertTrue(meta["merged_at"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), base)
+        self.assertEqual(self.merges(), "")
+
+    def test_107_close_with_a_commit_still_merges(self):
+        base = self.git("rev-parse", "HEAD")
+        task = self.running_task(base=json.dumps(base))
+        wt, head = self.pass_report(task)
+        self.assertNotEqual(head, base)
+        self.agents(self.finished("task-1"))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertEqual(self.named(events, "no-change"), [])
+        self.one(events, "merged")
+        self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
+        self.assertEqual(self.meta(task)["merged_by"], "manager")
+
     def test_36_stopped_session_is_not_live_and_not_counted(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
@@ -5680,6 +5712,45 @@ class PrTest(Base):
         self.one(events, "published")
         meta = self.meta(task)
         self.assertEqual((meta["pushed"], meta["pr"]), (head, 1))
+
+    def no_commit_task(self):
+        """A running task in pr mode whose worker passed with `Head:` at its base: no commit. (task, base)"""
+        self.pr_config()
+        base = self.git("rev-parse", "HEAD")
+        task = self.running_task(base=json.dumps(base))
+        self.pass_report(task, head=base)
+        self.agents(self.finished(f"task-{task}"))
+        return task, base
+
+    def assert_nothing_published(self, task):
+        self.assertEqual(self.create_calls(), [])
+        self.assertEqual(self.merge_calls(), [])
+        self.assertIsNone(self.remote_sha())
+        meta = self.meta(task)
+        self.assertEqual(meta["merged_by"], "no-change")
+        self.assertTrue(meta["merged_at"])
+        self.assertNotIn("pr", meta)
+        self.assertEqual(self.status_of(task), "done")
+
+    @both_hosts
+    def test_107_pr_close_with_no_commit_opens_no_request(self):
+        task, base = self.no_commit_task()
+        self.fake_host(head=base, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertEqual(self.one(events, "no-change")["task"], task)
+        self.assertEqual(self.named(events, "published"), [])
+        self.assert_nothing_published(task)
+
+    @both_hosts
+    def test_107_resume_close_finishes_a_stuck_no_change_task(self):
+        task, base = self.no_commit_task()
+        self.tg("edit", str(task), "--meta", f'verdict_ref="{base}"', "verdict=test-verified")
+        self.tg("done", str(task))
+        self.fake_host(head=base, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.assertEqual(self.one(events, "no-change")["task"], task)
+        self.assertEqual(self.named(events, "resumed"), [])
+        self.assert_nothing_published(task)
 
     @both_hosts
     def test_88_a_remote_branch_that_is_not_ours_stops_the_publish(self):

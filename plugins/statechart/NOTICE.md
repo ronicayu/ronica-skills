@@ -40,8 +40,11 @@ dev dependency. We left that file unchanged. Do not run `npm test` here.
 
 Upstream code is unchanged. The only changed upstream file is `SKILL.md`:
 
-- The frontmatter is unchanged: name `statechart`, upstream description,
-  `disable-model-invocation: true`.
+- The frontmatter keeps the name `statechart`. It drops upstream's
+  `disable-model-invocation: true`, so that Claude and other agents can pick the
+  skill up, and its description says when: a change to state-machine or
+  lifecycle logic, a request to model-check a flow, or a change to code that a
+  repository already models with the skill.
 - An attribution paragraph after the `# Statechart` heading.
 - A new section "Setup without mise" after "Run". It uses the runner's own
   `TLA2TOOLS` and `JAVA` variables, and points to `scripts/setup.sh`.
