@@ -62,6 +62,7 @@ every report, and on every wake (step 6).
      Never bypass a hook (`--no-verify`).
    - `pr-changed`, `pr-closed`, `pr-unpinned`, `push-refused`, `merge-failed`, `host-error`, `comment-failed`: tell the operator what the line says; add a
      decision when they must choose. `published`, `pushed`, `rebased`, `catch-up-local`, `commented`: no action.
+   - `no-change`: the task closed with no commit beyond its base; it is recorded as merged and its worktree is cleaned up. Nothing to do.
 
    A result whose attempt is not the task's current attempt is superseded.
    Check it against the current state before you use anything in it, and

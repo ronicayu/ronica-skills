@@ -3193,7 +3193,10 @@ def resume_close(run, task):
         run.emit("rebased", tid, attempt, None, f"same change at {now[:7]} (verified at {ref[:7]}); verdict_ref moves")
         run.set_meta(task, verdict_ref=now)
     stop_live(run, task, attempt, branch)
-    if run.pr_mode:
+    base = no_change(run, task, now)
+    if base:
+        close_no_change(run, task, attempt, now, base)
+    elif run.pr_mode:
         run.emit("resumed", tid, attempt, None, "closed earlier; continuing at publish")
         if publish(run, task, branch, now, catch_up=True):
             post_verdict(run, task, attempt, str(task["meta"]["verdict"]),
@@ -3229,6 +3232,33 @@ def choose_verdict(run, args, task, rows, attempt):
         if OVERRIDE_RANK[wanted] > OVERRIDE_RANK.get(level, -1) and not EVIDENCE.search(args.ran or ""):
             raise Refused(f"an upgrade from {level} to {wanted} needs evidence in --ran: a CI run id or URL, or an artifact link")
     return wanted, True, (level, last)
+
+
+def no_change(run, task, ref):
+    """The base the verified head `ref` adds nothing to, or None. The base is the task's base meta when it is an
+    ancestor of ref, else the fetched target in pr mode. A task with no commit beyond its base has nothing to merge
+    or publish: a host refuses a request with no commits."""
+    if not is_sha(ref):
+        return None
+    base = str((task.get("meta") or {}).get("base") or "")
+    if not (base and run.git("merge-base", "--is-ancestor", base, ref, check=False).returncode == 0):
+        if not run.pr_mode:
+            return None
+        base = run.target_ref(task)
+    count = run.git("rev-list", "--count", f"{base}..{ref}", check=False)
+    return base if count.returncode == 0 and count.stdout.strip() == "0" else None
+
+
+def close_no_change(run, task, attempt, ref, base):
+    """Record a task with no commit beyond `base` as merged, without a merge, a push or a request."""
+    tid = task["id"]
+    at = run.now()
+    run.tg("edit", str(tid), "--meta", meta_arg("merged_at", at), meta_arg("merged_by", "no-change"))
+    task.setdefault("meta", {}).update(merged_at=at, merged_by="no-change")
+    run.emit("no-change", tid, attempt, None,
+             f"{ref[:7]} holds no commit beyond {(commit_of(run, base) or base)[:7]}; "
+             "nothing to merge or publish; recorded merged_by=no-change")
+    cleanup(run, task)
 
 
 def cmd_close(run, args):
@@ -3291,8 +3321,11 @@ def cmd_close(run, args):
     stop_live(run, task, attempt, branch)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}")
     meta.update(verdict=level, verdict_ref=ref)
+    base = no_change(run, task, ref)
     if not is_sha(ref):
         cleanup(run, task)  # outside git: there is no branch to merge
+    elif base:
+        close_no_change(run, task, attempt, ref, base)
     elif run.pr_mode:
         if publish(run, task, branch, ref, catch_up=True):
             post_verdict(run, task, attempt, level, str(task["meta"].get("verdict_ref") or ref), kind)
