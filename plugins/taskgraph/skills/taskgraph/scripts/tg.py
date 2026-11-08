@@ -8,15 +8,15 @@ import subprocess
 import sys
 import urllib.request
 import webbrowser
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from tgstore import open_store
-from tgstore.base import StoreError
-from tgstore.sqlite import data_version, db_path, next_id
+from tgstore import open_store as open_tgstore
+from tgstore.base import ResultInput, StoreError, now
+from tgstore.changes import DUE_KEYS, normal, parse_date
+from tgstore.sqlite import data_version, db_path
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
@@ -26,7 +26,6 @@ NODE_FIELDS = (
 TYPES = ("task", "milestone", "decision", "external", "objective", "risk", "issue")
 PARENT_TYPES = ("task", "objective")
 DATE_KEYS = ("date", "decide_by", "needed_by", "chase", "due", "start", "promised", "review", "raised")
-DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by", "risk": "review", "issue": "due"}
 POINTS = ("milestone", "decision", "risk")
 DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since", "--from")
 PERSON_KEYS = {"decision": "decider", "external": "party"}
@@ -50,21 +49,9 @@ class Fail(Exception):
     pass
 
 
-def now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def today():
     env = os.environ.get("TASKGRAPH_TODAY")
     return date.fromisoformat(env) if env else datetime.now(timezone.utc).date()
-
-
-def parse_date(value):
-    try:
-        parsed = date.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.isoformat() == value else None
 
 
 def default_project():
@@ -202,6 +189,10 @@ def load(conn):
     return tasks
 
 
+def open_store(args):
+    return open_tgstore(args, load)
+
+
 def hops_into(tasks, task):
     found = []
     need = task["start"] or task["due"]
@@ -302,10 +293,6 @@ def finish_derived(tasks, effective, current):
     for task in tasks.values():
         if computed(task):
             task["done_at"] = finished(task["id"])
-
-
-def normal(value):
-    return value if parse_date(value) else None
 
 
 def span(tasks, task):
@@ -460,36 +447,6 @@ def check_deadlock(conn):
             visit(node, [])
 
 
-def tracked(task):
-    fields = {
-        "title": task["title"], "status": task["status"], "type": task["type"], "parent": task["parent"], "notes": task["notes"],
-        "start": task["start"], "due": task["due"], "promised": normal(task["meta"].get("promised")), "depends_on": task["depends_on"],
-    }
-    skip = {"type", "start", "promised", *DUE_KEYS.values()}
-    fields.update({f"meta.{k}": v for k, v in task["meta"].items() if k not in skip})
-    return fields
-
-
-@contextmanager
-def journal(conn):
-    before = load(conn)
-    yield
-    after = load(conn)
-    ts = now()
-    rows = []
-    for i in sorted(before.keys() | after.keys()):
-        if i not in before:
-            rows.append((i, after[i]["project"], ts, "created", None, json.dumps(after[i]["title"], ensure_ascii=False)))
-        elif i not in after:
-            rows.append((i, before[i]["project"], ts, "removed", json.dumps(before[i]["title"], ensure_ascii=False), None))
-        else:
-            old, new = tracked(before[i]), tracked(after[i])
-            for field in sorted(old.keys() | new.keys()):
-                if old.get(field) != new.get(field):
-                    rows.append((i, after[i]["project"], ts, field, *(json.dumps(v.get(field), ensure_ascii=False) for v in (old, new))))
-    conn.executemany("INSERT INTO events (task_id, project, at, field, old, new) VALUES (?, ?, ?, ?, ?, ?)", rows)
-
-
 def add_dep(conn, task_id, dep_id):
     tasks = load(conn)
     get(tasks, task_id)
@@ -549,8 +506,8 @@ def cmd_add(store, conn, args):
         meta["promised"] = resolve_date(args.promised)
     check_span(meta)
     ts = now()
-    with conn, journal(conn):
-        task_id = next_id(conn)
+    with store.write(conn):
+        task_id = store.new_id(conn)
         conn.execute(
             "INSERT INTO tasks (id, project, title, notes, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (task_id, args.project, args.title, args.notes, json.dumps(meta), ts, ts),
@@ -561,17 +518,18 @@ def cmd_add(store, conn, args):
             add_dep(conn, task_id, dep)
         for blocked in args.blocks:
             add_dep(conn, blocked, task_id)
+    task_id = store.resolve_id(task_id)
     emit(args, load(conn)[task_id], task_id)
 
 
 def cmd_dep_add(store, conn, args):
-    with conn, journal(conn):
+    with store.write(conn):
         add_dep(conn, args.task, args.depends_on)
     emit(args, {"task_id": args.task, "depends_on": args.depends_on}, f"#{args.task} depends on #{args.depends_on}")
 
 
 def cmd_dep_rm(store, conn, args):
-    with conn, journal(conn):
+    with store.write(conn):
         cur = conn.execute("DELETE FROM deps WHERE task_id=? AND depends_on=?", (args.task, args.depends_on))
     if cur.rowcount == 0:
         raise Fail(f"no such dependency: #{args.task} -> #{args.depends_on}")
@@ -696,7 +654,9 @@ def set_status(store, conn, args, status):
         warnings.append(f"#{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}")
         print(f"warning: {warnings[0]}", file=sys.stderr)
     ts = now()
-    with conn, journal(conn):
+    with store.write(conn):
+        if status == "in_progress":
+            store.claim(conn, args.id)
         conn.execute(
             "UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?",
             (status, ts if status == "done" else None, ts, args.id),
@@ -731,7 +691,7 @@ def cmd_edit(store, conn, args):
     if meta.get("type") == "task":
         del meta["type"]
     parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
-    with conn, journal(conn):
+    with store.write(conn):
         conn.execute(
             "UPDATE tasks SET title=?, notes=?, meta=?, updated_at=? WHERE id=?",
             (args.title if args.title is not None else task["title"], args.notes if args.notes is not None else task["notes"], json.dumps(meta), now(), args.id),
@@ -747,7 +707,7 @@ def cmd_rm(store, conn, args):
     if below and not args.recursive:
         raise Fail(f"#{args.id} has {len(tasks[args.id]['children'])} children; pass --recursive to delete the whole subtree")
     doomed = [args.id, *below]
-    with conn, journal(conn):
+    with store.write(conn):
         conn.execute(f"DELETE FROM tasks WHERE id IN ({','.join('?' * len(doomed))})", doomed)
     data = {"deleted": args.id, **({"descendants": below} if below else {})}
     emit(args, data, f"deleted #{args.id}" + (f" and {len(below)} descendants" if below else ""))
@@ -886,7 +846,7 @@ def cmd_date(store, conn, args):
     for name in args.clear:
         meta.pop(keys[name], None)
     check_span(meta)
-    with conn, journal(conn):
+    with store.write(conn):
         conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
     data = load(conn)[args.id]
     text = f"#{args.id} start {data['start'] or '-'} due {data['due'] or '-'}"
@@ -1202,15 +1162,7 @@ def cmd_result_add(store, conn, args):
     if args.attempt is not None and args.attempt < 1:
         raise Fail(f"--attempt must be a positive integer: {args.attempt}")
     body = read_body(args)
-    # One statement: it checks the task and inserts in the same transaction, and reads nothing it later writes.
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO results (task_id, at, status, kind, attempt, author, body) SELECT id, ?, ?, ?, ?, ?, ? FROM tasks WHERE id=?",
-            (now(), status, kind, args.attempt, args.by, body, args.id),
-        )
-        if cur.rowcount == 0:
-            raise Fail(f"no such task: {args.id}")
-        row = dict(conn.execute("SELECT * FROM results WHERE id=?", (cur.lastrowid,)).fetchone())
+    row = store.add_result(conn, args.id, ResultInput(status, kind, args.attempt, args.by, body))
     suffix = f", attempt {row['attempt']}" if row["attempt"] is not None else ""
     emit(args, without_body(row) if args.brief else row, f"result #{row['id']} added to #{args.id} ({kind} {status}{suffix})")
 

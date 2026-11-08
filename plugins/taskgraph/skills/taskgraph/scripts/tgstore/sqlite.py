@@ -1,9 +1,11 @@
+import json
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
-from tgstore.base import Capabilities, StoreError
+from tgstore.base import Capabilities, StoreError, now
+from tgstore.changes import tracked
 
 DB_TIMEOUT = 30  # seconds a writer waits for the lock; background agents add results concurrently
 
@@ -89,6 +91,26 @@ def db_path(conn):
     return conn.execute("PRAGMA database_list").fetchone()[2]
 
 
+@contextmanager
+def record(conn, load):
+    before = load(conn)
+    yield
+    after = load(conn)
+    ts = now()
+    rows = []
+    for i in sorted(before.keys() | after.keys()):
+        if i not in before:
+            rows.append((i, after[i]["project"], ts, "created", None, json.dumps(after[i]["title"], ensure_ascii=False)))
+        elif i not in after:
+            rows.append((i, before[i]["project"], ts, "removed", json.dumps(before[i]["title"], ensure_ascii=False), None))
+        else:
+            old, new = tracked(before[i]), tracked(after[i])
+            for field in sorted(old.keys() | new.keys()):
+                if old.get(field) != new.get(field):
+                    rows.append((i, after[i]["project"], ts, field, *(json.dumps(v.get(field), ensure_ascii=False) for v in (old, new))))
+    conn.executemany("INSERT INTO events (task_id, project, at, field, old, new) VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+
 class SqliteStore:
     name = "sqlite"
     caps = Capabilities(
@@ -96,8 +118,9 @@ class SqliteStore:
         max_blockers=None, max_depth=None, max_children=None,
     )
 
-    def __init__(self, db=None):
+    def __init__(self, db=None, load=None):
         self.db = db
+        self.load = load  # the model reader of tg.py; the event journal compares two loads
         self.resolved = None
 
     def connect(self, *, fresh=False):
@@ -105,11 +128,31 @@ class SqliteStore:
         self.resolved = db_path(conn)
         return conn
 
+    @contextmanager
+    def write(self, conn, *, journal=True):
+        if journal:
+            with conn, record(conn, self.load):
+                yield
+        else:
+            with conn:
+                yield
+
     def new_id(self, conn):
         return next_id(conn)
 
     def resolve_id(self, provisional):
         return provisional
+
+    def add_result(self, conn, task_id, row):
+        # One statement: it checks the task and inserts in the same transaction, and reads nothing it later writes.
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO results (task_id, at, status, kind, attempt, author, body) SELECT id, ?, ?, ?, ?, ?, ? FROM tasks WHERE id=?",
+                (now(), row.status, row.kind, row.attempt, row.author, row.body, task_id),
+            )
+            if cur.rowcount == 0:
+                raise StoreError(f"no such task: {task_id}")
+            return dict(conn.execute("SELECT * FROM results WHERE id=?", (cur.lastrowid,)).fetchone())
 
     def claim(self, conn, task_id):
         pass
