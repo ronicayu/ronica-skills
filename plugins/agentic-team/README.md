@@ -746,9 +746,13 @@ skill. Metadata holds everything else, 26 keys:
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
 
-### Upgrading from 0.12.2
+### Upgrading from 0.12.3
 
 Version 0.13.0 labels Follow-ups so that they can be counted. Each `Follow-ups:` line of a report is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`). A verifier keeps `decision:`, and `leftover ...` lines keep their own form and are not counted. The new command `run.py check-report <file>` checks a report file before a session files it, and the brief's REPORT section names it. `run.py status` counts the `Follow-ups:` lines of the worker reports filed in the period by label, and gives the mean attempts of the tasks done in the period (`follow_ups` and `attempts` in `--json`). Reports filed before the upgrade have no labels, so their lines count as `unlabelled`: to measure from the upgrade, pass `status --since <upgrade date>`. A session started before the upgrade has no check step and files its report as before. No migration.
+
+### Upgrading from 0.12.2
+
+Version 0.12.3 closes a task whose branch holds no commit beyond its base without a merge, a push or a request, and records `merged_by=no-change`. A task that a pr-mode `close` left done with no request finishes at the next `run.py close <id>`.
 
 ### Upgrading from 0.12.0
 
