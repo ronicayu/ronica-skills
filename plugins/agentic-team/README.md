@@ -147,7 +147,8 @@ writes session data under `~/.claude`, so run
 either needs the operator's agreement. Before it files its report, whatever the
 status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>` commit for
 `ISSUES` or `BLOCKED`), so `Head` is always set and the worktree is clean. It
-writes its report to a file with the Write tool and files it with
+writes its report to a file with the Write tool, checks it with
+`run.py check-report`, and files it with
 `tg result add --body-file`, so no report text reaches a shell command, where a
 project's guard could refuse it for a word. The report names the `Branch`, the
 `Head` commit SHA, and the `Worktree` path. If the Manager set its address
@@ -463,7 +464,8 @@ session's message or the end of `wait` wakes it.
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
-| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. |
+| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). |
+| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--interval` (default 30 seconds), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`. `--clear` removes the name; with no argument it prints the name. |
 
@@ -652,7 +654,7 @@ one through `scripts/python-path.sh`.
 
 [templates/task-brief.md](templates/task-brief.md) is the one brief template.
 Its sections are GOAL, SCOPE, CONTEXT, ACCEPTANCE, VERIFY, TIMEBOX, FORBIDDEN,
-AUTONOMY, STANDING ORDERS, and REPORT (the command that files the report, and a notify step while an address is set). The
+AUTONOMY, STANDING ORDERS, and REPORT (the `check-report` command, the command that files the report, and a notify step while an address is set). The
 report format lives in the worker agent. `run.py` fills the template from
 Taskgraph, the config, and the run directory. Task content is copied from
 Taskgraph, never written by hand: GOAL is the title plus the prose in the
@@ -667,8 +669,8 @@ REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Pr
 `templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
 base commit, how it was found, and the head commit.
 
-The worker runs `result add` from its own session, so its permission mode
-must allow that command. Pin `--db` and allow only a `--body-file` path in the
+The worker runs `result add` and `run.py check-report` from its own session, so
+its permission mode must allow both. Pin `--db` and allow only a `--body-file` path in the
 worktree's `.agentic-team/` folder if you write a permission rule for it. In `auto` mode nothing enforces that rule: the
 brief gives the worker the paths to `tg.py` and the database, and only the
 worker's instructions keep it to the one `result add` command.
@@ -700,7 +702,7 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
-| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. |
+| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. Each `Follow-ups:` line is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`); a `leftover ...` line keeps its own form. A verifier also uses `decision:`. |
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker that `stop` stopped (a second row carries the WIP commit `Head:`), or a worker session `close` stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), or `close`. Only `Reason: pause` keeps the attempt from counting toward the cap; a row with no `Reason:` line counts. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
@@ -743,6 +745,10 @@ skill. Metadata holds everything else, 26 keys:
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
+
+### Upgrading from 0.12.2
+
+Version 0.13.0 labels Follow-ups so that they can be counted. Each `Follow-ups:` line of a report is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`). A verifier keeps `decision:`, and `leftover ...` lines keep their own form and are not counted. The new command `run.py check-report <file>` checks a report file before a session files it, and the brief's REPORT section names it. `run.py status` counts the `Follow-ups:` lines of the worker reports filed in the period by label, and gives the mean attempts of the tasks done in the period (`follow_ups` and `attempts` in `--json`). Reports filed before the upgrade have no labels, so their lines count as `unlabelled`: to measure from the upgrade, pass `status --since <upgrade date>`. A session started before the upgrade has no check step and files its report as before. No migration.
 
 ### Upgrading from 0.12.0
 

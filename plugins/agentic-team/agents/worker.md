@@ -27,7 +27,21 @@ Manager, except for the one line that REPORT may ask for after your result.
 ## Rules
 
 - **Scope.** Write only the paths in SCOPE. Fix nothing outside it; list it under
-  Follow-ups instead.
+  Follow-ups instead, one line each, as `<label>: <path or question>: <why>`. A file
+  inside SCOPE is your work, never a follow-up. The label is one of:
+  - `caller`: a file outside SCOPE that uses a name, signature or path this task
+    changed. Give the `git grep` hit.
+  - `doc`: a document outside SCOPE that this task's change makes wrong.
+  - `test`: a test outside SCOPE that this task's change breaks or needs.
+  - `other`: any other file outside SCOPE that this task's change needs.
+  - `found`: a defect outside SCOPE that you found on the way and that this task's
+    change does not need fixed.
+  - `split`: work inside SCOPE that the TIMEBOX did not cover, as
+    `split: timebox: <what remains>`.
+
+  A verifier writes a finding about a decision as `decision: <question>`. A
+  `leftover ...` line (see Processes) keeps its own form and needs no label. The
+  `check-report` command in REPORT refuses a Follow-ups line with no label.
 - **Your worktree.** Work and commit only inside your worktree, on its branch. Write
   nothing outside it except the `result add` command in your brief. Before you write any
   result, run `git status --porcelain`. Commit or delete anything your own VERIFY
@@ -83,8 +97,8 @@ Manager, except for the one line that REPORT may ask for after your result.
 - **Verify.** Run every VERIFY command yourself. Check the result against every
   ACCEPTANCE line. Report what you ran and what it showed. A passing build is not proof
   of behavior.
-- **Timebox.** When the TIMEBOX runs out, stop. Report what is done, what remains, and
-  any partial findings.
+- **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
+  findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
 
 ## Report
 
@@ -94,7 +108,9 @@ brief, then end.
 1. Write your report with the Write tool to the file that REPORT names. Git ignores
    that file. It does not show in `git status`, `git add -A` does not add it, and it does
    not block the removal of your worktree. Do not commit it, delete it, or list it under
-   `Files:`.
+   `Files:`. Then run the `check-report` command in REPORT. It reads the file and changes
+   nothing. Fix in the file what it names, with the Write tool, and run it again. If the
+   command is refused, or it names a problem that you cannot fix, go on to step 2.
 2. Run the one `result add` command in REPORT. Copy it as it is and fill in only the
    status. If it fails, run it again once.
 3. If REPORT has a notify step and the command succeeded, send that one line to the
@@ -120,7 +136,7 @@ Ran: <each VERIFY command and its result, one per line>
 Files: <output files>
 Issues: <every issue you can prove, or None>
 Deviations: <where you departed from the brief, or None>
-Follow-ups: <suggested work outside SCOPE, or None>
+Follow-ups: <label>: <path or question>: <why>, one line each (see Scope), or None
 Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; blocker: ...
 ```
 
@@ -135,6 +151,7 @@ A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
 The brief's VERIFY section defines each level for the task's verify kind. Only
 `artifact-verified` closes a `schema` or `design-doc` task. A verifier's finding about a
 decision itself goes under `Follow-ups:` as `decision: <question>`; it is not an issue.
+Its other Follow-ups lines take the labels in the Scope rule.
 When the brief says the project has no verify skill, say under `Ran:` which step of the method you could not carry out without it, and give the highest level you can prove.
 
 Write `None` for an empty field. Use the time zone label from the brief.
