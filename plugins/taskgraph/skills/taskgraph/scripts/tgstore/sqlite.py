@@ -1,6 +1,9 @@
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
+
+from tgstore.base import Capabilities, StoreError
 
 DB_TIMEOUT = 30  # seconds a writer waits for the lock; background agents add results concurrently
 
@@ -84,3 +87,41 @@ def data_version(conn):
 
 def db_path(conn):
     return conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+class SqliteStore:
+    name = "sqlite"
+    caps = Capabilities(
+        cross_project_deps=True, claim=False, history="full", baselines="local", soft_delete=False,
+        max_blockers=None, max_depth=None, max_children=None,
+    )
+
+    def __init__(self, db=None):
+        self.db = db
+        self.resolved = None
+
+    def connect(self, *, fresh=False):
+        conn = connect(self.db)
+        self.resolved = db_path(conn)
+        return conn
+
+    def new_id(self, conn):
+        return next_id(conn)
+
+    def resolve_id(self, provisional):
+        return provisional
+
+    def claim(self, conn, task_id):
+        pass
+
+    def sync(self, *, full=False):
+        raise StoreError("tg sync: this project uses the local store; nothing to sync")
+
+    def version(self, conn):
+        return data_version(conn)
+
+    def path(self):
+        if self.resolved is None:
+            with closing(self.connect()) as conn:
+                return db_path(conn)
+        return self.resolved

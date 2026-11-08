@@ -14,7 +14,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from tgstore.sqlite import connect, data_version, db_path, next_id
+from tgstore import open_store
+from tgstore.base import StoreError
+from tgstore.sqlite import data_version, db_path, next_id
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
@@ -530,7 +532,7 @@ def place(conn, task_id, kind, parent_id):
     check_deadlock(conn)
 
 
-def cmd_add(conn, args):
+def cmd_add(store, conn, args):
     meta = parse_meta(args.meta)
     if args.type is not None:
         meta["type"] = args.type
@@ -562,13 +564,13 @@ def cmd_add(conn, args):
     emit(args, load(conn)[task_id], task_id)
 
 
-def cmd_dep_add(conn, args):
+def cmd_dep_add(store, conn, args):
     with conn, journal(conn):
         add_dep(conn, args.task, args.depends_on)
     emit(args, {"task_id": args.task, "depends_on": args.depends_on}, f"#{args.task} depends on #{args.depends_on}")
 
 
-def cmd_dep_rm(conn, args):
+def cmd_dep_rm(store, conn, args):
     with conn, journal(conn):
         cur = conn.execute("DELETE FROM deps WHERE task_id=? AND depends_on=?", (args.task, args.depends_on))
     if cur.rowcount == 0:
@@ -576,7 +578,7 @@ def cmd_dep_rm(conn, args):
     emit(args, {"task_id": args.task, "removed": args.depends_on}, f"#{args.task} no longer depends on #{args.depends_on}")
 
 
-def cmd_ls(conn, args):
+def cmd_ls(store, conn, args):
     everything = load(conn)
     tasks = scoped(everything, args)
     if args.parent is not None:
@@ -613,16 +615,16 @@ def same(actual, wanted):
     return actual is not None and str(actual).strip().lower() == str(wanted).strip().lower()
 
 
-def cmd_ready(conn, args):
+def cmd_ready(store, conn, args):
     args.status = ["ready"]
     args.type = [t for t in TYPES if t != "risk"]
     args.parent = args.search = args.owner = args.lane = args.team = args.due_before = None
     args.meta = []
     args.sort = "id"
-    cmd_ls(conn, args)
+    cmd_ls(store, conn, args)
 
 
-def cmd_show(conn, args):
+def cmd_show(store, conn, args):
     tasks = load(conn)
     task = get(tasks, args.id)
 
@@ -681,7 +683,7 @@ def cmd_show(conn, args):
     emit(args, data, "\n".join(out))
 
 
-def set_status(conn, args, status):
+def set_status(store, conn, args, status):
     tasks = load(conn)
     task = get(tasks, args.id)
     if is_summary(task):
@@ -703,19 +705,19 @@ def set_status(conn, args, status):
     emit(args, dict(data, warnings=warnings) if warnings else data, f"#{args.id} {status}")
 
 
-def cmd_start(conn, args):
-    set_status(conn, args, "in_progress")
+def cmd_start(store, conn, args):
+    set_status(store, conn, args, "in_progress")
 
 
-def cmd_done(conn, args):
-    set_status(conn, args, "done")
+def cmd_done(store, conn, args):
+    set_status(store, conn, args, "done")
 
 
-def cmd_reopen(conn, args):
-    set_status(conn, args, "open")
+def cmd_reopen(store, conn, args):
+    set_status(store, conn, args, "open")
 
 
-def cmd_edit(conn, args):
+def cmd_edit(store, conn, args):
     task = get(load(conn), args.id)
     if args.parent is not None and args.no_parent:
         raise Fail("--parent and --no-parent cannot be combined")
@@ -738,7 +740,7 @@ def cmd_edit(conn, args):
     emit(args, load(conn)[args.id], f"#{args.id} updated")
 
 
-def cmd_rm(conn, args):
+def cmd_rm(store, conn, args):
     tasks = load(conn)
     get(tasks, args.id)
     below = descendants(tasks, args.id)
@@ -785,14 +787,14 @@ def paths_up(tasks, task_id, via=None):
     return [[here] + path for b, v in steps for path in paths_up(tasks, b, v)]
 
 
-def cmd_why(conn, args):
+def cmd_why(store, conn, args):
     tasks = load(conn)
     get(tasks, args.id)
     text = "\n".join(render(subtree(tasks, args.id, upward, set())))
     emit(args, paths_up(tasks, args.id), text)
 
 
-def cmd_tree(conn, args):
+def cmd_tree(store, conn, args):
     tasks = load(conn)
     key = "children" if args.children else "depends_on"
 
@@ -811,7 +813,7 @@ def cmd_tree(conn, args):
     emit(args, nodes, "\n".join(l for n in nodes for l in render(n)))
 
 
-def cmd_path(conn, args):
+def cmd_path(store, conn, args):
     tasks = load(conn)
     root = get(tasks, args.id)
     hops = upstream(tasks, root["id"])
@@ -847,7 +849,7 @@ def cmd_path(conn, args):
     emit(args, {"id": root["id"], "due": root["due"], "hops": hops, "driving": chain, **o}, "\n".join(out))
 
 
-def cmd_deps(conn, args):
+def cmd_deps(store, conn, args):
     tasks = load(conn)
     rows = []
     for t in scoped(tasks, args):
@@ -867,7 +869,7 @@ def cmd_deps(conn, args):
     emit(args, data, "\n".join(text) or "no dependencies")
 
 
-def cmd_date(conn, args):
+def cmd_date(store, conn, args):
     task = get(load(conn), args.id)
     meta = dict(task["meta"])
     keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
@@ -929,7 +931,7 @@ def agenda_line(task, note):
     return f"#{task['id']} {marker(task)}{task['title']} — " + " · ".join(parts)
 
 
-def cmd_agenda(conn, args):
+def cmd_agenda(store, conn, args):
     day = today()
     limit = (day + timedelta(days=args.within)).isoformat()
     tasks = load(conn)
@@ -990,7 +992,7 @@ def describe(field, old, new):
     return f"{name} {old if old is not None else '-'} → {new if new is not None else '-'}"
 
 
-def cmd_changes(conn, args):
+def cmd_changes(store, conn, args):
     since = resolve_since(args.since)
     found, text = collect_changes(conn, load(conn), args, since)
     out = [f"Changes since {since}"]
@@ -1082,7 +1084,7 @@ def days_between(old, new):
     return (date.fromisoformat(new) - date.fromisoformat(old)).days if old and new else None
 
 
-def cmd_baseline_set(conn, args):
+def cmd_baseline_set(store, conn, args):
     label = args.label or today().isoformat()
     tasks = [t for t in load(conn).values() if t["project"] == args.project]
     if not tasks:
@@ -1100,12 +1102,12 @@ def cmd_baseline_set(conn, args):
     emit(args, {"label": label, "at": ts, "tasks": len(tasks)}, f"baseline {label!r}: {len(tasks)} tasks")
 
 
-def cmd_baseline_ls(conn, args):
+def cmd_baseline_ls(store, conn, args):
     labels = baseline_labels(conn, args.project)
     emit(args, labels, "\n".join(f"{l['label']:<24} {l['at'][:10]}  {l['tasks']} tasks" for l in labels) or "no baselines")
 
 
-def cmd_baseline_rm(conn, args):
+def cmd_baseline_rm(store, conn, args):
     with conn:
         cur = conn.execute("DELETE FROM baselines WHERE project=? AND label=?", (args.project, args.label))
     if cur.rowcount == 0:
@@ -1113,7 +1115,7 @@ def cmd_baseline_rm(conn, args):
     emit(args, {"removed": args.label}, f"removed baseline {args.label!r}")
 
 
-def cmd_baseline_diff(conn, args):
+def cmd_baseline_diff(store, conn, args):
     label, base = baseline_rows(conn, args.project, args.label)
     if label is None:
         raise Fail(f"project {args.project} has no baseline; run baseline set first")
@@ -1194,7 +1196,7 @@ def result_rows(conn, where="", params=()):
     return [dict(r) for r in conn.execute(sql, params)]
 
 
-def cmd_result_add(conn, args):
+def cmd_result_add(store, conn, args):
     status = result_word("--status", args.status)
     kind = result_word("--kind", args.kind)
     if args.attempt is not None and args.attempt < 1:
@@ -1213,7 +1215,7 @@ def cmd_result_add(conn, args):
     emit(args, without_body(row) if args.brief else row, f"result #{row['id']} added to #{args.id} ({kind} {status}{suffix})")
 
 
-def cmd_result_ls(conn, args):
+def cmd_result_ls(store, conn, args):
     where, params = [], []
     if args.id is not None:
         if conn.execute("SELECT 1 FROM tasks WHERE id=?", (args.id,)).fetchone() is None:
@@ -1316,7 +1318,7 @@ def asks_for(tasks, day, limit):
     return asks
 
 
-def cmd_report(conn, args):
+def cmd_report(store, conn, args):
     day = today().isoformat()
     limit = (today() + timedelta(days=args.within)).isoformat()
     since = resolve_since(args.since)
@@ -1491,7 +1493,7 @@ def load_items(tasks):
     return [t for t in tasks if t["derived_status"] != "done" and not is_summary(t) and t["type"] not in LOAD_SKIP]
 
 
-def cmd_load(conn, args):
+def cmd_load(store, conn, args):
     day = today()
     tasks = load(conn)
     first = parse_date(resolve_date(args.start)) if args.start else day
@@ -1564,7 +1566,7 @@ def load_text(d):
     return "\n".join(out)
 
 
-def cmd_export(conn, args):
+def cmd_export(store, conn, args):
     keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
     tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
     ids = {t["id"] for t in tasks}
@@ -1617,7 +1619,7 @@ def inline_vendor(html):
     return re.sub(r'<script src="https://cdn\.jsdelivr\.net/npm/[^"]*/([^/"]+)"></script>', swap, html)
 
 
-def cmd_graph(conn, args):
+def cmd_graph(store, conn, args):
     payload = graph_payload(conn, args)
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1669,7 +1671,7 @@ def probe(url):
         return {}
 
 
-def cmd_serve(conn, args):
+def cmd_serve(store, conn, args):
     base = f"http://127.0.0.1:{args.port}/"
     url = base if args.all_projects else f"{base}?project={quote(args.project, safe='')}"
     try:
@@ -1696,7 +1698,7 @@ def cmd_serve(conn, args):
         server.server_close()
 
 
-def cmd_projects(conn, args):
+def cmd_projects(store, conn, args):
     tasks = load(conn)
     day = today().isoformat()
     limit = (today() + timedelta(days=14)).isoformat()
@@ -1928,8 +1930,9 @@ def main(argv=None):
     args.project = args.project or default_project()
     key = f"{args.command} {getattr(args, args.command + '_command')}" if args.command in ("dep", "baseline", "result") else args.command
     try:
-        COMMANDS[key](connect(args.db), args)
-    except (Fail, sqlite3.Error) as e:
+        store = open_store(args)
+        COMMANDS[key](store, store.connect(), args)
+    except (Fail, StoreError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
