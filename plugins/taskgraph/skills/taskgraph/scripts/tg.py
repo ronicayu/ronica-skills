@@ -16,7 +16,6 @@ from urllib.parse import quote, urlsplit
 from tgstore import open_store as open_tgstore
 from tgstore.base import ResultInput, StoreError, now
 from tgstore.changes import DUE_KEYS, normal, parse_date
-from tgstore.sqlite import data_version, db_path
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
@@ -1581,8 +1580,8 @@ def cmd_graph(store, conn, args):
     emit(args, {"path": str(out), "nodes": len(payload["nodes"]), "edges": len(payload["edges"])}, str(out))
 
 
-def make_handler(conn, args):
-    identity = {"app": "taskgraph", "db": db_path(conn)}
+def make_handler(store, conn, args):
+    identity = {"app": "taskgraph", "db": store.path()}
     everything = argparse.Namespace(**{**vars(args), "all_projects": True})
 
     class Handler(BaseHTTPRequestHandler):
@@ -1596,14 +1595,14 @@ def make_handler(conn, args):
             self.wfile.write(raw)
 
         def live_payload(self):
-            return dict(graph_payload(conn, everything), live=True, version=data_version(conn))
+            return dict(graph_payload(conn, everything), live=True, version=store.version(conn))
 
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/":
                 self.send(render_page(self.live_payload()), "text/html; charset=utf-8")
             elif path == "/version":
-                self.send(json.dumps(dict(identity, version=data_version(conn))), "application/json")
+                self.send(json.dumps(dict(identity, version=store.version(conn))), "application/json")
             elif path == "/data.json":
                 self.send(json.dumps(self.live_payload(), ensure_ascii=False), "application/json; charset=utf-8")
             else:
@@ -1627,13 +1626,13 @@ def cmd_serve(store, conn, args):
     base = f"http://127.0.0.1:{args.port}/"
     url = base if args.all_projects else f"{base}?project={quote(args.project, safe='')}"
     try:
-        server = HTTPServer(("127.0.0.1", args.port), make_handler(conn, args))
+        server = HTTPServer(("127.0.0.1", args.port), make_handler(store, conn, args))
     except OSError:
         other = probe(base)
         if other.get("app") != "taskgraph":
             raise Fail(f"port {args.port} in use")
-        if other.get("db") != db_path(conn):
-            raise Fail(f"port {args.port} is serving taskgraph for {other.get('db')}; pass --port to serve {db_path(conn)}")
+        if other.get("db") != store.path():
+            raise Fail(f"port {args.port} is serving taskgraph for {other.get('db')}; pass --port to serve {store.path()}")
         if not args.no_open:
             webbrowser.open(url)
         emit(args, {"url": url, "already_running": True}, f"already running at {url}")
