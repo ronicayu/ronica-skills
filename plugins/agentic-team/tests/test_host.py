@@ -137,6 +137,15 @@ class GitHubTest(unittest.TestCase):
             client.create_pr("task-1", "main", "T", "b")
         self.assertEqual(str(caught.exception), "gh pr create failed: no permission")
 
+    def test_create_pr_opens_a_draft_only_when_asked(self):
+        client, sh = gh((["pr", "create"], ok("https://github.com/o/r/pull/42\n")))
+        client.create_pr("task-1", "main", "T", "body", draft=True)
+        self.assertIn("--draft", sh.calls[0]["cmd"])
+        self.assertEqual(sh.calls[0]["input"], "body")
+        client, sh = gh((["pr", "create"], ok("https://github.com/o/r/pull/42\n")))
+        client.create_pr("task-1", "main", "T", "body")
+        self.assertNotIn("--draft", sh.calls[0]["cmd"])
+
     def test_67_push_builds_the_lease_and_the_environment(self):
         client, sh = gh((["push"], {"stderr": "To origin\n"}))
         self.assertEqual(client.push("refs/heads/worktree-task-1", "task-1", ""), (True, "To origin"))
@@ -319,6 +328,12 @@ class GitLabTest(unittest.TestCase):
         client, _ = gl((["api", "-X", "POST"], {"exit": 1, "stdout": json.dumps({"message": "Another open merge request already exists"})}),
                        (["api", "projects/g%2Fp/merge_requests?source_branch=task-7"], ok([self.mr(iid=3), self.mr(iid=8)])))
         self.assertEqual(client.create_pr("task-7", "main", "T", "b").number, 8)
+        client, sh = gl((["api", "-X", "POST", "projects/g%2Fp/merge_requests"], ok(self.mr())))
+        client.create_pr("task-7", "main", "T", "body", draft=True)
+        self.assertIn("title=Draft: T", sh.calls[0]["cmd"])
+        client, sh = gl((["api", "-X", "POST", "projects/g%2Fp/merge_requests"], ok(self.mr())))
+        client.create_pr("task-7", "main", "Draft: T", "body", draft=True)
+        self.assertIn("title=Draft: T", sh.calls[0]["cmd"])
         self.assertEqual(gl((["api", "projects/g%2Fp"], ok({"default_branch": "trunk"})))[0].default_branch(), "trunk")
         self.assertEqual(gl((["api", "-X", "POST", "projects/g%2Fp/pipeline"], ok({})))[0].dispatch("task-7", "pipeline"), (True, ""))
         none = {"exit": 1, "stdout": json.dumps({"message": "Missing CI config file"})}

@@ -55,9 +55,9 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(cfg["models"]["verifier"])
         self.assertEqual(cfg["constraints"]["forbidden"], [])
         self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge",
-                                       "catch_up": "host", "remove_worktrees": True, "disposable": []})
-        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "remove_worktrees",
-                                             "disposable"})
+                                       "catch_up": "host", "draft": False, "remove_worktrees": True, "disposable": []})
+        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
+                                             "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code"})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 

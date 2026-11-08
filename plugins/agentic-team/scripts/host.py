@@ -177,8 +177,9 @@ class GitHub(Host):
         found = self.json(self.gh(*args), "pr list") or []
         return self.to_pr(max(found, key=lambda d: d["number"])) if found else None
 
-    def create_pr(self, branch, base, title, body):
-        out = self.gh("pr", "create", "--head", branch, "--base", base, "--title", title, "--body-file", "-", input=body)
+    def create_pr(self, branch, base, title, body, draft=False):
+        args = ("pr", "create", "--head", branch, "--base", base, "--title", title, "--body-file", "-")
+        out = self.gh(*args, *(("--draft",) if draft else ()), input=body)
         if out.returncode != 0 and "already exists" in out.stderr:
             found = self.find_pr(branch)
             if found:
@@ -368,8 +369,10 @@ class GitLab(Host):
         found = self.get("/merge_requests" + query) or []
         return self.to_pr(max(found, key=lambda d: d["iid"])) if found else None
 
-    def create_pr(self, branch, base, title, body):
+    def create_pr(self, branch, base, title, body, draft=False):
         # UNVERIFIED: the POST fields, and HTTP 409 "already exists" for a second request.
+        # GitLab marks a merge request as a draft by the "Draft:" title prefix.
+        title = f"Draft: {title}" if draft and not title.startswith("Draft:") else title
         out, made = self.api("/merge_requests", "-f", f"source_branch={branch}", "-f", f"target_branch={base}",
                              "-f", f"title={title}", "-f", f"description={body}", "-f", "remove_source_branch=false",
                              method="POST")
