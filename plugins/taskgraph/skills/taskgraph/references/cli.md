@@ -6,7 +6,7 @@
 python3 scripts/tg.py [--db PATH] [--project NAME] [--json | --brief] COMMAND ...
 ```
 
-For an installed plugin, use `${CLAUDE_PLUGIN_ROOT}/skills/taskgraph/scripts/tg.py`. In the example, `scripts/` is relative to the skill directory. The script uses only the Python 3.10+ standard library. Data lives in `$TASKGRAPH_DB`; the default is `~/.taskgraph/tasks.db`. The graph works offline. Cytoscape.js, dagre, and cytoscape-dagre (MIT) are vendored in `scripts/vendor/` and inlined.
+For an installed plugin, use `${CLAUDE_PLUGIN_ROOT}/skills/taskgraph/scripts/tg.py`. In the example, `scripts/` is relative to the skill directory. The script uses only the Python 3.10+ standard library. Data lives in `$TASKGRAPH_DB`; the default is `~/.taskgraph/tasks.db`. Storage sits behind a store interface (`scripts/tgstore/`), so other stores can be added later; the default store is this SQLite file, and nothing changes for it. The graph works offline. Cytoscape.js, dagre, and cytoscape-dagre (MIT) are vendored in `scripts/vendor/` and inlined.
 
 When parsing output, pass `--json` or `--brief`. See [planning and task semantics](./planning.md) for types, dates, status, and dependency flags.
 
