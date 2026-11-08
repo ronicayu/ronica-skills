@@ -1,11 +1,10 @@
-import json
 import os
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 from tgstore.base import Capabilities, StoreError, now
-from tgstore.changes import tracked
+from tgstore.changes import changeset, event_rows
 
 DB_TIMEOUT = 30  # seconds a writer waits for the lock; background agents add results concurrently
 
@@ -95,19 +94,7 @@ def db_path(conn):
 def record(conn, load):
     before = load(conn)
     yield
-    after = load(conn)
-    ts = now()
-    rows = []
-    for i in sorted(before.keys() | after.keys()):
-        if i not in before:
-            rows.append((i, after[i]["project"], ts, "created", None, json.dumps(after[i]["title"], ensure_ascii=False)))
-        elif i not in after:
-            rows.append((i, before[i]["project"], ts, "removed", json.dumps(before[i]["title"], ensure_ascii=False), None))
-        else:
-            old, new = tracked(before[i]), tracked(after[i])
-            for field in sorted(old.keys() | new.keys()):
-                if old.get(field) != new.get(field):
-                    rows.append((i, after[i]["project"], ts, field, *(json.dumps(v.get(field), ensure_ascii=False) for v in (old, new))))
+    rows = event_rows(changeset(before, load(conn)), now())
     conn.executemany("INSERT INTO events (task_id, project, at, field, old, new) VALUES (?, ?, ?, ?, ?, ?)", rows)
 
 
