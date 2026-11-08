@@ -17,6 +17,23 @@ Base: `main` at 0422db3. Test repository: `ronicayu/taskgraph-backend-test` (pri
 8. Numbers: one running agentic-team Manager uses about **1,550 GraphQL points per hour on 50 tasks and about 5,060 on 300 tasks without a cache** (over the 5,000 limit). **With the cache it uses about 30–60 GraphQL points and 135–175 counted REST requests per hour** (plus 120–360 free 304 probes), about the same for both sizes. Counted points go down by about 90 % (50 tasks) and 96 % (300 tasks); GraphQL points by about 98–99 %.
 9. agentic-team does not change. One limit stays: two Managers on different machines must not run the same project at the same time. Section 7.4 explains why (agentic-team, not tg, would file `DIED` for the other Manager's tasks).
 
+```mermaid
+flowchart LR
+  subgraph M["This machine"]
+    TG["tg command"]
+    C[("cache: SQLite, same schema")]
+    LM[("local_meta")]
+    PM[("pending_meta")]
+  end
+  GH[("GitHub Issues")]
+  TG -->|"all reads"| C
+  TG -->|"local-only meta"| LM
+  TG -->|"deferred meta"| PM
+  TG ==>|"write-through: status, structure, notes, results, claims"| GH
+  GH -->|"refresh after 30 s: free 304 probe, pull what changed"| C
+  PM -.->|"with the next write to the issue, or tg sync"| GH
+```
+
 ## 1. Terms
 
 | Term | Meaning |
@@ -169,6 +186,22 @@ class Remote(Protocol):
 
 ## 5. Mapping
 
+One task as GitHub stores it:
+
+```mermaid
+flowchart TB
+  P["Issue #3: parent task"] -->|"sub-issue"| I
+  subgraph I["Issue #12 = task 12"]
+    T["title = task title"]
+    S["state open / closed + label tg:in-progress = status"]
+    L["labels taskgraph, tg:type:decision = type"]
+    B["body = notes + hidden meta block"]
+  end
+  I -->|"blocked by"| D["Issue #9: dependency"]
+  I --- R["comment with result marker = one result"]
+  I --- K["comment with claim marker = claim of tg start"]
+```
+
 ### 5.1 Every tg field
 
 | tg field (SQLite) | GitHub home | Notes |
@@ -312,6 +345,25 @@ CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT);  -- page etags, last
 
 ### 6.2 When the cache refreshes
 
+```mermaid
+flowchart TD
+  A["read command (show, ready, ls, ...)"] --> F{"--fresh, or cache older than cache_ttl?"}
+  F -->|no| R["read the cache"]
+  F -->|yes| L{"refresh lock free?"}
+  L -->|"no: another tg refreshes (--fresh waits)"| R
+  L -->|yes| P["probe: conditional GET of each list page"]
+  P -->|"all 304 (free)"| R
+  P -->|"a page changed"| CH["changed issues = new fingerprint"]
+  CH --> E{"dependency or sub-issue summary changed?"}
+  E -->|yes| G["one GraphQL query for their edges"]
+  E -->|no| CM
+  G --> CM{"comment count changed?"}
+  CM -->|yes| RC["read new comments since last pull"]
+  CM -->|no| AP
+  RC --> AP["apply in one transaction, merge rule 6.4"]
+  AP --> R
+```
+
 | Trigger | What runs |
 |---|---|
 | A read command and the last refresh is older than `cache_ttl` (default 30 s) | probe; pull if a page changed |
@@ -322,6 +374,28 @@ CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT);  -- page etags, last
 | `result add` | none (write only; the cache gets the new row) |
 
 Why 30 s: `run.py wait` polls every 30 s with 5 tg calls inside about 1 s. A 30 s TTL gives one probe per poll. A probe that finds nothing costs 0 primary points (G15), so a shorter TTL buys little.
+
+Every write command runs this sequence:
+
+```mermaid
+sequenceDiagram
+  participant T as tg write command
+  participant C as cache (SQLite)
+  participant G as GitHub
+  T->>G: probe, pull what changed
+  G-->>C: changes applied
+  T->>C: BEGIN, apply the change, validate (cycles, parents, deadlocks)
+  alt validation fails
+    T->>C: ROLLBACK, print the error
+  else valid
+    T->>G: fetch the issue, then PATCH or POST (write-through keys + pending deferred keys)
+    alt GitHub refuses
+      T->>C: ROLLBACK, print the error
+    else accepted
+      T->>C: COMMIT (local-only keys go to local_meta)
+    end
+  end
+```
 
 Concurrency: the refresh holds `BEGIN IMMEDIATE` on the cache plus a non-blocking `fcntl.flock` on `<cache>.lock`. A second tg process that cannot get the lock reads the cache as it is and does not wait. `--fresh`, writes and the claim wait for the lock (30 s timeout, the current `DB_TIMEOUT`).
 
@@ -373,6 +447,17 @@ People can make, in the GitHub UI, a graph that tg would refuse: a parent blocke
 - **deferred**: cache table `pending_meta` now. tg sends it with the next body write of the same issue (zero extra calls), on `tg done` of that issue, on `tg sync`, or on the full pull when the row is older than 15 minutes.
 - Status changes, structure changes, notes, results and claims are always write-through. Only meta keys can be local-only or deferred.
 - A meta key not named in the config is write-through. This is the safe default.
+
+```mermaid
+flowchart LR
+  K["meta key in tg edit --meta"] --> Q{"class in config"}
+  Q -->|"write-through, or not named"| PATCH["one body PATCH to GitHub"]
+  Q -->|local| LM[("local_meta")]
+  Q -->|deferred| Q2{"same edit has a write-through key?"}
+  Q2 -->|yes| PATCH
+  Q2 -->|no| PM[("pending_meta")]
+  PM -.->|"next body write, tg done, tg sync, or full pull after 15 min"| PATCH
+```
 
 One `tg edit --meta` can hold keys of all three classes (`run.py launch` does). The store splits it: write-through keys and pending deferred keys of that issue go in one body `PATCH`; local keys go to `local_meta`; if the edit has no write-through key, the deferred keys go to `pending_meta` and no GitHub call happens.
 
@@ -441,6 +526,26 @@ deferred = ["tokens", "model", "started_at"]
 8. Read the comments again. The winner is the lowest unvoided claim id. My comment must be in the list; if not, read again (3 times, 1 s apart), then fail with `RemoteError`.
 9. If I lost: delete my comment, exit 1 `#N is claimed by <winner>`.
 10. If I won: wait 1.1 s (mutation pacing), read again (the confirm read). If I still win: `PATCH` state open (when closed), labels += `tg:in-progress`, body with pending deferred meta. Commit the cache. If the confirm read shows a lower unvoided claim: delete my comment, exit 1.
+
+Two Managers claim the same task at the same time:
+
+```mermaid
+sequenceDiagram
+  participant A as Manager A
+  participant G as Issue #12 comments
+  participant B as Manager B
+  A->>G: read: no active claim
+  B->>G: read: no active claim
+  A->>G: post claim (comment id 101)
+  B->>G: post claim (comment id 102)
+  A->>G: read: 101 is the lowest, mine
+  B->>G: read: 101 is the lowest, not mine
+  B->>G: delete comment 102
+  Note over B: exit 1, "#12 is claimed by A"
+  A->>G: wait 1.1 s, confirm read: 101 still lowest
+  A->>G: PATCH labels += tg:in-progress
+  Note over A: exit 0
+```
 
 `tg done` and `tg reopen` post nothing. Removing the label makes the claim stale after 60 s. The next claimer voids it in its claim comment.
 
@@ -568,6 +673,15 @@ GraphQL points per call / requests. N = tasks in the repository. Measured costs:
 | **Total GraphQL** | **~1,550 pts (31 % of 5,000)** | **~5,060 pts (101 %)** | **~32 pts** | **~56 pts** |
 | **Total REST** | ~106 | ~106 | ~255 incl. ~120 free 304s → ~135 counted | ~535 incl. ~360 free → ~175 counted |
 | Content-creating requests | ~12 per hour (limit 500) | same | same | same |
+
+```mermaid
+xychart-beta
+  title "GraphQL points per hour, one waiting Manager (limit 5,000)"
+  x-axis ["No cache, 50 tasks", "No cache, 300 tasks", "Cache, 50 tasks", "Cache, 300 tasks"]
+  y-axis "points per hour" 0 --> 5500
+  bar [1550, 5060, 32, 56]
+  line [5000, 5000, 5000, 5000]
+```
 
 Result: without a cache, a 50-task project uses about a third of the GraphQL budget for one waiting Manager. The account already used between 847 and 4,019 points in the same hour (G20). A 300-task project goes over the limit. With the cache, the cost no longer grows with N for reads, and it is about 1–3 % of each budget.
 

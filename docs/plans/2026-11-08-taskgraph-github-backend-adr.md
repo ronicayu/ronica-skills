@@ -14,6 +14,23 @@ Taskgraph keeps its model and schedule logic in `tg.py`, and moves storage behin
 - Task = issue with the label `taskgraph`; id = issue number; dependency = native "blocked by"; parent = native sub-issue; status = open/closed plus label `tg:in-progress`; type = label; meta = hidden JSON block at the end of the body; result = comment with a hidden marker.
 - `tg start` claims with comments: the lowest unvoided claim comment id wins, and the loser exits 1. A claim always reads GitHub, never the cache.
 
+```mermaid
+flowchart LR
+  subgraph M["This machine"]
+    TG["tg command"]
+    C[("cache: SQLite, same schema")]
+    LM[("local_meta")]
+    PM[("pending_meta")]
+  end
+  GH[("GitHub Issues")]
+  TG -->|"all reads"| C
+  TG -->|"local-only meta"| LM
+  TG -->|"deferred meta"| PM
+  TG ==>|"write-through: status, structure, notes, results, claims"| GH
+  GH -->|"refresh after 30 s: free 304 probe, pull what changed"| C
+  PM -.->|"with the next write to the issue, or tg sync"| GH
+```
+
 ## Context
 
 - Taskgraph stores everything in `~/.taskgraph/tasks.db`. Other machines and people cannot share a plan (#15).
