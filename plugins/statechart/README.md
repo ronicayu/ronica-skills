@@ -13,8 +13,10 @@ and draws it as a Mermaid statechart, in the words of the person who must
 decide whether the behaviour is right. The report gives the shortest path to
 each state that breaks a rule.
 
-The skill runs only when you call it: `/statechart`. Its frontmatter sets
-`disable-model-invocation: true`, as upstream does.
+Call it with `/statechart`, or let Claude or another agent pick it up when a
+change touches state-machine or lifecycle logic, or code that a repository
+already models with it. Upstream sets `disable-model-invocation: true`; this
+copy does not (see NOTICE.md).
 
 ## Install
 

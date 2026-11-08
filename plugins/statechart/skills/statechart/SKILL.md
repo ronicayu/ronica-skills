@@ -1,7 +1,6 @@
 ---
 name: statechart
-description: "Check a TLA+ model of a system that moves between states, such as a product flow, a protocol, or a service, and draw it as a Mermaid statechart. The report gives the shortest path to each state that breaks a rule. Use for /statechart, or to show a bug as a path through states."
-disable-model-invocation: true
+description: "Check a TLA+ model of a system that moves between states, such as a product flow, a protocol, a job or task lifecycle, a retry or pause flow, or a service, with TLC, and draw it as a Mermaid statechart. The report gives the shortest path to each state that breaks a rule. Use when a change touches state-machine or lifecycle logic and you must find dead ends, lost transitions or broken rules before users do; when asked to model-check a flow or to show a bug as a path through states; when you change code that a repository already models with this skill (a model/ folder with a .tla spec and regress-*.cfg configs), to update and rerun the model; and for /statechart. Not for a diagram that nothing checks."
 ---
 
 # Statechart
@@ -181,4 +180,5 @@ sips -c H 2400 --cropOffset 1 0 chart.svg.png --out chart.png
 
 - The runner is `${CLAUDE_PLUGIN_ROOT}/skills/statechart/scripts/statechart`. Each Bash call starts a new shell, so set the variables on each call: `TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java <runner> SPEC.tla --out out-r1`.
 - In auto mode, the permission classifier treats the runner and TLC as downloaded code. It blocks them until the user approves them. A subagent does not inherit that approval. So the main session runs the checks. A subagent can write the spec, the view, and NOTES.
+- Another agent, or the model on its own, can pick this skill up. Use it when the description fits, not for a small change that no state logic touches. A session that may not run the runner writes the spec, the view, NOTES and the predictions, then hands the run to the main session, with the exact commands.
 - The `--out` folder must be new or empty. Use a new folder for each run, such as `out-r1` and `out-r2`, so that the output of each round stays. Never run `rm -rf` on a path that comes from a variable. Delete an old folder by its literal name, or leave it.
