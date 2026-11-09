@@ -119,11 +119,13 @@ def settled_ids(rows, attempt):
             and ref_of(r.get("body")) in newest and r["id"] < newest[ref_of(r["body"])] and newest[ref_of(r["body"])] in acked}
 
 
-def open_messages(rows, meta, attempt):
+def open_messages(rows, meta, attempt, listed=None):
     """Every answer and steer row of the attempt that a worker still has to read and ack: by the Manager or the
     operator, listed in the `mailbox` meta, with no ack, and not settled by a newer answer. Not "the rows after the
-    last ack": a row filed between an inbox and an ack prints again."""
-    listed, done = listed_ids(meta), acked_ids(rows, attempt) | settled_ids(rows, attempt)
+    last ack": a row filed between an inbox and an ack prints again. `listed` replaces the meta's list (run.py reads the
+    thread of an earlier attempt from the rows alone, once its meta entries are gone)."""
+    listed = listed_ids(meta) if listed is None else listed
+    done = acked_ids(rows, attempt) | settled_ids(rows, attempt)
     return [r for r in rows if r.get("kind") in (ANSWER, STEER) and r.get("attempt") == attempt
             and r.get("author") in SENDERS and r["id"] in listed and r["id"] not in done]
 

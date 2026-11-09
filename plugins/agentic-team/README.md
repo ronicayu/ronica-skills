@@ -780,13 +780,16 @@ because a peer message asked it to, so the command comes from the brief, not fro
    `session_id`), and the post goes ahead only when that id equals the `sessionId` of the `claude agents` row and
    the file is not older than the row's start. When the file is missing or stale, `run.py` reads
    `<profile dir>/sessions/<pid>.json` (an internal format, observed on CLI 2.1.319) and accepts its
-   `messagingSocketPath` only when that file's `sessionId` equals the row's. A post that works proves nothing: only
+   `messagingSocketPath` only when that file's `sessionId` equals the row's. The row must have a pid, and the socket path
+   must name it (`<pid>.sock`), so a reused pid is never posted to. A post that works proves nothing: only
    the worker's `ack` row does. With no ack after `pending_minutes`, the message goes back to pending.
 2. **Stop plus resume.** For an idle, parked or stopped worker, for `steer --interrupt`, and as the fallback:
-   `claude stop <id>` (when its process runs), then `claude --bg --resume <sessionId> --settings <json> "<doorbell>"`
-   run under the worker's own profile, in its worktree. The conversation continues under the same session id.
-   If `claude` prints a `note:` line (a copy was started), `run.py` records the copy, stops the original and prints
-   `deliver-copy`. A resume that cannot start, or a conversation with no transcript, files `DIED`: only then is a
+   `claude stop <id>` (when its process runs), then `claude --bg --resume <sessionId> "<doorbell>"` with no other flag,
+   run under the worker's own profile, in its worktree. On CLI 2.1.319 a flag after `--resume` starts a copy under a new
+   id, while the bare command wakes the same session (same id and session id, a new process and socket) with its saved
+   options, hooks included; so `run.py` passes none, and removes the old socket address first (the wake's
+   `SessionStart` hook writes a new one). If a copy starts anyway (the printed id differs), `run.py` records it as a
+   new `sessions` entry with its session id, stops the original and prints `deliver-copy`. A resume that cannot start, or a conversation with no transcript, files `DIED`: only then is a
    waiting worker called dead.
 3. **Pointer flag.** For a busy worker whose socket post failed: `run.py` writes the doorbell line to
    `.agentic-team/inbox/task-<id>-<attempt>.flag`, and the worker's `PostToolUse` hook shows it after the next tool call
@@ -794,7 +797,10 @@ because a peer message asked it to, so the command comes from the brief, not fro
    `pending_minutes` `record` prints `steer-pending` with the hint `run.py steer <id> --file <same text> --interrupt`.
 
 A message delivered by a socket post or by a resume that the worker does not ack within `pending_minutes` goes
-back to pending and is delivered again, at most 3 times; then `record` prints `steer-pending` and stops. A blocking
+back to pending and is delivered again, at most 3 times (the count is socket posts and resumes; a pointer-flag touch is
+not a try); then `record` prints `steer-pending` and stops. A worker that waits on a permission prompt gets no doorbell and
+no resume: `record` stops it once and files `BLOCKED`. `record` reads each task's rows, meta and session rows again under
+the task's lock, and files no `DIED` or salvaged report while a steer of the attempt has no ack. A blocking
 ask stays open until the worker acks its answer, not merely until an answer row exists, so a worker that was
 answered and has not acked is never filed `DIED` or `stuck`, and `launch` refuses its task. When a newer answer to an ask
 is acked, the older answers to it are settled. `steer` refuses an attempt that has a filed report, whatever the process
@@ -802,13 +808,13 @@ shows, and takes a waiting or parked worker. The worker's `inbox` prints every u
 
 Two socket failures in one `run.py` command turn the socket off for the rest of that command.
 **The worker's doorbell to the Manager** is the existing SendMessage notify step. Its `to` is
-`uds:<the Manager's inbox socket>` when `.agentic-team/manager.addr` holds it, else the Manager's session name. Every
-`run.py` call that runs in the Manager's own Bash (except `wait` and `--dry-run`) refreshes that file from
+`uds:<the Manager's inbox socket>` when `.agentic-team/manager.addr` holds it, else the Manager's session name. Only
+`record`, `launch` and `notify-to`, when they run in the Manager's own Bash (not `--dry-run`), refresh that file from
 `$CLAUDE_CODE_MESSAGING_SOCKET`, so a new Manager session never leaves a worker with an old address. A worker
 after an `ask` wakes the Manager with the line `task <id> attempt <n> asked #<id>; run record`. Without the
 `notify-to` switch no step is rendered, and `run.py wait` (it reads Taskgraph every 5 seconds) still wakes the Manager.
 
-**Hooks.** `launch` passes one `--settings` JSON to a worker, and `--resume` passes it again: a `SessionStart` hook
+**Hooks.** `launch` passes one `--settings` JSON to a worker, and a resume keeps it (saved options): a `SessionStart` hook
 (matchers `startup` and `resume`) that runs `mailbox.py checkin`, a `PostToolUse` hook that runs `mailbox.py hook`,
 and, for `sessions.permission_mode = "bypassPermissions"`, `"crossSessionInbound": "accept"` (that mode holds a
 peer message for approval otherwise; a doorbell has no authority, so accepting it is safe). Hook commands are in

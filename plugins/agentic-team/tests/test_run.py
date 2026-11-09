@@ -62,27 +62,44 @@ if os.environ.get("FAKE_CLAUDE_PROFILES") and cmd in ("stop", "logs", "rm"):
         sys.stderr.write("No job matching '%s'\n" % argv[1])
         sys.exit(1)
 if cmd == "agents":
+    counter = os.environ["FAKE_CLAUDE_LOG"] + ".agentscalls"  # after the Nth call the list is $FAKE_CLAUDE_AGENTS_NEW
+    count = int(open(counter).read()) + 1 if os.path.isfile(counter) else 1
+    open(counter, "w").write(str(count))
+    if os.environ.get("FAKE_CLAUDE_AGENTS_AFTER") and count > int(os.environ["FAKE_CLAUDE_AGENTS_AFTER"]):
+        agents_path = os.environ["FAKE_CLAUDE_AGENTS_NEW"]
     print((open(agents_path).read() if agents_path and os.path.isfile(agents_path) else None) or "[]")
 elif cmd == "plugin":  # `plugin list --json`: <dir>/plugins.json of the profile, else nothing installed
     path = os.path.join(config_dir, "plugins.json") if config_dir else None
     print((open(path).read() if path and os.path.isfile(path) else None) or "[]")
-elif cmd == "--bg" and "--resume" in argv:  # `claude --bg --resume <sessionId> [--settings JSON] "<prompt>"`
-    wanted = argv[argv.index("--resume") + 1]
+elif cmd == "--bg" and "--resume" in argv:  # `claude --bg --resume <sessionId> [flags] "<prompt>"`, as CLI 2.1.319 does it
+    at = argv.index("--resume")
+    wanted, after = argv[at + 1], argv[at + 2:]
     if os.environ.get("FAKE_CLAUDE_RESUME_FAIL"):
         sys.stderr.write(os.environ["FAKE_CLAUDE_RESUME_FAIL"] + "\n")
         sys.exit(1)
     rows = json.load(open(agents_path)) if agents_path and os.path.isfile(agents_path) else []
     found = [row for row in rows if row.get("sessionId") == wanted]
-    if found and os.environ.get("FAKE_CLAUDE_RESUME_COPY"):  # the session still runs: a copy starts under a new id
-        rows.append(dict(found[0], id="sess-copy", status="busy", state="working", pid=4400))
+    flags = [a for a in after[:-1] if a.startswith("--")] if after else []
+    if found and (flags or os.environ.get("FAKE_CLAUDE_RESUME_FORCE_COPY")):
+        # a flag after --resume starts a COPY: a new job id and a new sessionId; the note is on stderr
+        rows.append(dict(found[0], id="sess-copy", sessionId="copy-" + wanted, status="busy", state="working", pid=4400))
         open(agents_path, "w").write(json.dumps(rows))
-        sys.stdout.write("backgrounded \u00b7 sess-copy \u00b7 %s\nnote: session %s is still running; started a copy\n"
-                         % (found[0].get("name"), wanted))
-    else:
-        for row in found:  # the session continues in place, under the same id
+        sys.stderr.write("note: background session %s keeps its own saved options, so the flags you passed started a copy "
+                         "as sess-copy. Without flags, the same command continues %s itself.\n" % (found[0]["id"], found[0]["id"]))
+        sys.stdout.write("backgrounded \u00b7 sess-copy \u00b7 %s\n" % found[0].get("name"))
+    else:  # no flag: the same session wakes, same id and sessionId, a new process
+        for row in found:
             row.update(status="busy", state="working", pid=4300)
         if found:
             open(agents_path, "w").write(json.dumps(rows))
+            sys.stderr.write("note: woke session %s with its saved options (--name, --settings, --model).\n" % found[0]["id"])
+        saved = os.environ.get("FAKE_CLAUDE_WAKE_SETTINGS")  # run the SessionStart hooks of the saved --settings
+        if found and saved:
+            for group in json.load(open(saved))["hooks"].get("SessionStart", []):
+                for hook in group["hooks"]:
+                    subprocess.run([hook["command"], *hook.get("args", [])], input=json.dumps(
+                        {"session_id": wanted, "source": "resume"}), text=True,
+                        env=dict(os.environ, CLAUDE_CODE_MESSAGING_SOCKET=os.environ["FAKE_CLAUDE_WAKE_SOCKET"]))
         sys.stdout.write("backgrounded \u00b7 %s \u00b7 %s\n" % (found[0]["id"] if found else wanted, found[0].get("name") if found else ""))
 elif cmd == "--bg":
     wt = os.path.join(".claude", "worktrees", argv[argv.index("--worktree") + 1])
@@ -238,9 +255,9 @@ class Doorbell:
     """A fake inbox socket of a session: it records each line that run.py posts. The path is short, as the real
     ones are (a Unix socket path holds about 104 bytes); nothing here touches /tmp/cc-socks."""
 
-    def __init__(self):
+    def __init__(self, pid=4242):
         self.dir = tempfile.mkdtemp(prefix="at-", dir="/tmp")
-        self.path = os.path.join(self.dir, "s")
+        self.path = os.path.join(self.dir, f"{pid}.sock")  # a session's socket is named for its process
         assert len(self.path) < 100, self.path
         self.lines = []
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -7641,7 +7658,8 @@ class DeliveryTest(Base):
         self.assertEqual([a for a, _ in stops], [["stop", "sess-task-1-1"]])
         (resume,) = [(a, cwd) for a, cwd in self.calls_in("--bg", self.c2) if "--resume" in a]
         argv, cwd = resume
-        self.assertEqual(argv, ["--bg", "--resume", UUID1, "--settings", self.worker_settings(1, 1), self.doorbell(answer["id"], "answer")])
+        # no flag after --resume: on CLI 2.1.319 a flag starts a copy; the saved --settings keep the hooks
+        self.assertEqual(argv, ["--bg", "--resume", UUID1, self.doorbell(answer["id"], "answer")])
         self.assertEqual(os.path.realpath(cwd), os.path.realpath(self.wt_path("task-1")))
         self.assertIn("the session was resumed with the doorbell", self.one(events, "answered")["detail"])
         self.assertEqual(self.mailbox_meta(task)[str(answer["id"])]["via"], "resume")
@@ -7668,13 +7686,14 @@ class DeliveryTest(Base):
     def test_t10_a_resume_that_starts_a_copy_records_it_and_stops_the_original(self):
         task = self.worker(status="idle", state="blocked", pid=4242)
         self.ask()
-        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_COPY="1"))
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FORCE_COPY="1"))  # as if a flag was passed
         copy = self.one(events, "deliver-copy")
         self.assertEqual(copy["session"], "sess-copy")
         ids = [e["id"] for e in self.meta(task)["sessions"]]
         self.assertEqual(ids, ["sess-task-1-1", "sess-copy"])
         self.assertEqual(self.meta(task)["sessions"][1]["profile"], "c2")
-        self.assertEqual(self.meta(task)["sessions"][1]["sessionId"], UUID1)
+        self.assertEqual(self.meta(task)["sessions"][1]["sessionId"], "copy-" + UUID1)  # read from the copy's agents row
+        self.assertEqual(self.meta(task)["sessions"][1]["name"], "task-1")  # the row's own name, kept
         self.assertEqual([a for a, _ in self.calls_in("stop", self.c2)], [["stop", "sess-task-1-1"], ["stop", "sess-task-1-1"]])
         self.assertIn("the resume started a copy (the original is stopped)", self.one(events, "answered")["detail"])
 
@@ -7946,6 +7965,196 @@ class DeliveryTest(Base):
         finally:
             holder.wait()
             holder.stdout.close()
+
+    # --- fix round 2: the resume on the real CLI, and the review findings
+
+    def checkin_ctx(self, task=1, attempt=1):
+        """The context file that the saved SessionStart hook reads (the worker() fixture does not run a launch)."""
+        os.makedirs(os.path.dirname(self.inbox_file("x")), exist_ok=True)
+        with open(self.inbox_file(f"{task}-{attempt}.ctx.json"), "w") as fh:
+            json.dump({"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": task, "attempt": attempt,
+                       "by": f"task-{task}-{attempt}", "asks_cap": 3, "scope": "src/", "inbox_dir": os.path.dirname(self.inbox_file("x")),
+                       "lock": os.path.join(self.dir, "task.lock")}, fh)
+
+    def test_a1_a_resume_passes_no_flag_so_the_same_session_wakes_in_place(self):
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (argv,) = [a for a, _ in self.calls_in("--bg", self.c2) if "--resume" in a]
+        self.assertEqual([a for a in argv[3:-1]], [])  # nothing between the session id and the prompt
+        self.assertNotIn("--settings", argv)
+        self.assertEqual([e["id"] for e in self.meta(task)["sessions"]], ["sess-task-1-1"])  # no copy
+        self.assertEqual(self.one(self.events("record"), "running")["session"], "sess-task-1-1")
+
+    def test_a3_the_old_socket_address_goes_before_the_wake_and_the_saved_hook_writes_a_new_one(self):
+        task = self.worker(status=None, state="done", startedAt=(time.time() - 600) * 1000)
+        self.checkin_ctx()
+        old, new = self.bell(), Doorbell(pid=4300)
+        self.bells.append(new)
+        self.checkin(old)  # the old process's address, not older than the row's start
+        self.ask()
+        settings = os.path.join(self.dir, "saved-settings.json")
+        with open(settings, "w") as fh:
+            fh.write(self.worker_settings(task, 1))
+        env = dict(self.env, FAKE_CLAUDE_WAKE_SETTINGS=settings, FAKE_CLAUDE_WAKE_SOCKET=new.path)
+        self.ok("answer", str(task), "--file", self.text_file("v2"), env=env)
+        with open(self.inbox_file("1-1.addr")) as fh:
+            addr = json.load(fh)
+        self.assertEqual((addr["socket"], addr["session_id"]), (new.path, UUID1))  # written by the wake's SessionStart
+        # without the hook (a CLI that did not run it) the old address is simply gone: nothing is posted to it
+        self.fresh()
+        task = self.worker(status=None, state="done")
+        self.checkin(old)
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        self.assertFalse(os.path.exists(self.inbox_file("1-1.addr")))
+        time.sleep(0.2)
+        self.assertEqual(old.lines, [])
+
+    def test_b1_a_flag_touch_is_not_a_try_and_an_idle_worker_is_then_resumed(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("use v2"))
+        (row,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        for _ in range(3):
+            events = self.events("record")
+            self.assertEqual(self.named(events, "steer-pending"), [])  # the cap counts posts and resumes, not flag touches
+        self.assertEqual(self.mailbox_meta(task)[str(row["id"])].get("tries", 0), 0)
+        self.assertEqual((self.resumes(), self.calls("stop")), ([], []))
+        self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242))  # it went idle
+        self.events("record")
+        (resume,) = self.resumes()
+        self.assertEqual(resume[-1], self.doorbell(row["id"], "steer"))
+        self.assertEqual(self.mailbox_meta(task)[str(row["id"])]["tries"], 1)
+
+    def test_b2_a_settled_ask_of_an_earlier_attempt_is_not_pasted_as_open(self):
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.ack(answer["id"])
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=1)
+        self.c2_agents(self.finished("task-1", 1))
+        self.ok("launch", str(task), "--profile", "c2")  # attempt 2: the entries of attempt 1 are pruned from the meta
+        self.assertNotIn("mailbox", self.meta(task))
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=2)
+        self.c2_agents(self.finished("task-1", 1), self.finished("task-1", 2))
+        brief = self.brief(task)  # attempt 3
+        self.assertIn("Attempt 3.", brief)
+        self.assertNotIn("Open thread", brief)
+        self.assertNotIn(f"Ask #{ask}", brief)
+        # abandon drops the table too; the thread of the last attempt is read from the rows
+        self.ok("launch", str(task), "--profile", "c2")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=3)
+        self.c2_agents(*[self.finished("task-1", n) for n in (1, 2, 3)])
+        self.ok("abandon", str(task), "died")
+        self.assertNotIn("mailbox", self.meta(task))
+        self.assertNotIn("Open thread", self.brief(task, "--attempt", "4"))
+
+    def test_b2_an_open_ask_is_still_pasted_into_the_next_brief_after_the_meta_is_gone(self):
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=1)
+        self.c2_agents(self.finished("task-1", 1))
+        self.assertIn(f"Ask #{ask} (OPEN):", self.brief(task))
+
+    def test_b3_record_reads_the_session_rows_again_under_each_tasks_lock(self):
+        first = self.running_task()
+        second = self.add_task("Second", start=True, attempt=1)
+        self.record_sessions(second, {**self.entry(second, 1), "worktree": f"task-{second}", "id": f"sess-task-{second}-1"})
+        old = [self.row("task-1"), self.finished(f"task-{second}")]  # what record reads first: task 2's worker has ended
+        new = [self.row("task-1"), self.row(f"task-{second}")]  # the operator resumed it before record reached task 2
+        self.agents(*old)
+        newer = os.path.join(self.dir, "agents-new.json")
+        with open(newer, "w") as fh:
+            json.dump(new, fh)
+        events = self.events("record", env=dict(self.env, FAKE_CLAUDE_AGENTS_AFTER="1", FAKE_CLAUDE_AGENTS_NEW=newer))
+        self.assertEqual(self.named(events, "died"), [])  # a DIED from the old row would have been filed
+        self.assertEqual([r for r in self.results(second) if r["kind"] == "task"], [])
+        self.assertEqual({e["task"] for e in self.named(events, "running")}, {first, second})
+
+    def test_b4_a_report_is_not_salvaged_while_a_steer_has_no_ack(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("x"), "--interrupt")  # resumed: delivered, not acked
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        report = os.path.join(self.wt_path("task-1"), ".agentic-team", "report-task-1-1.md")
+        os.makedirs(os.path.dirname(report), exist_ok=True)
+        with open(report, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+        self.c2_agents(self.row("task-1", status=None, state="done", sessionId=UUID1))  # it ended with a report file
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        died = self.one(events, "died")
+        self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("DIED", "manager")])
+        self.assertIn(f"a report was found, but steer #{steer['id']} has no ack", self.results(task)[-1]["body"])
+        self.assertTrue(self.mailbox_meta(task)[str(steer["id"])]["carried"])
+        self.assertIn("run.py launch", died["next"])
+        # with the steer acked, the same report is salvaged as before
+        self.fresh()
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("x"), "--interrupt")
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.ack(steer["id"])
+        report = os.path.join(self.wt_path("task-1"), ".agentic-team", "report-task-1-1.md")
+        os.makedirs(os.path.dirname(report), exist_ok=True)
+        with open(report, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+        self.c2_agents(self.row("task-1", status=None, state="done", sessionId=UUID1))
+        self.one(self.events("record"), "salvaged")
+
+    def test_b5_a_socket_that_names_another_pid_is_never_posted_to(self):
+        task = self.worker(status="idle", state="blocked", pid=4242, startedAt=(time.time() - 60) * 1000)
+        other = Doorbell(pid=9999)  # a reused pid: the check-in file names a socket of another process
+        self.bells.append(other)
+        self.checkin(other)
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        time.sleep(0.2)
+        self.assertEqual(other.lines, [])
+        self.assertIn("does not name pid 4242", self.one(events, "deliver-fallback")["detail"])
+        self.assertEqual(len(self.resumes()), 1)
+        # the same for the registry fallback, and for a row with no pid
+        self.fresh()
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        other = Doorbell(pid=9999)
+        self.bells.append(other)
+        os.makedirs(os.path.join(self.c2, "sessions"))
+        with open(os.path.join(self.c2, "sessions", "4242.json"), "w") as fh:
+            json.dump({"pid": 4242, "sessionId": UUID1, "messagingSocketPath": other.path}, fh)
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        time.sleep(0.2)
+        self.assertEqual(other.lines, [])
+        self.assertIn("the registry socket", self.one(events, "deliver-fallback")["detail"])
+
+    def test_b6_a_worker_stuck_on_a_prompt_gets_no_resume_and_is_stopped_once(self):
+        task = self.worker(status="waiting", state="working", pid=4242, waitingFor="Bash permission")
+        steer = self.add_result(task, "SENT", "Steer: x\nKind: info\n", kind="steer", by="manager")["id"]
+        self.set_mailbox(task, {str(steer): {"kind": "steer", "attempt": 1, "via": "pending", "filed": self.old(1), "at": self.old(1), "tries": 0}})
+        events = self.events("record")
+        self.one(events, "stuck")
+        self.assertEqual(self.resumes(), [])
+        self.assertEqual(len(self.calls("stop")), 1)
+        self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("BLOCKED", "manager")])
+        self.assertTrue(self.mailbox_meta(task)[str(steer)]["carried"])
+
+    def test_b7_only_record_launch_and_notify_to_note_the_managers_socket(self):
+        path = os.path.join(self.root, ".agentic-team", "manager.addr")
+        env = dict(self.env, CLAUDE_CODE_MESSAGING_SOCKET="/tmp/at-test-manager.sock")
+        task = self.worker(status="busy", state="working", pid=4242)
+        text = self.text_file("x")
+        self.ok("status", env=env)
+        self.ok("inbox", str(task), env=env)
+        self.ok("steer", str(task), "--file", text, "--by", "operator", env=env)  # from an operator's own Claude session
+        self.assertFalse(os.path.exists(path))
+        self.ok("record", env=env)
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["socket"], "/tmp/at-test-manager.sock")
+        os.remove(path)
+        self.ok("notify-to", "m", env=env)
+        self.assertTrue(os.path.exists(path))
+        os.remove(path)
+        self.ok("launch", str(self.add_task("Second")), "--profile", "c2", env=env)
+        self.assertTrue(os.path.exists(path))
 
     # --- T15: wait reads Taskgraph on its own, shorter interval
 
