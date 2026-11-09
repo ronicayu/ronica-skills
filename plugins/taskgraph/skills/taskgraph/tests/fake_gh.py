@@ -266,8 +266,9 @@ class Fake:
     def repo_comments(self, s, query):
         since = query.get("since", [None])[0]
         found = [c for c in s["comments"].values() if not since or c["updated_at"] >= since]
-        found.sort(key=lambda c: c["id"], reverse=query.get("direction", ["asc"])[0] == "desc")
-        return Resp(200, [self.comment_json(s, c) for c in self.page(found, query)])
+        by = "updated_at" if query.get("sort", ["created"])[0] == "updated" else "id"
+        found.sort(key=lambda c: (c[by], c["id"]), reverse=query.get("direction", ["asc"])[0] == "desc")
+        return self.etag_response([self.comment_json(s, c) for c in self.page(found, query)], {"if-none-match": self.header})
 
     def issue_route(self, s, method, n, rest, query, headers, body):
         issue = s["issues"][str(n)]

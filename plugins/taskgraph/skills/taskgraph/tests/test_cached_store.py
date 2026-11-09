@@ -89,8 +89,8 @@ def test_an_expired_ttl_makes_one_conditional_get_per_page_and_costs_nothing_whe
     fake.clear_log()
     env.ok("ls")
     calls = fake.calls()
-    assert len(calls) == math.ceil(120 / 100) == 2
-    assert [(c["status"], c["counted"]) for c in calls] == [(304, False), (304, False)]
+    assert len(calls) == math.ceil(120 / 100) + 1 == 3  # one per page, and one for the newest comment of the repository
+    assert [(c["status"], c["counted"]) for c in calls] == [(304, False)] * 3
     fake.clear_log()
     env.ok("ls")  # the refresh above reset the clock
     assert fake.calls() == []
@@ -448,7 +448,7 @@ def test_two_tg_processes_share_one_refresh(env, fake):
         fcntl.flock(held, fcntl.LOCK_EX)
         assert titles(env.ok("ls")) == ["a"]
     assert fake.calls() == []
-    assert titles(env.ok("ls")) == ["a"] and len(fake.calls()) == 1
+    assert titles(env.ok("ls")) == ["a"] and len(fake.calls()) == 2  # the page, and the newest comment
 
 
 def test_a_write_refreshes_before_it_validates(env, fake):

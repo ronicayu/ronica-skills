@@ -145,7 +145,7 @@ class CachedRemoteStore:
                     self.apply(conn, self.remote.single(task), self.sync_state(conn), first=False)
 
     def sync_state(self, conn):
-        state = SyncState(pages={int(k): v for k, v in get_state(conn, "pages", {}).items()}, removed=set(get_state(conn, "removed", [])))
+        state = SyncState(pages={int(k): v for k, v in get_state(conn, "pages", {}).items()}, removed=set(get_state(conn, "removed", [])), comments_etag=get_state(conn, "comments_etag"))
         for task_id, fp in conn.execute("SELECT task_id, fingerprint FROM remote_tasks WHERE fingerprint IS NOT NULL"):
             state.fingerprints[task_id] = json.loads(fp)
         return state
@@ -171,17 +171,22 @@ class CachedRemoteStore:
 
     def pull_into(self, conn, full, comments):
         state = self.sync_state(conn)
+        last_pull = get_state(conn, "last_pull_at")
         last_full = get_state(conn, "last_full_at")
         full = full or last_full is None or time.time() - last_full >= self.entry.full_every
         probe = self.remote.probe(state)
+        edited, etag = self.remote.comment_changes(state, None if last_pull is None else last_pull - 60)
         changed = 0
-        if full or probe.changed:
-            delta = self.remote.pull(state, probe, full=full, comments=comments)
+        if full or probe.changed or edited:
+            delta = self.remote.pull(state, probe, full=full, comments=comments, reread=edited)
             changed = len(delta.tasks)
             self.apply(conn, delta, state, first=last_full is None)
         else:
             with conn:
                 put_state(conn, "last_pull_at", time.time())
+        if etag != state.comments_etag:
+            with conn:
+                put_state(conn, "comments_etag", etag)
         if full and self.pending_rows(conn, older=PENDING_AGE):
             self.flush(conn, older=PENDING_AGE)
         return changed

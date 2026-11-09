@@ -216,6 +216,21 @@ def test_when_both_confirm_reads_miss_the_other_both_win_and_show_says_so(env, f
     assert any("claim conflict" in line for line in tg_text(env, "show", str(n))[1].splitlines())
 
 
+def test_a_claim_comment_edited_to_void_only_clears_the_conflict_in_another_cache(env, fake):
+    n = task(env)
+    stale = plant(fake, n, "old@host:0", age=300)
+    plant(fake, n, "alice@host:1", age=3)
+    loser = plant(fake, n, "bob@host:2", age=2, voids=[stale])
+    labelled(fake, n)
+    conflicts = lambda: [c["message"] for c in env.ok("--fresh", "show", str(n))["conflicts"]]
+    assert conflicts() == [f"claim conflict on #{n}: alice@host:1 and bob@host:2"]  # this cache reads both claims as unvoided
+    GitHubRemote(env.entry).abandon(loser, [stale])  # bob lost: the edit keeps only its void marker; the comment count does not change
+    assert len(fake.comments(n)) == 3
+    env.age(31)
+    assert [c["message"] for c in env.ok("show", str(n))["conflicts"]] == []
+    assert env.ok("show", str(n))["claimant"] == "alice@host:1"
+
+
 def test_a_loser_whose_comment_voids_a_stale_claim_keeps_a_void_only_comment(env, fake):
     n = task(env)
     stale = plant(fake, n, "old@host:0", age=300)

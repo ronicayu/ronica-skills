@@ -36,6 +36,7 @@ class SyncState:
     pages: dict = field(default_factory=dict)  # page -> {"etag", "ids", "count"}
     fingerprints: dict = field(default_factory=dict)  # task number -> {"all", "edges", "comments"}
     removed: set = field(default_factory=set)  # numbers of issues that carry the removed label
+    comments_etag: str | None = None  # of the probe that finds created and edited comments
 
 
 @dataclass

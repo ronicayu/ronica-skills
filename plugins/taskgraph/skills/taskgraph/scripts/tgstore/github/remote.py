@@ -94,6 +94,20 @@ class GitHubRemote:
             page += 1
         return Probe(pages, info, bool(pages) or set(info) != set(state.pages))
 
+    def comment_changes(self, state, since):
+        """The task numbers that have a comment created or edited since `since` (epoch seconds; None: do not look), and the etag of the probe.
+
+        An edit moves neither the comment count nor, as far as we know, updated_at of the issue, so the pages do not show it. One conditional
+        read of the newest-updated comment tells whether any comment of the repository changed (a 304 costs nothing); only then is the list since
+        the last pull read."""
+        r = self.gh.get(f"{self.base}/issues/comments?sort=updated&direction=desc&per_page=1", etag=state.comments_etag)
+        etag = r.headers.get("etag")
+        if r.status == 304 or since is None:
+            return set(), etag
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))
+        found = self.gh.get_all(f"{self.base}/issues/comments?since={stamp}&sort=updated&direction=asc")
+        return {int(c["issue_url"].rsplit("/", 1)[1]) for c in found}, etag
+
     def read_edges(self, numbers):
         out = {}
         numbers = sorted(numbers)
@@ -125,7 +139,7 @@ class GitHubRemote:
                 found.setdefault(n, []).append(p)
         return found
 
-    def pull(self, state, probe, full=False, comments=False):
+    def pull(self, state, probe, full=False, comments=False, reread=()):
         delta = Delta(full=full, pages=probe.info)
         seen = {n for info in probe.info.values() for n in info["ids"]}
         want_edges, want_comments = set(), set()
@@ -152,6 +166,7 @@ class GitHubRemote:
             by_issue = self.read_all_comments(seen - gone)
             want_comments = seen - gone
         else:
+            want_comments |= set(reread) & (seen - gone)  # comments created or edited since the last pull
             by_issue = {n: self.read_comments(n) for n in sorted(want_comments)}
         for n in want_comments:
             parsed = by_issue.get(n, [])

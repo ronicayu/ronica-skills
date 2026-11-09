@@ -338,7 +338,7 @@ CREATE TABLE pending_meta (task_id INTEGER, key TEXT, op TEXT CHECK (op IN ('set
                            base TEXT, at TEXT NOT NULL, PRIMARY KEY (task_id, key));
 CREATE TABLE claims (comment_id INTEGER PRIMARY KEY, task_id INTEGER, token TEXT, claimant TEXT,
                      voids INTEGER, at TEXT);
-CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT);  -- page etags, last_pull_at, last_full_at, comments_since
+CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT);  -- page etags, last_pull_at, last_full_at, comments_etag
 ```
 
 `tasks.meta` holds the merged view `remote_meta ⊕ pending ⊕ local_meta` (later wins). Thus `load(conn)` reads the cache with no change. The `results.id` column takes comment ids (SQLite `INTEGER` holds them).
@@ -406,8 +406,8 @@ Concurrency: the refresh holds `BEGIN IMMEDIATE` on the cache plus a non-blockin
 3. For each changed page: the response holds the full issue JSON. For each item, compute `fingerprint = sha1(updated_at, state, state_reason, labels, comments, issue_dependencies_summary, sub_issues_summary, parent_issue_url, title, body)`. Items with a new fingerprint are the changed set.
 4. Update the changed tasks from the REST items (title, body → notes and `remote_meta`, state, labels → status and type, `parent_issue_url` → parent, timestamps).
 5. If a changed item has a new `issue_dependencies_summary`, `sub_issues_summary` or `parent_issue_url`, read its edges in one GraphQL query with one alias per issue: `i12: issue(number:12) { blockedBy(first:100) { totalCount nodes { number } } parent { number } }`. Cost: 1 point for up to 99 issues (G18).
-6. If any changed item has a new `comments` count, read `GET /repos/{o}/{r}/issues/comments?since=<comments_since - 60 s>&sort=updated&direction=asc&per_page=100` until done. Keep only the comments of task issues (the list also holds pull request comments). Parse result and claim markers. Upsert by comment id.
-7. Apply in one SQLite transaction with the merge rule (6.4). Write events (6.5). Store the new ETags and `comments_since`.
+6. Comments. A comment edit changes neither the `comments` count nor (as far as we know; not tested live) the `updated_at` of the issue, so the pages do not show it, and a loser of a claim edits its comment to void-only (section 8.1 step 9). Every pull therefore sends one conditional read `GET /repos/{o}/{r}/issues/comments?sort=updated&direction=desc&per_page=1` with the stored ETag (`comments_etag`). A 304 costs nothing. Otherwise read `GET /repos/{o}/{r}/issues/comments?since=<last pull - 60 s>&sort=updated&direction=asc&per_page=100` until done. The task issues that have a comment in the answer, and the changed items that have a new `comments` count, get their comments read again (`GET .../issues/{n}/comments`). The list also holds pull request comments; tg ignores them. Parse result and claim markers; the cached rows of the issue are replaced. If GitHub does not honour the ETag on this list, every pull costs two requests instead of one, and the result is the same.
+7. Apply in one SQLite transaction with the merge rule (6.4). Write events (6.5). Store the new ETags and `comments_etag`.
 
 Full pull: GraphQL `repository.issues(labels:["taskgraph"], states:[OPEN,CLOSED], first:100)` with `labels(first:20)`, `parent`, `blockedBy(first:100) { totalCount }`, body and timestamps. Cost 2 points per 100 issues (C9). If a `totalCount` is above 100, tg reads the rest of that connection with `after`. Tasks absent from the full result (deleted, transferred, label removed) leave the cache with a `removed` event. `tg sync --full` also reads all comments (1 point per 50 issues).
 
