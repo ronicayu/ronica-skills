@@ -28,6 +28,10 @@ Usage:
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
                    tells its session to message after its result
+    answer <id>    answer a worker's ask (--file, --default or --decision); files
+                   an answer row and rings the worker's doorbell
+    steer <id>     send a running worker a steer; --interrupt stops and resumes it
+    inbox <id>     show the task's messages and their delivery state; read only
 
 Run from the repository root. Taskgraph is the only source of task content;
 this script copies it and never invents it. Only `wait` and the host
@@ -261,6 +265,7 @@ class Run:
         self.host_failed = False
         self._fetched = set()
         self._docker = None  # (what docker_read() returned,) once containers() has asked
+        self.socket_failures, self.socket_off = 0, False  # failed socket posts of this command; two turn them off
 
     def find_tg(self, given):
         if given:
@@ -289,9 +294,9 @@ class Run:
         except ConfigError as exc:
             raise Refused(str(exc))
 
-    def claude(self, *cmd, check=True, profile=None):
+    def claude(self, *cmd, check=True, profile=None, cwd=None):
         directory = self.profile_dir(profile)
-        out = sh(["claude", *cmd], cwd=self.root, env={"CLAUDE_CONFIG_DIR": directory} if directory else None)
+        out = sh(["claude", *cmd], cwd=cwd or self.root, env={"CLAUDE_CONFIG_DIR": directory} if directory else None)
         if check and out.returncode != 0:
             raise Refused(f"claude {cmd[0]} failed: {out.stderr.strip() or out.stdout.strip()}", 1)
         return out
@@ -1079,6 +1084,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             upstream.append(f"### Previous attempt ({describe_result(previous)})\n\n"
                             "Start from this report. Fix what it lists; do not redo what passed.\n\n"
                             f"{strip_comments(previous['body']).strip()}")
+        carried = carried_text(rows, task, attempt)
+        if carried:
+            upstream.append(carried)
         for dep in task.get("depends_on") or []:
             node = run.show(dep["id"])
             if node["type"] == "decision":
@@ -1703,9 +1711,14 @@ def cmd_launch(run, args):
     keep = [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
     if not meta.get("base") and mode in ("first", "base", "head"):
         keep.append(meta_arg("base", base))
+    table = mailbox_table(task)  # delivery state of earlier attempts goes; this attempt starts with none
+    left = {k: v for k, v in table.items() if isinstance(v, dict) and (v.get("attempt") or 0) >= nxt}
+    if left != table and left:
+        keep.append(meta_arg("mailbox", left))
+    lower_flag(run, tid)
     run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
            meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), *keep,
-           "--unset-meta", "verdict", "verdict_ref", "abandoned")
+           "--unset-meta", "verdict", "verdict_ref", "abandoned", *(["mailbox"] if table and not left else []))
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
@@ -1971,6 +1984,507 @@ def emit_verified(run, tid, attempt, row, kind):
     if level == "test-verified" and kind != "code":
         nxt += f" (records test-verified; it does not close a {kind} task)"
     run.emit("verified", tid, attempt, None, f"Verdict {level} by {row['author']} (result #{row['id']})", nxt)
+
+
+# ------------------------------------------------------------------ messages
+
+RESUME_POLLS = 20  # reads of `claude agents` after a stop, at most, before a resume
+RESUME_WAIT = 0.5  # seconds between two of those reads
+SOCKET_FAILURES_MAX = 2  # failed socket posts in one run.py command; after that it posts no more
+
+DOORBELL = "agentic-team: task {tid} attempt {attempt} has message #{row} ({kind}). Run: {inbox}"
+
+
+def utc_stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def minutes_since(stamp):
+    """Minutes since an ISO time with a Z, or 0 when it cannot be read."""
+    try:
+        then = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds() / 60
+
+
+def mailbox_table(task):
+    found = (task.get("meta") or {}).get("mailbox")
+    return found if isinstance(found, dict) else {}
+
+
+class Thread:
+    """The message rows of one attempt of a task, read with the task's `mailbox` meta. An answer or a steer counts only
+    when it is by the Manager or the operator and run.py listed its id: a worker can file any row, and `tg` keeps no
+    author check."""
+
+    def __init__(self, rows, task, attempt):
+        self.attempt, self.table = attempt, mailbox_table(task)
+        listed = mbx.listed_ids(task.get("meta"))
+        mine = [r for r in rows if r.get("attempt") == attempt]
+        self.asks = [r for r in mine if r["kind"] == mbx.ASK]
+        self.answers = [r for r in mine if r["kind"] == mbx.ANSWER and r.get("author") in mbx.SENDERS and r["id"] in listed]
+        self.steers = [r for r in mine if r["kind"] == mbx.STEER and r.get("author") in mbx.SENDERS and r["id"] in listed]
+        self.acks = [r for r in mine if r["kind"] == mbx.ACK]
+        self.acked = {mbx.ref_of(r.get("body")) for r in self.acks} - {None}
+
+    def answer_of(self, ask_id):
+        """The newest answer to an ask, or None."""
+        found = [r for r in self.answers if mbx.ref_of(r["body"]) == ask_id]
+        return found[-1] if found else None
+
+    def open_asks(self):
+        return [a for a in self.asks if self.answer_of(a["id"]) is None]
+
+    def blocking(self):
+        """The asks that no answer settles and that make the worker wait."""
+        return [a for a in self.open_asks() if mbx.ask_blocking(a["body"])]
+
+    def unacked(self):
+        """The answers and steers that no ack names yet, oldest first."""
+        return sorted((r for r in self.answers + self.steers if r["id"] not in self.acked), key=lambda r: r["id"])
+
+    def holds(self):
+        """True while the worker waits for a message, or has one it has not acked: it is not dead and not stuck."""
+        return bool(self.blocking() or self.unacked())
+
+
+def message_rows(rows):
+    return [r for r in rows if r["kind"] in (mbx.ASK, mbx.ANSWER, mbx.STEER, mbx.ACK)]
+
+
+def save_mailbox(run, task, table):
+    run.set_meta(task, mailbox=table)
+
+
+def doorbell_text(run, tid, attempt, row):
+    return DOORBELL.format(tid=tid, attempt=attempt, row=row["id"], kind=row["kind"],
+                           inbox=mailbox_command(run, tid, attempt, "inbox"))
+
+
+def worker_session(run, tid, attempt):
+    """The session of the attempt that a message goes to: the newest live one, else the newest row (a parked or
+    stopped worker is resumed). None when the attempt has no row."""
+    found = own_sessions(run, tid, "task", attempt)
+    live = [s for s in found if s.live]
+    return (live or found or [None])[-1]
+
+
+def resume_id(task, s):
+    """The full session id that --resume needs: the row's sessionId, else the one run.py recorded at the launch."""
+    return s.row.get("sessionId") or next((e.get("sessionId") for e in recorded_sessions(task) if e.get("id") == s.sid), None)
+
+
+def registry_socket(run, s, session_id):
+    """The socket of a session from Claude Code's own session registry. Used only when the check-in file is missing
+    or stale. The file format is internal to Claude Code and was observed on CLI 2.1.319: <profile dir>/sessions/<pid>.json
+    holds `messagingSocketPath` and `sessionId`. The path is returned only when that file's sessionId equals the
+    agents row's, so a reused pid never gets a post."""
+    pid = s.row.get("pid")
+    if not isinstance(pid, int):
+        return None
+    base = run.profile_dir(s.profile) or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    try:
+        with open(os.path.join(base, "sessions", f"{pid}.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    path = data.get("messagingSocketPath") if isinstance(data, dict) else None
+    return path if isinstance(path, str) and path and data.get("sessionId") == session_id else None
+
+
+def socket_address(run, tid, attempt, s):
+    """(path, token, why): where to post a doorbell for session `s`, or why there is no address. The check-in file of
+    the attempt counts when its session id equals the row's sessionId and it is not older than the row's start;
+    otherwise the registry is read (registry_socket). A socket is never used for a session id that was not matched."""
+    session_id = s.row.get("sessionId")
+    if not session_id:
+        return None, None, "the agents row has no sessionId"
+    addr = mbx.read_addr(attempt_file(run, tid, attempt, "addr"))
+    started = s.row.get("startedAt")
+    fresh = not isinstance(started, (int, float)) or (addr or {}).get("at", 0) >= started / 1000 - 1
+    if addr and addr.get("session_id") == session_id and addr.get("socket") and fresh:
+        return addr["socket"], addr.get("token"), None
+    path = registry_socket(run, s, session_id)
+    if path:
+        return path, None, None
+    return None, None, ("the check-in file is stale or for another session" if addr else "no check-in file")
+
+
+def forget_stopped(run, sid):
+    """Take a session id out of the stopped-sessions file: it was resumed, so it is not stopped any more."""
+    path = os.path.join(run.run_dir, STOPPED_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            kept = [line for line in fh.read().splitlines() if line.strip() and line.strip() != sid]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{line}\n" for line in kept))
+    except OSError:
+        pass
+
+
+def touch_flag(run, tid, text):
+    """Raise the pointer flag: the worker's PostToolUse hook shows its text after each tool call."""
+    os.makedirs(os.path.dirname(flag_file(run, tid)), exist_ok=True)
+    with open(flag_file(run, tid), "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+
+
+def lower_flag(run, tid):
+    if os.path.lexists(flag_file(run, tid)):
+        os.remove(flag_file(run, tid))
+
+
+def wait_for_exit(run, s):
+    """True once `claude agents` shows the session with no process. Bounded: RESUME_POLLS reads."""
+    for number in range(RESUME_POLLS):
+        if number:
+            time.sleep(RESUME_WAIT)
+        row = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == s.sid), None)
+        if row is None or not row.get("pid"):
+            return True
+    return False
+
+
+def file_died(run, task, attempt, s, why):
+    """A resume that cannot continue the conversation: the worker is gone. File DIED; the open thread is carried."""
+    tid = task["id"]
+    run.add_result(tid, "task", attempt, "manager", "DIED", f"session {s.sid} {s.status}/{s.state}, no result; {why}")
+    carry_thread(run, task, attempt)
+    run.emit("died", tid, attempt, s.sid, f"filed DIED ({why})", retry_next(tid, attempt, "died"))
+
+
+def deliver(run, task, row, interrupt=False):
+    """Hand a message row to its worker. Returns the word for the event line: "socket", "resume", "hook" (the pointer
+    flag is up), "copy", "pending" (nothing worked yet; record tries again) or "died". Steps, best first:
+    1. a socket post, when the process runs and its address is matched (doorbell = "socket");
+    2. `claude stop` plus `claude --bg --resume <sessionId> "<doorbell>"` for a worker that is idle, parked or
+       stopped, and for --interrupt;
+    3. the pointer flag, for a busy worker with no socket: its hook shows the line at the next tool call.
+    A post that succeeds proves nothing: only the worker's ack does (record turns a post with no ack back to pending)."""
+    tid, table = task["id"], mailbox_table(task)
+    entry = table.setdefault(str(row["id"]), {"kind": row["kind"], "attempt": row["attempt"], "filed": utc_stamp()})
+    attempt, text = entry["attempt"], doorbell_text(run, tid, entry["attempt"], row)
+    entry["tries"] = entry.get("tries", 0) + 1
+    s = worker_session(run, tid, attempt)
+
+    def settle(via, word):
+        entry.update(via=via, at=utc_stamp())
+        save_mailbox(run, task, table)
+        return word
+
+    if s is None:
+        run.emit("deliver-fallback", tid, attempt, None, f"#{row['id']}: no session row for attempt {attempt}; record tries again")
+        return settle("pending", "pending")
+    alive = bool(s.row.get("pid"))
+    busy = s.live and alive and s.status == "busy" and not s.stuck
+    if (run.config["messaging"]["doorbell"] == "socket" and not interrupt and not run.socket_off
+            and not entry.get("socket_failed") and s.live and alive):
+        path, token, why = socket_address(run, tid, attempt, s)
+        if path:
+            ok, why = mbx.post_line(path, text, token)
+            if ok:
+                return settle("socket", "socket")
+            run.socket_failures += 1
+            run.socket_off = run.socket_failures >= SOCKET_FAILURES_MAX
+        entry["socket_failed"] = True
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the socket post did not work ({why}); "
+                 + ("the pointer flag shows it at the next tool call" if busy else "resuming the session"))
+    if busy and not interrupt:
+        touch_flag(run, tid, text)
+        entry["hook"] = True
+        return settle("pending", "hook")
+    return resume_with(run, task, entry, row, s, text, settle)
+
+
+def resume_with(run, task, entry, row, s, text, settle):
+    """Stop the session when its process still runs, then `claude --bg --resume` it in its worktree with the doorbell
+    as the prompt. A resume that cannot start files DIED: only then is a waiting worker called dead."""
+    tid, attempt = task["id"], entry["attempt"]
+    session_id = resume_id(task, s)
+    wt = task_worktree(run, tid)
+    if not session_id:
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: no full session id on file to resume; "
+                 "record tries again")
+        return settle("pending", "pending")
+    path = find_transcript(run, wt, s.sid, s.row, s.profile)[0]
+    if not path:
+        file_died(run, task, attempt, s, "the conversation cannot be resumed: its transcript is gone")
+        return "died"
+    if s.row.get("pid"):
+        stop_session(run, s.sid, check=False, profile=s.profile)
+        if not wait_for_exit(run, s):
+            run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the process did not exit after claude stop; "
+                     "record tries again")
+            return settle("pending", "pending")
+    out = run.claude("--bg", "--resume", session_id, "--settings", worker_settings(run, tid, attempt), text,
+                     check=False, profile=s.profile, cwd=wt if os.path.isdir(wt) else None)
+    run._sessions = None
+    if out.returncode != 0:
+        file_died(run, task, attempt, s, f"claude --resume failed: {first_line(out.stderr.strip() or out.stdout.strip())}")
+        return "died"
+    said = out.stdout
+    match = BACKGROUNDED.search(said)
+    if any(line.strip().startswith("note:") for line in said.splitlines()) and match and match.group(1) != s.sid:
+        copy = {"id": match.group(1), "kind": "task", "attempt": attempt, "name": s.name or s.wtname,
+                "worktree": s.wtname, "model": session_model(task, s.sid), "sessionId": session_id,
+                **profile_field(s.profile)}
+        run.set_meta(task, sessions=recorded_sessions(task) + [copy])
+        stop_session(run, s.sid, check=False, profile=s.profile)  # a copy was started: keep one live session
+        run._sessions = None
+        run.emit("deliver-copy", tid, attempt, match.group(1), f"#{row['id']}: the resume started a copy {match.group(1)} "
+                 f"of {s.sid}; stopped the original")
+        return settle("resume", "copy")
+    forget_stopped(run, s.sid)
+    lower_flag(run, tid)
+    return settle("resume", "resume")
+
+
+def carry_thread(run, task, attempt):
+    """An attempt ended (a report, a stop, DIED): mark its open asks and unacked messages carried (meta only), and
+    lower the pointer flag. The next brief pastes them (carried_text). Nothing is deleted."""
+    tid, table = task["id"], mailbox_table(task)
+    th = Thread(run.results_for(tid), task, attempt)
+    changed = False
+    for row in th.open_asks() + th.unacked():
+        entry = table.setdefault(str(row["id"]), {"kind": row["kind"], "attempt": attempt})
+        if not entry.get("carried"):
+            entry["carried"], changed = True, True
+    if changed:
+        save_mailbox(run, task, table)
+    lower_flag(run, tid)
+
+
+def carried_text(rows, task, attempt):
+    """The text that CONTEXT pastes for the newest earlier attempt that has a thread: each ask with no answer or with
+    an answer that no ack names, the answers to those asks, and the steers with no ack. "" when there is none."""
+    earlier = sorted({r["attempt"] for r in message_rows(rows) if isinstance(r.get("attempt"), int) and r["attempt"] < attempt})
+    if not earlier:
+        return ""
+    th = Thread(rows, task, earlier[-1])
+    unacked = {r["id"] for r in th.unacked()}
+    parts = []
+    for ask in th.asks:
+        answer = th.answer_of(ask["id"])
+        if answer is None or answer["id"] in unacked:
+            parts.append(f"Ask #{ask['id']} ({'OPEN' if answer is None else 'answered, not acked'}):\n"
+                         + strip_comments(ask["body"]).strip())
+            if answer is not None:
+                parts.append(f"Answer #{answer['id']} by {answer['author']}:\n" + strip_comments(answer["body"]).strip())
+    parts += [f"Steer #{r['id']} by {r['author']} (not acked):\n" + strip_comments(r["body"]).strip() for r in th.steers
+              if r["id"] in unacked]
+    if not parts:
+        return ""
+    return (f"### Open thread of attempt {earlier[-1]}\n\nThese messages were not settled when that attempt ended. "
+            "Apply them to this attempt; they are the Manager's, not the worker's.\n\n" + "\n\n".join(parts))
+
+
+def mailbox_events(run, task, attempt, th):
+    """The part of `record` for a live attempt's thread: the asks, the due ones, the acks, and the retries of
+    deliveries. A retry may stop or resume a session, so the caller reads the session rows again."""
+    tid, table = task["id"], mailbox_table(task)
+    messaging, dirty = run.config["messaging"], False
+    for ask in th.asks:
+        entry, answer = table.get(str(ask["id"])), th.answer_of(ask["id"])
+        if answer is not None or (entry or {}).get("carried"):
+            continue
+        question, blocking = mbx.ask_question(ask["body"]), mbx.ask_blocking(ask["body"])
+        if not (entry or {}).get("seen"):
+            table[str(ask["id"])] = {"kind": mbx.ASK, "attempt": attempt, "seen": True}
+            dirty = True
+            run.emit("asked", tid, attempt, None,
+                     f"#{ask['id']} by {ask.get('author')}: {question}"
+                     + ("" if blocking else " (does not block; the worker goes on with its Default)"),
+                     f"run.py answer {tid} --ask {ask['id']} --file <answer.md>; or, when only the operator can answer, "
+                     f'tg add "<question>" --type decision --meta decider=operator --meta ask={ask["id"]} --blocks {tid}, '
+                     f"then run.py answer {tid} --ask {ask['id']} --decision <id>")
+        elif blocking:
+            run.emit("asking", tid, attempt, None, f"#{ask['id']} waits for an answer: {question}")
+        if minutes_since(ask.get("at")) >= messaging["ask_due_minutes"]:
+            run.emit("ask-due", tid, attempt, None, f"#{ask['id']} has had no answer for {messaging['ask_due_minutes']} minutes",
+                     f"run.py answer {tid} --ask {ask['id']} --default (the worker's Default: "
+                     f"{mbx.field_line(ask['body'], 'Default')})")
+    for row in sorted(th.answers + th.steers, key=lambda r: r["id"]):
+        entry = table.get(str(row["id"]))
+        if entry is None or entry.get("carried"):
+            continue
+        word = "answer" if row["kind"] == mbx.ANSWER else "steer"
+        if row["id"] in th.acked:
+            if not entry.get("seen"):
+                ack = [a for a in th.acks if mbx.ref_of(a.get("body")) == row["id"]][-1]
+                entry["seen"], dirty = True, True
+                via = {"resume": "resume", "socket": "socket"}.get(entry.get("via"), "hook" if entry.get("hook") else "pending")
+                run.emit(f"{word}-seen", tid, attempt, None,
+                         f"#{row['id']} acked by {ack.get('author')} (via {via}): {mbx.field_line(ack['body'], 'Action')}")
+                if not th.unacked():
+                    lower_flag(run, tid)
+            continue
+        if entry.get("via") == "socket" and minutes_since(entry.get("at")) >= messaging["pending_minutes"]:
+            entry.update(via="pending", socket_failed=True)  # posted, never acked: a bypass worker may hold it
+            dirty = True
+            run.emit("deliver-fallback", tid, attempt, None, f"#{row['id']}: no ack {messaging['pending_minutes']} minutes "
+                     "after the socket post; resuming the session instead")
+        if entry.get("via") == "pending":
+            if dirty:
+                save_mailbox(run, task, table)
+                dirty = False
+            deliver(run, task, row)
+            table = mailbox_table(task)
+            entry = table.get(str(row["id"])) or entry
+            if entry.get("via") == "pending" and minutes_since(entry.get("filed")) >= messaging["pending_minutes"]:
+                run.emit("steer-pending", tid, attempt, None,
+                         f"#{row['id']} ({row['kind']}) is not delivered after {messaging['pending_minutes']} minutes",
+                         f"run.py steer {tid} --file <same text> --interrupt, to stop and resume the worker")
+    if dirty:
+        save_mailbox(run, task, table)
+
+
+def refuse_ended(task, rows, attempt):
+    """Refuse a message to an attempt that has ended (a report, a stop or a DIED row is filed), or to a task that is not
+    running."""
+    tid = task["id"]
+    if task_rows(rows, attempt):
+        raise Refused(f"#{tid} attempt {attempt} has ended; write the text in the task notes (tg edit {tid} --notes ...) "
+                      "so the next brief carries it")
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Refused(f"cannot read {path}: {getattr(exc, 'strerror', None) or exc}")
+    if not text:
+        raise Refused(f"{path} is empty")
+    return text
+
+
+def file_message(run, task, attempt, kind, by, status, body):
+    """File an answer or a steer row and list it in the task's `mailbox` meta: the worker acts only on listed ids."""
+    row = run.add_result(task["id"], kind, attempt, by, status, body)
+    table = mailbox_table(task)
+    table[str(row["id"])] = {"kind": kind, "attempt": attempt, "via": "pending", "filed": utc_stamp(), "at": utc_stamp(), "tries": 0}
+    save_mailbox(run, task, table)
+    return row
+
+
+DELIVERED = {"socket": "posted to its socket; the worker's ack proves delivery",
+             "resume": "the session was resumed with the doorbell",
+             "copy": "the resume started a copy (the original is stopped)",
+             "hook": "the worker is busy and has no socket: the pointer flag shows it at its next tool call",
+             "pending": "not delivered yet; run.py record tries again",
+             "died": "the session could not be resumed; filed DIED"}
+
+
+def cmd_answer(run, args):
+    tid = args.id
+    task = run.show(tid)
+    refuse_legacy(task)
+    attempt = refuse_unless_running(task)
+    rows = run.results_for(tid)
+    th = Thread(rows, task, attempt)
+    if args.ask is not None:
+        ask = next((r for r in rows if r["id"] == args.ask and r["kind"] == mbx.ASK), None)
+        if ask is None:
+            raise Refused(f"#{tid} has no ask #{args.ask}; run.py inbox {tid} lists them")
+    else:
+        found = th.open_asks()
+        if not found:
+            raise Refused(f"#{tid} attempt {attempt} has no open ask; run.py inbox {tid} shows its thread")
+        ask = found[-1]
+    if ask.get("attempt") != attempt:
+        raise Refused(f"ask #{ask['id']} is of attempt {ask.get('attempt')}; #{tid} is on attempt {attempt}, so that "
+                      "worker is gone. Its thread is pasted into the next brief; put the answer in the task notes "
+                      f"(tg edit {tid} --notes ...) if it still matters")
+    refuse_ended(task, rows, attempt)
+    earlier = th.answer_of(ask["id"])
+    if earlier and not args.supersede:
+        raise Refused(f"ask #{ask['id']} is already answered by #{earlier['id']}; --supersede files a new answer")
+    if args.default:
+        text, source = mbx.field_text(ask["body"], "Default"), "default"
+    elif args.decision is not None:
+        node = run.show(args.decision)
+        if node["type"] != "decision" or node["status"] != "done":
+            raise Refused(f"#{args.decision} is not a decision that is done; answer it first (tg edit {args.decision} "
+                          f'--notes "<answer>", then tg done {args.decision})')
+        if str((node.get("meta") or {}).get("ask")) != str(ask["id"]):
+            raise Refused(f"decision #{args.decision} was not made for ask #{ask['id']}: it needs --meta ask={ask['id']}")
+        text, source = strip_comments(node.get("notes") or "").strip(), f"decision #{args.decision}"
+        if not text:
+            raise Refused(f"decision #{args.decision} has no notes; the answer goes in them")
+    else:
+        text, source = read_text(args.file), args.by
+    row = file_message(run, task, attempt, mbx.ANSWER, args.by, "ANSWERED",
+                       f"Re: #{ask['id']}\nAnswer: {text}\nSource: {source}\n")
+    word = deliver(run, task, row)
+    run.emit("answered", tid, attempt, None, f"#{row['id']} answers ask #{ask['id']} ({source}); {DELIVERED[word]}",
+             None if word == "died" else "run.py record shows answer-seen when the worker acks")
+
+
+def cmd_steer(run, args):
+    tid = args.id
+    task = run.show(tid)
+    refuse_legacy(task)
+    attempt = refuse_unless_running(task)
+    rows = run.results_for(tid)
+    s = worker_session(run, tid, attempt)
+    th = Thread(rows, task, attempt)
+    verifiers = [v for v in own_sessions(run, tid, "verify") if v.live]
+    if verifiers and not (s and s.live):
+        raise Refused(f"#{tid} has a verifier session {verifiers[0].describe()}; a verifier is read only and takes no "
+                      f"steer. Stop it with run.py record, or start another with run.py verify {tid} --again")
+    gone = f"#{tid} has no live worker in attempt {attempt}; write the text in the task notes (tg edit {tid} --notes ...) "\
+           "so the next brief carries it"
+    if s is None or (not s.live and not th.holds()):
+        raise Refused(gone)
+    if task_rows(rows, attempt):
+        raise Refused(gone)
+    text = read_text(args.file)
+    row = file_message(run, task, attempt, mbx.STEER, args.by, "SENT", f"Steer: {text}\nKind: {args.kind}\n")
+    word = deliver(run, task, row, interrupt=args.interrupt)
+    run.emit("steered", tid, attempt, None, f"#{row['id']} {args.kind} by {args.by}; {DELIVERED[word]}",
+             None if word == "died" else "run.py record shows steer-seen when the worker acks")
+
+
+def cmd_inbox(run, args):
+    """Show the thread of a task: asks, answers, steers and acks, with the delivery state of each message."""
+    tid = args.id
+    task = run.show(tid)
+    rows = message_rows(run.results_for(tid))
+    table = mailbox_table(task)
+    if not rows:
+        run.emit("inbox", tid, None, None, "no messages")
+        return
+    for r in rows:
+        entry = table.get(str(r["id"])) or {}
+        body = r.get("body") or ""
+        text = {mbx.ASK: mbx.ask_question(body), mbx.ANSWER: f"re #{mbx.ref_of(body)}: {mbx.field_line(body, 'Answer')}",
+                mbx.STEER: f"{mbx.field_line(body, 'Kind')}: {mbx.field_line(body, 'Steer')}",
+                mbx.ACK: f"re #{mbx.ref_of(body)}: {mbx.field_line(body, 'Action')}"}[r["kind"]]
+        state = ""
+        if r["kind"] in (mbx.ANSWER, mbx.STEER):
+            acked = r["id"] in mbx.acked_ids(rows, r.get("attempt"))
+            state = f" [{'acked' if acked else entry.get('via', 'not listed by run.py')}"
+            state += (f", {entry['tries']} tries" if entry.get("tries") else "") + (", carried" if entry.get("carried") else "") + "]"
+        elif r["kind"] == mbx.ASK:
+            state = "" if not entry.get("carried") else " [carried]"
+        run.emit("message", tid, r.get("attempt"), None,
+                 f"#{r['id']} {r['kind']} {r['status']} by {r.get('author')}{state}: {text}")
+
+
+def drop_mailbox(run, task):
+    """The run state of a task's mailbox goes with its worktree and sessions (a merge, an abandon): the `mailbox` meta,
+    and the inbox files of its attempts. The message rows stay in Taskgraph, as history."""
+    tid = task["id"]
+    if "mailbox" in (task.get("meta") or {}):
+        run.unset_meta(task, "mailbox")
+    folder = inbox_path(run, "")
+    for name in (os.listdir(folder) if os.path.isdir(folder) else []):
+        if re.fullmatch(rf"{tid}-\d+\.(addr|ctx\.json)|task-{tid}\.flag", name):
+            try:
+                os.remove(os.path.join(folder, name))
+            except OSError:
+                pass
 
 
 # ------------------------------------------------------------------ record
@@ -2249,6 +2763,18 @@ def record_in_progress(run, snap, task, unmanaged):
     if paused and paused[-1]["status"] == "STOPPED" and not HEAD_ANY.search(paused[-1]["body"]):
         commit_stopped(run, tid, attempt, rows, mine)  # finish the pause first: launch needs its Head line
         return
+    holds = False  # a worker that waits for an answer, or has a message it has not acked, is not dead and not stuck
+    if message_rows(rows):  # a project that never uses ask, answer or steer skips this
+        th = Thread(rows, task, attempt)
+        if task_rows(rows, attempt):  # the attempt ended: what is still open goes into the next brief
+            table = mailbox_table(task)
+            if any(not (table.get(str(r["id"])) or {}).get("carried") for r in th.open_asks() + th.unacked()):
+                carry_thread(run, task, attempt)
+        else:
+            mailbox_events(run, task, attempt, th)
+            mine = own_sessions(run, tid, "task", attempt)  # a delivery may have stopped or resumed the session
+            table = mailbox_table(task)
+            holds = bool(th.blocking()) or any((table.get(str(r["id"])) or {}).get("via") in ("pending", "socket") for r in th.unacked())
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
@@ -2313,6 +2839,8 @@ def record_in_progress(run, snap, task, unmanaged):
         return
     results = task_rows(rows, attempt)
     if not results:
+        if holds and not any(s.live and s.status == "busy" and not s.stuck for s in mine):
+            return  # mailbox_events said asked or asking, or a message waits for its delivery: the worker is not dead
         stuck = [s for s in mine if s.stuck]
         busy = [s for s in mine if s.live and s.status == "busy" and not s.stuck]
         unknown = [s for s in mine if s.unknown]
@@ -2929,6 +3457,7 @@ def cleanup(run, task, sweep=False):
             for folder in folders + legacy:
                 run.emit("kept", tid, None, None, f"{folder}: merge.remove_worktrees is false")
         return
+    drop_mailbox(run, task)  # the mailbox state goes with the worktree and the sessions; the message rows stay
     rows = own_sessions(run, tid)
     if not rows and not folders and not legacy:
         return
@@ -3446,6 +3975,7 @@ def stop_live(run, task, attempt, branch):
             run.add_result(tid, "task", attempt, "manager", "STOPPED",
                            f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nBranch: {branch}\n"
                            f"Stopped: {run.now()}\nReason: close\nFiles: None")
+            carry_thread(run, task, attempt)
         run._sessions = None  # the stopped row no longer counts as live
 
 
@@ -3689,6 +4219,7 @@ def cmd_stop(run, args):
     run.add_result(tid, "task", attempt, "manager", "STOPPED",
                    f"Session: {s.sid}\nWorktree: {wt}\nBranch: {branch}\nStopped: {run.now()}\nReason: {reason}\n"
                    f"Files: {files or 'None'}")
+    carry_thread(run, task, attempt)
     counts = ("a pause: the attempt does not count" if reason == "pause"
               else f"no STOP order: attempt {attempt} counts toward the cap of {MAX_ATTEMPTS}")
     run.emit("stopped", tid, attempt, s.sid, f"session {s.sid} ({counts}); run.py record commits its WIP once it has exited")
@@ -3712,6 +4243,7 @@ def cmd_abandon(run, args):
             record_row(run, task, s, attempt)
             stop_session(run, s.sid, profile=s.profile)
     run.edit_meta(tid, abandoned=args.mode)
+    drop_mailbox(run, task)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
@@ -3931,7 +4463,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,check-report,wait,notify-to}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -4001,6 +4533,26 @@ def build_parser():
                    help=f"pr mode: seconds between two reads of the code host (default {WAIT_HOST_INTERVAL}; "
                         "the host limits its rate, so keep the default)")
 
+    p = sub.add_parser("answer", help="answer a worker's ask: the answer is a Taskgraph row, and a doorbell wakes the worker")
+    p.add_argument("id", type=int)
+    p.add_argument("--ask", type=int, help="the ask row id (default: the newest open ask of the current attempt)")
+    how = p.add_mutually_exclusive_group(required=True)
+    how.add_argument("--file", help="the answer text")
+    how.add_argument("--default", action="store_true", help="answer with the ask's own Default line")
+    how.add_argument("--decision", type=int, help="a decision that is done and has --meta ask=<ask id>: its notes are the answer")
+    p.add_argument("--supersede", action="store_true", help="answer an ask that is already answered")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+
+    p = sub.add_parser("steer", help="send a running worker a message: change its focus, order or approach inside SCOPE")
+    p.add_argument("id", type=int)
+    p.add_argument("--file", required=True, help="the steer text")
+    p.add_argument("--kind", choices=("info", "redirect", "wrap-up"), default="info")
+    p.add_argument("--interrupt", action="store_true", help="stop the worker and resume it with the doorbell, even when busy")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+
+    p = sub.add_parser("inbox", help="show the messages of a task: asks, answers, steers, acks and their delivery state")
+    p.add_argument("id", type=int)
+
     p = sub.add_parser("notify-to", help="set, clear, or show the session that sessions message after their result")
     p.add_argument("name", nargs="?", help="the bare session name from the first line of ListAgents")
     p.add_argument("--clear", action="store_true", help="remove the name; new briefs have no notify step")
@@ -4009,7 +4561,7 @@ def build_parser():
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "wait": cmd_wait, "notify-to": cmd_notify_to}
+            "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 def main(argv=None):

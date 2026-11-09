@@ -7,15 +7,19 @@ logs every call and answers from files the test writes. Nothing here starts a
 real Claude session or reaches a real code host.
 """
 
+import datetime
 import functools
 import json
 import os
 import re
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import types
 import unittest
@@ -38,7 +42,7 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")  # the Claude profile of this c
 with open(os.environ["FAKE_CLAUDE_LOG"], "a") as fh:
     fh.write(json.dumps(argv) + "\n")
 with open(os.environ["FAKE_CLAUDE_LOG"] + ".dirs", "a") as fh:  # the same calls, with the profile directory of each
-    fh.write(json.dumps({"argv": argv, "dir": config_dir}) + "\n")
+    fh.write(json.dumps({"argv": argv, "dir": config_dir, "cwd": os.getcwd()}) + "\n")
 
 
 def read(name):
@@ -61,6 +65,24 @@ if cmd == "agents":
 elif cmd == "plugin":  # `plugin list --json`: <dir>/plugins.json of the profile, else nothing installed
     path = os.path.join(config_dir, "plugins.json") if config_dir else None
     print((open(path).read() if path and os.path.isfile(path) else None) or "[]")
+elif cmd == "--bg" and "--resume" in argv:  # `claude --bg --resume <sessionId> [--settings JSON] "<prompt>"`
+    wanted = argv[argv.index("--resume") + 1]
+    if os.environ.get("FAKE_CLAUDE_RESUME_FAIL"):
+        sys.stderr.write(os.environ["FAKE_CLAUDE_RESUME_FAIL"] + "\n")
+        sys.exit(1)
+    rows = json.load(open(agents_path)) if agents_path and os.path.isfile(agents_path) else []
+    found = [row for row in rows if row.get("sessionId") == wanted]
+    if found and os.environ.get("FAKE_CLAUDE_RESUME_COPY"):  # the session still runs: a copy starts under a new id
+        rows.append(dict(found[0], id="sess-copy", status="busy", state="working", pid=4400))
+        open(agents_path, "w").write(json.dumps(rows))
+        sys.stdout.write("backgrounded \u00b7 sess-copy \u00b7 %s\nnote: session %s is still running; started a copy\n"
+                         % (found[0].get("name"), wanted))
+    else:
+        for row in found:  # the session continues in place, under the same id
+            row.update(status="busy", state="working", pid=4300)
+        if found:
+            open(agents_path, "w").write(json.dumps(rows))
+        sys.stdout.write("backgrounded \u00b7 %s \u00b7 %s\n" % (found[0]["id"] if found else wanted, found[0].get("name") if found else ""))
 elif cmd == "--bg":
     wt = os.path.join(".claude", "worktrees", argv[argv.index("--worktree") + 1])
     if os.environ.get("FAKE_CLAUDE_DIRTY"):  # the session wrote a file before it failed
@@ -209,6 +231,43 @@ def transcript(output_tokens):
                                            "cache_read_input_tokens": 5, "cache_creation_input_tokens": 7}}},
     ]
     return "".join(json.dumps(r) + "\n" for r in records)
+
+
+class Doorbell:
+    """A fake inbox socket of a session: it records each line that run.py posts. The path is short, as the real
+    ones are (a Unix socket path holds about 104 bytes); nothing here touches /tmp/cc-socks."""
+
+    def __init__(self):
+        self.dir = tempfile.mkdtemp(prefix="at-", dir="/tmp")
+        self.path = os.path.join(self.dir, "s")
+        assert len(self.path) < 100, self.path
+        self.lines = []
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(self.path)
+        self.server.listen(5)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while chunk := conn.recv(4096):
+                    data += chunk
+                self.lines += [json.loads(line) for line in data.decode("utf-8").splitlines() if line]
+
+    def wait_for(self, count, seconds=5):
+        end = time.time() + seconds
+        while len(self.lines) < count and time.time() < end:
+            time.sleep(0.02)
+        return self.lines
+
+    def close(self):
+        self.server.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 def both_hosts(test):
@@ -7147,6 +7206,632 @@ class MessagingTest(Base):
         self.assertEqual(self.ok("check-report", report, "--mailbox", ctx).stdout, "ok\n")
         os.remove(ctx)  # an unreadable context degrades to the plain check
         self.assertEqual(self.ok("check-report", report, "--mailbox", ctx).stdout, "ok\n")
+
+
+UUID1 = "3fa9c1d2-0b7e-4c55-9a11-6d2f8e0b1c44"
+
+
+class DeliveryTest(Base):
+    """Asks, answers, steers and their delivery, for a worker on the profile c2 (the fake claude keeps one session
+    list per CLAUDE_CONFIG_DIR). Every socket here is a fake server in a temp folder."""
+
+    def setUp(self):
+        super().setUp()
+        self.c2 = os.path.join(self.dir, "claude-2")
+        os.makedirs(self.c2)
+        self.env["FAKE_CLAUDE_PROFILES"] = "1"  # stop of a session that the profile does not list fails
+        self.env["FAKE_CLAUDE_STOP_CLEARS_STATUS"] = "1"  # like the real CLI: after `claude stop` the row has no process
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n', sessions="max_parallel = 3\n")
+        self.bells = []
+
+    def tearDown(self):
+        for bell in self.bells:
+            bell.close()
+        super().tearDown()
+
+    # --- fixtures
+
+    def c2_agents(self, *rows):
+        with open(os.path.join(self.c2, "agents.json"), "w") as fh:
+            json.dump(list(rows), fh)
+
+    def worker(self, attempt=1, status="idle", state="blocked", transcript=True, profile="c2", sid=UUID1, **row_extra):
+        """A task whose attempt `attempt` runs on c2: its `sessions` entry (with the full session id), its row in
+        c2's session list, and the transcript that --resume needs."""
+        task = self.running_task(attempt=attempt, sessions=[{**self.entry(1, attempt), "profile": profile, "sessionId": sid}])
+        self.c2_agents(self.row("task-1", attempt, status=status, state=state, sessionId=sid, **row_extra))
+        if transcript:
+            folder = os.path.join(self.c2, "projects", re.sub(r"[^A-Za-z0-9]", "-", self.task_wt(task)))
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, sid + ".jsonl"), "w") as fh:
+                fh.write(transcript_text(1))
+        return task
+
+    def ask(self, task=1, attempt=1, body="Question: Which endpoint?\nOptions: v1, v2\nDefault: v2\nBlocking: yes\nWhy: both\n"):
+        return self.add_result(task, "OPEN", body, kind="ask", attempt=attempt, by=f"task-{task}-{attempt}")["id"]
+
+    def ack(self, row_id, task=1, attempt=1, action="doing it"):
+        return self.add_result(task, "SEEN", f"Re: #{row_id}\nAction: {action}\n", kind="ack", attempt=attempt, by=f"task-{task}-{attempt}")
+
+    def text_file(self, text, name="a.md"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def bell(self):
+        bell = Doorbell()
+        self.bells.append(bell)
+        return bell
+
+    def checkin(self, bell, task=1, attempt=1, session_id=UUID1, at=None):
+        """What the SessionStart hook writes: where the session listens."""
+        os.makedirs(self.inbox_file("x").rsplit("/", 1)[0], exist_ok=True)
+        with open(self.inbox_file(f"{task}-{attempt}.addr"), "w") as fh:
+            json.dump({"socket": bell.path, "session_id": session_id, "at": time.time() if at is None else at}, fh)
+
+    def old(self, minutes):
+        return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def mailbox_meta(self, task=1):
+        return self.meta(task).get("mailbox") or {}
+
+    def set_mailbox(self, task, table):
+        self.tg("edit", str(task), "--meta", "mailbox=" + json.dumps(table))
+
+    def calls_in(self, command, directory):
+        """The logged claude calls of `command` made under one CLAUDE_CONFIG_DIR: [(argv, cwd)]."""
+        with open(self.log + ".dirs") as fh:
+            found = [json.loads(line) for line in fh if line.strip()]
+        return [(c["argv"], c["cwd"]) for c in found if c["argv"] and c["argv"][0] == command and c["dir"] == directory]
+
+    def doorbell(self, row_id, kind, task=1, attempt=1):
+        return (f"agentic-team: task {task} attempt {attempt} has message #{row_id} ({kind}). Run: "
+                f'"{sys.executable}" "{self.MAILBOX_PY}" --ctx "{self.inbox_file(f"{task}-{attempt}.ctx.json")}" inbox')
+
+    def stopped_ids(self):
+        path = os.path.join(self.root, ".agentic-team", "stopped-sessions")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return fh.read().split()
+
+    def resumes(self):
+        return [c for c in self.calls("--bg") if "--resume" in c]
+
+    # --- T3: a waiting worker is not dead and not stuck
+
+    def test_t3_a_blocked_row_with_an_open_ask_is_asking_and_nothing_is_stopped_or_filed(self):
+        task = self.worker()
+        ask = self.ask()
+        events = self.events("record")
+        asked = self.one(events, "asked")
+        self.assertEqual((asked["task"], asked["attempt"]), (task, 1))
+        self.assertIn(f"#{ask} by task-1-1: Which endpoint?", asked["detail"])
+        self.assertIn(f"run.py answer {task} --ask {ask} --file <answer.md>", asked["next"])
+        for gone in ("stuck", "died", "unknown", "running"):
+            self.assertEqual(self.named(events, gone), [])
+        again = self.events("record")
+        self.assertEqual(self.named(again, "asked"), [])  # printed once
+        self.assertEqual(self.one(again, "asking")["detail"], f"#{ask} waits for an answer: Which endpoint?")
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual([r["status"] for r in self.results(task)], ["OPEN"])  # no BLOCKED, no DIED
+
+    def test_t3_a_row_that_reads_done_with_no_status_is_not_filed_as_died_while_an_ask_is_open(self):
+        task = self.worker(status=None, state="done")  # what a parked worker and a dead one both look like
+        self.ask()
+        events = self.events("record")
+        self.one(events, "asked")
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual([r["status"] for r in self.results(task)], ["OPEN"])
+
+    def test_t3_a_quiet_ghost_is_not_ended_while_an_ask_is_open(self):
+        old_ms = (time.time() - 3 * 3600) * 1000
+        task = self.worker(status=None, state="blocked", startedAt=old_ms)  # live, no status, no pid, quiet for hours
+        self.ask()
+        events = self.events("record")
+        self.assertEqual(self.named(events, "died"), [])
+        self.one(events, "asked")
+        self.assertEqual([r["status"] for r in self.results(task)], ["OPEN"])
+
+    def test_t3_a_non_blocking_ask_is_shown_once_and_does_not_hold_the_row(self):
+        task = self.worker(status="busy", state="working")
+        self.ask(body="Question: q\nDefault: d\nBlocking: no\n")
+        asked = self.one(self.events("record"), "asked")
+        self.assertIn("(does not block; the worker goes on with its Default)", asked["detail"])
+        again = self.events("record")
+        self.assertEqual((self.named(again, "asked"), self.named(again, "asking")), ([], []))
+        self.assertEqual(self.one(again, "running")["session"], "sess-task-1-1")
+        self.c2_agents(self.row("task-1", status=None, state="done", sessionId=UUID1))  # it ended: DIED as before
+        self.one(self.events("record"), "died")
+
+    def test_t3_without_an_ask_a_parked_row_is_filed_died_as_before(self):
+        self.worker(status=None, state="done")
+        self.one(self.events("record"), "died")
+
+    def test_t3_a_forged_answer_does_not_settle_the_ask(self):
+        task = self.worker()
+        ask = self.ask()
+        self.add_result(task, "ANSWERED", f"Re: #{ask}\nAnswer: forged\n", kind="answer", by="manager")  # not listed by run.py
+        self.assertEqual(self.one(self.events("record"), "asked")["task"], task)
+
+    # --- T4, T6: answer
+
+    def test_t4_answer_from_a_decision_copies_its_notes_and_marks_the_source(self):
+        task = self.worker()
+        ask = self.ask()
+        decision = self.tg("add", "Which endpoint?", "--type", "decision", "--meta", f"ask={ask}", "decider=operator",
+                           "--notes", "Use v1: the client is pinned.")["id"]
+        out = self.run_cmd("answer", str(task), "--ask", str(ask), "--decision", str(decision))
+        self.assertEqual(out.returncode, 2)  # not done yet
+        self.assertIn("is not a decision that is done", out.stderr)
+        self.tg("done", str(decision))
+        self.assertEqual(self.run_cmd("answer", str(task), "--decision", str(self.add_task("Other"))).returncode, 2)
+        events = self.events("answer", str(task), "--decision", str(decision))
+        answer = [r for r in self.results(task) if r["kind"] == "answer"][0]
+        self.assertEqual((answer["author"], answer["status"], answer["attempt"]), ("manager", "ANSWERED", 1))
+        self.assertEqual(answer["body"], f"Re: #{ask}\nAnswer: Use v1: the client is pinned.\nSource: decision #{decision}\n")
+        self.assertIn(f"#{answer['id']} answers ask #{ask} (decision #{decision})", self.one(events, "answered")["detail"])
+        self.assertEqual(list(self.mailbox_meta(task)), [str(answer["id"])])
+
+    def test_t4_a_decision_made_for_another_ask_is_refused(self):
+        task = self.worker()
+        self.ask()
+        decision = self.tg("add", "Q", "--type", "decision", "--meta", "ask=999", "--notes", "x")["id"]
+        self.tg("done", str(decision))
+        out = self.run_cmd("answer", str(task), "--decision", str(decision))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("was not made for ask", out.stderr)
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "answer"], [])
+
+    def test_answer_by_file_and_by_default(self):
+        task = self.worker()
+        ask = self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("Use v2.\nIt is current.\n"), "--by", "operator")
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual((answer["author"], answer["body"]), ("operator", f"Re: #{ask}\nAnswer: Use v2.\nIt is current.\nSource: operator\n"))
+        self.fresh()
+        self.setUp()
+        task = self.worker()
+        ask = self.ask()
+        self.ok("answer", str(task), "--default")
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(answer["body"], f"Re: #{ask}\nAnswer: v2\nSource: default\n")
+
+    def test_t6_answer_refuses_an_ask_of_an_ended_attempt_and_a_second_answer_without_supersede(self):
+        task = self.worker()
+        ask = self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("first"))
+        out = self.run_cmd("answer", str(task), "--ask", str(ask), "--file", self.text_file("second"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"ask #{ask} is already answered by #", out.stderr)
+        self.assertIn("--supersede", out.stderr)
+        self.ok("answer", str(task), "--ask", str(ask), "--file", self.text_file("second"), "--supersede")
+        self.assertEqual(len([r for r in self.results(task) if r["kind"] == "answer"]), 2)
+        # the attempt ends (a report is filed): its asks cannot be answered
+        other = self.running_task(attempt=2)
+        old = self.ask(task=other, attempt=1)
+        out = self.run_cmd("answer", str(other), "--ask", str(old), "--file", self.text_file("late"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("is of attempt 1; #2 is on attempt 2", out.stderr)
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=1)
+        third = self.ask(task=task)
+        out = self.run_cmd("answer", str(task), "--ask", str(third), "--file", self.text_file("late"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("attempt 1 has ended", out.stderr)
+        self.assertEqual(self.run_cmd("answer", str(task), "--ask", "999", "--file", self.text_file("x")).returncode, 2)
+
+    def test_answer_with_no_open_ask_is_refused(self):
+        task = self.worker()
+        out = self.run_cmd("answer", str(task), "--file", self.text_file("x"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("has no open ask", out.stderr)
+
+    # --- T5: due
+
+    def test_t5_an_ask_past_its_due_time_prints_ask_due_with_the_default_hint_and_files_nothing(self):
+        task = self.worker()
+        ask = self.ask(body="Question: q\nOptions: a, b\nDefault: b\nBlocking: yes\n")
+        self.assertEqual(self.named(self.events("record"), "ask-due"), [])
+        with sqlite3.connect(self.db) as conn:  # the ask was filed 90 minutes ago
+            conn.execute("UPDATE results SET at=? WHERE id=?", (self.old(90), ask))
+        before = self.results(task)
+        due = self.one(self.events("record"), "ask-due")
+        self.assertEqual(due["detail"], f"#{ask} has had no answer for 60 minutes")
+        self.assertEqual(due["next"], f"run.py answer {task} --ask {ask} --default (the worker's Default: b)")
+        self.assertEqual(self.results(task), before)  # run.py never decides
+        self.assertEqual(self.calls("stop"), [])
+
+    # --- T7: steer
+
+    def test_t7_steer_refuses_a_verifier_and_a_task_with_no_live_worker(self):
+        task = self.running_task()
+        steer = self.text_file("use v2")
+        out = self.run_cmd("steer", str(task), "--file", steer)  # no session row at all
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("has no live worker in attempt 1; write the text in the task notes", out.stderr)
+        self.agents(self.finished("task-1"))  # a finished worker with nothing open
+        self.assertEqual(self.run_cmd("steer", str(task), "--file", steer).returncode, 2)
+        self.agents(self.finished("task-1"), self.row("verify-1-1", status="busy"))
+        self.record_sessions(task, self.entry(task), self.entry(task, kind="verify"))
+        out = self.run_cmd("steer", str(task), "--file", steer)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("a verifier is read only and takes no steer", out.stderr)
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "steer"], [])
+        self.assertEqual(self.mailbox_meta(task), {})
+
+    def test_t7_steer_refuses_an_attempt_that_has_ended(self):
+        task = self.worker(status="busy", state="working")
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nCheckpoint: x\n")
+        out = self.run_cmd("steer", str(task), "--file", self.text_file("x"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("no live worker", out.stderr)
+
+    # --- T8: the socket
+
+    def busy_worker_with_socket(self, **extra):
+        """A busy worker with a process, a check-in file for its session, and a fake socket."""
+        task = self.worker(status="busy", state="working", pid=4242, startedAt=(time.time() - 60) * 1000, **extra)
+        bell = self.bell()
+        self.checkin(bell)
+        return task, bell
+
+    def test_t8_a_steer_is_posted_to_the_socket_of_a_busy_worker_without_a_restart(self):
+        task, bell = self.busy_worker_with_socket()
+        events = self.events("steer", str(task), "--file", self.text_file("use v2"), "--kind", "redirect")
+        (row,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.assertEqual((row["author"], row["status"], row["body"]), ("manager", "SENT", "Steer: use v2\nKind: redirect\n"))
+        self.assertEqual(bell.wait_for(1), [{"type": "user", "message": {"role": "user", "content": self.doorbell(row["id"], "steer")}}])
+        self.assertIn("posted to its socket; the worker's ack proves delivery", self.one(events, "steered")["detail"])
+        self.assertEqual((self.calls("stop"), self.resumes()), ([], []))
+        entry = self.mailbox_meta(task)[str(row["id"])]
+        self.assertEqual((entry["via"], entry["kind"], entry["attempt"], entry["tries"]), ("socket", "steer", 1, 1))
+        self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
+
+    def test_t8_an_answer_wakes_an_idle_worker_through_its_socket(self):
+        task = self.worker(status="idle", state="blocked", pid=4242, startedAt=(time.time() - 60) * 1000)
+        bell = self.bell()
+        self.checkin(bell)
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(bell.wait_for(1)[0]["message"]["content"], self.doorbell(answer["id"], "answer"))
+        self.assertEqual((self.calls("stop"), self.resumes()), ([], []))
+        self.assertEqual(self.named(self.events("record"), "asking"), [])  # answered: the ask is settled
+
+    def test_t8_a_checkin_for_another_session_or_older_than_the_row_is_not_used(self):
+        cases = {"another session": dict(session_id="some-other-uuid"), "older than the row's start": dict(at=time.time() - 3600)}
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                self.fresh()
+                self.setUp()
+                task = self.worker(status="idle", pid=4242, startedAt=(time.time() - 60) * 1000)
+                bell = self.bell()
+                self.checkin(bell, **kwargs)
+                self.ask()
+                events = self.events("answer", str(task), "--file", self.text_file("v2"))
+                time.sleep(0.2)
+                self.assertEqual(bell.lines, [])  # never posted to a socket whose session was not matched
+                fallback = self.one(events, "deliver-fallback")
+                self.assertIn("the socket post did not work (the check-in file is stale or for another session)", fallback["detail"])
+                self.assertEqual(len(self.resumes()), 1)  # the fallback: stop plus resume
+                self.assertEqual(self.mailbox_meta(task)[str(self.results(task)[-1]["id"])]["via"], "resume")
+
+    def test_t8_a_refused_connection_falls_back_to_resume_and_two_failures_turn_the_socket_off(self):
+        task, bell = self.busy_worker_with_socket()
+        self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242,
+                                startedAt=(time.time() - 60) * 1000))
+        bell.close()  # connect fails
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertIn("the socket post did not work", self.one(events, "deliver-fallback")["detail"])
+        self.assertIn("No such file or directory", self.one(events, "deliver-fallback")["detail"])
+        self.assertEqual(len(self.resumes()), 1)
+        self.assertEqual(len(self.calls("stop")), 1)
+
+    def test_t8_the_session_registry_is_the_fallback_address_and_only_for_a_matching_session_id(self):
+        for name, registry_id, posted in (("matching", UUID1, 1), ("another session", "other-uuid", 0)):
+            with self.subTest(name):
+                self.fresh()
+                self.setUp()
+                task = self.worker(status="idle", pid=4242)
+                bell = self.bell()
+                os.makedirs(os.path.join(self.c2, "sessions"))
+                with open(os.path.join(self.c2, "sessions", "4242.json"), "w") as fh:  # internal to Claude Code (CLI 2.1.319)
+                    json.dump({"pid": 4242, "sessionId": registry_id, "messagingSocketPath": bell.path}, fh)
+                self.ask()
+                self.ok("answer", str(task), "--file", self.text_file("v2"))
+                time.sleep(0.2)
+                self.assertEqual(len(bell.lines), posted)
+                self.assertEqual(len(self.resumes()), 1 - posted)
+
+    def test_t8_without_a_session_id_in_the_row_there_is_no_socket(self):
+        task = self.worker(status="idle", pid=4242)
+        self.c2_agents(self.row("task-1", status="idle", state="blocked", pid=4242))  # a row with no sessionId
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertIn("the agents row has no sessionId", self.one(events, "deliver-fallback")["detail"])
+
+    def test_t8_the_resume_doorbell_config_posts_to_no_socket(self):
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[messaging]\ndoorbell = "resume"\n', sessions="max_parallel = 3\n")
+        task, bell = self.busy_worker_with_socket()
+        self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242, startedAt=(time.time() - 60) * 1000))
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        time.sleep(0.2)
+        self.assertEqual(bell.lines, [])
+        self.assertEqual(len(self.resumes()), 1)
+
+    def test_t8_a_stale_checkin_file_of_an_earlier_attempt_is_never_used(self):
+        task = self.worker(attempt=2, status="idle", pid=4242, startedAt=(time.time() - 60) * 1000)
+        bell = self.bell()
+        self.checkin(bell, attempt=1)  # attempt 1 left its address; attempt 2 has not checked in
+        self.ask(attempt=2)
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        time.sleep(0.2)
+        self.assertEqual(bell.lines, [])
+        self.assertEqual(len(self.resumes()), 1)
+        # even the same session id in attempt 1's file does not count for attempt 2: the file is named by attempt
+        self.assertTrue(os.path.exists(self.inbox_file("1-1.addr")))
+
+    def test_t8b_a_post_with_no_ack_after_pending_minutes_goes_back_to_pending_and_resumes(self):
+        task, bell = self.busy_worker_with_socket()
+        self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242, startedAt=(time.time() - 60) * 1000))
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(len(bell.wait_for(1)), 1)
+        key = str(answer["id"])
+        table = self.mailbox_meta(task)
+        self.assertEqual(table[key]["via"], "socket")
+        self.assertEqual(self.resumes(), [])
+        events = self.events("record")  # posted a moment ago: still waiting for the ack
+        self.assertEqual((self.named(events, "deliver-fallback"), self.resumes()), ([], []))
+        table[key]["at"] = self.old(30)  # a worker in bypass mode holds the message: no ack in 30 minutes
+        self.set_mailbox(task, table)
+        events = self.events("record")
+        self.assertIn("no ack 10 minutes after the socket post", self.one(events, "deliver-fallback")["detail"])
+        self.assertEqual(len(self.resumes()), 1)
+        self.assertEqual(self.mailbox_meta(task)[key]["via"], "resume")
+        self.assertTrue(self.mailbox_meta(task)[key]["socket_failed"])
+        self.assertEqual(len(bell.lines), 1)  # not posted a second time
+
+    # --- T8c: a failed resume is the only DIED
+
+    def test_t8c_a_resume_that_exits_non_zero_files_died_and_carries_the_thread(self):
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="no such conversation"))
+        died = self.one(events, "died")
+        self.assertIn("claude --resume failed: no such conversation", died["detail"])
+        self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("DIED", "manager")])
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertTrue(self.mailbox_meta(task)[str(answer["id"])]["carried"])  # the unacked answer goes into the next brief
+        self.assertIn("run.py launch", died["next"])
+
+    def test_t8c_a_resume_with_no_transcript_files_died_without_starting_claude(self):
+        task = self.worker(status=None, state="done", transcript=False)
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertIn("its transcript is gone", self.one(events, "died")["detail"])
+        self.assertEqual(self.resumes(), [])
+
+    # --- T9, T10: stop plus resume
+
+    def test_t9_an_idle_worker_on_c2_is_stopped_and_resumed_under_its_profile_in_its_worktree(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)  # idle, but its process still runs
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        stops = self.calls_in("stop", self.c2)
+        self.assertEqual([a for a, _ in stops], [["stop", "sess-task-1-1"]])
+        (resume,) = [(a, cwd) for a, cwd in self.calls_in("--bg", self.c2) if "--resume" in a]
+        argv, cwd = resume
+        self.assertEqual(argv, ["--bg", "--resume", UUID1, "--settings", self.worker_settings(1, 1), self.doorbell(answer["id"], "answer")])
+        self.assertEqual(os.path.realpath(cwd), os.path.realpath(self.wt_path("task-1")))
+        self.assertIn("the session was resumed with the doorbell", self.one(events, "answered")["detail"])
+        self.assertEqual(self.mailbox_meta(task)[str(answer["id"])]["via"], "resume")
+        self.assertEqual(self.stopped_ids(), [])  # resumed: not stopped any more
+        self.assertEqual(self.one(self.events("record"), "running")["session"], "sess-task-1-1")  # the same row, busy again
+        self.assertEqual(self.calls_in("stop", None), [])  # nothing ran under the Manager's profile
+
+    def test_t9_a_parked_worker_with_no_process_is_resumed_without_a_stop(self):
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(len(self.resumes()), 1)
+
+    def test_t9_a_stop_that_leaves_the_process_alive_is_not_resumed(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        env = {k: v for k, v in self.env.items() if k != "FAKE_CLAUDE_STOP_CLEARS_STATUS"}  # the row keeps its pid
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=env)
+        self.assertEqual(len([e for e in self.named(events, "deliver-fallback") if "did not exit after claude stop" in e["detail"]]), 1)
+        self.assertEqual(self.resumes(), [])
+        self.assertEqual(list(self.mailbox_meta(task).values())[0]["via"], "pending")
+
+    def test_t10_a_resume_that_starts_a_copy_records_it_and_stops_the_original(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_COPY="1"))
+        copy = self.one(events, "deliver-copy")
+        self.assertEqual(copy["session"], "sess-copy")
+        ids = [e["id"] for e in self.meta(task)["sessions"]]
+        self.assertEqual(ids, ["sess-task-1-1", "sess-copy"])
+        self.assertEqual(self.meta(task)["sessions"][1]["profile"], "c2")
+        self.assertEqual(self.meta(task)["sessions"][1]["sessionId"], UUID1)
+        self.assertEqual([a for a, _ in self.calls_in("stop", self.c2)], [["stop", "sess-task-1-1"], ["stop", "sess-task-1-1"]])
+        self.assertIn("the resume started a copy (the original is stopped)", self.one(events, "answered")["detail"])
+
+    # --- T11, T12: the pointer flag, acks
+
+    def test_t11_a_busy_worker_with_no_socket_gets_the_pointer_flag_and_steer_pending_after_ten_minutes(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        events = self.events("steer", str(task), "--file", self.text_file("use v2"))
+        (row,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        flag = self.inbox_file("task-1.flag")
+        with open(flag) as fh:
+            self.assertEqual(fh.read(), self.doorbell(row["id"], "steer") + "\n")
+        self.assertIn("pointer flag shows it at its next tool call", self.one(events, "steered")["detail"])
+        self.assertEqual((self.calls("stop"), self.resumes()), ([], []))  # a busy worker is not interrupted
+        self.assertEqual(self.mailbox_meta(task)[str(row["id"])]["via"], "pending")
+        again = self.events("record")
+        self.assertEqual(self.named(again, "steer-pending"), [])
+        table = self.mailbox_meta(task)
+        table[str(row["id"])]["filed"] = self.old(20)
+        self.set_mailbox(task, table)
+        pending = self.one(self.events("record"), "steer-pending")
+        self.assertEqual(pending["next"], f"run.py steer {task} --file <same text> --interrupt, to stop and resume the worker")
+        self.assertEqual(self.resumes(), [])
+        # --interrupt: stop plus resume, even though it is busy
+        self.ok("steer", str(task), "--file", self.text_file("use v2 now"), "--interrupt")
+        self.assertEqual(len(self.resumes()), 1)
+        self.assertEqual(len(self.calls("stop")), 1)
+
+    def test_t12_an_ack_lowers_the_flag_and_record_prints_steer_seen(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("use v2"))
+        (row,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.assertTrue(os.path.exists(self.inbox_file("task-1.flag")))
+        self.ack(row["id"], action="switch to v2")
+        seen = self.one(self.events("record"), "steer-seen")
+        self.assertEqual(seen["detail"], f"#{row['id']} acked by task-1-1 (via hook): switch to v2")
+        self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
+        self.assertEqual(self.named(self.events("record"), "steer-seen"), [])  # once
+
+    def test_t12_answer_seen_names_the_transport(self):
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.ack(answer["id"], action="use v2")
+        self.assertEqual(self.one(self.events("record"), "answer-seen")["detail"], f"#{answer['id']} acked by task-1-1 (via resume): use v2")
+        # the ask is answered and acked: a row that ended is DIED again, as for any worker
+        self.assertEqual(self.named(self.events("record"), "asking"), [])
+
+    # --- T13: carried
+
+    def test_t13_an_attempt_that_ends_with_an_open_ask_and_an_unacked_steer_is_pasted_into_the_next_brief(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        ask = self.ask()
+        self.ok("steer", str(task), "--file", self.text_file("skip the docs"))
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.add_result(task, "BLOCKED", "Task: 1\nStatus: BLOCKED\nCheckpoint: x\n")
+        self.c2_agents(self.finished("task-1"))
+        self.one(self.events("record"), "arrived")
+        table = self.mailbox_meta(task)
+        self.assertTrue(table[str(steer["id"])]["carried"])
+        self.assertTrue(table[str(ask)]["carried"])
+        self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
+        brief = self.section(self.brief(task), "CONTEXT")
+        self.assertIn("### Open thread of attempt 1", brief)
+        self.assertIn(f"Ask #{ask} (OPEN):\nQuestion: Which endpoint?", brief)
+        self.assertIn(f"Steer #{steer['id']} by manager (not acked):\nSteer: skip the docs", brief)
+        self.assertEqual(len([r for r in self.results(task) if r["kind"] in ("ask", "steer")]), 2)  # the rows stay
+
+    def test_t13_a_settled_thread_is_not_pasted_and_an_answered_unacked_ask_is(self):
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n")
+        self.c2_agents(self.finished("task-1"))
+        text = self.section(self.brief(task), "CONTEXT")
+        self.assertIn(f"Ask #{ask} (answered, not acked):", text)
+        self.assertIn(f"Answer #{answer['id']} by manager:\nRe: #{ask}", text)
+        self.ack(answer["id"])
+        self.assertNotIn("Open thread", self.section(self.brief(task), "CONTEXT"))
+
+    def test_stop_and_close_carry_the_thread(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("x"))
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.ok("stop", str(task))
+        self.assertTrue(self.mailbox_meta(task)[str(steer["id"])]["carried"])
+        self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
+
+    # --- run state: launch, cleanup, abandon
+
+    def test_a_new_attempt_drops_the_delivery_state_of_earlier_attempts_and_the_stale_flag(self):
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n")
+        self.assertEqual(len(self.mailbox_meta(task)), 1)
+        os.makedirs(os.path.dirname(self.inbox_file("x")), exist_ok=True)
+        with open(self.inbox_file("task-1.flag"), "w") as fh:
+            fh.write("stale\n")
+        self.c2_agents(self.finished("task-1"))
+        self.ok("launch", str(task), "--profile", "c2")
+        self.assertNotIn("mailbox", self.meta(task))
+        self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
+        self.assertEqual(len([r for r in self.results(task) if r["kind"] in ("ask", "answer")]), 2)  # history stays
+
+    def test_cleanup_of_a_merged_task_and_abandon_remove_the_mailbox_state_but_never_the_rows(self):
+        for how in ("merged", "abandon"):
+            with self.subTest(how):
+                self.fresh()
+                self.setUp()
+                task = self.worker(status=None, state="done")
+                self.ask()
+                self.ok("answer", str(task), "--file", self.text_file("v2"))
+                os.makedirs(os.path.dirname(self.inbox_file("x")), exist_ok=True)
+                for name in ("1-1.ctx.json", "1-1.addr", "task-1.flag", "2-1.ctx.json", "manager.addr"):
+                    path = self.inbox_file(name) if name != "manager.addr" else os.path.join(self.root, ".agentic-team", name)
+                    with open(path, "w") as fh:
+                        fh.write("{}")
+                self.assertIn("mailbox", self.meta(task))
+                rows = len(self.results(task))
+                if how == "merged":
+                    self.tg("edit", str(task), "--meta", f"verdict_ref={json.dumps(SHA_A)}", "merged_at=\"x\"", "merged_by=\"operator\"")
+                    self.tg("done", str(task))
+                    self.c2_agents(self.finished("task-1"))
+                    self.ok("merged", str(task))
+                else:
+                    self.add_result(task, "DIED", "x")
+                    self.ok("abandon", str(task), "died")
+                self.assertNotIn("mailbox", self.meta(task))
+                left = sorted(os.listdir(os.path.dirname(self.inbox_file("x"))))
+                self.assertEqual(left, ["2-1.ctx.json"])  # only this task's files went
+                self.assertTrue(os.path.exists(os.path.join(self.root, ".agentic-team", "manager.addr")))
+                self.assertGreaterEqual(len(self.results(task)), rows)
+                self.assertEqual(len([r for r in self.results(task) if r["kind"] in ("ask", "answer")]), 2)
+
+    def test_cleanup_that_keeps_worktrees_keeps_the_mailbox_state(self):
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[merge]\nremove_worktrees = false\n', sessions="max_parallel = 3\n")
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        self.tg("edit", str(task), "--meta", f"verdict_ref={json.dumps(SHA_A)}", "merged_at=\"x\"", "merged_by=\"operator\"")
+        self.tg("done", str(task))
+        self.ok("merged", str(task))
+        self.assertIn("mailbox", self.meta(task))
+
+    # --- the Manager's view
+
+    def test_inbox_shows_the_thread_and_the_delivery_state(self):
+        self.assertEqual(self.one(self.events("inbox", str(self.running_task())), "inbox")["detail"], "no messages")
+        self.fresh()
+        self.setUp()
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        lines = [e["detail"] for e in self.named(self.events("inbox", str(task)), "message")]
+        self.assertEqual(lines, [f"#{ask} ask OPEN by task-1-1: Which endpoint?",
+                                 f"#{answer['id']} answer ANSWERED by manager [resume, 1 tries]: re #{ask}: v2"])
+        self.ack(answer["id"], action="use v2")
+        lines = [e["detail"] for e in self.named(self.events("inbox", str(task)), "message")]
+        self.assertTrue(lines[1].endswith("[acked, 1 tries]: re #%d: v2" % ask), lines)
+        self.assertEqual(lines[2], f"#{self.results(task)[-1]['id']} ack SEEN by task-1-1: re #{answer['id']}: use v2")
+        before = (self.results(task), self.meta(task))
+        self.events("inbox", str(task))
+        self.assertEqual((self.results(task), self.meta(task)), before)  # read only
+
+
+def transcript_text(tokens):
+    return transcript(tokens)
 
 
 if __name__ == "__main__":
