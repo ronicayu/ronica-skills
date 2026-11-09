@@ -37,6 +37,10 @@ IN_PROGRESS = "tg:in-progress"
 REMOVED = "tg:removed"
 
 
+class TaskGone(StoreError):
+    """A task that GitHub no longer has as a task: deleted, unlabelled, removed, or a pull request."""
+
+
 def open_cache(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -470,10 +474,10 @@ class CachedRemoteStore:
             t = self.remote.fetch(i)
         except HttpError as e:
             if e.status == 404:
-                raise StoreError(f"#{i} no longer exists on GitHub; run tg sync")
+                raise TaskGone(f"#{i} no longer exists on GitHub; run tg sync")
             raise
         if self.entry.label not in t.labels or t.removed or t.item.get("pull_request"):
-            raise StoreError(f"#{i} is no longer a task on GitHub (no {self.entry.label} label); run tg sync")
+            raise TaskGone(f"#{i} is no longer a task on GitHub (no {self.entry.label} label); run tg sync")
         return t
 
     def ensure_labels(self, conn, labels):
@@ -553,15 +557,27 @@ class CachedRemoteStore:
             plan = Plan(edits=[Edit(n, pending=rows[n], flush=True) for n in sorted(rows)])
             plan.labels = {self.entry.label, IN_PROGRESS, REMOVED}
             self.ensure_labels(conn, plan.labels)
-            fresh = {e.id: self.fresh_task(e.id) for e in plan.edits}
+            fresh = {}
+            for e in list(plan.edits):
+                try:
+                    fresh[e.id] = self.fresh_task(e.id)
+                except TaskGone:  # nothing to send the rows to: drop them
+                    conn.execute("DELETE FROM pending_meta WHERE task_id=?", (e.id,))
+                    plan.edits.remove(e)
+                    self.warn(f"warning: deferred {', '.join(r['key'] for r in rows[e.id])} on #{e.id} dropped; #{e.id} is no longer a task on GitHub")
+                    row = conn.execute("SELECT meta FROM tasks WHERE id=?", (e.id,)).fetchone()
+                    if row:
+                        self.write_meta(conn, e.id, json.loads(row[0]).get("type", "task"))
+            if not plan.edits:
+                return 0
             pushed = self.remote.push(plan, fresh)
             self.finish(conn, plan, pushed, [], {})
         return len(pushed.flushed)
 
     def sync(self, *, full=False):
         conn = self.conn or self.connect(mode="none")
+        changed = self.refresh(conn, wait=True, full=full, comments=full)  # first: a task that left GitHub is dropped from the cache with its deferred rows
         flushed = self.flush_numbers(conn, sorted(self.pending_for(conn)))
-        changed = self.refresh(conn, wait=True, full=full, comments=full)
         return {"changed": changed or 0, "flushed": flushed, "full": full}
 
     # -- results, claims, identity ----------------------------------------------------------------------------------

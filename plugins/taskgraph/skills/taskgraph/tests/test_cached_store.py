@@ -198,6 +198,39 @@ def test_sync_sends_deferred_rows(env, fake):
     assert CachedRemoteStore(GitHubRemote(env.entry), env.entry, tg.load, "demo").sync()["flushed"] == 0
 
 
+def old_task(fake, title):
+    with fake.locked() as s:
+        return fake.new_issue(s, title, labels=["taskgraph"], created_at="2026-01-01T00:00:00Z")["number"]
+
+
+def unlabel(fake, n):
+    with fake.locked() as s:
+        s["issues"][str(n)]["labels"] = []  # a person removes the taskgraph label
+
+
+def test_sync_full_drops_the_deferred_rows_of_a_task_that_left_github(env, fake):
+    a, b = old_task(fake, "A"), old_task(fake, "B")
+    env.ok("ls")
+    env.ok("edit", str(a), "--meta", 'tokens="5"')
+    unlabel(fake, a)
+    code, out, err = env.run("sync", "--full")
+    assert code == 0 and err == "", err
+    assert [t["id"] for t in env.ok("--fresh", "ls")] == [b]
+    assert env.sql("SELECT id FROM tasks") == [(b,)] and env.sql("SELECT * FROM pending_meta") == []
+
+
+def test_plain_sync_drops_the_deferred_rows_of_a_task_that_left_github_with_one_warning(env, fake):
+    a = old_task(fake, "A")
+    env.ok("ls")
+    env.ok("edit", str(a), "--meta", 'tokens="5"', 'model="m"')
+    unlabel(fake, a)
+    code, out, err = env.run("sync")
+    assert code == 0, err
+    assert err == f"warning: deferred model, tokens on #{a} dropped; #{a} is no longer a task on GitHub\n"
+    assert env.sql("SELECT * FROM pending_meta") == []
+    assert env.run("sync")[0] == 0
+
+
 def test_a_pending_row_whose_key_changed_on_github_is_dropped_with_a_warning(env, fake):
     a = env.ok("add", "A", "--meta", "model=old")["id"]  # model is deferred, but a new task sends everything
     env.ok("edit", str(a), "--meta", "model=mine")
@@ -410,8 +443,10 @@ def test_sync_command_flushes_and_refreshes_and_full_reads_everything(env, fake)
     env.ok("edit", str(a), "--meta", 'tokens="3"')
     fake.add_issue("from a person")
     done = env.ok("sync")
-    assert done == {"changed": 2, "flushed": 1, "full": False}  # the flushed task is re-read too
+    assert done == {"changed": 2, "flushed": 1, "full": False}  # A has no known content since its own write, so it is re-read
     assert '"tokens":"3"' in fake.issue(a)["body"]
+    code, out, _ = tg_text(env, "sync")
+    assert out.strip() == "synced: 1 changed, 0 deferred sent"  # the flush came after the pull: the next one re-reads A
     code, out, _ = tg_text(env, "sync")
     assert out.strip() == "synced: 0 changed, 0 deferred sent"
     env.ok("sync", "--full")
