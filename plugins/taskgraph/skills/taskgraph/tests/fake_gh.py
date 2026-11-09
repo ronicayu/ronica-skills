@@ -209,7 +209,7 @@ class Fake:
         if s["rate_limited"]:
             reset = s["rate_limited"] if isinstance(s["rate_limited"], int) and s["rate_limited"] > 10**9 else int(time.time()) + 3600
             return Resp(403, {"message": "API rate limit exceeded"}, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(reset)})
-        if method != "GET":
+        if method != "GET" and path != "graphql":  # GraphQL here only reads
             s["writes"] += 1
             if s["fail_after"]:
                 s["fail_after"] -= 1
