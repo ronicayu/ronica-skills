@@ -359,10 +359,10 @@ class CachedRemoteStore:
 
     @contextmanager
     def write(self, conn, *, journal=True):
-        before = self.before = self.load(conn)
         self.claimed = {}
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            before = self.before = self.load(conn)  # inside the lock: a write that committed while this one waited is part of the baseline
             yield
             self.commit(conn, before, self.load(conn), journal)
 
