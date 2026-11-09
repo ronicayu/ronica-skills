@@ -57,7 +57,7 @@ def backend(request, tmp_path, monkeypatch):
         return
     state = Fake.create(tmp_path / "github-fake.json", repo="o/demo")
     config = tmp_path / "github-fake.toml"
-    config.write_text(CONFIG.format(cache=tmp_path / "github-fake-cache.db"), encoding="utf-8")
+    config.write_text(CONFIG.format(cache=tmp_path / "t.db"), encoding="utf-8")  # the cache is where tests/test_tg.py looks for its database
     monkeypatch.setenv("TASKGRAPH_CONFIG", str(config))
     monkeypatch.setenv("FAKE_GH_STATE", str(state.path))
     monkeypatch.setenv("TASKGRAPH_GH", f"{sys.executable} -I {HERE / 'fake_gh.py'}")

@@ -202,7 +202,6 @@ def test_ls_default_excludes_done(tg):
     assert ids(tg("ls", "--status", "done")) == [a]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_cascades_deps(tg, db):
     a = tg("add", "A")["id"]
     b = tg("add", "B", "--depends", str(a))["id"]
@@ -371,7 +370,6 @@ def test_serve_port_taken_by_other_db(serve, raw, tmp_path):
     assert "pass --port" in other.stderr
 
 
-@pytest.mark.sqlite_only("compares the store identity with the --db path; a GitHub store is identified by its cache file")
 def test_serve_ignores_query_string(serve, db):
     port = free_port()
     p = serve(port)
@@ -907,7 +905,6 @@ def test_add_with_start_and_due(tg):
     assert d["meta"]["decide_by"] == "2026-12-01" and d["start"] is None
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_load_normalizes_start_and_due(tg, db):
     t = add(tg, "T", "--meta", "due=2026-11-01", "start=2026-10-20")
     bad = add(tg, "Bad")
@@ -1185,7 +1182,6 @@ def test_add_promised(tg, fail):
     fail("add", "plain", "--promised", "2026-11-01")
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
     p = add(tg, "P")
     a = add(tg, "a", "--parent", str(p))
@@ -1222,7 +1218,6 @@ def events(db):
         return [(t, f, json.loads(o) if o else None, json.loads(n) if n else None) for t, f, o, n in conn.execute("SELECT task_id, field, old, new FROM events ORDER BY id")]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_events_record_every_mutation(tg, fail, db):
     a = add(tg, "A", "--due", "2026-11-01")
     b = add(tg, "B")
@@ -1246,7 +1241,6 @@ def test_events_record_every_mutation(tg, fail, db):
     ]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_events_capture_recursive_delete(tg, db):
     p = add(tg, "P")
     c = add(tg, "C", "--parent", str(p))
@@ -1254,7 +1248,6 @@ def test_events_capture_recursive_delete(tg, db):
     assert [e[:2] for e in events(db)[-2:]] == [(p, "removed"), (c, "removed")]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_changes_buckets(tg, raw, db):
     late = add(tg, "VPC", "--due", "2026-10-10", "--meta", "owner=Priya")
     early = add(tg, "App", "--due", "2026-11-01")
@@ -1308,7 +1301,6 @@ def test_changes_since_and_scope(tg, raw, db):
     assert raw("--project", "demo", "changes", "--since", "2027-01-01").stdout.strip() == "no changes since 2027-01-01"
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_changes_net_out_round_trips(tg, db):
     a = add(tg, "A", "--due", "2026-11-01")
     age_events(db)
@@ -1682,7 +1674,6 @@ def test_result_add_options_and_output(tg, raw):
     assert "body" not in brief and brief["id"] == 4
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_result_add_does_not_touch_the_task(tg, db):
     t = add(tg, "A", "--notes", "the spec", "--meta", "owner=x")
     with closing(sqlite3.connect(db)) as conn, conn:
@@ -1795,7 +1786,6 @@ def test_show_lists_results_without_bodies(tg, raw, logged):
     assert "results:" not in raw("--project", "demo", "show", str(quiet)).stdout
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_removes_results(tg, db, logged):
     a, b, log = logged
     tg("rm", str(a))
@@ -1804,7 +1794,6 @@ def test_rm_removes_results(tg, db, logged):
     assert ids(tg("result", "ls", "--all-projects")) == [log[1]]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_recursive_removes_results_below(tg, db):
     parent = add(tg, "P")
     kid = add(tg, "K", "--parent", str(parent))
@@ -1866,7 +1855,6 @@ def test_results_table_is_added_to_an_old_database(db, raw, tg):
     assert cols == ["id", "task_id", "at", "status", "kind", "attempt", "author", "body"]
 
 
-@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_concurrent_writers_all_land(tg, raw, db):
     t = add(tg, "A")
     count = 12
