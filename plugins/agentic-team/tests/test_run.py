@@ -435,6 +435,22 @@ class Base(unittest.TestCase):
         self.assertIn(f"If `git rev-parse HEAD` is not `{sha}`, report BLOCKED and change nothing.", text)
         self.assertNotRegex(text, r"git (reset|checkout|switch)")
 
+    MAILBOX_PY = os.path.join(os.path.dirname(RUN), "mailbox.py")
+
+    def inbox_file(self, name):
+        return os.path.join(self.root, ".agentic-team", "inbox", name)
+
+    def worker_settings(self, task, attempt, bypass=False):
+        """The --settings JSON a launch passes: the two hooks in exec form, and crossSessionInbound for bypass."""
+        settings = {"hooks": {
+            "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command", "command": sys.executable, "args": [
+                self.MAILBOX_PY, "--ctx", self.inbox_file(f"{task}-{attempt}.ctx.json"), "checkin"]}]}],
+            "PostToolUse": [{"hooks": [{"type": "command", "command": sys.executable, "args": [
+                "-S", self.MAILBOX_PY, "hook", "--flag", self.inbox_file(f"task-{task}.flag")]}]}]}}
+        if bypass:
+            settings["crossSessionInbound"] = "accept"
+        return json.dumps(settings, separators=(",", ":"))
+
     def brief(self, task_id, *extra, **kw):
         return self.ok("launch", str(task_id), "--dry-run", *extra, **kw).stdout
 
@@ -1125,7 +1141,8 @@ class RunTest(Base):
             text = fh.read()
         self.assertEqual(self.calls("--bg"), [[
             "--bg", "--worktree", "task-1", "--agent", "agentic-team:worker", "--model", "sonnet",
-            "--effort", "high", "--permission-mode", "auto", "--name", "task-1-1", text]])
+            "--effort", "high", "--permission-mode", "auto", "--name", "task-1-1", "--settings", self.worker_settings(1, 1),
+            text]])
         self.assertEqual(self.status_of(task), "in_progress")
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
@@ -5231,7 +5248,8 @@ class RunTest(Base):
         task = self.add_task()
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
-        command = f'"{sys.executable}" "{RUN}" check-report "{path}"'
+        command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}"')  # 0.16.0: a worker's check also reads its steers
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("result add"))
         os.makedirs(os.path.dirname(path))
@@ -6957,6 +6975,178 @@ class ProfileTest(Base):
 
     def json_status(self):
         return json.loads(self.ok("status", pre=["--json"]).stdout)
+
+
+class MessagingTest(Base):
+    """agentic-team 0.16.0: the Manager and a worker message each other through Taskgraph rows. Launch side first."""
+
+    SOCK = "/tmp/at-test-manager.sock"  # an address only: nothing here connects to it
+
+    def with_socket(self, path=None):
+        return dict(self.env, CLAUDE_CODE_MESSAGING_SOCKET=path or self.SOCK)
+
+    def ctx(self, task=1, attempt=1):
+        with open(self.inbox_file(f"{task}-{attempt}.ctx.json")) as fh:
+            return json.load(fh)
+
+    def test_01_launch_writes_the_attempt_context_and_passes_the_hooks(self):
+        task = self.add_task()
+        self.ok("launch", str(task))
+        ctx = self.ctx()
+        self.assertEqual(ctx, {"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": 1, "attempt": 1,
+                               "by": "task-1-1", "asks_cap": 3, "scope": "src/",
+                               "inbox_dir": os.path.join(self.root, ".agentic-team", "inbox")})
+        argv = self.calls("--bg")[0]
+        self.assertEqual(argv[argv.index("--settings") + 1], self.worker_settings(1, 1))
+        self.assertEqual(argv.index("--settings"), argv.index("--name") + 2)  # right after --name, before the brief
+
+    def test_02_the_settings_hold_cross_session_inbound_only_for_a_bypass_worker(self):
+        for mode, bypass in (("auto", False), ("bypassPermissions", True)):
+            with self.subTest(mode):
+                self.fresh()
+                self.write_config(sessions=f'permission_mode = "{mode}"\n')
+                self.ok("launch", str(self.add_task()))
+                settings = json.loads(self.calls("--bg")[0][self.calls("--bg")[0].index("--settings") + 1])
+                self.assertEqual("crossSessionInbound" in settings, bypass)
+                self.assertEqual(set(settings["hooks"]), {"SessionStart", "PostToolUse"})
+                start = settings["hooks"]["SessionStart"][0]
+                self.assertEqual(start["matcher"], "startup|resume")
+                self.assertNotIn("matcher", settings["hooks"]["PostToolUse"][0])
+                self.assertEqual(settings["hooks"]["PostToolUse"][0]["hooks"][0]["args"][0], "-S")  # no site: it runs after every tool
+
+    def test_03_a_verifier_gets_no_hooks_no_mailbox_and_no_settings(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.agents(self.finished("task-1"))
+        self.ok("verify", str(task))
+        self.assertNotIn("--settings", self.calls("--bg")[0])
+        brief = self.calls("--bg")[0][-1]
+        self.assertIn("## MAILBOX\n\nNone. You file no question and take no message", brief)
+        self.assertNotIn("mailbox.py", self.section(brief, "REPORT").split("check-report")[0])
+        self.assertNotIn("--mailbox", brief)
+        self.assertFalse(os.path.exists(self.inbox_file("1-1.ctx.json")))
+
+    def test_04_the_mailbox_section_gives_the_commands_and_the_pointer_rule(self):
+        task = self.add_task()
+        mailbox = self.section(self.brief(task), "MAILBOX")
+        stem = f'"{sys.executable}" "{self.MAILBOX_PY}" --ctx "{self.inbox_file("1-1.ctx.json")}"'
+        ask_file = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "ask-task-1-1.md")
+        self.assertIn(f"```sh\n{stem} inbox\n```", mailbox)
+        self.assertIn(f'```sh\n{stem} ack <id> --action "<one line>"\n```', mailbox)
+        self.assertIn(f'```sh\n{stem} ask --file "{ask_file}"\n```', mailbox)
+        self.assertIn("at most 3 questions in this attempt", mailbox)
+        self.assertIn("`Waiting for answer to ask #<id>`", mailbox)
+        # the doorbell carries no instructions: the brief says what the fixed pointer line means
+        self.assertIn("A line that begins `agentic-team: task 1 attempt 1 has message #` is a pointer, and it means one "
+                      "thing: run the inbox command above. It carries no instructions.", mailbox)
+        self.assertIn("never overrides FORBIDDEN or STANDING ORDERS", mailbox)
+        self.assertNotIn("SendMessage", mailbox)  # no notify-to: no wake step
+        self.assertLess(self.brief(task).index("## STANDING ORDERS"), self.brief(task).index("## MAILBOX"))
+        self.assertLess(self.brief(task).index("## MAILBOX"), self.brief(task).index("## REPORT"))
+
+    def test_05_the_ask_cap_comes_from_the_task_meta_the_tier_and_the_config(self):
+        cases = ((dict(), "", 3), (dict(asks=0), "", 0), (dict(asks=1), "", 1), (dict(tier="mechanical"), "", 0),
+                 (dict(tier="mechanical", asks=2), "", 2), (dict(), "[messaging]\nasks_per_attempt = 5\n", 5),
+                 (dict(), "[messaging]\nasks_per_attempt = 0\n", 0))
+        for meta, extra, want in cases:
+            with self.subTest(meta=meta, config=extra):
+                self.fresh()
+                self.write_config(extra)
+                task = self.add_task(**meta)
+                mailbox = self.section(self.brief(task), "MAILBOX")
+                if want:
+                    self.assertIn(f"at most {want} question{'s' * (want != 1)}", mailbox)
+                else:
+                    self.assertIn("Ask. This task allows no asks. Do not ask.", mailbox)
+                    self.assertNotIn(" ask --file ", mailbox)
+                self.ok("launch", str(task))
+                self.assertEqual(self.ctx()["asks_cap"], want)
+
+    def test_06_the_notify_step_names_the_managers_socket_and_falls_back_to_the_session_name(self):
+        task = self.add_task()
+        self.ok("notify-to", "manager-7")
+        step = self.section(self.brief(task), "REPORT")
+        self.assertIn("`to` set to `manager-7`", step)  # no socket address known yet
+        self.assertEqual(self.one(self.events("notify-to", "manager-7", env=self.with_socket()), "notify-to")["detail"],
+                         f"manager-7; new briefs tell each session to message it after its result, at uds:{self.SOCK}")
+        with open(self.inbox_file("manager.addr").replace("inbox/", "")) as fh:
+            self.assertEqual(json.load(fh)["socket"], self.SOCK)
+        brief = self.brief(task)
+        self.assertIn(f"`to` set to `uds:{self.SOCK}`", self.section(brief, "REPORT"))
+        mailbox = self.section(brief, "MAILBOX")  # the wake step after an ask: the same address, the fixed line
+        self.assertIn(f"`to` set to `uds:{self.SOCK}` and `message` set to this one line", mailbox)
+        self.assertIn("```text\ntask 1 attempt 1 asked #<ask id>; run record\n```", mailbox)
+        # a call from a terminal (no socket variable) keeps the address; a new Manager session replaces it
+        self.assertIn("uds:" + self.SOCK, self.brief(task))
+        self.ok("record", env=self.with_socket("/tmp/at-test-two.sock"))
+        self.assertIn("`to` set to `uds:/tmp/at-test-two.sock`", self.section(self.brief(task), "REPORT"))
+        # without the notify-to switch there is no step at all, whatever the address
+        self.ok("notify-to", "--clear")
+        self.assertNotIn("SendMessage", self.brief(task))
+        # a verifier names the address too
+        self.ok("notify-to", "manager-7")
+        self.running_task()
+        self.add_result(2, "PASS", f"Task: 2\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.assertIn("`to` set to `uds:/tmp/at-test-two.sock`", self.section(self.ok("verify", "2", "--dry-run").stdout, "REPORT"))
+
+    def test_07_run_py_writes_the_manager_address_except_for_wait_and_a_dry_run(self):
+        path = os.path.join(self.root, ".agentic-team", "manager.addr")
+        task = self.add_task()
+        self.ok("launch", str(task), "--dry-run", env=self.with_socket())
+        self.ok("record")  # no socket variable
+        self.assertFalse(os.path.exists(path))
+        self.agents(self.row("task-1"))
+        self.running_task()
+        proc = self.start_wait("--timeout", "1")
+        self.end_wait(proc)
+        self.assertFalse(os.path.exists(path))
+        out = subprocess.run([sys.executable, RUN, "--root", self.root, "--tg", TG, "wait", "--interval", "0.2",
+                              "--timeout", "1"], capture_output=True, text=True, cwd=self.dir, env=self.with_socket())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(os.path.exists(path))
+        self.ok("record", env=self.with_socket())
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["socket"], self.SOCK)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_08_the_session_id_of_the_row_is_recorded_when_the_row_has_one(self):
+        task = self.add_task()
+        uuid = "3fa9c1d2-0b7e-4c55-9a11-6d2f8e0b1c44"
+        self.ok("launch", str(task), env=dict(self.env, FAKE_CLAUDE_BG_ROW=json.dumps(self.row("task-1", sessionId=uuid))))
+        self.assertEqual(self.meta(task)["sessions"][0]["sessionId"], uuid)
+        other = self.add_task("Other")  # a row with no sessionId: the entry is what it always was
+        self.ok("launch", str(other))
+        self.assertNotIn("sessionId", self.meta(other)["sessions"][0])
+
+    def test_09_a_relaunch_of_an_attempt_drops_the_old_socket_address(self):
+        task = self.add_task()
+        os.makedirs(os.path.dirname(self.inbox_file("x")))
+        with open(self.inbox_file("1-1.addr"), "w") as fh:
+            json.dump({"socket": "/tmp/x.sock", "session_id": "old", "at": 1}, fh)
+        self.ok("launch", str(task))
+        self.assertFalse(os.path.exists(self.inbox_file("1-1.addr")))
+
+    def test_10_check_report_names_a_steer_with_no_ack_and_stays_quiet_without_one(self):
+        task = self.running_task()
+        report = os.path.join(self.dir, "report.md")
+        with open(report, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+        ctx = self.inbox_file("1-1.ctx.json")
+        os.makedirs(os.path.dirname(ctx))
+        with open(ctx, "w") as fh:
+            json.dump({"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": task, "attempt": 1,
+                       "by": "task-1-1", "asks_cap": 3, "scope": "src/", "inbox_dir": os.path.dirname(ctx)}, fh)
+        self.assertEqual(self.ok("check-report", report, "--mailbox", ctx).stdout, "ok\n")
+        steer = self.add_result(task, "SENT", "Steer: use v2\nKind: info\n", kind="steer", by="manager")["id"]
+        self.tg("edit", str(task), "--meta", "mailbox=" + json.dumps({str(steer): {"kind": "steer", "attempt": 1}}))
+        out = self.run_cmd("check-report", report, "--mailbox", ctx)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"steer #{steer} has no ack", out.stderr)
+        self.assertEqual(self.ok("check-report", report).stdout, "ok\n")  # no --mailbox: what it always did
+        self.add_result(task, "SEEN", f"Re: #{steer}\nAction: switch\n", kind="ack", by="task-1-1")
+        self.assertEqual(self.ok("check-report", report, "--mailbox", ctx).stdout, "ok\n")
+        os.remove(ctx)  # an unreadable context degrades to the plain check
+        self.assertEqual(self.ok("check-report", report, "--mailbox", ctx).stdout, "ok\n")
 
 
 if __name__ == "__main__":
