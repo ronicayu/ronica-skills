@@ -82,7 +82,7 @@ class Gh:
         except ValueError:
             data = None
         if self.debug:
-            print(f"gh: {method} {path} -> {status}", file=sys.stderr)
+            print(f"gh: {method} {path} -> {status} used={headers.get('x-ratelimit-used')}", file=sys.stderr)
         if "date" in headers:
             self.server_time = parsedate_to_datetime(headers["date"]).timestamp()
         if "x-ratelimit-remaining" in headers:
