@@ -69,3 +69,19 @@ def test_a_write_that_commits_while_another_waits_for_the_lock_is_not_pushed_twi
     assert (b.returncode, a.returncode) == (0, 0), (err_b, err_a)
     assert sorted(titles(fake)) == ["B", "one"]
     assert sorted(t["title"] for t in proc.ok("ls")) == ["B", "one"]
+
+
+def test_an_edit_that_waits_for_the_lock_does_not_undo_the_write_that_committed_first(fake, tmp_path):
+    proc = Proc(fake, tmp_path)
+    proc.ok("add", "one")
+    fake.fault(delay_ms=1500)
+    fake.clear_log()
+    b = proc.start("edit", "1", "--title", "X")
+    wait_for(fake, "PATCH", "/issues/1")
+    fake.fault(delay_ms=0)
+    a = proc.start("edit", "1", "--meta", "session=x")  # reads task 1 before B commits, writes after
+    out_b, err_b = b.communicate()
+    out_a, err_a = a.communicate()
+    assert (b.returncode, a.returncode) == (0, 0), (err_b, err_a)
+    assert fake.issue(1)["title"] == "X"
+    assert proc.ok("--fresh", "show", "1")["title"] == "X"

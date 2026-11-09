@@ -749,20 +749,20 @@ def cmd_reopen(store, conn, args):
 
 
 def cmd_edit(store, conn, args):
-    task = get(load(conn), args.id)
     if args.parent is not None and args.no_parent:
         raise Fail("--parent and --no-parent cannot be combined")
     changes = parse_meta(args.meta)
     if args.type is not None:
         changes["type"] = args.type
     check_meta(changes)
-    meta = {**task["meta"], **changes}
-    for key in args.unset_meta:
-        meta.pop(key, None)
-    if meta.get("type") == "task":
-        del meta["type"]
-    parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
     with store.write(conn):
+        task = get(load(conn), args.id)  # read inside the write: a task that another tg changed while this one waited is not overwritten
+        meta = {**task["meta"], **changes}
+        for key in args.unset_meta:
+            meta.pop(key, None)
+        if meta.get("type") == "task":
+            del meta["type"]
+        parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
         conn.execute(
             "UPDATE tasks SET title=?, notes=?, meta=?, updated_at=? WHERE id=?",
             (args.title if args.title is not None else task["title"], args.notes if args.notes is not None else task["notes"], json.dumps(meta), now(), args.id),
@@ -901,23 +901,23 @@ def cmd_deps(store, conn, args):
 
 
 def cmd_date(store, conn, args):
-    task = get(load(conn), args.id)
-    meta = dict(task["meta"])
-    keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
     given = {"start": args.start, "due": args.due, "promised": args.promised}
     setting = {n for n, v in given.items() if v is not None}
     if not setting and not args.clear:
         raise Fail("nothing to change (pass --start, --due, --promised or --clear)")
-    if "promised" in setting | set(args.clear) and task["type"] != "external":
-        raise Fail(f"promised applies to externals, but #{task['id']} is a {task['type']}")
     if setting & set(args.clear):
         raise Fail("cannot set and clear the same date")
-    for name in setting:
-        meta[keys[name]] = resolve_date(given[name])
-    for name in args.clear:
-        meta.pop(keys[name], None)
-    check_span(meta)
     with store.write(conn):
+        task = get(load(conn), args.id)  # read inside the write, as cmd_edit does
+        meta = dict(task["meta"])
+        keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
+        if "promised" in setting | set(args.clear) and task["type"] != "external":
+            raise Fail(f"promised applies to externals, but #{task['id']} is a {task['type']}")
+        for name in setting:
+            meta[keys[name]] = resolve_date(given[name])
+        for name in args.clear:
+            meta.pop(keys[name], None)
+        check_span(meta)
         conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
     data = load(conn)[args.id]
     text = f"#{args.id} start {data['start'] or '-'} due {data['due'] or '-'}"
