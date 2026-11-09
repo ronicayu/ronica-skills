@@ -1,7 +1,6 @@
 import json
 import subprocess
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -9,8 +8,6 @@ import pytest
 
 import tg
 from tgstore.base import ClaimLost
-from tgstore.cached import CachedRemoteStore
-from tgstore.config import Entry
 from tgstore.github import comments as cm
 from tgstore.github.remote import GitHubRemote
 from test_cached_store import Env, tg_text
@@ -104,7 +101,7 @@ def test_an_old_claim_with_the_label_still_held_is_not_stale(env, fake):
 def test_a_claim_without_the_label_is_voided_only_after_60_seconds(env, fake):
     n = task(env)
     old = plant(fake, n, "bob@host:2", age=59)
-    assert f"claimed by bob@host:2" in env.fail("start", str(n))
+    assert "claimed by bob@host:2" in env.fail("start", str(n))
     fake.age_comment(old, 2)  # now 61 s
     fake.clear_log()
     env.ok("start", str(n))
@@ -272,3 +269,13 @@ def test_two_tg_processes_race_for_one_task(fake, tmp_path):
     winner = scripts[[r[0] for r in results].index(0)][0]
     assert loser[2] == f"error: #{n} is claimed by {winner}\n"
     assert len(fake.comments(n)) == 1
+
+
+def test_the_default_claimant_is_login_host_and_checkout_id(env, fake, monkeypatch):
+    monkeypatch.delenv("TASKGRAPH_CLAIMANT")
+    n = task(env)
+    env.ok("start", str(n))
+    [(_, parsed)] = claim_comments(fake, n)
+    who = parsed["claim"]["claimant"]
+    assert who.startswith("tester@") and ":" in who and len(who.rsplit(":", 1)[1]) == 8
+    assert env.sql("SELECT value FROM sync_state WHERE key='login'") == [('"tester"',)]

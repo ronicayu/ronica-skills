@@ -390,7 +390,6 @@ def test_two_tg_processes_share_one_refresh(env, fake):
     fake.clear_log()
     # the lock is free: one probe; a held lock makes a non-fresh read use the cache as it is
     import fcntl
-    store = CachedRemoteStore(GitHubRemote(env.entry), env.entry, tg.load, "demo")
     with open(f"{env.cache}.lock", "a+") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         assert titles(env.ok("ls")) == ["a"]
@@ -447,3 +446,17 @@ def test_a_task_the_list_page_lags_behind_is_found_by_id_and_not_dropped_by_a_fu
     fake.fault(hide_from_list=[])
     env.ok("--fresh", "ls")
     assert [t["id"] for t in env.ok("ls")] == [n]
+
+
+def test_a_full_pull_sends_deferred_rows_older_than_15_minutes(env, fake):
+    a = env.ok("add", "A")["id"]
+    env.ok("edit", str(a), "--meta", 'tokens="7"')
+    env.age(31)
+    env.ok("ls")  # not a full pull yet, and the row is young: nothing is sent
+    assert "tokens" not in fake.issue(a)["body"]
+    with closing(sqlite3.connect(env.cache)) as db, db:
+        db.execute("UPDATE pending_meta SET at='2020-01-01T00:00:00Z'")
+        db.execute("UPDATE sync_state SET value=? WHERE key='last_full_at'", (json.dumps(time.time() - 700),))
+    env.age(31)
+    env.ok("ls")
+    assert '"tokens":"7"' in fake.issue(a)["body"] and env.sql("SELECT * FROM pending_meta") == []

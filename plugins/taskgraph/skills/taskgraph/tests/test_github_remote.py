@@ -3,7 +3,7 @@ import pytest
 from tgstore.base import RemoteError, ResultInput, StoreError
 from tgstore.config import Entry
 from tgstore.github.remote import GitHubRemote, fingerprint, task_from_item
-from tgstore.remote import KEEP, Create, Edit, Plan, SyncState, canon
+from tgstore.remote import Create, Edit, Plan, SyncState, canon
 
 
 @pytest.fixture
