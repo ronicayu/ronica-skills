@@ -548,7 +548,7 @@ def test_date_format(browser, page_file):
     text = page.inner_text("#panel")
     assert "Due\t25 Nov · +5d vs 20 Nov · plan" in text
     assert not re.search(r"\d{4}-\d{2}-\d{2}", page.text_content("#panel"))
-    assert re.search(r"Created\d{1,2} Oct \d{2}:\d{2}", page.text_content("#details"))
+    assert re.search(r"Created\d{1,2} [A-Z][a-z]{2}( \d{4})? \d{2}:\d{2}", page.text_content("#details"))
     assert re.fullmatch(r"Generated \d{1,2} \w{3}( \d{4})? \d{2}:\d{2}", page.inner_text("#stamp"))
     assert problems == []
     page.close()
