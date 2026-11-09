@@ -402,7 +402,7 @@ Concurrency: the refresh holds `BEGIN IMMEDIATE` on the cache plus a non-blockin
 ### 6.3 Probe and incremental pull
 
 1. Probe: for each page `GET /repos/{o}/{r}/issues?labels=taskgraph&state=all&sort=created&direction=asc&per_page=100&page=K`, send `If-None-Match` with the stored ETag. Stop after the first page that has fewer than 100 items. Pages: `ceil(N/100)`. Skip every item that has a `pull_request` key: the issues list also returns pull requests, and a labelled pull request is not a task.
-2. All 304: the refresh ends. Set `last_pull_at`.
+2. All pages 304, and no comment change (step 6): the refresh ends. Set `last_pull_at`.
 3. For each changed page: the response holds the full issue JSON. For each item, compute `fingerprint = sha1(updated_at, state, state_reason, labels, comments, issue_dependencies_summary, sub_issues_summary, parent_issue_url, title, body)`. Items with a new fingerprint are the changed set.
 4. Update the changed tasks from the REST items (title, body → notes and `remote_meta`, state, labels → status and type, `parent_issue_url` → parent, timestamps).
 5. If a changed item has a new `issue_dependencies_summary`, `sub_issues_summary` or `parent_issue_url`, read its edges in one GraphQL query with one alias per issue: `i12: issue(number:12) { blockedBy(first:100) { totalCount nodes { number } } parent { number } }`. Cost: 1 point for up to 99 issues (G18).
@@ -410,6 +410,8 @@ Concurrency: the refresh holds `BEGIN IMMEDIATE` on the cache plus a non-blockin
 7. Apply in one SQLite transaction with the merge rule (6.4). Write events (6.5). Store the new ETags and `comments_etag`.
 
 Full pull: GraphQL `repository.issues(labels:["taskgraph"], states:[OPEN,CLOSED], first:100)` with `labels(first:20)`, `parent`, `blockedBy(first:100) { totalCount }`, body and timestamps. Cost 2 points per 100 issues (C9). If a `totalCount` is above 100, tg reads the rest of that connection with `after`. Tasks absent from the full result (deleted, transferred, label removed) leave the cache with a `removed` event. `tg sync --full` also reads all comments (1 point per 50 issues).
+
+Known gap: a refresh reads GitHub (the probe and the pull) before it takes `BEGIN IMMEDIATE` and the cache lock, and applies what it read. A write that commits between the read and the apply can be overwritten in the cache by the older GitHub data. The next refresh (at most `cache_ttl` later) shows the true state; the write itself reached GitHub and is not lost. A write takes its baseline inside the lock, so it never pushes a committed write twice.
 
 Known gap: a dependency change that keeps every summary count the same is seen only by the next full pull (at most 10 minutes). The live swap test still changed the counts (C10).
 
@@ -663,7 +665,7 @@ deferred = ["tokens", "model", "started_at"]
 - `--all-projects` on a GitHub project lists that project only (one repository = one project in v1). On SQLite it is unchanged.
 - Auth: tg calls `gh api`. tg stores no token. `GH_HOST` and `GH_TOKEN` pass through to `gh`. The token needs `repo` (private repository) or `public_repo`. No `project` scope.
 - Checkout id: the first 8 hex digits of sha1 of the real path of `git rev-parse --git-common-dir`. All worktrees of one checkout share it.
-- `tomllib` needs Python 3.11. With a config file and Python 3.10, tg exits 1: `error: .taskgraph.toml needs Python 3.11 or later`. Without a config file, 3.10 still works (open question Q6).
+- `tomllib` needs Python 3.11. With a config file and Python 3.10, tg exits 1: `error: .taskgraph.toml needs Python 3.11 or later`. Without a config file, 3.10 still works (open question Q6). The rule is about the file, not the project: with any `.taskgraph.toml` found, tg needs 3.11 also for a project the file does not name.
 
 Validation errors (exit 1, before any command runs): unknown `backend`; `repo` not `owner/name`; a key in both `local` and `deferred`; `cache_ttl` < 0; `full_every` < 60.
 
