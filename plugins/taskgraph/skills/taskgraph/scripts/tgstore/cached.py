@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tgstore import config as cfg
 from tgstore.base import Capabilities, StoreError, now
-from tgstore.changes import ChangeSet, changeset, event_rows
+from tgstore.changes import PRIORITIES, ChangeSet, changeset, event_rows
 from tgstore.github import body as bodies
 from tgstore.remote import KEEP, Create, Edit, Plan, SyncState, canon
 from tgstore.sqlite import DB_TIMEOUT, SCHEMA
@@ -75,7 +75,7 @@ def ancestors(parents, n):
 
 
 def meta_diff(before, after):
-    keys = (before.keys() | after.keys()) - {"type"}
+    keys = (before.keys() | after.keys()) - {"type", "priority"}  # both are labels, not meta
     return {k: (before.get(k, KEEP), after.get(k, KEEP)) for k in sorted(keys) if before.get(k, KEEP) != after.get(k, KEEP)}
 
 
@@ -260,17 +260,19 @@ class CachedRemoteStore:
             "ON CONFLICT(task_id) DO UPDATE SET node_id=excluded.node_id, db_id=excluded.db_id, meta=excluded.meta, fingerprint=excluded.fingerprint",
             (t.number, t.node_id, t.db_id, json.dumps(t.meta, ensure_ascii=False), json.dumps(fp)),
         )
-        self.write_meta(conn, t.number, t.type)
+        self.write_meta(conn, t.number, t.type, t.priority)
         conn.execute("DELETE FROM remote_conflicts WHERE task_id=? AND source IN ('body', 'parent')", (t.number,))
         found = [("body", m) for m in bodies.conflicts(t.number, t.problems)]
         if t.parent is not None and t.parent not in known:
             found.append(("parent", f"#{t.number} is under #{t.parent}, which has no taskgraph label"))
         conn.executemany("INSERT INTO remote_conflicts (task_id, source, message) VALUES (?, ?, ?)", [(t.number, s, m) for s, m in found])
 
-    def write_meta(self, conn, number, kind):
-        # tasks.meta = what the remote holds, then the deferred rows, then the local-only keys; later wins
+    def write_meta(self, conn, number, kind, priority=None):
+        # tasks.meta = the type and priority (labels), what the remote holds, then the deferred rows, then the local-only keys; later wins
         remote = json.loads(conn.execute("SELECT meta FROM remote_tasks WHERE task_id=?", (number,)).fetchone()[0])
         meta = {"type": kind} if kind != "task" else {}
+        if priority:
+            meta["priority"] = priority
         meta.update(remote)
         for row in conn.execute("SELECT key, op, value FROM pending_meta WHERE task_id=?", (number,)):
             if row["op"] == "set":
@@ -345,6 +347,11 @@ class CachedRemoteStore:
             rows += event_rows(ChangeSet(changed=(f,)), at(f.id, f.field))
         conn.executemany("INSERT INTO events (task_id, project, at, field, old, new) VALUES (?, ?, ?, ?, ?, ?)", rows)
 
+    def labelled(self, meta):
+        # the type and the priority in a tasks.meta text: the two keys that GitHub holds as labels
+        meta = json.loads(meta)
+        return meta.get("type", "task"), meta.get("priority")
+
     def warn(self, text):
         print(text, file=sys.stderr)
 
@@ -361,6 +368,7 @@ class CachedRemoteStore:
         # an edit that only sets local-only or deferred meta keys makes no remote call, so it needs no refresh first
         keys = [m.partition("=")[0] for m in args.meta] + list(args.unset_meta)
         loud = args.title is not None or args.notes is not None or args.type is not None or args.parent is not None or args.no_parent
+        loud = loud or args.priority is not None or args.no_priority  # the priority is a label
         return bool(keys) and not loud and all(self.kind_of(k) != "through" for k in keys)
 
     def kind_of(self, key):
@@ -417,8 +425,8 @@ class CachedRemoteStore:
         existing = self.pending_for(conn)
         for i in sorted(after.keys() - before.keys()):
             t = after[i]
-            meta = {k: v for k, v in t["meta"].items() if k != "type"}
-            plan.created.append(Create(i, t["title"], t["notes"], t["type"], t["parent"], {k: v for k, v in meta.items() if self.kind_of(k) != "local"}))
+            meta = {k: v for k, v in t["meta"].items() if k not in ("type", "priority")}
+            plan.created.append(Create(i, t["title"], t["notes"], t["type"], t["parent"], {k: v for k, v in meta.items() if self.kind_of(k) != "local"}, t["priority"]))
             local_rows += [(i, k, v) for k, v in meta.items() if self.kind_of(k) == "local"]
         for i in sorted(after.keys() & before.keys()):
             b, a, e = before[i], after[i], Edit(i)
@@ -426,6 +434,7 @@ class CachedRemoteStore:
             e.notes = a["notes"] if a["notes"] != b["notes"] else None
             e.status = a["status"] if (a["status"] != b["status"] or i in self.claimed) else None
             e.type = a["type"] if a["type"] != b["type"] else None
+            e.priority = a["priority"] if a["priority"] != b["priority"] else KEEP
             e.parent = a["parent"] if a["parent"] != b["parent"] else KEEP
             old_rows = {r["key"]: r for r in existing.get(i, [])}
             rows = dict(old_rows)
@@ -443,12 +452,12 @@ class CachedRemoteStore:
                     rows[k] = {"task_id": i, "key": k, "op": "unset" if new is KEEP else "set", "value": None if new is KEEP else canon(new), "base": base, "at": now(), "old": old_rows.get(k)}
                     new_pending.setdefault(i, {})[k] = rows[k]
             e.pending = sorted(old_rows.values(), key=lambda r: r["key"])  # only rows queued earlier ride along; this edit's own stay queued
-            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.parent is not KEEP or e.meta_set or e.meta_unset:
+            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.priority is not KEEP or e.parent is not KEEP or e.meta_set or e.meta_unset:
                 plan.edits.append(e)
         plan.removed = sorted(before.keys() - after.keys())
         plan.edges_added, plan.edges_removed = list(cs.edges_added), list(cs.edges_removed)
         plan.db_ids = {r[0]: r[1] for r in conn.execute("SELECT task_id, db_id FROM remote_tasks WHERE db_id IS NOT NULL")}
-        plan.labels = {self.entry.label, IN_PROGRESS, REMOVED} | {"tg:type:" + c.type for c in plan.created if c.type != "task"} | {"tg:type:" + e.type for e in plan.edits if e.type not in (None, "task")}
+        plan.labels = {self.entry.label, IN_PROGRESS, REMOVED, *("tg:priority:" + p for p in PRIORITIES)} | {"tg:type:" + c.type for c in plan.created if c.type != "task"} | {"tg:type:" + e.type for e in plan.edits if e.type not in (None, "task")}
         return plan, local_rows, new_pending
 
     def commit(self, conn, before, after, journal):
@@ -548,7 +557,7 @@ class CachedRemoteStore:
         for number in sorted(touched - set(plan.removed)):
             row = conn.execute("SELECT meta FROM tasks WHERE id=?", (number,)).fetchone()
             if row:
-                self.write_meta(conn, number, json.loads(row[0]).get("type", "task"))
+                self.write_meta(conn, number, *self.labelled(row[0]))
 
     # -- deferred rows and sync -------------------------------------------------------------------------------------
 
@@ -575,7 +584,7 @@ class CachedRemoteStore:
                     self.warn(f"warning: deferred {', '.join(r['key'] for r in rows[e.id])} on #{e.id} dropped; #{e.id} is no longer a task on GitHub")
                     row = conn.execute("SELECT meta FROM tasks WHERE id=?", (e.id,)).fetchone()
                     if row:
-                        self.write_meta(conn, e.id, json.loads(row[0]).get("type", "task"))
+                        self.write_meta(conn, e.id, *self.labelled(row[0]))
             if not plan.edits:
                 return 0
             pushed = self.remote.push(plan, fresh)

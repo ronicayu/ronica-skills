@@ -2354,6 +2354,14 @@ class RunTest(Base):
         self.assertIn(f"decision #{gate}: ", text)
         self.assertIn(f"ready: #{free}", text)
 
+    def test_41_ready_tasks_are_listed_in_tg_ready_order(self):
+        first, second, third, fourth = (self.add_task(f"Job {i}") for i in range(4))
+        self.assertEqual(self.one(self.events("record"), "ready")["detail"], f"#{first} #{second} #{third} #{fourth}")
+        self.tg("edit", str(third), "--priority", "P1")
+        self.tg("edit", str(fourth), "--priority", "P0")
+        self.assertEqual(self.one(self.events("record"), "ready")["detail"], f"#{fourth} #{third} #{first} #{second}")
+        self.assertIn(f"ready: #{fourth} #{third} #{first} #{second}", self.ok("record").stdout)
+
     def test_41_nothing_ready(self):
         self.assertEqual(self.one(self.events("record"), "ready")["detail"], "none")
 

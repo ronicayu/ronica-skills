@@ -64,5 +64,6 @@ def check_size(label, body):
 
 
 def conflicts(number, problems):
-    text = {"broken": f"meta block on #{number} is broken; fix or delete it on GitHub", "two_blocks": f"#{number} has 2 meta blocks; the last one counts"}
-    return [text.get(p) or f"#{number} has the label {p[5:]}, which is not a task type" for p in problems]
+    text = {"broken": f"meta block on #{number} is broken; fix or delete it on GitHub", "two_blocks": f"#{number} has 2 meta blocks; the last one counts",
+            "two_priorities": f"#{number} has more than one priority label; the highest counts"}
+    return [text.get(p) or (f"#{number} has the label {p[9:]}, which is not a priority" if p.startswith("priority:") else f"#{number} has the label {p[5:]}, which is not a task type") for p in problems]

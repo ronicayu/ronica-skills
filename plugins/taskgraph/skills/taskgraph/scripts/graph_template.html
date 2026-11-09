@@ -189,6 +189,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #panel .badge + .badge { margin-left: 4px; }
 #panel .badge.risk { background: var(--risk-bg); color: var(--amber-text); border: 1px solid #f59e0b; }
 #panel .badge.conflict { background: var(--conflict-bg); color: var(--red-text); border: 1px solid #ef4444; }
+#panel .badge.priority { background: var(--chip); color: var(--text); border: 1px solid var(--chip-line); }
+#panel .badge.priority.p0 { background: var(--conflict-bg); color: var(--red-text); border-color: #ef4444; }
 #panel h3.red { color: var(--red-text); }
 #panel h3.amber { color: var(--amber-text); }
 #panel .lead { margin: 8px 0 2px; color: var(--muted); font-size: 12px; }
@@ -417,6 +419,10 @@ const LABELS = { ready: 'Ready', in_progress: 'In progress', blocked: 'Blocked',
 // carry one always. The mark's colour is a tone of the status fill that reads as text.
 const MARKS = { ready: '○', in_progress: '◔', blocked: '⊘', done: '✓' };
 const nodeMark = n => n.derived_status === 'ready' || !MARKS[n.derived_status] ? '' : MARKS[n.derived_status] + ' ';
+// The priority badge on a node: P0 to P3, nothing when the item has none.
+const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+const hasPriority = n => PRIORITIES.includes(n.priority);
+const priorityMark = n => hasPriority(n) ? n.priority + ' ' : '';
 const statusMark = status => el('i', { className: 'mark', textContent: MARKS[status] || MARKS.blocked, title: LABELS[status] || status, ariaHidden: 'true', style: `color:var(--mark-${tone(status)})` });
 const TYPES = ['task', 'milestone', 'decision', 'external', 'objective', 'risk', 'issue'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -905,7 +911,7 @@ function labelOf(n, open) {
   const sub = parts.filter(Boolean).join(' · ');
   const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
   const [titleLines, subLines] = view === 'lanes' ? [2, 1] : [3, 2];
-  const title = clampLabel(nodeMark(n) + '#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
+  const title = clampLabel(nodeMark(n) + priorityMark(n) + '#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
 
@@ -1198,7 +1204,7 @@ function layoutTimeline() {
     ele.removeClass('mk-none mk-pt mk-bar mk-sum').addClass(mark).data({ w, h, pct }).position({ x, y });
     if (baseDue(n)) els.push(bg('tl-base', 'tl:base:' + n.id, { h: TL.bar + 8 }, xOf(baseDue(n)), y));
     if (d) marks.set(String(n.id), { id: String(n.id), x, y, h, x1: x - w / 2, x2: x + w / 2, pt: mark === 'mk-pt', from: mark === 'mk-sum' ? x + w / 2 : x - w / 2 - 4, end: x + w / 2 + 6 + ctx.measureText(ele.data('label')).width });
-    const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + nodeMark(n) + '#' + n.id + ' ' + n.title;
+    const title = (isSummary(n) ? (open.has(n.id) ? '▾ ' : '▸ ') : '') + nodeMark(n) + priorityMark(n) + '#' + n.id + ' ' + n.title;
     els.push(bg('tl-name', 'tl:name:' + i, { name: clampLabel(title, TL.names - 28 - r.depth * TL.indent, 1), of: String(n.id), w: TL.names, h: TL.row, tx: 14 + r.depth * TL.indent - TL.names }, TL.names / 2, y));
   });
   const width = Math.max(left + (hi - lo) * TL.px, ...[...marks.values()].map(m => m.end)) + 12;
@@ -2160,6 +2166,7 @@ function openPanel(n) {
   const again = inside && (inside.dataset.ref || inside.id);
   trail = trail.filter(id => byId.has(id));
   const known = factKeys(n);
+  if (hasPriority(n)) known.add('priority');  // the badge shows it
   const extra = Object.entries(n.meta).filter(([k]) => !known.has(k));
   const focus = goal === n.id || n.type !== 'risk';
   const focusText = goal === n.id ? 'Show everything' : GOAL_TYPES.includes(n.type) ? 'Focus on this goal' : 'Show only what this needs';
@@ -2171,6 +2178,7 @@ function openPanel(n) {
     back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { id: 'panelTitle', tabIndex: -1, textContent: n.title }),
     el('div', { className: 'sub' }, '#' + n.id + '  ', badge(n.derived_status),
+      hasPriority(n) ? el('span', { className: 'badge priority ' + n.priority.toLowerCase(), textContent: n.priority, title: 'Priority ' + n.priority }) : null,
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
       atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
       conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,

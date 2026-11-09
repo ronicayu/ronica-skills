@@ -29,6 +29,7 @@ class RemoteTask:
     comments: int = 0
     item: dict = field(default_factory=dict)
     server_time: float | None = None  # the remote's clock when it answered
+    priority: str | None = None  # P0 to P3 from the label; None: no label
 
 
 @dataclass
@@ -67,6 +68,7 @@ class Create:
     type: str
     parent: int | None
     meta: dict  # the keys that go to the remote (write-through and deferred)
+    priority: str | None = None
 
 
 @dataclass
@@ -77,6 +79,7 @@ class Edit:
     status: str | None = None  # the status the task has now
     type: str | None = None  # the new type, when it changed
     parent: object = KEEP  # a task id, None to detach, KEEP
+    priority: object = KEEP  # P0 to P3, None to clear the label, KEEP
     meta_set: dict = field(default_factory=dict)  # write-through keys
     meta_unset: list = field(default_factory=list)
     pending: list = field(default_factory=list)  # deferred rows of this task: {"key", "op", "value", "base"}, all JSON text

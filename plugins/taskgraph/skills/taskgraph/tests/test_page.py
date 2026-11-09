@@ -548,7 +548,7 @@ def test_date_format(browser, page_file):
     text = page.inner_text("#panel")
     assert "Due\t25 Nov · +5d vs 20 Nov · plan" in text
     assert not re.search(r"\d{4}-\d{2}-\d{2}", page.text_content("#panel"))
-    assert re.search(r"Created\d{1,2} Oct \d{2}:\d{2}", page.text_content("#details"))
+    assert re.search(r"Created\d{1,2} [A-Z][a-z]{2}( \d{4})? \d{2}:\d{2}", page.text_content("#details"))
     assert re.fullmatch(r"Generated \d{1,2} \w{3}( \d{4})? \d{2}:\d{2}", page.inner_text("#stamp"))
     assert problems == []
     page.close()
@@ -1611,4 +1611,51 @@ def test_notes_render_as_safe_markdown(browser, page_file):
     assert "<script>alert(1)</script>" in last and "snake_case_name" in last and "2 * 3 * 4" in last
     assert page.evaluate(f"document.querySelectorAll('{notes} script, {notes} img, {notes} em').length") == 0
     assert dialogs == [] and problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def priority_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("priority")
+    tg = runner(tmp / "t.db")
+    tg("add", "Urgent fix", "--priority", "P0", "--meta", "lane=dev")
+    tg("add", "Someday", "--meta", "lane=dev")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_priority_badge_shows_on_nodes_that_have_one(browser, priority_file, view):
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{priority_file.as_uri()}?view={view}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    page.wait_for_timeout(300)
+    if view == "timeline":
+        names = page.evaluate("cy.nodes('.tl-name').map(n => n.data('name'))")
+        assert any(n.startswith("P0 #1 ") for n in names) and any(n.startswith("#2 ") for n in names)
+    else:
+        assert page.evaluate("cy.getElementById('1').data('label')").startswith("P0 #1 Urgent fix")
+        assert page.evaluate("cy.getElementById('2').data('label')").startswith("#2 Someday")
+    assert problems == []
+    page.close()
+
+
+def test_priority_badge_shows_in_the_panel(browser, priority_file):
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    page.goto(f"{priority_file.as_uri()}?view=graph&focus=1")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    page.wait_for_timeout(300)
+    x, y = page.evaluate(
+        """() => {
+            const p = cy.getElementById('1').renderedPosition(), b = document.getElementById('cy').getBoundingClientRect();
+            return [b.left + p.x, b.top + p.y];
+        }"""
+    )
+    page.mouse.click(x, y)
+    page.wait_for_function("document.getElementById('panel').style.display === 'block'")
+    assert page.inner_text("#panel .badge.priority") == "P0"
+    assert "Priority" not in page.text_content("#details")  # the badge shows it; the details do not repeat it
     page.close()

@@ -14,15 +14,15 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 
 | Command | Purpose |
 |---|---|
-| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--promised D] [--notes T] [--meta k=v ...]` | Create a task and its links. |
+| `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--promised D] [--priority P0\|P1\|P2\|P3] [--notes T] [--meta k=v ...]` | Create a task and its links. |
 | `dep add TASK DEPENDS_ON` / `dep rm TASK DEPENDS_ON` | Add or remove a dependency. Taskgraph rejects cycles. |
-| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--sort id\|due\|late] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
-| `ready [--all-projects]` | List leaf tasks that can start now. |
+| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--priority P0\|P1\|P2\|P3\|none ...] [--sort id\|due\|late\|priority] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
+| `ready [--all-projects]` | List leaf tasks that can start now, by priority (P0 first, tasks without one last), then by id. |
 | `show ID` | Show details, dependencies, dependents, and conflicts. |
 | `start ID` / `done ID` / `reopen ID` | Change a task's status. |
 | `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates. |
 | `agenda [--within DAYS] [--type T ...] [--all-projects]` | List late, at-risk, conflicting, due-soon, and chase-due items. It also lists tasks whose start dates have passed and items without dates. |
-| `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--meta k=v ...] [--unset-meta k ...]` | Edit fields. Metadata merges. Valid JSON values are parsed as JSON. |
+| `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--priority P0\|P1\|P2\|P3 \| --no-priority] [--meta k=v ...] [--unset-meta k ...]` | Edit fields. Metadata merges. Valid JSON values are parsed as JSON. |
 | `rm ID [--recursive]` | Delete a task and its links. |
 | `path ID` | Show the upstream chain, slack at each step, driving chain, and verdict. |
 | `why ID` | Show the chains from a task to its goals, through dependencies and parents (`via`: `blocks` or `parent`). |
@@ -43,6 +43,12 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 The result log is append-only. `result add` is one insert, so several writers can add to the same task at once. It does not change the task: not its status, notes, metadata, or `updated_at`, and it writes no history. Taskgraph has no command to edit or delete a single entry. Removing the task removes its entries. `show --json` lists the entries without bodies, `show --brief` leaves them out, and `result ls` reads them. Use this command as the one write that a background agent may make. A permission rule that allows it still lets the agent read any file it can open into the log through `--body-file PATH`, and create a database anywhere through `--db`. To narrow it, pin `--db` and allow only `--body` or `--body-file -`.
 
 Stored statuses are `open`, `in_progress`, and `done`. Taskgraph derives `blocked` and `ready`. Exit code 1 and an `error:` message on stderr indicate an error.
+
+### Priority
+
+A task may have a priority: `P0` (highest), `P1`, `P2` or `P3`. No priority is the default and is stored as no value. Set it with `add --priority P` or `edit ID --priority P`, and clear it with `edit ID --no-priority`. Any other value is `error: priority must be P0, P1, P2 or P3`. `--meta priority=...` is refused, so that the value is always checked. It is stored as the meta key `priority`, and every JSON task object has `"priority": "P1"` or `"priority": null`; `export` carries it in `meta`.
+
+`ls --priority P1 P2` keeps tasks with one of those priorities, and `--priority none` keeps tasks without one. `ls --sort priority` orders by priority (P0 first, then P1, P2, P3, then none), then by due date, then by id. `ready` orders by priority, then by id; with no priorities set the order is the id order. The text of `ls`, `ready`, `show` and `agenda` shows the priority where a task has one: `ls` and `ready` add a column only when a listed task has a priority, so a project without priorities prints what it always did. `changes` lists a priority change under Re-scoped, and the graph shows a `P0` to `P3` badge on the nodes that have one.
 
 ## The GitHub backend
 
@@ -67,7 +73,7 @@ deferred = ["tokens", "model", "started_at"]                      # sent with th
 
 The file is found through `$TASKGRAPH_CONFIG` (a path; an empty value turns it off), else the first `.taskgraph.toml` in the current folder or a parent, else the main checkout of a git worktree. `--db` does not apply to a GitHub project.
 
-A task is an issue with the label `taskgraph`; its id is the issue number. A dependency is GitHub's "blocked by", a parent is a sub-issue, the status is open or closed plus the label `tg:in-progress`, the type is a label `tg:type:<type>`, notes are the issue body, and other meta is a hidden JSON block at the end of the body. A result is a comment with a hidden marker. `rm` closes the issue as not planned with the label `tg:removed`.
+A task is an issue with the label `taskgraph`; its id is the issue number. A dependency is GitHub's "blocked by", a parent is a sub-issue, the status is open or closed plus the label `tg:in-progress`, the type is a label `tg:type:<type>`, the priority is a label `tg:priority:<P>`, notes are the issue body, and other meta is a hidden JSON block at the end of the body. A result is a comment with a hidden marker. `rm` closes the issue as not planned with the label `tg:removed`. The priority is written through, never into the body: the label is the source of truth on a pull, the cached `priority` key mirrors it, and a person can set it by changing the label. A task holds at most one `tg:priority:` label; if a person adds a second, the highest counts, `show` lists a conflict, and the next `tg edit --priority` leaves one. The first write creates the four labels `tg:priority:P0` to `tg:priority:P3`.
 
 ```mermaid
 flowchart LR

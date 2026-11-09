@@ -746,6 +746,15 @@ skill. Metadata holds everything else, 26 keys:
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
 
+A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
+`tg add --priority` and `tg edit --priority` set; it is not one of these keys.
+`record` lists the ready tasks in `tg ready` order, which is priority first and
+then id, and the Manager launches them in that order.
+
+### Upgrading from 0.14.0
+
+Version 0.14.1 lists ready tasks in Taskgraph's priority order: P0 first, then P1, P2 and P3, then tasks without a priority, and by id within each group. `run.py` keeps the order of `tg ready`, and the Manager launches in that order. The plan step may set `--priority` on a task. This needs Taskgraph 1.16.0. A project that sets no priority sees the same order as before. No migration.
+
 ### Upgrading from 0.13.0
 
 Version 0.14.0 adds a `Checks` section to the project verify skill skeleton (`templates/project-verify-skill-code.md`): the project's lint, format check, type check, other static analysis and tests. The agent that fills the skeleton checks the project's configuration first; when a kind is missing it tells the user, proposes a standard tool, and asks the user to add it, and it writes `none: <reason>` only with the user's reason. The code verifier now runs every `Checks` command at the base and the head: a problem only the head has is an issue, one the base already has is a `found:` follow-up, and a missing or `TODO` kind is a `doc:` follow-up. A project verify skill made before 0.14.0 has no `Checks` section: copy it from the skeleton and fill it, or the verifier reports a `doc:` follow-up for each kind. No migration.

@@ -107,7 +107,9 @@ every report, and on every wake (step 6).
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
      After a `kept` line about untracked files, delete only files your rerun
      created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete those files, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
-4. **Launch.** For each task `record` lists under `ready`, while `slots` has
+4. **Launch.** For each task `record` lists under `ready`, in the order it
+   lists them (that is `tg ready` order: priority first, P0 to P3, then tasks
+   without one; ties by id), while `slots` has
    room: skip a task whose work needs a person or an outside party (a drafting
    task may prepare a request but never send it). Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - Exit 2: fix what the message names (the task, the config, or the state),
