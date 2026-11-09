@@ -15,6 +15,9 @@ adds what Taskgraph cannot decide.
    - `--meta scope="<paths it may write; paths it may not>"`;
    - `--meta verify="<exact commands or checks>"`;
    - `--meta estimate=<hours>`. The worker's timebox is twice the estimate;
+   - `--priority P0|P1|P2|P3` (optional; P0 is the highest, no priority is the
+     default). `record` lists ready tasks in priority order, then by id. Never
+     pass it with `--meta`;
    - `--meta tier=<mechanical|implementation|judgement|override key>`;
    - `--meta risk=low|high`. Use `high` when a check is expensive or needs
      judgement, when other work builds on the output, or when readers rely on it;
