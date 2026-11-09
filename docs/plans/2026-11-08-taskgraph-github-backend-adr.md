@@ -56,10 +56,11 @@ Also rejected:
 
 ## What the issue-API-only claim guarantees
 
-- At most one claimant gets exit 0 for one claim, if comment ids increase in commit order and a list read that holds my comment also holds every lower id. The first is documented (ascending id order); the second is not. Live: 10 of 10 rounds of two parallel claimers agreed on one winner.
-- A loser learns it lost from its own reads and exits 1. It deletes its claim comment.
-- If the second property fails, two claimants can both win. Then two unvoided claims stay on the issue, and every later refresh shows a `claim conflict` on the task. The failure is detectable, not silent.
-- Not guaranteed: a claim made while GitHub is unreachable (tg fails instead); protection of the worker session that `run.py launch` starts before `tg start`; mutual exclusion between tg and a person who edits labels in the GitHub UI.
+- At most one claimant holds the task, and it is the one GitHub shows as the holder, if comment ids increase in commit order, a list read that holds my comment also holds every lower id, and no `tg start` pauses 60 s or more between its steps. A TLA+ model check proves this for two claimants and three `tg start` runs each, also with reads that miss newer comments (spec section 8.5, `plugins/taskgraph/model/claim/`).
+- The model check found three ways to two holders in the first draft of the protocol: a close made claims posted after it stale; a loser's delete undid the void its comment carried; an owner reused its own old claim through a lagging read. Spec section 8.1 fixes all three.
+- A loser learns it lost from its own reads and exits 1. It removes its claim, and keeps a void marker that its comment carried.
+- Not guaranteed, and not always visible as a conflict: a `tg start` that pauses 60 s or more between its claim and its label `PATCH` (a 30 s check makes the window small; without compare-and-set it cannot close it); a person who removes the label or closes the issue in the GitHub UI; list reads that miss older comments.
+- Not guaranteed: a claim made while GitHub is unreachable (tg fails instead); protection of the worker session that `run.py launch` starts before `tg start`.
 - The only other locks are local to one machine: `BEGIN IMMEDIATE` and an `flock` on the cache file, so that 5 tg processes of one poll do not refresh at the same time. They are not part of the claim.
 
 ## Consequences

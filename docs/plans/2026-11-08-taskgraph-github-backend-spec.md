@@ -13,7 +13,7 @@ Base: `main` at 0422db3. Test repository: `ronicayu/taskgraph-backend-test` (pri
 4. Every write is in one of three classes: **write-through** (to GitHub at once, then to the cache), **local-only** (cache only, never pulled over), **deferred** (cache now, sent to GitHub with the next write-through on the same issue or by `tg sync`). Section 7 gives the class of each write that agentic-team and the skill make.
 5. A write command always refreshes first, validates against the refreshed cache inside a SQLite transaction (the current validation code), sends the change to GitHub, and only then commits. If GitHub refuses, the cache transaction rolls back.
 6. Mapping: task = issue with the label `taskgraph`. Task id = issue number. Dependency = native "blocked by". Parent = native sub-issue. Status = open/closed plus the label `tg:in-progress`. Type = label `tg:type:<type>`. Notes = issue body text. Meta = a hidden JSON block at the end of the body. Result = a comment with a hidden marker. Events and baselines stay in the cache only.
-7. Claim: `tg start` on GitHub runs a claim protocol with claim comments. The lowest unvoided claim comment id wins. In a live test, 10 of 10 rounds of two parallel claimers agreed on one winner. The loser deletes its comment and `tg start` fails with exit 1.
+7. Claim: `tg start` on GitHub runs a claim protocol with claim comments. The lowest unvoided claim comment id wins. In a live test, 10 of 10 rounds of two parallel claimers agreed on one winner. The loser removes its claim and `tg start` fails with exit 1. A TLA+ model check (section 8.5) found three ways to two holders in the first draft; section 8.1 has the fixed protocol.
 8. Numbers: one running agentic-team Manager uses about **1,550 GraphQL points per hour on 50 tasks and about 5,060 on 300 tasks without a cache** (over the 5,000 limit). **With the cache it uses about 30–60 GraphQL points and 135–175 counted REST requests per hour** (plus 120–360 free 304 probes), about the same for both sizes. Counted points go down by about 90 % (50 tasks) and 96 % (300 tasks); GraphQL points by about 98–99 %.
 9. agentic-team does not change. One limit stays: two Managers on different machines must not run the same project at the same time. Section 7.4 explains why (agentic-team, not tg, would file `DIED` for the other Manager's tasks).
 
@@ -516,16 +516,18 @@ deferred = ["tokens", "model", "started_at"]
 
 ### 8.1 Protocol (`tg start N` on GitHub)
 
+Revised on 2026-11-09 after a TLA+ model check (section 8.5). The changes from the first draft are steps 4, 5, 9 and 10.
+
 1. Refresh and validate as for every write (section 6.2).
-2. `fetch(N)`: state, labels.
-3. `GET .../issues/N/comments` (all pages). Build the claim list: comments whose first line is `<!-- taskgraph:claim v1 {...} -->`, and void markers `<!-- taskgraph:void v1 {"of":<claim comment id>} -->`.
-4. Find the active claim: the claim with the lowest comment id that no void marker names. It is **stale** when the issue has no `tg:in-progress` label and the claim comment is older than 60 s, or when the issue is closed.
-5. If the active claim is mine and not stale: make sure the issue is open and has the `tg:in-progress` label (`PATCH` only when it is missing, for example after a failed step 10), then exit 0 (idempotent restart, launch repair).
+2. `fetch(N)`: state, labels, `closed_at`.
+3. `GET .../issues/N/comments` (all pages). Build the claim list: comments whose first line is `<!-- taskgraph:claim v1 {...} -->`, and void markers `<!-- taskgraph:void v1 {"of":<claim comment id>} -->`. A comment can hold a void marker, a claim marker, or both.
+4. Find the active claim: the claim with the lowest comment id that no void marker names. It is **stale** when it is **older than 60 s** and either the issue has no `tg:in-progress` label, or the issue is closed and the claim was posted before `closed_at`. A close alone does not make a claim stale: a claimant can still be between its steps.
+5. If the active claim is mine, not stale and **younger than 60 s**: make sure the issue is open and has the `tg:in-progress` label (`PATCH` only when it is missing, for example after a failed step 10), then exit 0 (idempotent restart, launch repair). If my claim is 60 s or older, go to step 7 and post a new claim that voids it: another claimant may already have voided it, and a lagging read may not show that.
 6. If the active claim is another claimant's and not stale: exit 1, `error: #N is claimed by <claimant> since <at>`.
-7. Post one comment. If a stale claim exists, the comment voids it and claims in one body (two marker lines: void first, then claim). The claim marker holds `{"token": <12 hex>, "claimant": "...", "at": "..."}`.
-8. Read the comments again. The winner is the lowest unvoided claim id. My comment must be in the list; if not, read again (3 times, 1 s apart), then fail with `RemoteError`.
-9. If I lost: delete my comment, exit 1 `#N is claimed by <winner>`.
-10. If I won: wait 1.1 s (mutation pacing), read again (the confirm read). If I still win: `PATCH` state open (when closed), labels += `tg:in-progress`, body with pending deferred meta. Commit the cache. If the confirm read shows a lower unvoided claim: delete my comment, exit 1.
+7. Post one comment. If the active claim is stale, the comment voids it and claims in one body (two marker lines: void first, then claim). The claim marker holds `{"token": <12 hex>, "claimant": "...", "at": "..."}`.
+8. Read the comments again. **I win when the lowest unvoided claim is mine.** My comment must be in the list; if not, read again (3 times, 1 s apart), then fail with `RemoteError`.
+9. If I lost: if my comment holds a void marker, **edit it so that only the void marker stays**; otherwise delete it. Exit 1 `#N is claimed by <winner>`. Deleting a comment that holds a void would undo the void and bring the stale claim back.
+10. If I won: wait 1.1 s (mutation pacing), read again (the confirm read) and apply the same check as step 8. If I lost, clean up as in step 9 and exit 1. If more than 30 s have passed since my claim's `created_at` (server time), clean up as in step 9 and exit 1 `claim took too long; run tg start again`. Otherwise `PATCH` state open (when closed), labels += `tg:in-progress`, body with pending deferred meta. Commit the cache.
 
 Two Managers claim the same task at the same time:
 
@@ -540,32 +542,29 @@ sequenceDiagram
   B->>G: post claim (comment id 102)
   A->>G: read: 101 is the lowest, mine
   B->>G: read: 101 is the lowest, not mine
-  B->>G: delete comment 102
+  B->>G: delete comment 102 (it holds no void)
   Note over B: exit 1, "#12 is claimed by A"
   A->>G: wait 1.1 s, confirm read: 101 still lowest
   A->>G: PATCH labels += tg:in-progress
   Note over A: exit 0
 ```
 
-`tg done` and `tg reopen` post nothing. Removing the label makes the claim stale after 60 s. The next claimer voids it in its claim comment.
-
-A void marker names one claim id. Two claimers that both void the same stale claim do not void each other. Thus the void step cannot create two winners.
-
 ### 8.2 Statechart
 
 ```mermaid
 stateDiagram-v2
   [*] --> Checking: tg start N
-  Checking --> Held: active claim is mine
+  Checking --> Held: active claim is mine, not stale, younger than 60 s
   Checking --> Refused: active claim is another's, not stale
-  Checking --> Posting: no claim, or stale claim
+  Checking --> Posting: no claim, a stale claim, or my claim is 60 s or older
   Posting --> Deciding: claim comment posted (voids the stale claim)
-  Deciding --> Lost: lower unvoided claim exists
-  Deciding --> Confirming: my claim is lowest
-  Confirming --> Lost: confirm read shows a lower claim
-  Confirming --> Held: still lowest; label added
-  Lost --> Refused: my comment deleted
-  Held --> Stale: label removed (done, reopen) and 60 s passed, or issue closed
+  Deciding --> Lost: lowest unvoided claim is not mine
+  Deciding --> Confirming: lowest unvoided claim is mine
+  Confirming --> Lost: confirm read - lowest unvoided claim is not mine
+  Confirming --> Lost: more than 30 s since my claim
+  Confirming --> Held: still mine; label added
+  Lost --> Refused: comment deleted, or edited to keep its void
+  Held --> Stale: label removed or issue closed, and the claim is older than 60 s
   Stale --> Posting: next tg start voids it
   Refused --> [*]
   Held --> [*]
@@ -573,25 +572,27 @@ stateDiagram-v2
 
 | State | Event | Action | Next |
 |---|---|---|---|
-| Checking | active claim is mine, not stale | add the label if it is missing | Held (exit 0) |
+| Checking | active claim is mine, not stale, younger than 60 s | add the label if it is missing | Held (exit 0) |
+| Checking | active claim is mine and 60 s or older | post a claim that voids it | Posting → Deciding |
 | Checking | active claim is another's, not stale | print holder | Refused (exit 1) |
 | Checking | no claim or stale claim | post claim (+ void) comment | Posting → Deciding |
-| Deciding | my comment not in list after 3 reads | none | error (exit 1); comment stays; next start sees it as mine |
-| Deciding | a lower unvoided claim exists | delete my comment | Lost → Refused |
-| Deciding | mine is lowest | wait 1.1 s, read again | Confirming |
-| Confirming | a lower unvoided claim appeared | delete my comment | Lost → Refused |
-| Confirming | mine is still lowest | PATCH label (+ state, + deferred meta); commit cache | Held |
-| Held | `tg done` / `tg reopen` / person closes / label removed, then 60 s | none | Stale |
+| Deciding | my comment not in list after 3 reads | none | error (exit 1); comment stays |
+| Deciding | the lowest unvoided claim is not mine | delete my comment, or keep only its void | Lost → Refused |
+| Deciding | the lowest unvoided claim is mine | wait 1.1 s, read again | Confirming |
+| Confirming | the lowest unvoided claim is not mine | as Deciding → Lost | Lost → Refused |
+| Confirming | more than 30 s since my claim's `created_at` | as Deciding → Lost | Lost → Refused |
+| Confirming | still mine | PATCH label (+ state, + deferred meta); commit cache | Held |
+| Held | `tg done` / `tg reopen` / person closes / label removed, and the claim is older than 60 s | none | Stale |
 | Stale | another `tg start` | its comment voids my claim | (their) Posting |
 
 ### 8.3 What is guaranteed
 
 The claim uses only the issue API (comments, labels) and the client's re-reads. It uses no GitHub Actions runner, no workflow `concurrency` group, no lock container and no other service that must run somewhere (user decision; the ADR lists this as a rejected option). The `flock` and `BEGIN IMMEDIATE` of section 6.2 are local to one machine and guard only the cache refresh.
 
-
-- G-a: **At most one claimant gets exit 0 for one epoch**, if two GitHub properties hold: comment ids increase in commit order (docs: lists are in ascending id order), and a list read that contains my comment also contains every comment with a lower id. The live test (C7) found both in 10 of 10 rounds; the second property is not documented.
+- G-a: **At most one claimant holds the task at a time, and it is the claimant that GitHub shows as the holder**, if three things hold: comment ids increase in commit order (docs: lists are in ascending id order); a list read that contains my comment also contains every comment with a lower id (not documented; the live test C7 found it in 10 of 10 rounds); and no `tg start` pauses 60 s or more between its steps. The model check (section 8.5) proves this for two claimants and up to three `tg start` runs each, with list reads that miss newer comments.
 - G-b: A loser always learns it lost from its own reads, and its exit code is 1.
-- G-c: If the second property fails, two claimants can both get exit 0. Then two unvoided claims stay on the issue (neither deletes its comment). Each later refresh computes the same winner from the cached claims and adds the conflict `claim conflict on #N: <a> and <b>` to `show`, `ls` and `agenda`. The unsafe case is thus detectable, not silent.
+- G-c: If the second property fails, two claimants can both get exit 0. In some of those runs only one unvoided claim stays, so a refresh cannot always see the conflict. When two unvoided claims stay, each later refresh adds `claim conflict on #N: <a> and <b>` to `show`, `ls` and `agenda`.
+- Not guaranteed, and found by the model as paths to two holders: a `tg start` that pauses 60 s or more between posting its claim and the label `PATCH` (the 30 s check of step 10 makes the window small; it cannot close it, because GitHub has no compare-and-set, G14); a person who removes the label or closes the issue while a Manager holds the task. Neither case is visible as a conflict.
 - Not guaranteed: anything about agentic-team's session start. `run.py launch` starts the worker session **before** it runs `tg start`. A lost claim makes `tg start` fail (run.py exit 1, `tg start failed: ... claimed by ...`), and that session is left running. The operator stops it. A future agentic-team change can claim before it starts the session.
 
 ### 8.4 Paths that must read GitHub, not the cache
@@ -604,6 +605,36 @@ The claim uses only the issue API (comments, labels) and the client's re-reads. 
 | `result add` | `fetch` of the issue (exists, has the label). |
 | Deferred flush | `fetch` first; GitHub wins on a changed key (6.4). |
 | `ready --fresh`, any read with `--fresh` | Refresh now. For a person who wants to be sure. |
+
+### 8.5 Model check
+
+`plugins/taskgraph/model/claim/` holds a TLA+ model of this protocol, checked with the statechart plugin (TLC). `NOTES.md` there maps each action to a step of section 8.1 and gives the commands. Two claimants and one issue; time is one bit per comment (older than 60 s or not).
+
+The first draft of section 8.1 broke "at most one holder" with no read lag and no pause. The model found three paths:
+
+1. **A close made every claim stale, also a claim posted after the close.** A restarts a done task and posts a claim. A passes its confirm read. Before A's `PATCH` reopens the issue, B reads A's new claim as stale (the issue is still closed), voids it and wins. Both hold, and only B's claim is unvoided, so no conflict shows. Fix: step 4 (the 60 s always applies, and a close ends only the claims posted before it). Steps 8 and 10 now use one check, so a claimant whose claim was voided while it waited also loses at the confirm read.
+
+```mermaid
+sequenceDiagram
+  participant A as Manager A
+  participant G as Issue #12
+  participant B as Manager B
+  Note over G: A held the task and ran tg done (closed)
+  A->>G: tg start: old claim c1 is stale; post c2 (voids c1)
+  A->>G: read, confirm read: c2 is the lowest unvoided claim
+  B->>G: tg start: issue still closed, so c2 counts as stale
+  B->>G: post c3 (voids c2)
+  A->>G: PATCH: reopen, add label
+  Note over A: exit 0, holds the task
+  B->>G: read, confirm read: c3 is the lowest unvoided claim
+  B->>G: PATCH label
+  Note over B: exit 0, holds the task too
+```
+
+2. **A loser deleted its comment, and with it the void it carried.** The stale claim it had voided came back as the active claim, so GitHub showed the wrong holder, and that claim's owner could pass step 5 and hold the task too. Fix: step 9.
+3. **An owner reused its own old claim.** A's label `PATCH` failed; after 60 s B voided A's claim and won. A ran `tg start` again; a read that missed B's newer comment showed A's claim as active, and step 5 reused it. Fix: step 5 reuses a claim only while it is younger than 60 s.
+
+With the revised steps, every rule holds: 183,062 states with full reads and 592,300 states with lagging reads, three `tg start` runs per claimant. Each fix is needed: with any one of them off, a `regress-*.cfg` config breaks a rule. The `accepted-*.cfg` configs show the cases that section 8.3 does not guarantee.
 
 ## 9. Configuration
 
