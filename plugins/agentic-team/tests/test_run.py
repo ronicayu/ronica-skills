@@ -7751,6 +7751,36 @@ class DeliveryTest(Base):
         self.assertTrue(self.mailbox_meta(task)[str(steer["id"])]["carried"])
         self.assertFalse(os.path.exists(self.inbox_file("task-1.flag")))
 
+
+    # --- T15: wait reads Taskgraph on its own, shorter interval
+
+    def test_t15_wait_wakes_within_one_tg_interval_on_a_new_ask_row(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        log = os.path.join(self.dir, "wait.log")
+        proc = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--tg", TG, "--json", "wait", "--interval", "600",
+                                 "--tg-interval", "0.2", "--timeout", "60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=self.dir, env=dict(self.env, FAKE_CLAUDE_LOG=log))
+        end = time.time() + 30
+        while not os.path.isfile(log) and time.time() < end:  # its starting state is read once it has listed the sessions
+            time.sleep(0.05)
+        self.assertTrue(os.path.isfile(log))
+        started = time.time()
+        ask = self.ask()
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertLess(time.time() - started, 10)  # --interval is 600: only the Taskgraph read can have seen it
+        (event,) = json.loads(out)
+        self.assertEqual((event["event"], event["task"], event["detail"]), ("changed", task, f"new result #{ask}: ask OPEN"))
+        with open(log) as fh:
+            self.assertEqual(sum(1 for line in fh if line.startswith('["agents"')), 2)  # c2 is listed too; never again
+
+    def test_t15_the_tg_interval_comes_from_the_config_and_must_be_positive(self):
+        self.running_task()
+        self.agents(self.row("task-1"))
+        out = self.run_cmd("wait", "--tg-interval", "0", "--timeout", "1")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--tg-interval", out.stderr)
+
     # --- run state: launch, cleanup, abandon
 
     def test_a_new_attempt_drops_the_delivery_state_of_earlier_attempts_and_the_stale_flag(self):

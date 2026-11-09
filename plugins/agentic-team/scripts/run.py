@@ -54,6 +54,15 @@ for the Manager's own profile, `default`). `claude agents` lists one profile onl
 `record` and every later call on the session (`logs`, `stop`, `rm`, the transcript
 folder) use the profile of its entry; without [profiles] nothing changes.
 
+A worker may ask the Manager, and the Manager may answer or steer it (`answer`, `steer`, `inbox`). Every message is a
+Taskgraph result row (kind ask, answer, steer, ack); the row id is the message id. `run.py` lists the id of each
+answer and steer row it files in the task's `mailbox` meta, with its delivery state, and the worker acts only on listed
+ids. A doorbell wakes the receiver and carries no instructions: a socket post to the worker's inbox socket (when its
+process runs and its session id is matched), else `claude stop` plus `claude --bg --resume <sessionId>` under the
+session's own profile, else a flag file that the worker's PostToolUse hook shows. Only the worker's ack row proves
+delivery. A worker that waits for an answer is `asking` in `record`, never `stuck` or `DIED`. Attempts stay fresh
+sessions: a resume happens only inside an attempt, through `answer` and `steer`.
+
 Text output is one line per event: `<event> #<id> attempt <n>: <detail>`, with
 ` | next: <step>` when a step follows. `--json` prints one JSON array of
 {"event", "task", "attempt", "session", "detail", "next"} and nothing else
@@ -2981,16 +2990,18 @@ def wait_host(run, snap, watched):
     return found
 
 
-def wait_state(run, host=None):
+def wait_state(run, host=None, fresh=True):
     """(state, host part, things in flight) for `wait`. It reads only what `record` reads, and writes nothing.
 
     The state maps a key to a value: ("results", task) to the task's (result id, kind, status) rows; ("session",
     task, sid) to the row's (status, state, waitingFor, turn_over, stuck, finished); ("decision", id) to the status
     of an open decision; in pr mode, ("request", task) and ("ci", task) from wait_host. The watched tasks are the
     tasks in progress with an attempt, not abandoned and not legacy. `host` is the host part of an earlier read, to
-    reuse; None reads the host now (pr mode only). Things in flight: live sessions of watched tasks, plus each host
-    key."""
-    run._sessions = None  # read `claude agents` again
+    reuse; None reads the host now (pr mode only). `fresh` False keeps the session rows of the last read instead of
+    running `claude agents` again: `wait` reads Taskgraph often and the sessions seldom. Things in flight: live
+    sessions of watched tasks, plus each host key."""
+    if fresh:
+        run._sessions = None  # read `claude agents` again
     snap = Snapshot(run)
     watched = {t["id"]: t for t in snap.in_progress if wanted_attempt(t) is not None
                and not (t.get("meta") or {}).get("abandoned") and not is_legacy(t)}
@@ -3055,21 +3066,25 @@ def cmd_wait(run, args):
     if not 0 < args.timeout <= WAIT_TIMEOUT_MAX:
         raise Refused(f"--timeout must be more than 0 and at most {WAIT_TIMEOUT_MAX} seconds (110 minutes); "
                       "Bash stops a background command after 2 hours")
-    if args.interval <= 0 or args.host_interval <= 0:
-        raise Refused("--interval and --host-interval must be more than 0 seconds")
+    tg_interval = args.tg_interval if args.tg_interval is not None else run.config["messaging"]["tg_poll_seconds"]
+    if args.interval <= 0 or args.host_interval <= 0 or tg_interval <= 0:
+        raise Refused("--interval, --tg-interval and --host-interval must be more than 0 seconds")
+    tick = min(args.interval, tg_interval)  # Taskgraph is read every tick, `claude agents` every --interval
     start = time.monotonic()
     before, host, flight = wait_state(run)
     if not flight:
         run.emit("nothing-in-flight", None, None, None, "no live session, open request or CI run to watch",
                  "run.py record")
         return
-    host_read = start
+    host_read = agents_read = start
     while True:
-        time.sleep(max(0.0, min(args.interval, start + args.timeout - time.monotonic())))
+        time.sleep(max(0.0, min(tick, start + args.timeout - time.monotonic())))
         now = time.monotonic()
         if run.pr_mode and now - host_read >= args.host_interval:
             host, host_read = None, now
-        after, host, _ = wait_state(run, host)
+        sessions_due = now - agents_read >= args.interval - 0.01
+        agents_read = now if sessions_due else agents_read
+        after, host, _ = wait_state(run, host, fresh=sessions_due)
         changes = wait_changes(before, after)
         for number, sid, detail in changes:
             run.emit("changed", number, None, sid, detail, WAKE_NEXT)
@@ -4528,7 +4543,10 @@ def build_parser():
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,
                    help=f"seconds to wait at most (default {WAIT_TIMEOUT}, at most {WAIT_TIMEOUT_MAX})")
     p.add_argument("--interval", type=float, default=WAIT_INTERVAL,
-                   help=f"seconds between two reads of Taskgraph and claude agents (default {WAIT_INTERVAL})")
+                   help=f"seconds between two reads of claude agents (default {WAIT_INTERVAL})")
+    p.add_argument("--tg-interval", type=float, default=None,
+                   help="seconds between two reads of Taskgraph (default: [messaging] tg_poll_seconds, 5); "
+                        "claude agents is still read every --interval, so a new ask or answer row wakes the Manager sooner")
     p.add_argument("--host-interval", type=float, default=WAIT_HOST_INTERVAL,
                    help=f"pr mode: seconds between two reads of the code host (default {WAIT_HOST_INTERVAL}; "
                         "the host limits its rate, so keep the default)")
