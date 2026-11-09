@@ -265,6 +265,10 @@ class Doorbell:
             time.sleep(0.02)
         return self.lines
 
+    def refuse(self):
+        """Stop listening but leave the socket file: a connect now gets ECONNREFUSED."""
+        self.server.close()
+
     def close(self):
         self.server.close()
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -7391,7 +7395,6 @@ class DeliveryTest(Base):
         (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
         self.assertEqual((answer["author"], answer["body"]), ("operator", f"Re: #{ask}\nAnswer: Use v2.\nIt is current.\nSource: operator\n"))
         self.fresh()
-        self.setUp()
         task = self.worker()
         ask = self.ask()
         self.ok("answer", str(task), "--default")
@@ -7504,7 +7507,6 @@ class DeliveryTest(Base):
         for name, kwargs in cases.items():
             with self.subTest(name):
                 self.fresh()
-                self.setUp()
                 task = self.worker(status="idle", pid=4242, startedAt=(time.time() - 60) * 1000)
                 bell = self.bell()
                 self.checkin(bell, **kwargs)
@@ -7517,23 +7519,27 @@ class DeliveryTest(Base):
                 self.assertEqual(len(self.resumes()), 1)  # the fallback: stop plus resume
                 self.assertEqual(self.mailbox_meta(task)[str(self.results(task)[-1]["id"])]["via"], "resume")
 
-    def test_t8_a_refused_connection_falls_back_to_resume_and_two_failures_turn_the_socket_off(self):
-        task, bell = self.busy_worker_with_socket()
-        self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242,
-                                startedAt=(time.time() - 60) * 1000))
-        bell.close()  # connect fails
-        self.ask()
-        events = self.events("answer", str(task), "--file", self.text_file("v2"))
-        self.assertIn("the socket post did not work", self.one(events, "deliver-fallback")["detail"])
-        self.assertIn("No such file or directory", self.one(events, "deliver-fallback")["detail"])
-        self.assertEqual(len(self.resumes()), 1)
-        self.assertEqual(len(self.calls("stop")), 1)
+    def test_t8_a_refused_or_missing_socket_falls_back_to_resume(self):
+        for name, break_it, reason in (("refused", lambda bell: bell.refuse(), "Connection refused"),
+                                       ("gone", lambda bell: bell.close(), "No such file or directory")):
+            with self.subTest(name):
+                self.fresh()
+                task, bell = self.busy_worker_with_socket()
+                self.c2_agents(self.row("task-1", status="idle", state="blocked", sessionId=UUID1, pid=4242,
+                                        startedAt=(time.time() - 60) * 1000))
+                break_it(bell)
+                self.ask()
+                events = self.events("answer", str(task), "--file", self.text_file("v2"))
+                detail = self.one(events, "deliver-fallback")["detail"]
+                self.assertIn("the socket post did not work", detail)
+                self.assertIn(reason, detail)
+                self.assertEqual(len(self.resumes()), 1)
+                self.assertEqual(len(self.calls("stop")), 1)
 
     def test_t8_the_session_registry_is_the_fallback_address_and_only_for_a_matching_session_id(self):
         for name, registry_id, posted in (("matching", UUID1, 1), ("another session", "other-uuid", 0)):
             with self.subTest(name):
                 self.fresh()
-                self.setUp()
                 task = self.worker(status="idle", pid=4242)
                 bell = self.bell()
                 os.makedirs(os.path.join(self.c2, "sessions"))
@@ -7781,6 +7787,17 @@ class DeliveryTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("--tg-interval", out.stderr)
 
+    def test_launch_refuses_while_a_parked_worker_waits_for_an_answer(self):
+        task = self.worker(status=None, state="done")  # the supervisor stopped it: no process, no result
+        ask = self.ask()
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"attempt 1 waits for an answer to ask #{ask}", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="gone"))
+        self.one(events, "died")  # the worker could not be resumed: DIED frees the task
+        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+
     # --- run state: launch, cleanup, abandon
 
     def test_a_new_attempt_drops_the_delivery_state_of_earlier_attempts_and_the_stale_flag(self):
@@ -7802,7 +7819,6 @@ class DeliveryTest(Base):
         for how in ("merged", "abandon"):
             with self.subTest(how):
                 self.fresh()
-                self.setUp()
                 task = self.worker(status=None, state="done")
                 self.ask()
                 self.ok("answer", str(task), "--file", self.text_file("v2"))
@@ -7843,7 +7859,6 @@ class DeliveryTest(Base):
     def test_inbox_shows_the_thread_and_the_delivery_state(self):
         self.assertEqual(self.one(self.events("inbox", str(self.running_task())), "inbox")["detail"], "no messages")
         self.fresh()
-        self.setUp()
         task = self.worker(status=None, state="done")
         ask = self.ask()
         self.ok("answer", str(task), "--file", self.text_file("v2"))

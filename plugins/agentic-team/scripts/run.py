@@ -1600,6 +1600,12 @@ def cmd_launch(run, args):
     if live:
         raise Refused(f"#{tid} has a live session {live[0].describe()}; run run.py record, or run.py stop {tid}")
     latest = task_rows(rows, current)
+    if current and not latest:
+        waiting = Thread(rows, task, current).blocking()
+        if waiting:  # a parked worker waits for its answer: a new attempt would end a conversation that is still there
+            raise Refused(f"#{tid} attempt {current} waits for an answer to ask #{waiting[-1]['id']}; run run.py answer "
+                          f"{tid} --ask {waiting[-1]['id']} (--file F, --default or --decision <id>). If the worker is gone, "
+                          "that answer's resume fails and files DIED, and the launch is free again")
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
         raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
