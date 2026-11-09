@@ -1,6 +1,6 @@
 ---
 name: verify
-description: How to prove this project's code changes work. The agentic-team verifier reads this file from its brief; it launches the application, checks the build, drives the change as a user, collects evidence and cleans up. Fill every TODO with commands, paths and selectors that exist in this repository.
+description: How to prove this project's code changes work. The agentic-team verifier reads this file from its brief; it runs the project's static checks, launches the application, checks the build, drives the change as a user, collects evidence and cleans up. Fill every TODO with commands, paths and selectors that exist in this repository; first check that the project has lint, format, type and test checks, and ask the user to add the ones it lacks.
 ---
 
 # Verify this project
@@ -9,6 +9,33 @@ The verifier is read only: it edits nothing, commits nothing, checks out
 nothing. Its one write is the report file its brief names. Every command below runs inside the verifier's own worktree; `<worktree>`
 means that folder. This file never lifts a rule in the verifier's agent
 instructions or in its brief's FORBIDDEN section.
+
+## Checks
+
+The project's static checks and tests. The verifier runs each one at the base
+commit and at the head commit (see its method).
+
+When you fill this file, check the project's configuration first. For each
+kind below, look for the command in this order: the steps that CI runs
+(`.github/workflows`, `.gitlab-ci.yml`); tool configuration (`pyproject.toml`
+sections such as ruff or mypy, an ESLint or Prettier configuration,
+`tsconfig.json` for `tsc --noEmit`, `.golangci.yml`, `cargo clippy` and
+`rustfmt`); `.pre-commit-config.yaml` (run a hook with
+`pre-commit run <hook> --files ...`, never `pre-commit install`); Makefile
+targets and `package.json` scripts.
+
+When a kind is missing, stop and tell the user. Name the kind, propose one
+standard tool for the project's language and the configuration it needs, and
+ask the user to add it. Do not fill a command that the repository does not
+configure, and do not add the tool yourself. Write `none: <reason>` only when
+the user says that the kind does not apply, and give the user's reason (for
+example, no type check for a project in plain shell).
+
+- Lint: TODO (the exact command, and what a pass prints or returns)
+- Format check: TODO (a check mode that changes no file, for example `ruff format --check`, `prettier --check`)
+- Type check: TODO
+- Other static analysis: TODO (security or dependency scanners that CI runs; `none: <reason>` is fine)
+- Tests: TODO (the command that runs the test suite)
 
 ## Launch
 

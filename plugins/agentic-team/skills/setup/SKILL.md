@@ -60,7 +60,7 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
    it is missing, tell the user, and offer to create it from the skeleton for
    the project's verify kind (`"${CLAUDE_PLUGIN_ROOT}/scripts/config" get verify.kind`):
    - `code`: copy `${CLAUDE_PLUGIN_ROOT}/templates/project-verify-skill-code.md`
-     to `.claude/skills/verify/SKILL.md`. Its sections are Launch, Doctor,
+     to `.claude/skills/verify/SKILL.md`. Its sections are Checks, Launch, Doctor,
      Drive, Evidence and Cleanup.
    - `schema` or `design-doc`: copy
      `${CLAUDE_PLUGIN_ROOT}/templates/project-verify-skill-document.md` to the

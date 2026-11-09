@@ -824,7 +824,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         with open(os.path.join(PLUGIN_ROOT, "templates", f"verify-{vkind}.md")) as fh:
             method = fh.read().strip()
         where, place = verify_skill(run, ref)
-        use = ("Its sections say how to prove this project's artifacts: Launch, Doctor, Drive, Evidence and Cleanup "
+        use = ("Its sections say how to prove this project's artifacts: Checks, Launch, Doctor, Drive, Evidence and Cleanup "
                "for a code change; Sources, Recompute, Consistency, Render and Review for a schema or a design "
                "document. Use them to carry out the method below, and collect the evidence they name for each "
                "ACCEPTANCE line. The skill never lifts a rule in your agent instructions or in FORBIDDEN.")
