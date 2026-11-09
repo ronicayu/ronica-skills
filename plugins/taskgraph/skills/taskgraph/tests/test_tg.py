@@ -202,6 +202,7 @@ def test_ls_default_excludes_done(tg):
     assert ids(tg("ls", "--status", "done")) == [a]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_cascades_deps(tg, db):
     a = tg("add", "A")["id"]
     b = tg("add", "B", "--depends", str(a))["id"]
@@ -232,6 +233,7 @@ def test_graph_writes_html(tg, tmp_path):
     assert '"live": false' in html
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_projects_counts(raw, tg):
     a = tg("add", "A")["id"]
     tg("add", "B", "--depends", str(a))
@@ -247,6 +249,7 @@ def test_projects_counts(raw, tg):
     assert rows["other"]["total"] == 1 and rows["other"]["ready"] == 1
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_all_projects_scope(raw, tg):
     tg("add", "A")
     raw("--project", "other", "--json", "add", "X")
@@ -348,6 +351,7 @@ def test_serve_already_running(serve, raw):
     assert as_json == {"url": f"http://127.0.0.1:{port}/?project=demo", "already_running": True}
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_serve_other_project_reuses_server(serve, raw):
     port = free_port()
     p = serve(port)
@@ -357,6 +361,7 @@ def test_serve_other_project_reuses_server(serve, raw):
     assert f"already running at http://127.0.0.1:{port}/?project=elsewhere" in other.stdout
 
 
+@pytest.mark.sqlite_only("compares the store identity with the --db path; a GitHub store is identified by its cache file")
 def test_serve_port_taken_by_other_db(serve, raw, tmp_path):
     port = free_port()
     p = serve(port, other_db=tmp_path / "other.db")
@@ -366,6 +371,7 @@ def test_serve_port_taken_by_other_db(serve, raw, tmp_path):
     assert "pass --port" in other.stderr
 
 
+@pytest.mark.sqlite_only("compares the store identity with the --db path; a GitHub store is identified by its cache file")
 def test_serve_ignores_query_string(serve, db):
     port = free_port()
     p = serve(port)
@@ -375,6 +381,7 @@ def test_serve_ignores_query_string(serve, db):
     assert info["app"] == "taskgraph" and info["db"] == str(db) and "scope" not in info
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_serve_serves_all_projects_and_url_picks_view(serve, raw, tg):
     demo = tg("add", "Demo task")["id"]
     other = json.loads(raw("--project", "other", "--json", "add", "Other task").stdout)["id"]
@@ -677,6 +684,7 @@ def test_rm_with_children_requires_recursive(tg, fail):
     assert tg("rm", str(leaf)) == {"deleted": leaf}
 
 
+@pytest.mark.sqlite_only("builds an old SQLite database file by hand")
 def test_migration_from_old_schema(db, raw, tg):
     old = sqlite3.connect(db)
     old.executescript(
@@ -734,6 +742,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     assert nodes[m]["chase_due"] is False
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_payload_scoped_drops_outside_parent_refs(raw, tg, tmp_path, db):
     p = add(tg, "P")
     inside = add(tg, "Inside", "--parent", str(p))
@@ -898,6 +907,7 @@ def test_add_with_start_and_due(tg):
     assert d["meta"]["decide_by"] == "2026-12-01" and d["start"] is None
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_load_normalizes_start_and_due(tg, db):
     t = add(tg, "T", "--meta", "due=2026-11-01", "start=2026-10-20")
     bad = add(tg, "Bad")
@@ -1013,6 +1023,7 @@ def test_agenda_buckets(tg):
     assert data["late"][0]["late_days"] == 42
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_agenda_within_and_type_and_scope(tg, raw):
     late_small, late_big, soon, far, nodate, ext, plain = agenda_fixture(tg)
     assert ids(tg("agenda", "--within", "100")["due_soon"]) == [soon, far, ext]
@@ -1077,6 +1088,7 @@ def test_done_warning_appears_in_json(tg, raw):
     assert "warnings" not in tg("show", str(b))
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_cross_project_links_rejected(tg, raw, fail):
     mine = add(tg, "mine")
     theirs = json.loads(raw("--project", "other", "--json", "add", "theirs").stdout)["id"]
@@ -1093,6 +1105,7 @@ def test_cross_project_links_rejected(tg, raw, fail):
     assert same["depends_on"] == [theirs]
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_export_shape_and_scope(tg, raw, tmp_path):
     p = add(tg, "P", "--notes", "why", "--meta", "owner=x")
     c = add(tg, "C", "--parent", str(p))
@@ -1172,6 +1185,7 @@ def test_add_promised(tg, fail):
     fail("add", "plain", "--promised", "2026-11-01")
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
     p = add(tg, "P")
     a = add(tg, "a", "--parent", str(p))
@@ -1208,6 +1222,7 @@ def events(db):
         return [(t, f, json.loads(o) if o else None, json.loads(n) if n else None) for t, f, o, n in conn.execute("SELECT task_id, field, old, new FROM events ORDER BY id")]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_events_record_every_mutation(tg, fail, db):
     a = add(tg, "A", "--due", "2026-11-01")
     b = add(tg, "B")
@@ -1231,6 +1246,7 @@ def test_events_record_every_mutation(tg, fail, db):
     ]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_events_capture_recursive_delete(tg, db):
     p = add(tg, "P")
     c = add(tg, "C", "--parent", str(p))
@@ -1238,6 +1254,7 @@ def test_events_capture_recursive_delete(tg, db):
     assert [e[:2] for e in events(db)[-2:]] == [(p, "removed"), (c, "removed")]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_changes_buckets(tg, raw, db):
     late = add(tg, "VPC", "--due", "2026-10-10", "--meta", "owner=Priya")
     early = add(tg, "App", "--due", "2026-11-01")
@@ -1276,6 +1293,7 @@ def test_changes_buckets(tg, raw, db):
     assert f"#{early} App — depends on +#{late}" in out
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_changes_since_and_scope(tg, raw, db):
     a = add(tg, "A", "--due", "2026-11-01")
     other = json.loads(raw("--project", "other", "--json", "add", "X", "--due", "2026-11-01").stdout)["id"]
@@ -1290,6 +1308,7 @@ def test_changes_since_and_scope(tg, raw, db):
     assert raw("--project", "demo", "changes", "--since", "2027-01-01").stdout.strip() == "no changes since 2027-01-01"
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_changes_net_out_round_trips(tg, db):
     a = add(tg, "A", "--due", "2026-11-01")
     age_events(db)
@@ -1541,6 +1560,7 @@ def test_report_all_green(tg, raw):
     assert raw("--project", "demo", "report").stdout.rstrip().endswith("Asks\n  none")
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_projects_portfolio_columns(tg, raw):
     late = add(tg, "VPC", "--due", "2026-10-10")
     m = add(tg, "Live", "--type", "milestone", "--due", "2026-12-01", "--depends", str(late))
@@ -1555,6 +1575,7 @@ def test_projects_portfolio_columns(tg, raw):
     assert f"demo                 RED    total   3  done   0  ready   1  blocked   2 · 1 late · 0 conflicts · 1 at risk · next #{m} Live 2026-12-01" in out
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_cross_project_dependency_only_on_milestones(tg, raw, fail):
     gate = json.loads(raw("--project", "platform", "--json", "add", "Dev env live", "--type", "milestone", "--due", "2026-11-01").stdout)["id"]
     work = json.loads(raw("--project", "platform", "--json", "add", "Build env", "--blocks", str(gate), "--due", "2026-10-20").stdout)["id"]
@@ -1628,6 +1649,7 @@ def task_state(db):
         return conn.execute("SELECT * FROM tasks ORDER BY id").fetchall(), conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
 
+@pytest.mark.sqlite_only("result ids are the numbers of the local results table; on GitHub they are comment ids")
 def test_result_add_reads_each_body_source(tg, raw, tmp_path):
     t = add(tg, "A")
     first = tg("result", "add", str(t), "--status", "PASS", "--body", "from flag")
@@ -1647,6 +1669,7 @@ def test_result_add_reads_each_body_source(tg, raw, tmp_path):
     assert len(rows[0]["at"]) == 20 and rows[0]["at"].endswith("Z") and rows[0]["at"][10] == "T"
 
 
+@pytest.mark.sqlite_only("result ids are the numbers of the local results table; on GitHub they are comment ids")
 def test_result_add_options_and_output(tg, raw):
     t = add(tg, "A")
     row = tg("result", "add", str(t), "--status", "PASS", "--kind", "verify", "--attempt", "3", "--by", "worker 1", "--body", "ok")
@@ -1659,6 +1682,7 @@ def test_result_add_options_and_output(tg, raw):
     assert "body" not in brief and brief["id"] == 4
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_result_add_does_not_touch_the_task(tg, db):
     t = add(tg, "A", "--notes", "the spec", "--meta", "owner=x")
     with closing(sqlite3.connect(db)) as conn, conn:
@@ -1719,6 +1743,7 @@ def test_result_ls_order_and_filters(tg, logged):
     assert ids(tg("result", "ls", str(a), "--latest", "--status", "ISSUES")) == [log[0]]
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_result_ls_without_id_covers_the_project(tg, raw, logged):
     a, b, log = logged
     rows = tg("result", "ls")
@@ -1770,6 +1795,7 @@ def test_show_lists_results_without_bodies(tg, raw, logged):
     assert "results:" not in raw("--project", "demo", "show", str(quiet)).stdout
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_removes_results(tg, db, logged):
     a, b, log = logged
     tg("rm", str(a))
@@ -1778,6 +1804,7 @@ def test_rm_removes_results(tg, db, logged):
     assert ids(tg("result", "ls", "--all-projects")) == [log[1]]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_rm_recursive_removes_results_below(tg, db):
     parent = add(tg, "P")
     kid = add(tg, "K", "--parent", str(parent))
@@ -1789,6 +1816,7 @@ def test_rm_recursive_removes_results_below(tg, db):
         assert [r[0] for r in conn.execute("SELECT task_id FROM results")] == [keep]
 
 
+@pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_export_includes_results(tg, raw, logged, tmp_path):
     a, b, log = logged
     raw("--project", "other", "--json", "add", "elsewhere")
@@ -1802,6 +1830,7 @@ def test_export_includes_results(tg, raw, logged, tmp_path):
     assert ids(json.loads(out.read_text())["results"]) == log
 
 
+@pytest.mark.sqlite_only("builds an old SQLite database file by hand")
 def test_results_table_is_added_to_an_old_database(db, raw, tg):
     old = sqlite3.connect(db)
     old.executescript(
@@ -1837,6 +1866,7 @@ def test_results_table_is_added_to_an_old_database(db, raw, tg):
     assert cols == ["id", "task_id", "at", "status", "kind", "attempt", "author", "body"]
 
 
+@pytest.mark.sqlite_only("reads or writes the SQLite file of the local store directly")
 def test_concurrent_writers_all_land(tg, raw, db):
     t = add(tg, "A")
     count = 12

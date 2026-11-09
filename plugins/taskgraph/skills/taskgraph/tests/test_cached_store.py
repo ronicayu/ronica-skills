@@ -404,3 +404,32 @@ def test_a_write_refreshes_before_it_validates(env, fake):
     fake.add_blocker(a, b)
     err = env.fail("dep", "add", str(b), str(a))  # the cache did not know the edge a -> b; the refresh did
     assert "cycle" in err
+
+
+def test_sync_command_flushes_and_refreshes_and_full_reads_everything(env, fake):
+    a = env.ok("add", "A")["id"]
+    env.ok("edit", str(a), "--meta", 'tokens="3"')
+    fake.add_issue("from a person")
+    done = env.ok("sync")
+    assert done == {"changed": 1, "flushed": 1, "full": False}
+    assert '"tokens":"3"' in fake.issue(a)["body"]
+    code, out, _ = tg_text(env, "sync")
+    assert out.strip() == "synced: 0 changed, 0 deferred sent"
+    env.ok("sync", "--full")
+    fake.clear_log()
+    assert env.ok("sync", "--full")["full"] is True
+    paths = [(c["status"], c["counted"]) for c in fake.calls() if "issues?labels" in c["path"]]
+    assert paths == [(304, False)]  # the page probe of a full pull is still conditional
+    assert any(c["path"] == "graphql" for c in fake.calls())  # but every task's edges are read again
+    assert any("issues/comments" in c["path"] for c in fake.calls())  # and every comment
+
+
+def test_a_full_pull_notices_a_task_that_is_gone(env, fake):
+    a, b = fake.add_issue("a")["number"], fake.add_issue("b")["number"]
+    env.ok("ls")
+    fake.edit_issue(b, labels=[])  # label removed in the browser: invisible to a page probe, found by the full pull
+    env.ok("--fresh", "ls")
+    assert [t["id"] for t in env.ok("ls")] == [a, b]
+    env.ok("sync", "--full")
+    assert [t["id"] for t in env.ok("ls")] == [a]
+    assert env.ok("changes", "--since", "1d")["removed"][0]["id"] == b
