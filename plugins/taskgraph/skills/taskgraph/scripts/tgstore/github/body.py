@@ -65,4 +65,4 @@ def check_size(label, body):
 
 def conflicts(number, problems):
     text = {"broken": f"meta block on #{number} is broken; fix or delete it on GitHub", "two_blocks": f"#{number} has 2 meta blocks; the last one counts"}
-    return [text[p] for p in problems]
+    return [text.get(p) or f"#{number} has the label {p[5:]}, which is not a task type" for p in problems]
