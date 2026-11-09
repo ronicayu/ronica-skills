@@ -2,7 +2,7 @@
 // and answer, one for its steer, one for the task. Use with every config; overview-ask.cfg and
 // overview-steer.cfg are small enough (< 500 states) for the whole chart.
 
-export const title = "Ask, answer and steer between the Manager and a worker (ADR 2026-11-09)";
+export const title = "Ask, answer and steer between the Manager and a worker (ADR 2026-11-09; code 3330fc7)";
 
 // A TLA+ sequence or function on 1..n arrives as an object with keys from 1 (or as an array).
 const list = (x) => (x == null ? [] : Array.isArray(x) ? x : Object.values(x));
@@ -17,6 +17,7 @@ const workerLabel = (v) => {
   const w = v.wst[s];
   const sessions = Object.keys(v.proc).filter((k) => alive(v.proc[k]));
   if (sessions.length > 1) return "Two live sessions (a resume copy)";
+  if (sessions.length === 1 && list(v.untracked).includes(sessions[0])) return "Only an unrecorded copy runs";
   if (p === "failed") return "Resumed session failed (account)";
   if (p === "none") {
     if (w === "wait") return v.conv[s] === "lost" ? "Waiting, process and conversation gone" : "Waiting, no process";
@@ -56,7 +57,7 @@ const steerLabel = (v) => {
   return "Steer " + mailLabel(st[st.length - 1]);
 };
 
-const END = { report: "report filed", DIED: "DIED filed", FAILED: "failed row", STOPPED: "stopped" };
+const END = { report: "report filed", DIED: "DIED filed", FAILED: "failed end filed", STOPPED: "stopped" };
 const taskLabel = (v) => {
   if (v.taskEnd === "closed") return "Closed";
   if (v.taskEnd === "abandoned") return "Abandoned";
@@ -90,21 +91,28 @@ const strayAdded = (from, to) => list(to.stray).length > list(from.stray).length
 const decideLabel = (from, to) => {
   const r = who(from, to);
   const c = changedMsg(from, to);
+  const d = opMoved(from, to) ? "op" : "mgr";
   if (c && c.after.st === "carried") return `${r} drops a message of an ended attempt (Carried)`;
-  if (c && c.after.st === "rung" && c.after.via === "hook") return `${r} touches the hook flag`;
+  if (to.dpc[d] === "resume") return `${r} stops the worker for a resume`;
+  if (c && c.after.via === "hook" && to.dpc[d] === "idle")
+    return c.before && c.before.via === "hook" ? `${r} touches the hook flag again` : `${r} touches the hook flag`;
   if (c && c.after.st === "rung") {
     if (strayAdded(from, to)) return `${r} posts the doorbell to a socket of the wrong session`;
     return newBell(from, to) ? `${r} posts the doorbell to the socket` : `${r} posts the doorbell; the worker holds it`;
   }
-  if (c && c.after.sockF && !(c.before && c.before.sockF)) return `${r}'s socket post is refused`;
-  const d = opMoved(from, to) ? "op" : "mgr";
-  if (to.dpc[d] === "resume") return `${r} stops the worker for a resume`;
+  if (c && c.after.sockF && !(c.before && c.before.sockF) && c.after.st === "pending" && c.after.tries === c.before.tries
+      && to.dpc[d] === "decide") return `${r}'s socket post is refused`;
+  if (c && c.after.st === "pending") return `${r} stops the worker; the process does not exit (the row stays pending)`;
+  const t = at(from.cur, from.attempt);
+  if (from.proc[t] === "failed" && from.dpc[d] === "decide" && list(from.msgs).some((m) => m.st === "pending"))
+    return `${r} does not resume a failed session`;
   return `${r} finds the message already handled`;
 };
 
 const resumeLabel = (from, to) => {
   const r = who(from, to);
   const d = opMoved(from, to) ? "op" : "mgr";
+  if (list(to.untracked).length > list(from.untracked).length) return `${r}'s resume starts a copy it does not record (note: on stderr)`;
   if (to.dpc[d] === "settle") return `${r}'s resume starts a copy (note: line)`;
   if (to.overflow) return `${r}'s resume needs a second copy`;
   if (Object.keys(to.ends).some((k) => to.ends[k] === "DIED" && from.ends[k] !== "DIED")) return `${r}'s resume fails: no transcript, DIED`;
@@ -123,17 +131,23 @@ export const step = (action, from, to) => {
     case "SupervisorStops": return "the supervisor stops the idle session";
     case "AccountFails": return "the worker's account fails";
     case "PidReused": return "another process takes the old pid";
+    case "ProcessIgnoresStop": return "the worker's process stops answering claude stop";
     case "Answer": return "the Manager answers";
     case "ManagerSteers": return "the Manager steers";
     case "OperatorSteers": return "the operator steers from a terminal";
     case "RecordRetries": return "record retries the delivery";
     case "RecordTimesOut": return "no ack within pending_minutes";
-    case "RecordFilesDied": return "record files DIED";
+    case "RecordFilesDied": {
+      const k = Object.keys(to.ends).find((a) => to.ends[a] !== from.ends[a]);
+      return to.ends[k] === "report" ? "record files the report it salvaged"
+        : to.ends[k] === "FAILED" ? "record files the failed end (the account failed)" : "record files DIED";
+    }
     case "RecordFilesFailed": return "record files the failed row";
     case "DeliverDecide": return decideLabel(from, to);
     case "DeliverResume": return resumeLabel(from, to);
     case "DeliverSettle": return `${who(from, to)} stops the original and records the copy`;
     case "Launch": return "the Manager launches the next attempt";
+    case "Relaunch": return "the operator launches the abandoned task again (--attempt)";
     case "Close": return "the Manager closes the task";
     case "Abandon": return "the Manager abandons the task";
     case "ManagerStops": return "the Manager stops the attempt";

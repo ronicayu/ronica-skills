@@ -1,14 +1,16 @@
 # The mailbox model
 
-`Mailbox.tla` models the message design of the ADR "How the Manager and its workers talk across Claude profiles": `ronica-skills-adr` `docs/plans/2026-11-09-agentic-team-channel-adr.md` (status proposed, 2026-11-09). It covers sections 1, 4.1 to 4.8, 5 and "Live check results". Nothing in the ADR is implemented, so the model reads the ADR text, not code. "L<n>" below is a line of that file as read on 2026-11-09. When `run.py` and `mailbox.py` implement the design, re-map each action to its function and line range, as `../NOTES.md` does for `Lifecycle.tla`.
+`Mailbox.tla` models the message design of the ADR "How the Manager and its workers talk across Claude profiles": `ronica-skills-adr` `docs/plans/2026-11-09-agentic-team-channel-adr.md` (status proposed, 2026-11-09). It covers sections 1, 4.1 to 4.8, 5 and "Live check results". "L<n>" below is a line of that file as read on 2026-11-09.
 
-The build ships Phase 1 and Phase 2 together: socket first, resume as the fallback, and the hook for a busy worker (`PHASE2 = TRUE`). With every `FIX_*` FALSE, the model is the ADR as written. Each `FIX_*` is one change that the model suspects the ADR needs. Each one names an ADR line below.
+Round 2 (2026-11-09) maps the model to the code: `scripts/run.py` and `scripts/mailbox.py` at commit 3330fc7 (branch agentic-team-messaging), run on the Claude CLI 2.1.319. Line numbers in the round-2 sections are of those two files at that commit (`git show 3330fc7:plugins/agentic-team/scripts/run.py`). See "Round 2: the code at 3330fc7" below. Keep them current when the code moves, as `../NOTES.md` does for `Lifecycle.tla`.
 
-Status: written 2026-11-09. Not run yet: TLC was not run, and the spec has not been parsed. The predictions below come before any run.
+The build ships Phase 1 and Phase 2 together: socket first, resume as the fallback, and the hook for a busy worker (`PHASE2 = TRUE`). With every `FIX_*` FALSE and every round-2 switch FALSE, the model is the ADR as written. Each `FIX_*` is one change that the model suspects the ADR needs. Each one names an ADR line below.
+
+Status: round 1 ran on 2026-11-09. With every `FIX_*` on, every rule held (`fixed.cfg`: 1,038,611 distinct states; `supersede.cfg`: 18,819,492). Not every round-1 prediction held: `phase1` also broke rules 2 and 4b, which the table below predicted to hold. Round 2 ran on 2026-11-09: every round-2 prediction held, and every round-1 config gave the same result with the same state count ("Round 2: results"). Round 3 (the fixes of `msg-fixes-r3.md`) is written, and SANY parses it. TLC has not run it: "Round 3: predictions" comes before any run.
 
 ## What the model holds
 
-- One task, up to `MaxAttempts` attempts (1 or 2). Each attempt has an original session (`w1`, `w2`) and room for one resume copy (`c1`, `c2`). `cur[a]` is the session id that run.py recorded for the attempt.
+- One task, up to `MaxAttempts` attempts (1, 2 or 3). Each attempt has an original session (`w1`, `w2`, `w3`) and room for one resume copy (`c1`, `c2`, `c3`). With `IMPL_RESUME_COPIES` a copy takes the attempt's other slot, which may be the original's once that has no process. `cur[a]` is the session id that run.py recorded for the attempt.
 - Per session:
   - `proc` is the process: `unborn`, `none`, `busy`, `idle` or `failed`. `none` means no pid: parked, stopped, dead or a ghost. `idle` means the turn is over and the process is alive.
   - `conv` is the conversation: `kept` or `lost`.
@@ -22,6 +24,7 @@ Status: written 2026-11-09. Not run yet: TLC was not run, and the spec has not b
 - `ends[a]`: the end row of attempt `a`. `taskEnd`: the task is closed or abandoned. `acct`: the account. `faults`: the fault budget used so far.
 - `dpc`, `dmsg`, `dsess`: where each deliverer is in `deliver`. The deliverers are the Manager's run.py (`mgr`) and the operator's terminal run.py (`op`).
 - History variables for rules: `stray` (where doorbells went that should not have), `resumeOverProc` and `overflow`.
+- Round 2: each answer and steer row also has `tries` (deliver calls that count toward the cap). `untracked`: the copies that run.py did not record. `metaGone`: the attempts whose `mailbox` meta run.py has dropped. `bad`: history for the round-2 rules (`endOverBusy`, `reportOverSteer`, `settledShownOpen`, `carriedLost`), kept only with `TRACK_NEW_RULES`.
 
 ## Actions and the ADR text they model
 
@@ -59,7 +62,7 @@ Status: written 2026-11-09. Not run yet: TLC was not run, and the spec has not b
 - "Socket delivery fails twice in a run, so it is turned off" (L307) is approximated per row by `sockF`.
 - Delivery state lives in meta (L140). `via: hook` is set when the flag is touched (L285 puts the row in Rung then), not "when the worker acks it" (L168).
 
-## Switches
+## Switches (round 1)
 
 | Switch | What it does | ADR text it questions |
 |---|---|---|
@@ -80,7 +83,7 @@ Status: written 2026-11-09. Not run yet: TLC was not run, and the spec has not b
 | `FIX_REPORT_CHECK_ATOMIC` | the report command itself refuses while a steer is unacked | L310, T12 L409 (check-report is a separate step) |
 | `FIX_DELIVER_LOCK` | one run.py lock per task: a deliver, and record's DIED / failed rows, launch, close, abandon and stop, run only when no deliver runs | L167 "wait until the row shows no process" is a check, then an act; L436 allows a second run.py; L329 stop/close/abandon are not serialised with it |
 
-## Rules
+## Rules (round 1)
 
 | Rule | In words | Source |
 |---|---|---|
@@ -123,7 +126,7 @@ Two readings to check:
 - **Worker model:** the worker acts only on rows that `inbox` printed (L315, L345; live check L6b L58 supports it). So "a worker never acts on a message it did not read through inbox" is a modelling assumption, not a checked rule.
 - **A woken session of an ended attempt** (a stray doorbell, a late steer) ends its turn again when inbox prints nothing for it. When inbox does print something, it acks and works on, and it can file a late report that changes no end row. `Launch` refuses while such a session is busy, as `cmd_launch` refuses a busy live row.
 
-## Predictions (written before any run)
+## Round 1: predictions (written before any run)
 
 "Breaks" names the shortest path I expect, in actions.
 
@@ -154,7 +157,7 @@ Two readings to check:
 
 A surprise means that the model or my reading is wrong. Find out which before going on.
 
-## State-space estimates (not measured)
+## Round 1: state-space estimates (not measured)
 
 | Config | Estimate |
 |---|---|
@@ -171,26 +174,249 @@ If a run goes past 100,000 distinct states, the runner lists the rules it did no
 3. For `check.cfg` and `fixed.cfg`, split the six `ALLOW_*` faults over two configs.
 4. Last: `ASKS = 0` or `MaxSteers = 0`. These remove whole rules, so avoid them.
 
-## Run
+## Round 2: the code at 3330fc7
 
-The main session runs these. A subagent may not: the permission classifier blocks the runner. The spec has not been parsed yet, so start with `overview-ask`. It is the smallest, and a syntax error shows there first. Use a new `--out` folder per run.
+### Actions and the code they model
+
+`run.py` and `mailbox.py` at commit 3330fc7. "mb" marks a line of `mailbox.py`; every other line is of `run.py`.
+
+| Action | Function | Lines |
+|---|---|---|
+| `WorkerAsks` | `cmd_ask`: the cap (`asks_cap` 919-927), the OPEN ask row, "End your turn now" | mb 269-292 |
+| `WorkerReadsInbox` | `cmd_inbox`, `open_messages` (listed in the `mailbox` meta, no ack, not settled by a newer acked answer: `listed_ids`, `acked_ids`, `settled_ids`); the hook: `cmd_hook` with `--match` (this task and attempt), `flag_file` (per attempt), `worker_settings` (the PostToolUse and SessionStart hooks) | mb 295-318, mb 95-128, mb 233-245; 875-878, 952-965 |
+| `WorkerAcks` | `cmd_ack` (one id at a time; refuses an id that is not open); record lowers the flag once nothing is unacked (`mailbox_events`) | mb 321-333; 2398-2399 |
+| `WorkerChecksReport` | `cmd_check_report` with `unacked_steers_of` (refuses an unacked steer); with `IMPL_SALVAGE` the report file is written at this step (worker.md REPORT) | 4360-4399 |
+| `WorkerReports` | `cmd_report`: the steer check and the task row under the task lock (`locked`, `lock_file`) | mb 336-351, mb 164-184; 885-887 |
+| `Die`, `SupervisorStops`, `AccountFails`, `PidReused` | the environment, as the code reads it: `Session` (finished, live, ghost, stuck), `Run.sessions` (the stopped-sessions file), `socket_address` (the .addr session id and its age against `startedAt`), `registry_socket` | 499-544, 404-448, 2161-2176, 2143-2158 |
+| `Answer` | `cmd_answer`: `refuse_unless_running`, the ask's attempt, `refuse_ended`, `--supersede`, `file_message`, `deliver` | 2466-2508, 2428-2434, 2448-2454 |
+| `ManagerSteers`, `OperatorSteers` | `cmd_steer`: refuses an attempt with a task row, and a worker whose row is not live unless `Thread.holds`; `file_message`; `deliver`. Both run.py commands hold the task lock (`LOCKED`, `task_lock`) | 2511-2533; 4670-4685, 890-912 |
+| `RecordRetries` | `mailbox_events`: a row with `via == "pending"` is delivered again at every record; `DELIVERIES_MAX` (steer-pending) | 2357, 2408-2423 |
+| `RecordTimesOut` | `mailbox_events`: `via` socket or resume with no ack after `pending_minutes` goes back to pending (socket: `socket_failed`) | 2401-2407 |
+| `RecordFilesDied` | `record_in_progress`: `holds` (2853-2864) returns before any end row (2929-2930); stuck (2934-2941, not modelled); salvage (`salvage` 2674-2694) or DIED (2949-2966); `carry_thread` | 2836-2966, 2318-2330 |
+| `RecordFilesFailed` | no such branch in the code: a failed row is finished (`Session.finished`) and takes the salvage-or-DIED branch (`IMPL_DETAILS`) | 534 |
+| `DeliverDecide` | `deliver`: the own-attempt check (carried), `worker_session`, the socket (`socket_address`, `post_line`, `socket_failed`), the hook (`touch_flag`; the row stays pending), step 3's stop (`stop_session`, `wait_for_exit`) | 2226-2272, 2130-2135, mb 189-205, 2191-2195, 2289-2294, 572-584, 2207-2215 |
+| `DeliverResume` | `resume_with`: no transcript → `file_died`; `claude --bg --resume <sessionId> --settings <json> <doorbell>`; the copy check reads stdout only; in place: `forget_stopped`, `lower_flag` | 2275-2315, 2218-2223, 2179-2188, 2198-2204 |
+| `DeliverSettle` | `resume_with` after a `note:` line on stdout: a `sessions` entry for the copy, `claude stop` of the original | 2303-2312 |
+| `Launch` | `cmd_launch`: live rows and stopped-idle (1627-1641), the blocking-ask refusal (1642-1652), `render` → `carried_text` (1703), `carry_thread` (1755-1756), `write_ctx` (drops the attempt's old .addr, 936-949), the meta prune (1775-1782), `lower_flag` | 1571-1790, 2333-2354 |
+| `Relaunch` | `cmd_launch` with `--attempt` after an abandon (1592-1593; 1782 unsets `abandoned`) | 1571-1790 |
+| `Close` | `cmd_close` → `stop_live` (stops live rows it can tie to the task; a STOPPED row and `carry_thread` only for a live worker row) | 4183-4254, 4059-4079 |
+| `Abandon` | `cmd_abandon`: stops live rows, ABANDONED rows, `drop_mailbox` (the whole `mailbox` meta and the inbox files); no `carry_thread` | 4328-4355, 2562-2574 |
+| `ManagerStops` | `cmd_stop`: refuses an attempt with no live row; STOPPED, `carry_thread` | 4303-4325 |
+| the brief (`BriefFlaws`) | `render` → `carried_text` → `Thread` (counts only answers and steers that the meta lists) | 2333-2354, 2077-2114 |
+
+### Where the code departs from the model with every round-1 `FIX_*` on
+
+The code implements every round-1 fix: `FIX_ASK_OPEN_UNTIL_ACK` (`Thread.blocking`), `FIX_CARRY_ON_EVERY_END` (`carry_thread` in launch, stop, record, `file_died`), `FIX_DELIVER_OWN_ATTEMPT` (2238-2243), `FIX_FLAG_PER_ATTEMPT` (`flag_file`, `--match`), `FIX_DELIVERED_TIMES_OUT` (2402), `FIX_SUPERSEDE_SETTLES` (`settled_ids`), `FIX_INBOX_UNACKED` (`open_messages`), `FIX_STEER_REFUSES_ENDED` (2525), `FIX_REPORT_CHECK_ATOMIC` (`cmd_report` under the lock), `FIX_DELIVER_LOCK` (`LOCKED`, record's per-task lock, the report's lock). Where it departs:
+
+| # | The code | Effect | Switch |
+|---|---|---|---|
+| D1 | `resume_with` passes `--settings` (2295), so on CLI 2.1.319 every resume starts a copy, also of a session with no process. The `note:` line goes to stderr; the check reads stdout (2301-2303). The copy is not recorded, the original stays the attempt's session, `forget_stopped` drops it from the stopped file, the flag is lowered, the row reads delivered by resume. (Round 2 A.1, A.2) | an untracked live worker; record files DIED (or salvages) from the stopped original while the copy works; close and abandon leave the copy running; the next resume starts a second copy | `IMPL_RESUME_COPIES`, `IMPL_COPY_NOTE_MISSED`, `CLI_COPY_IN_WORKTREE` |
+| D2 | Even when the note is seen, the copy's `sessions` entry carries the original's `sessionId` (2305). `resume_id` prefers the row's own id (2138-2140); once `claude agents` no longer lists the copy, a resume uses the original's id and forks the conversation from before the copy | a resume from a stale conversation | not modelled (round 2 A.2 already says "its full sessionId") |
+| D3 | A flag touch leaves `via` pending (2271), every `deliver` call counts a try (2237), record redelivers every pending row at each record (2408-2417) and stops at 3 (2409-2413). `holds` counts pending rows (2864) (B1) | after two records the cap is spent; a worker that goes idle or dies unread is never resumed, and `holds` keeps record from filing DIED: a dead end, apart from the hint's `run.py stop` | `IMPL_HOOK_IS_A_TRY`, `IMPL_DELIVERY_CAP`, `IMPL_HOLDS` |
+| D4 | record's `holds` counts unacked rows with `via` pending or socket only (2864); a row delivered by resume does not hold; salvage files the worker's report file (2949-2960) (B4) | a report is filed, and the task can close, over a steer that the worker never read | `IMPL_HOLDS`, `IMPL_SALVAGE`, `FIX_SALVAGE_REFUSES_UNACKED_STEER` |
+| D5 | launch drops the meta of earlier attempts after it renders (1775-1782); abandon drops all of it (4346, 2562-2567); `carried_text` reads which answers and steers count from that meta (2339, 2087-2088) (B2) | attempt 3's brief shows attempt 1's settled ask as OPEN when attempt 2 had no message rows; after abandon and `launch --attempt`, the brief shows every ask OPEN and pastes no answer and no steer | `IMPL_PRUNE_META`, `ALLOW_RELAUNCH` |
+| D6 | A failed row (an account that fails at resume) has no branch in record: it is finished (534) and goes to salvage-or-DIED, but `holds` returns first (2929). `Thread.blocking` holds while the answer has no ack, so record files nothing; `mailbox_events` resumes the failed session until the cap; the steer-pending hint names `run.py stop`, which refuses a row that is not live (4308-4310) | no hinted command leads out on a failed account while an answer waits for its ack (ADR item 12 asked this). `cmd_abandon` needs only `in_progress` (4331), so the Manager can still abandon by hand; the model's `Abandon` keeps the round-1 guard (an end row), so this shows as a deadlock, the Lifecycle model's "no dead end" convention. Not in the round-2 list; measured: `impl-r2-env1` deadlocks in 17 steps | `IMPL_DETAILS`, `IMPL_HOLDS`, `IMPL_LIVE_ROWS`; round 3: `FIX_FAILED_ENDS` |
+| D7 | `cmd_steer` refuses a worker whose row is not live unless `Thread.holds` (2527); `cmd_stop` refuses a row that is not live (4309). An idle worker whose turn is over reads as finished (state done, 534); a parked asker (state blocked) is live | steer and stop act on fewer states than the ADR's "a process is alive"; a steer to a parked worker with an open ask is accepted with no process | `IMPL_LIVE_ROWS`; round 3: `FIX_STOP_OPEN_THREAD` |
+| D8 | `holds` returns before the stuck check (2929-2930 before 2931-2941) | a worker on a permission prompt with an unacked message is never filed BLOCKED; deliver stops and resumes it instead (B6) | blind spot (no stuck state) |
+| D9 | `socket_failed` is set when the address is missing or stale (2265), not only when a post fails | that row never uses the socket again, even after a fresh checkin: more resumes (at 3330fc7, more copies) | round 3: `IMPL_STALE_ADDR_FAILS` (FALSE in the impl and impl-r2 configs, as they were measured) |
+| D10 | deliver posts only to a live row with a pid (2257); a finished row with a process is stopped and resumed | benign: such a worker has ended its turn after its report | not modelled |
+| D11 | A report's thread is carried by the next record (2856-2859), not by the report; close carries only for a live worker row (4074-4078); abandon carries nothing (it drops the meta) | benign while record runs before close (the Lifecycle's verify step makes it so); the abandon part is D5 | `FIX_CARRY_ON_EVERY_END` stands for it |
+| D12 | `carried_text` pastes the newest earlier attempt that has message rows (2336-2339), so with meta kept an ask that attempt 1 left open is pasted into attempt 2's brief and again into attempt 3's | a duplicate, not a loss; no rule names it | not a rule |
+| D13 | A row with no `sessions` entry is tied to the task by its folder with attempt None (532-541) and counts for every attempt (`own_sessions` 587-591) | with `CLI_COPY_IN_WORKTREE`, run.py targets and stops the copy although no entry names it; a later attempt's launch refuses on it while it is busy | `CLI_COPY_IN_WORKTREE` |
+| D14 | `cmd_report` waits for the task lock; the model's `WorkerReports` does not | the model is more permissive: safe for the safety rules | not modelled |
+| D15 | `wait_for_exit` gives up after 20 reads and leaves the row pending (2291-2294), a try | a process that does not exit spends the cap in three records | round 3: `ALLOW_NO_EXIT`, `FIX_EXIT_TIMEOUT_NOT_A_TRY` |
+| D16 | `resume_with` files DIED when `claude --resume` exits non-zero for any reason (2298-2300), not only for a missing transcript | a transient CLI error files DIED for a waiting asker | not modelled (no such fault) |
+| D17 | `Thread.blocking` holds until the newest answer is acked; the round-1 fix holds until any answer is acked | differs only with `--supersede` | `IMPL_HOLDS` uses the code's |
+| D18 | In the live run the copy did not rewrite the `.addr` file (msg-live-findings.md) | while the copy is untracked the sid check rejects its socket anyway | the model lets a copy check in or not |
+
+B3 (the session rows are cached across tasks in one record) and B7 (`manager.addr`) are under "Round 2: blind spots". B5 (pid reuse) is `CLI_WAKE_KEEPS_START` with `FIX_ADDR_AFTER_WAKE` and `FIX_SOCKET_PID_MATCH`.
+
+### Round-2 switches
+
+Every new switch FALSE gives the round-1 model. The round-1 configs list them all as FALSE, with `TRACK_NEW_RULES = FALSE`, so their state counts must not change: rerunning them is the regression check of the round-2 edits.
+
+| Switch | TRUE means | Code |
+|---|---|---|
+| `IMPL_RESUME_COPIES` | every deliver resume starts a copy in the attempt's other slot (a second live copy is `overflow`) | 2295, CLI 2.1.319 |
+| `IMPL_COPY_NOTE_MISSED` | the copy is not recorded (`untracked`), the row reads delivered by resume, the flag is lowered, no settle step | 2301-2315 |
+| `CLI_COPY_IN_WORKTREE` | run.py ties the unrecorded copy to the task by its folder: it becomes the attempt's target (`cur`) and close, abandon, launch and stop see it. FALSE: run.py does not see it (the live check's reading: "stop/rm/record cannot see it") | 532-541 |
+| `IMPL_HOOK_IS_A_TRY` | a flag touch leaves the row pending (via hook) and counts a try | 2268-2271 |
+| `IMPL_DELIVERY_CAP` | `RecordRetries` needs `tries < 3`; a try is a socket post, a step-3 stop/resume and (with the switch above) a flag touch | 2237, 2357, 2409 |
+| `IMPL_HOLDS` | record's DIED guard is `RecordHolds`: `Blocking` or an unacked row that is pending or rung | 2864, 2929 |
+| `IMPL_SALVAGE` | `WorkerChecksReport` (wst "checked") also means the report file is written; `RecordFilesDied` files a report row instead of DIED when a session of the attempt is "checked" | 2949-2960, 2674-2694 |
+| `IMPL_LIVE_ROWS` | `SteerAllowed`: no end row, and `RowLive(cur)` or `ThreadHolds`; `ManagerStops` needs a live row it can see | 2525-2528, 4308-4310 |
+| `IMPL_DETAILS` | a resume (in place, failed, or an unrecorded copy) lowers the attempt's flag; a failed row goes to `RecordFilesDied` (no FAILED row) | 2314, 534 |
+| `IMPL_PRUNE_META` | launch adds the earlier attempts to `metaGone` after the brief; abandon adds every attempt; a brief whose thread attempt is in `metaGone` shows every ask OPEN and pastes no answer or steer | 1775-1782, 2562-2567, 2333-2354 |
+| `ALLOW_RELAUNCH` | `Relaunch`: the operator's `launch --attempt n+1` after an abandon | 1592-1593 |
+| `CLI_WAKE_KEEPS_START` | an in-place resume without a checkin leaves the .addr fresh (startedAt is the first start); an open question about the CLI (B5) | 2169-2171 |
+| `FIX_ADDR_AFTER_WAKE` | round-2 A.3: an .addr from before the wake is never fresh | — |
+| `FIX_SOCKET_PID_MATCH` | round-2 B5: a post needs the .addr's socket to be the current process's | — |
+| `FIX_SALVAGE_REFUSES_UNACKED_STEER` | round-2 B4: with an unacked steer, record files DIED (and carries) instead of the salvaged report | — |
+| `TRACK_NEW_RULES` | the actions record `bad` for the round-2 rules | — |
+
+Assumed for the round-2 code, which is not written yet: a flag-touched row (rung by the hook, B1 fixed) still counts for `holds` until it times out. If the B1 fix makes it not hold, `RecordHolds` must count pending rows and socket-rung rows only.
+
+"The code at 3330fc7 on CLI 2.1.319" (`impl-*.cfg`): every round-1 `FIX_*` TRUE, every `IMPL_*` TRUE, `CLI_COPY_IN_WORKTREE = FALSE`, `CLI_WAKE_KEEPS_START = TRUE`, the three new `FIX_*` FALSE. "The code with the round-2 fixes" (`impl-r2*.cfg`): the same, with `IMPL_RESUME_COPIES`, `IMPL_COPY_NOTE_MISSED`, `IMPL_HOOK_IS_A_TRY` and `IMPL_PRUNE_META` FALSE (A.1, A.2, B1, B2) and `FIX_ADDR_AFTER_WAKE`, `FIX_SOCKET_PID_MATCH`, `FIX_SALVAGE_REFUSES_UNACKED_STEER` TRUE (A.3, B5, B4). The delivery cap, `holds`, salvage, the live-row guards and the details stay: the round-2 list keeps them. A.4 (the fake claude) is a test change, outside the model. The configs are written by `mailbox-gen/gen_r2.py` in the scratchpad.
+
+### Round-2 rules
+
+| Rule | In words | Catches |
+|---|---|---|
+| `EveryLiveWorkerIsRecorded` | 9. Every live worker session of the task is in the sessions record: no untracked copy | D1 |
+| `NoEndRowOverRunningWorker` | 10. record never files an end row (DIED, a salvaged report, a failed row) while a session of the attempt has a running turn | D1 with D4 |
+| `NoReportOverUnackedSteer` | 11. No report row, the worker's or a salvaged one, is filed while a steer of the attempt has no ack | D4 (B4) |
+| `BriefNeverShowsSettledAsOpen` | 12. A later brief never shows an ask whose answer was acked as OPEN | D5 (B2) |
+| `BriefPastesEveryCarriedMessage` | 13. The next brief pastes every answer and steer that the ended attempt left without an ack | D5 (abandon) |
+
+No new liveness property: the B1 dead end is a deadlock (the configs that show it have no `run.py stop`), and `SteersSettle` already says "a steer is eventually acked or carried". `impl-r2-live` runs it on the round-2 code.
+
+## Round 2: predictions (written before any run)
+
+"Breaks" names the shortest path I expect, in actions. Every impl config also lists the rules that it should still hold.
+
+| Config | Expect |
+|---|---|
+| `impl` (the code, 2 attempts, no fault) | **Breaks:** <br>• `EveryLiveWorkerIsRecorded` in 7: `WorkerAsks`, `Answer`, `DeliverDecide` (post), `RecordTimesOut`, `RecordRetries`, `DeliverDecide` (stop), `DeliverResume` (an unrecorded copy). <br>• `NoEndRowOverRunningWorker` and `AskerNeverFiledDead` in 10: the same, then the copy reads and acks the answer, and `RecordFilesDied` files DIED from the stopped original (its wst is still "wait") while the copy works. <br>• `NoWorkerLeftAtEnd` in 11: the same, then `Abandon` leaves the copy running. <br>• `TypeOK` (overflow) in 11: after the copy, the answer times out, a retry resumes the original again and needs a second live copy. That is a real second copy in the code, not only a model limit. <br>**Holds:** rules 1, 1b, 3, 4, 4b, 5, 6, 7, 11, 12, 13; no deadlock (low confidence: `run.py stop` cannot reach a stopped original). |
+| `impl-die` (1 attempt, a steer, doorbell = resume, one death, no stop) | **Breaks:** <br>• `EveryLiveWorkerIsRecorded` in 4: `ManagerSteers`, `Die`, `DeliverDecide` (step 3), `DeliverResume` (copy). <br>• `NoEndRowOverRunningWorker` in 5: then `RecordFilesDied` (the steer was delivered by resume, so it does not hold). <br>• `NoReportOverUnackedSteer` in 6: `WorkerChecksReport` first, then the same; record salvages the report file. <br>• `NoWorkerLeftAtEnd` in 6 (DIED, then `Abandon`). <br>• `ClosedTaskHasNoUnreadSteer` in 7: the salvage path, then `Close`. <br>• deadlock (B1) in 7: `ManagerSteers`, `DeliverDecide` (flag, try 1), `RecordRetries`, `DeliverDecide` (try 2), `RecordRetries`, `DeliverDecide` (try 3), `Die`. The row is pending, so `holds` blocks DIED; the cap blocks retries. <br>• `TypeOK` (overflow) in 8. <br>**Holds:** rules 1, 1b, 2, 3, 4, 4b, 5, 7, 12, 13. |
+| `impl-copy-cwd` (the code, if the copy's row is in the worktree; 1 attempt) | **Breaks:** `EveryLiveWorkerIsRecorded` in 7 (as `impl`). <br>**Holds:** everything else: run.py targets the copy, so record does not file DIED over it, and a later copy takes the stopped original's slot. |
+| `impl-brief` (the code, 3 attempts, one ask each, no steer) | **Breaks:** `BriefNeverShowsSettledAsOpen` in 9: `WorkerAsks`, `Answer`, `DeliverDecide` (post), `WorkerReadsInbox`, `WorkerAcks`, `ManagerStops`, `Launch`, `ManagerStops`, `Launch` (attempt 2 has no rows; attempt 1's meta is gone). Also the `impl` breaks with the same paths. <br>**Holds:** rules 1, 1b, 3 to 7, 11, 13. |
+| `impl-relaunch` (the code, abandon and `launch --attempt`) | **Breaks:** `BriefPastesEveryCarriedMessage` in 5: `ManagerSteers`, `DeliverDecide` (post), `ManagerStops` (Carried), `Abandon` (meta dropped), `Relaunch`. `BriefNeverShowsSettledAsOpen` in 8: ask, answer, post, read, ack, `ManagerStops`, `Abandon`, `Relaunch`. Also the `impl` breaks. |
+| `impl-r2` | **Every rule holds; no deadlock.** |
+| `impl-r2-env1` (death, supervisor stop, account; 1 fault) | **Breaks: deadlock** (D6, not in the round-2 list) in about 17: `WorkerAsks`, `AccountFails`, `Answer`, `DeliverDecide` (post, try 1), `RecordTimesOut`, `RecordRetries`, `DeliverDecide` (stop, try 2), `DeliverResume` (fails at once), `RecordTimesOut`, `RecordRetries`, `DeliverDecide` (try 3), `DeliverResume` (fails), `RecordTimesOut`, plus about 4 steps that spend the Manager's one steer (`steer` is still allowed, since the thread holds, and its row ends the same way). The answer has no ack, so `holds` blocks DIED; the cap blocks retries; `run.py stop` refuses a failed row; the model's `Abandon` needs an end row (the code's `cmd_abandon` does not: the Manager can abandon by hand, but no hint says so). <br>**Holds:** every invariant. |
+| `impl-r2-env2` (pid reuse, no checkin, held post; 1 fault) | **Every rule holds; no deadlock.** |
+| `impl-r2-die2` (1 attempt, a steer, two deaths) | **Every rule holds; no deadlock**: the B4 fix files DIED, and a flag touch no longer spends the cap. |
+| `impl-r2-brief`, `impl-r2-relaunch` | **Every rule holds.** Rules 12 and 13 hold by construction once the brief reads the rows (the model has no other way to get a brief wrong). |
+| `impl-r2-wake` (CLI keeps startedAt; stop, no checkin, pid reuse; 3 faults) | **Every rule holds.** |
+| `impl-r2-operator` (the operator's terminal steer) | **Every rule holds** (as `fixed-operator`). |
+| `impl-r2-live` (FairSpec) | `SteersSettle` and `AnswersSettle` **hold**. |
+| `need-r2-a1` (A.1 off: every resume copies; A.2 records it) | **Holds**: A.2 covers A.1 in the model. The cost (a new session id at every delivery) breaks no rule. |
+| `need-r2-a12` (A.1 and A.2 off; 1 attempt) | **Must break** `EveryLiveWorkerIsRecorded` (7), `NoEndRowOverRunningWorker` and `AskerNeverFiledDead` (10), `NoWorkerLeftAtEnd` and `TypeOK` (11), as in `impl`. A.2 alone off holds by construction (no copy is ever started), so it has no config. |
+| `need-r2-a3`, `need-r2-b5` | **Hold**: either fix alone covers the stale .addr. |
+| `need-r2-a3b5` (A.3 and B5 off) | **Must break** `DoorbellOnlyToOwnAttempt` (otherProcess) in 8: `WorkerAsks`, `SupervisorStops`, `PidReused`, `Answer`, `DeliverDecide` (step 3), `DeliverResume` (in place, no checkin: the old .addr still looks fresh), `ManagerSteers`, `DeliverDecide` (the post goes to the reused path). |
+| `need-r2-b1` (B1 off) | **Must deadlock** in 7, as in `impl-die`. |
+| `need-r2-b2` (B2 off, 3 attempts) | **Must break** `BriefNeverShowsSettledAsOpen` in 9, as in `impl-brief`. |
+| `need-r2-b2-abandon` (B2 off, relaunch) | **Must break** `BriefPastesEveryCarriedMessage` (5) and `BriefNeverShowsSettledAsOpen` (8), as in `impl-relaunch`. |
+| `need-r2-b4` (B4 off; two deaths) | **Must break** `NoReportOverUnackedSteer` in 7: `WorkerChecksReport`, `ManagerSteers`, `Die`, `DeliverDecide` (step 3), `DeliverResume` (in place), `Die`, `RecordFilesDied` (salvage); and `ClosedTaskHasNoUnreadSteer` in 8 (`Close`). |
+| every round-1 config | the round-1 result, with **the same distinct-state count** (for example `fixed` 1,038,611, `supersede` 18,819,492). A different count means a round-2 edit changed round-1 behaviour. |
+
+### Size estimates (not measured)
+
+Round-1 counts for scale: `fixed-operator` 29,983; `regress-no-sid-check` 37,572; `fixed-hold` 64,304; `fixed` 1,038,611. The breaking configs may stop early.
+
+| Config | Estimate |
+|---|---|
+| `impl-die`, `need-r2-b1`, `need-r2-b4`, `impl-r2-die2` | 1k to 20k |
+| `need-r2-a3`, `need-r2-b5`, `need-r2-a3b5`, `impl-r2-wake`, `impl-copy-cwd`, `need-r2-a12`, `impl-r2-operator`, `impl-r2-live` | 10k to 100k |
+| `impl`, `impl-r2`, `need-r2-a1` (2 attempts, no fault) | 100k to 600k |
+| `impl-relaunch`, `impl-r2-relaunch`, `need-r2-b2-abandon` | 150k to 900k |
+| `impl-brief`, `impl-r2-brief`, `need-r2-b2` (3 attempts, no steer) | 100k to 1M |
+| `impl-r2-env1`, `impl-r2-env2` (2 attempts, 1 fault of 3 kinds) | 500k to 2M |
+
+If one goes far past 2M: set `MANAGER_STOPS = FALSE` where no predicted path uses it, then `MaxAttempts` 2 → 1 for `impl-r2-env*` (they then lose rules 4 and 4b), then split the fault kinds once more.
+
+## Round 2: blind spots
+
+- **B3** (record caches the session rows across tasks, and rereads rows and meta under the lock only when it saw message rows before): the model has one task, and its record reads the state at each step. A stale read needs a second task in the same record command, and the harm (an end row next to a STOPPED row of a pause, the cap) is a Lifecycle question. Not modelled; check it in a test, as the round-2 list asks.
+- **B6** (a stuck worker after a steer is stopped, resumed and stopped again) and D8: the model has no stuck state (a permission prompt). Adding one doubles the worker states for one path; a test is cheaper.
+- **B7** (`manager.addr`): the Manager's own doorbell is out of the model (round 1 left out `notify` and `wait`).
+- The ghost row (a dead process, live for 30 minutes) is merged into "ended": the code lets a steer through and files nothing for a young ghost, then treats it as ended. The model takes the second half only.
+- `CLI_COPY_IN_WORKTREE` is an open question about the CLI. `CLI_WAKE_KEEPS_START` is settled (live, c2, 2026-11-09): a wake with no flags changed `startedAt` (1794232669270 → 1794232946304), same id and sessionId, new pid. The round-3 configs set it FALSE; the impl and impl-r2 configs keep TRUE, as they were measured (the A.3 and B5 fixes make it moot there). Two live checks settle them: the copy's `claude agents --json` row (its `cwd`), and `startedAt` before and after a wake without flags.
+- D2, D9, D10, D14 to D16 are not modelled (see the table).
+- With `IMPL_RESUME_COPIES`, a copy takes the stopped original's slot again. A third live session in one attempt is still `overflow` (TypeOK), so a trace that needs one ends there.
+
+## Round 2: results (measured, 2026-11-09)
+
+Every prediction held. Run by the main session; reports in the scratchpad, `mbx/<config>-r2/report.md` and `mbx/<config>-r2b/report.md`.
+
+| Config | Result | Distinct states |
+|---|---|---|
+| every round-1 config | the round-1 result, the same break sets | the same counts (`fixed` 1,038,611; `supersede` 18,819,492) |
+| `impl`, `impl-die`, `impl-brief`, `impl-relaunch`, `impl-copy-cwd` | break as predicted | stopped at the breaks |
+| `impl-r2` | holds | 181,886 |
+| `impl-r2-env2` | holds | 885,632 |
+| `impl-r2-operator` | holds | 39,958 |
+| `impl-r2-wake` | holds | 48,027 |
+| `impl-r2-brief` | holds | 61,302 |
+| `impl-r2-relaunch` | holds | 181,886 |
+| `impl-r2-die2` | holds | 305 |
+| `impl-r2-live` | `SteersSettle`, `AnswersSettle` hold | 3,684 |
+| `impl-r2-env1` | deadlock in 17 steps (D6) | stopped at the deadlock |
+| `need-r2-b1`, `need-r2-b2`, `need-r2-b2-abandon`, `need-r2-b4`, `need-r2-a12`, `need-r2-a3b5` | break as predicted | stopped at the breaks |
+| `need-r2-a1`, `need-r2-a3`, `need-r2-b5` | hold, as predicted | — |
+
+One spec fix during the run: TLC enumerates a `\/` inside an action as branches, so `MaxOf({})` was evaluated (a CHOOSE failure) in 16 configs. `Blocking` now reads `IF AnswersTo(k) = {} THEN TRUE ELSE ...`, and `BriefFlaws` uses nested IFs. Keep that form for any `MaxOf`.
+
+## Round 3: the fixes of msg-fixes-r3.md
+
+`msg-fixes-r3.md` (scratchpad) lists six fixes; the model takes four.
+
+| Switch | TRUE means | Item |
+|---|---|---|
+| `FIX_FAILED_ENDS` | `RecordFilesDied` ignores `holds` when the attempt's session is `failed` and files a salvaged report or a `FAILED` end (never DIED), carrying the thread; `DeliverDecide` never resumes a failed row (the row stays pending, no try) | 1 (D6) |
+| `FIX_STOP_OPEN_THREAD` | `ManagerStops` also accepts the attempt with no live row when its thread holds | 5 (D7) |
+| `ALLOW_NO_EXIT` | a fault: `ProcessIgnoresStop(s)` puts a live session in `noExit`; deliver's step 3 then stops it, the process does not exit, and the row stays pending (`wait_for_exit` gives up) | environment for item 4 |
+| `FIX_EXIT_TIMEOUT_NOT_A_TRY` | that timeout does not count a try | 4 (D15) |
+| `IMPL_STALE_ADDR_FAILS` | 3330fc7 (D9): when the socket step is entered (live row with a pid) but the address is missing or stale, the row is marked `sockF` for good. FALSE is the item-2 fix | 2 (D9) |
+
+Not modelled: item 3 (D16: the model has no non-zero `claude --resume` exit other than a lost transcript) and item 6 (D2: the copy path is off in the round-2 code). The other process actions of run.py (`run.py stop`, close, launch) still kill a `noExit` process: the model applies the fault to deliver's wait only.
+
+`impl-r3*.cfg` = the round-2 code (`impl-r2*`) with `FIX_FAILED_ENDS`, `FIX_STOP_OPEN_THREAD`, `FIX_EXIT_TIMEOUT_NOT_A_TRY` TRUE, `IMPL_STALE_ADDR_FAILS` FALSE, and `CLI_WAKE_KEEPS_START = FALSE` (the live fact). Every older config lists the five new constants as FALSE, which is the round-2 behaviour. `noExit` stays empty without `ALLOW_NO_EXIT`, so their state counts must not change. The configs are written by `mailbox-gen/gen_r3.py` in the scratchpad.
+
+## Round 3: predictions (written before any run)
+
+| Config | Expect | Size |
+|---|---|---|
+| `impl-r3` (2 attempts, no fault) | **Every rule holds; no deadlock.** About `impl-r2`'s 181,886: the wider stop guard adds few states, since without a fault a thread rarely holds with no live row | 180k to 200k |
+| `impl-r3-env1` (death, supervisor stop, account; 1 fault) | **Every rule holds; no deadlock.** The D6 path now ends: after the first failed resume, `RecordFilesDied` files FAILED and carries the answer; the next launch (or abandon) goes on | 400k to 1.5M |
+| `impl-r3-env1-nostop` (the same, no `run.py stop`) | **Holds; no deadlock**: item 1 alone leads out, without the Manager's stop | 300k to 1.2M |
+| `impl-r3-env2` (pid reuse, no checkin, held post) | **Every rule holds**, with about `impl-r2-env2`'s 885,632 states | 850k to 950k |
+| `impl-r3-noexit` (1 attempt, doorbell = resume, a process that ignores `claude stop`, `run.py stop` on) | **Every rule holds; no deadlock.** The row stays pending with no try, record retries it at every record, and `run.py stop` ends the attempt. Without `run.py stop` this is a loop that the deadlock check cannot see: item 4 relies on the operator reading the hint | 1k to 20k |
+| `need-r3-d6` (items 1 and 5 off) | **Must deadlock** in 17 steps, as `impl-r2-env1` | 300k to 1.5M (stops at the deadlock) |
+| `need-r3-d6-nostop` (item 1 off, item 5 on, no `run.py stop`) | **Must deadlock** in 17 steps: item 5 is only a manual way out. (Item 1 off with item 5 on and `run.py stop` on would hold, because the model's stop is a free move; no config.) | as above |
+| `need-r3-d15` (item 4 off; 1 attempt, one ask, no steer, no stop) | **Must deadlock** in 8: `WorkerAsks`, `ProcessIgnoresStop`, `Answer`, `DeliverDecide` (timeout, try 1), `RecordRetries`, `DeliverDecide` (try 2), `RecordRetries`, `DeliverDecide` (try 3). The cap blocks retries; the open ask holds DIED | 500 to 5k |
+| `need-r3-d9` (item 2 off; 1 attempt, no checkin) | **Holds.** The cost of D9 (a resume where a post would do) breaks no rule; the model has no rule for it. The run only shows that the switch changes nothing else | 10k to 60k |
+| every older config | its last result and state count (D9, D15 and item 1 are FALSE there) | unchanged |
+
+## Round 3: run (new and changed configs only)
 
 ```sh
 M=/Users/ronica/projects/ronica-skills-msg/plugins/agentic-team/model/mailbox
 RUNNER=/Users/ronica/projects/ronica-skills-msg/plugins/statechart/skills/statechart/scripts/statechart
-OUT=/private/tmp/claude-501/-Users-ronica-projects/5e0c1f80-e89e-517b-8af4-7440e1660cbe/scratchpad
+OUT=/private/tmp/claude-501/-Users-ronica-projects/5e0c1f80-e89e-517b-8af4-7440e1660cbe/scratchpad/mbx
 cd $M
-for c in overview-ask overview-steer adr-nofault phase1 operator \
+for c in need-r3-d15 impl-r3-noexit need-r3-d9 impl-r3 need-r3-d6 need-r3-d6-nostop \
+         impl-r3-env1-nostop impl-r3-env1 impl-r3-env2; do
+  TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java \
+    $RUNNER $M/Mailbox.tla --config $M/$c.cfg --view $M/view.mjs --out $OUT/$c-r3
+done
+```
+
+Every older config gained five constants set to FALSE and is otherwise unchanged. To confirm, rerun `impl-r2` (181,886) and `fixed` (1,038,611) with `--out $OUT/<c>-r3`.
+
+## Run
+
+The main session runs these. A subagent may not: the permission classifier blocks the runner. SANY parses the round-2 spec (`java -cp tla2tools.jar tla2sany.SANY Mailbox.tla`, 2026-11-09). Use a new `--out` folder per run. Round 2 first runs the new configs, smallest first, then reruns every round-1 config as the regression check (same result, same distinct-state count).
+
+```sh
+M=/Users/ronica/projects/ronica-skills-msg/plugins/agentic-team/model/mailbox
+RUNNER=/Users/ronica/projects/ronica-skills-msg/plugins/statechart/skills/statechart/scripts/statechart
+OUT=/private/tmp/claude-501/-Users-ronica-projects/5e0c1f80-e89e-517b-8af4-7440e1660cbe/scratchpad/mbx
+cd $M
+for c in impl-die need-r2-b1 need-r2-b4 impl-r2-die2 need-r2-a3b5 need-r2-a3 need-r2-b5 impl-r2-wake \
+         impl-copy-cwd need-r2-a12 impl-r2-operator impl-r2-live \
+         impl impl-r2 need-r2-a1 impl-relaunch impl-r2-relaunch need-r2-b2-abandon \
+         impl-brief impl-r2-brief need-r2-b2 impl-r2-env2 impl-r2-env1 \
+         overview-ask overview-steer adr-nofault phase1 operator \
          need-ask-open need-carry need-own-attempt need-flag need-delivered-timeout need-inbox \
          need-steer-ended need-report-atomic need-lock supersede regress-no-sid-check \
          fixed-operator fixed-die fixed-supstop fixed-account fixed-pid fixed-hold \
          check fixed live live-fixed; do
   TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java \
-    $RUNNER $M/Mailbox.tla --config $M/$c.cfg --view $M/view.mjs --out $OUT/mailbox-$c-r1
+    $RUNNER $M/Mailbox.tla --config $M/$c.cfg --view $M/view.mjs --out $OUT/$c-r2
 done
 ```
 
-For round 2, use `--out $OUT/mailbox-$c-r2`, and so on. The configs were generated by a script (`mailbox-gen/gen.py` in the scratchpad), which is not kept in the repo. Edit the `.cfg` files directly. Every config lists every constant.
+`supersede` took 18.8M states in round 1; run it last or skip it if time is short. The round-1 configs were generated by `mailbox-gen/gen.py` and the round-2 configs by `mailbox-gen/gen_r2.py`, both in the scratchpad and not kept in the repo. Edit the `.cfg` files directly, or rerun `gen_r2.py` from this folder. Every config lists every constant.
 
 ## Ambiguous or suspect in the ADR (found while modelling)
 
