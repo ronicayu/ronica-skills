@@ -732,7 +732,7 @@ def test_payload_fields_in_graph_and_serve(serve, tg, raw, tmp_path):
     proc = serve(port)
     proc.stdout.readline()
     nodes = {n["id"]: n for n in json.loads(fetch(port, "/data.json"))["nodes"]}
-    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "baseline", "rag"}
+    expected = {"id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at", "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "priority", "baseline", "rag"}
     assert set(nodes[p]) == expected
     assert nodes[p]["type"] == "objective" and nodes[p]["children"] == [c] and nodes[p]["parent"] is None
     assert nodes[c]["parent"] == p and nodes[c]["rollup"] is None
@@ -1016,7 +1016,7 @@ def test_agenda_buckets(tg):
     assert ids(data["chase_due"]) == [ext]
     assert ids(data["missing_date"]) == [nodate]
     assert [(c["from"]["id"], c["to"]["id"], c["gap"]) for c in data["conflicts"]] == [(far, conflicted, -49)]
-    assert set(data["late"][0]) == {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
+    assert set(data["late"][0]) == {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "priority", "conflict_count"}
     assert data["late"][0]["late_days"] == 42
 
 
@@ -1063,7 +1063,7 @@ def test_ls_search(tg):
 def test_brief_output(tg, raw):
     p = add(tg, "P", "--meta", "lane=ops", "--due", "2026-10-01")
     c = add(tg, "C", "--parent", str(p), "--depends", str(add(tg, "G")))
-    keys = {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "conflict_count"}
+    keys = {"id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "priority", "conflict_count"}
     for command in (("ls",), ("ready",)):
         rows = tg("--brief", *command)
         assert rows and all(set(r) == keys for r in rows)
@@ -1870,3 +1870,142 @@ def test_concurrent_writers_all_land(tg, raw, db):
     assert sorted(r["attempt"] for r in rows) == list(range(1, count + 1))
     with closing(sqlite3.connect(db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM results").fetchone()[0] == count
+
+
+# -- priority: P0 to P3, none by default
+
+def text(raw, *args):
+    p = raw("--project", "demo", *args)
+    assert p.returncode == 0, p.stderr
+    return p.stdout.splitlines()
+
+
+def test_priority_default_is_none_and_json_has_the_key(tg):
+    t = tg("add", "plain")
+    assert t["priority"] is None and "priority" not in t["meta"]
+    assert tg("show", str(t["id"]))["priority"] is None
+    assert [x["priority"] for x in tg("ls")] == [None] and [x["priority"] for x in tg("ls", "--brief")] == [None]
+
+
+def test_priority_add_edit_and_no_priority(tg):
+    a = tg("add", "A", "--priority", "P2")
+    assert a["priority"] == "P2" and a["meta"] == {"priority": "P2"}
+    assert tg("show", str(a["id"]))["priority"] == "P2"
+    e = tg("edit", str(a["id"]), "--priority", "P0")
+    assert e["priority"] == "P0" and e["meta"] == {"priority": "P0"}
+    e = tg("edit", str(a["id"]), "--title", "A2")
+    assert e["priority"] == "P0"  # an edit of something else keeps it
+    e = tg("edit", str(a["id"]), "--no-priority")
+    assert e["priority"] is None and e["meta"] == {}
+    e = tg("edit", str(a["id"]), "--priority", "P3")
+    assert tg("edit", str(a["id"]), "--unset-meta", "priority")["priority"] is None and e["priority"] == "P3"
+    typed = tg("add", "M", "--type", "milestone", "--meta", "date=2026-12-01", "--priority", "P1")
+    assert typed["priority"] == "P1" and typed["type"] == "milestone"
+
+
+@pytest.mark.parametrize("value", ["P4", "p1", "high", "1", "none", ""])
+def test_priority_refuses_any_other_value(tg, raw, fail, value):
+    a = add(tg, "A")
+    for args in (("add", "B", "--priority", value), ("edit", str(a), "--priority", value)):
+        p = fail(*args)
+        assert p.stderr.strip() == "error: priority must be P0, P1, P2 or P3"
+    assert ids(tg("ls")) == [a] and tg("show", str(a))["priority"] is None
+
+
+def test_priority_meta_is_refused_with_a_pointer(tg, fail):
+    a = add(tg, "A")
+    for args in (("add", "B", "--meta", "priority=P1"), ("edit", str(a), "--meta", "priority=P1")):
+        assert "--priority" in fail(*args).stderr
+    assert ids(tg("ls")) == [a]
+    assert "--no-priority" in fail("edit", str(a), "--meta", "priority=P1").stderr
+    assert "cannot be combined" in fail("edit", str(a), "--priority", "P1", "--no-priority").stderr
+    assert tg("show", str(a))["priority"] is None
+
+
+def test_ls_filters_by_priority(tg, fail):
+    p0 = add(tg, "p0", "--priority", "P0")
+    p1 = add(tg, "p1", "--priority", "P1")
+    none = add(tg, "none")
+    p1b = add(tg, "p1b", "--priority", "P1")
+    assert ids(tg("ls", "--priority", "P1")) == [p1, p1b]
+    assert ids(tg("ls", "--priority", "P0", "P1")) == [p0, p1, p1b]
+    assert ids(tg("ls", "--priority", "P0", "--priority", "none")) == [p0, none]
+    assert ids(tg("ls", "--priority", "none")) == [none]
+    assert ids(tg("ls", "--priority", "P3")) == []
+    assert ids(tg("ls", "--priority", "P1", "--brief")) == [p1, p1b]
+    assert "priority must be P0, P1, P2, P3 or none" in fail("ls", "--priority", "P9").stderr
+
+
+def test_ls_sort_priority_is_rank_then_due_then_id(tg):
+    a = add(tg, "none, early", "--due", "2026-10-01")
+    b = add(tg, "P2", "--priority", "P2", "--due", "2026-11-01")
+    c = add(tg, "P0 late", "--priority", "P0", "--due", "2026-12-01")
+    d = add(tg, "P0 early", "--priority", "P0", "--due", "2026-11-05")
+    e = add(tg, "P0 no due", "--priority", "P0")
+    f = add(tg, "P3", "--priority", "P3")
+    g = add(tg, "P2 same due", "--priority", "P2", "--due", "2026-11-01")
+    h = add(tg, "P1", "--priority", "P1")
+    i = add(tg, "none")
+    assert ids(tg("ls", "--sort", "priority")) == [d, c, e, h, b, g, f, a, i]
+    assert ids(tg("ls")) == [a, b, c, d, e, f, g, h, i]  # the default order does not change
+    assert ids(tg("ls", "--sort", "due"))[:2] == [a, b]
+
+
+def test_ready_order_is_rank_then_id_and_unchanged_without_priorities(tg):
+    a, b, c, d = (add(tg, name) for name in "ABCD")
+    assert ids(tg("ready")) == [a, b, c, d]
+    tg("edit", str(c), "--priority", "P1")
+    tg("edit", str(d), "--priority", "P0")
+    assert ids(tg("ready")) == [d, c, a, b]
+    tg("edit", str(b), "--priority", "P1")
+    assert ids(tg("ready")) == [d, b, c, a]
+    assert ids(tg("ls", "--status", "ready")) == [a, b, c, d]  # only ready and ls --sort priority rank
+    blocked = add(tg, "behind", "--priority", "P0", "--depends", str(a))
+    assert blocked not in ids(tg("ready"))
+
+
+def test_priority_in_text_output(tg, raw):
+    a = add(tg, "A")
+    assert text(raw, "ls") == ["   1  ready       A"]  # no priority anywhere: no column, the output is what it was
+    b = add(tg, "B", "--priority", "P1", "--due", "2026-12-01", "--meta", "owner=ann")
+    assert text(raw, "ls") == ["   1  ready          A", "   2  ready       P1 B — due 2026-12-01 · ann"]  # the column lines the titles up
+    assert text(raw, "ready") == ["   2  ready       P1 B — due 2026-12-01 · ann", "   1  ready          A"]
+    assert text(raw, "ls", "--priority", "none") == ["   1  ready       A"]
+    assert "priority: P1" in text(raw, "show", str(b))
+    assert not any(l.startswith("priority") for l in text(raw, "show", str(a)))
+    assert f"  #{b} B — due 2026-12-01 · P1 · ann" in text(raw, "agenda", "--within", "90")
+
+
+def test_priority_is_exported_through_meta_and_journaled(tg, raw, db):
+    a = add(tg, "A", "--priority", "P1")
+    b = add(tg, "B")
+    tg("edit", str(b), "--priority", "P2")
+    tg("edit", str(b), "--priority", "P0")
+    tg("edit", str(b), "--no-priority")
+    tasks = {t["id"]: t for t in json.loads(raw("--project", "demo", "export").stdout)["tasks"]}
+    assert tasks[a]["meta"] == {"priority": "P1"} and tasks[b]["meta"] == {}
+    assert [e for e in events(db) if e[1] == "priority"] == [(b, "priority", None, "P2"), (b, "priority", "P2", "P0"), (b, "priority", "P0", None)]
+    assert not any(e[1] == "meta.priority" for e in events(db))
+
+
+def test_changes_lists_a_priority_change(tg, raw, db):
+    a = add(tg, "A")
+    b = add(tg, "B", "--priority", "P2")
+    age_events(db)
+    tg("edit", str(a), "--priority", "P1")
+    tg("edit", str(b), "--priority", "P0")
+    data = tg("changes", "--since", "2026-10-01")
+    changes = {r["id"]: r["changes"] for r in data["rescoped"]}
+    assert changes == {a: [{"field": "priority", "from": None, "to": "P1"}], b: [{"field": "priority", "from": "P2", "to": "P0"}]}
+    out = "\n".join(text(raw, "changes", "--since", "2026-10-01"))
+    assert f"#{a} A — priority - → P1" in out and f"#{b} B — priority P2 → P0" in out
+    assert [r["priority"] for r in data["rescoped"]] == ["P1", "P0"]
+
+
+def test_priority_reaches_the_graph_payload(tg, tmp_path):
+    a = add(tg, "A", "--priority", "P0")
+    b = add(tg, "B")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    html = out.read_text()
+    assert '"priority": "P0"' in html and '"priority": null' in html

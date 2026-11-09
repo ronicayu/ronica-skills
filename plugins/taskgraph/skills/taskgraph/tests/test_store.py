@@ -110,6 +110,7 @@ FIELD_CASES = [
     ("due", {"due": "2026-11-09"}, None, "2026-11-09"),
     ("promised", {"meta": {"promised": "2026-11-05"}}, None, "2026-11-05"),
     ("meta.owner", {"meta": {"owner": "bob"}}, None, "bob"),
+    ("priority", {"meta": {"priority": "P1"}}, None, "P1"),
 ]
 
 
@@ -121,6 +122,11 @@ def test_changeset_detects_each_field(field, over, old, new):
     assert found.changed == (FieldChange(1, "p", field, old, new),)
     assert not found.created and not found.removed and not found.edges_added and not found.edges_removed
     assert changeset(after, after) == ChangeSet() and not changeset(after, after)
+
+
+def test_changeset_ignores_a_priority_value_that_is_not_one():
+    assert not changeset({1: node()}, {1: node(meta={"priority": "high"})})
+    assert changeset({1: node(meta={"priority": "P0"})}, {1: node(meta={"priority": "P3"})}).changed == (FieldChange(1, "p", "priority", "P0", "P3"),)
 
 
 def test_changeset_detects_meta_unset():

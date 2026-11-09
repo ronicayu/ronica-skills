@@ -429,6 +429,69 @@ def test_edit_title_notes_type_and_parent(env, fake):
     assert fake.issue(c)["labels"] == ["taskgraph"]
 
 
+def test_priority_is_written_through_as_a_label_and_not_into_the_body(env, fake):
+    t = env.ok("add", "Ship it", "--priority", "P1", "--meta", "lane=core")
+    assert t["priority"] == "P1" and t["meta"] == {"priority": "P1", "lane": "core"}
+    issue = fake.issue(t["id"])
+    assert issue["labels"] == ["taskgraph", "tg:priority:P1"] and "priority" not in issue["body"] and '"lane":"core"' in issue["body"]
+    assert env.ok("--fresh", "show", str(t["id"]))["priority"] == "P1"
+    env.ok("edit", str(t["id"]), "--priority", "P0", "--type", "decision")
+    assert fake.issue(t["id"])["labels"] == ["taskgraph", "tg:type:decision", "tg:priority:P0"]
+    env.ok("edit", str(t["id"]), "--no-priority")
+    assert fake.issue(t["id"])["labels"] == ["taskgraph", "tg:type:decision"] and "priority" not in fake.issue(t["id"])["body"]
+    shown = env.ok("--fresh", "show", str(t["id"]))
+    assert shown["priority"] is None and "priority" not in shown["meta"]
+    plain = env.ok("add", "No priority")
+    assert fake.issue(plain["id"])["labels"] == ["taskgraph"] and plain["priority"] is None
+
+
+def test_a_priority_edit_with_nothing_else_is_one_patch_of_the_labels(env, fake):
+    n = env.ok("add", "A", "--priority", "P3")["id"]
+    fake.clear_log()
+    env.ok("edit", str(n), "--priority", "P2")
+    writes = [(c["method"], c["path"]) for c in env.writes()]
+    assert writes == [("PATCH", f"repos/o/demo/issues/{n}")] and fake.issue(n)["labels"] == ["taskgraph", "tg:priority:P2"]
+    fake.clear_log()
+    env.ok("edit", str(n), "--priority", "P2")  # the same value: nothing to send
+    assert env.writes() == []
+
+
+def test_the_four_priority_labels_are_created_with_the_first_write(env, fake):
+    env.ok("add", "A")
+    assert {"tg:priority:P0", "tg:priority:P1", "tg:priority:P2", "tg:priority:P3"} <= set(fake.state()["labels"])
+
+
+def test_a_persons_priority_label_is_pulled_and_the_label_wins_over_the_body(env, fake):
+    n = fake.add_issue("t", body='text\n\n<!-- taskgraph:meta v1\n{"priority":"P0","lane":"x"}\ntaskgraph:end -->\n')["number"]
+    t = env.ok("show", str(n))
+    assert t["priority"] is None and t["meta"] == {"lane": "x"}  # a stray key in the block does not count
+    fake.edit_issue(n, labels=["taskgraph", "tg:priority:P2"])
+    t = env.ok("--fresh", "show", str(n))
+    assert t["priority"] == "P2" and t["meta"] == {"priority": "P2", "lane": "x"}
+    assert [x["id"] for x in env.ok("ls", "--priority", "P2")] == [n]
+    fake.edit_issue(n, labels=["taskgraph", "tg:priority:P1"])
+    assert env.ok("--fresh", "show", str(n))["priority"] == "P1"
+    fake.edit_issue(n, labels=["taskgraph"])
+    assert env.ok("--fresh", "show", str(n))["priority"] is None
+    rows = env.sql("SELECT field, old, new FROM events WHERE task_id=? AND field='priority' ORDER BY id", n)
+    assert [(f, json.loads(o) if o else None, json.loads(w) if w else None) for f, o, w in rows] == [("priority", None, "P2"), ("priority", "P2", "P1"), ("priority", "P1", None)]
+
+
+def test_a_task_carries_at_most_one_priority_label(env, fake):
+    n = fake.add_issue("t")["number"]
+    fake.edit_issue(n, labels=["taskgraph", "tg:priority:P3", "tg:priority:P1", "tg:priority:P9"])
+    t = env.ok("--fresh", "show", str(n))
+    assert t["priority"] == "P1"  # the highest of the valid ones
+    messages = [c["message"] for c in t["conflicts"]]
+    assert f"#{n} has more than one priority label; the highest counts" in messages and f"#{n} has the label tg:priority:P9, which is not a priority" in messages
+    env.ok("edit", str(n), "--priority", "P2")
+    assert fake.issue(n)["labels"] == ["taskgraph", "tg:priority:P2"]
+    fake.edit_issue(n, labels=["taskgraph", "tg:priority:P0", "tg:priority:P3"])
+    env.ok("--fresh", "ls")
+    env.ok("edit", str(n), "--no-priority")
+    assert fake.issue(n)["labels"] == ["taskgraph"]
+
+
 def test_dep_rm_and_date(env, fake):
     a, b = env.ok("add", "A")["id"], env.ok("add", "B", "--depends", "1")["id"]
     env.ok("dep", "rm", str(b), str(a))

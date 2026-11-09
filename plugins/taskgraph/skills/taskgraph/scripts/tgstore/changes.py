@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 from datetime import date
 
+PRIORITIES = ("P0", "P1", "P2", "P3")  # highest first
 DUE_KEYS = {"task": "due", "objective": "due", "milestone": "date", "decision": "decide_by", "external": "needed_by", "risk": "review", "issue": "due"}
 
 
@@ -17,12 +18,19 @@ def normal(value):
     return value if parse_date(value) else None
 
 
+def priority_of(meta):
+    # a priority is one of PRIORITIES; any other value in meta counts as none
+    return meta.get("priority") if meta.get("priority") in PRIORITIES else None
+
+
 def tracked(task):
     fields = {
         "title": task["title"], "status": task["status"], "type": task["type"], "parent": task["parent"], "notes": task["notes"],
         "start": task["start"], "due": task["due"], "promised": normal(task["meta"].get("promised")), "depends_on": task["depends_on"],
     }
-    skip = {"type", "start", "promised", *DUE_KEYS.values()}
+    if priority_of(task["meta"]):
+        fields["priority"] = priority_of(task["meta"])  # only a task that has one: a project without priorities journals what it always did
+    skip = {"type", "start", "promised", "priority", *DUE_KEYS.values()}
     fields.update({f"meta.{k}": v for k, v in task["meta"].items() if k not in skip})
     return fields
 

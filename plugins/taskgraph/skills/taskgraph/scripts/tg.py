@@ -15,12 +15,12 @@ from urllib.parse import quote, urlsplit
 
 from tgstore import open_store as open_tgstore
 from tgstore.base import ResultInput, StoreError, now
-from tgstore.changes import DUE_KEYS, normal, parse_date
+from tgstore.changes import DUE_KEYS, PRIORITIES, normal, parse_date, priority_of
 
 FILTERS = ("open", "in_progress", "done", "ready", "blocked")
 NODE_FIELDS = (
     "id", "title", "status", "derived_status", "project", "notes", "meta", "depends_on", "blocks", "created_at", "done_at",
-    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats",
+    "type", "parent", "children", "rollup", "late_days", "chase_due", "start", "due", "span", "conflicts", "outlook", "threats", "priority",
 )
 TYPES = ("task", "milestone", "decision", "external", "objective", "risk", "issue")
 PARENT_TYPES = ("task", "objective")
@@ -29,9 +29,9 @@ POINTS = ("milestone", "decision", "risk")
 DATE_FLAGS = ("--start", "--due", "--promised", "--due-before", "--since", "--from")
 PERSON_KEYS = {"decision": "decider", "external": "party"}
 INHERITED = ("lane", "team")
-SORTS = ("id", "due", "late")
+SORTS = ("id", "due", "late", "priority")
 DATE_FIELDS = ("due", "start", "promised")
-SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
+SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "priority", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
 RAG = ("green", "amber", "red")
 MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 LEVELS = {"low": 1, "medium": 2, "high": 3}
@@ -138,6 +138,7 @@ def load(conn):
         task = dict(row)
         task["meta"] = json.loads(task["meta"])
         task["type"] = task["meta"].get("type", "task")
+        task["priority"] = priority_of(task["meta"])
         task["parent"] = task.pop("parent_id")
         task["children"] = []
         task["conflicts"] = []
@@ -358,7 +359,20 @@ def parse_meta(pairs):
     return meta
 
 
+def check_priority(value, filtering=False):
+    if value not in PRIORITIES and not (filtering and value == "none"):
+        raise Fail("priority must be P0, P1, P2, P3 or none" if filtering else "priority must be P0, P1, P2 or P3")
+    return value
+
+
+def rank(task):
+    # P0 first, then P1 to P3; a task without a priority comes last
+    return PRIORITIES.index(task["priority"]) if task["priority"] else len(PRIORITIES)
+
+
 def check_meta(meta):
+    if "priority" in meta:
+        raise Fail("priority is not a meta key; use --priority P0|P1|P2|P3 (edit: --no-priority to clear it)")
     if meta.get("type", "task") not in TYPES:
         raise Fail(f"unknown type {meta['type']!r} (expected one of {', '.join(TYPES)})")
     for key in DATE_KEYS:
@@ -386,7 +400,7 @@ def check_span(meta):
 
 
 def brief_task(task):
-    keys = ("id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days")
+    keys = ("id", "title", "type", "derived_status", "project", "parent", "lane", "start", "due", "late_days", "priority")
     return {**{k: task[k] for k in keys}, "conflict_count": len(task["conflicts"])}
 
 
@@ -401,7 +415,7 @@ def marker(task):
     return f"[{task['type']}] " if task["type"] != "task" else ""
 
 
-def line(task, with_project=False):
+def line(task, with_project=False, with_priority=False):
     prefix = f"{task['project']:<12} " if with_project else ""
     suffix = f"  (blocked by {task['blocked_by']})" if task["derived_status"] == "blocked" and task["blocked_by"] else ""
     if task["late_days"]:
@@ -412,7 +426,8 @@ def line(task, with_project=False):
         suffix += "  (conflict)"
     details = [f"{due_word(task)} {task['due']}" if task["due"] else None, person(task), task["lane"]]
     details = " — " + " · ".join(str(d) for d in details if d) if any(details) else ""
-    return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {marker(task)}{task['title']}{details}{suffix}"
+    column = f"{task['priority'] or '':<3}" if with_priority else ""
+    return f"{prefix}{task['id']:>4}  {task['derived_status']:<11} {column}{marker(task)}{task['title']}{details}{suffix}"
 
 
 def reaches(conn, start, target):
@@ -559,6 +574,8 @@ def cmd_add(store, conn, args):
     check_meta(meta)
     if meta.get("type") == "task":
         del meta["type"]
+    if args.priority is not None:
+        meta["priority"] = check_priority(args.priority)
     if args.start is not None:
         meta["start"] = resolve_date(args.start)
     if args.due is not None:
@@ -618,6 +635,10 @@ def cmd_ls(store, conn, args):
     if args.due_before is not None:
         limit = resolve_date(args.due_before)
         tasks = [t for t in tasks if t["due"] and t["due"] <= limit]
+    if args.priority:
+        for value in args.priority:
+            check_priority(value, filtering=True)
+        tasks = [t for t in tasks if (t["priority"] or "none") in args.priority]
     wanted = args.status
     if wanted:
         tasks = [t for t in tasks if t["derived_status"] in wanted or (t["status"] in wanted and not computed(t))]
@@ -627,7 +648,12 @@ def cmd_ls(store, conn, args):
         tasks.sort(key=lambda t: (t["due"] or "9999-12-31", t["id"]))
     elif args.sort == "late":
         tasks.sort(key=lambda t: (-(t["late_days"] or 0), t["due"] or "9999-12-31", t["id"]))
-    emit(args, [brief_task(t) for t in tasks] if args.brief else tasks, "\n".join(line(t, args.all_projects) for t in tasks))
+    elif args.sort == "priority":
+        tasks.sort(key=lambda t: (rank(t), t["due"] or "9999-12-31", t["id"]))
+    elif args.sort == "ready":
+        tasks.sort(key=lambda t: (rank(t), t["id"]))
+    wide = any(t["priority"] for t in tasks)  # the priority column is there only when a row has one
+    emit(args, [brief_task(t) for t in tasks] if args.brief else tasks, "\n".join(line(t, args.all_projects, wide) for t in tasks))
 
 
 def same(actual, wanted):
@@ -639,9 +665,9 @@ def same(actual, wanted):
 def cmd_ready(store, conn, args):
     args.status = ["ready"]
     args.type = [t for t in TYPES if t != "risk"]
-    args.parent = args.search = args.owner = args.lane = args.team = args.due_before = None
+    args.parent = args.search = args.owner = args.lane = args.team = args.due_before = args.priority = None
     args.meta = []
-    args.sort = "id"
+    args.sort = "ready"
     cmd_ls(store, conn, args)
 
 
@@ -663,6 +689,7 @@ def cmd_show(store, conn, args):
     out = [
         f"#{task['id']} {task['title']}",
         f"type:    {task['type']}",
+        *([f"priority: {task['priority']}"] if task["priority"] else []),
         f"status:  {task['derived_status']}" + (f" (claimed by {holder})" if holder else ""),
         f"project: {task['project']}",
         f"created: {task['created_at']}",
@@ -755,6 +782,10 @@ def cmd_edit(store, conn, args):
     if args.type is not None:
         changes["type"] = args.type
     check_meta(changes)
+    if args.priority is not None and args.no_priority:
+        raise Fail("--priority and --no-priority cannot be combined")
+    if args.priority is not None:
+        check_priority(args.priority)
     with store.write(conn):
         task = get(load(conn), args.id)  # read inside the write: a task that another tg changed while this one waited is not overwritten
         meta = {**task["meta"], **changes}
@@ -762,6 +793,10 @@ def cmd_edit(store, conn, args):
             meta.pop(key, None)
         if meta.get("type") == "task":
             del meta["type"]
+        if args.priority is not None:
+            meta["priority"] = args.priority
+        if args.no_priority:
+            meta.pop("priority", None)
         parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
         conn.execute(
             "UPDATE tasks SET title=?, notes=?, meta=?, updated_at=? WHERE id=?",
@@ -961,7 +996,7 @@ def conflict_items(tasks, items):
 def agenda_line(task, note):
     person = task["meta"].get({"decision": "decider", "external": "party"}.get(task["type"], "owner"))
     parts = [f"{due_word(task)} {task['due']}" if task["due"] else f"no {due_word(task)} date"]
-    parts += [x for x in (person, note) if x]
+    parts += [x for x in (task["priority"], person, note) if x]
     return f"#{task['id']} {marker(task)}{task['title']} — " + " · ".join(parts)
 
 
@@ -1821,6 +1856,7 @@ def build_parser():
     p.add_argument("--start")
     p.add_argument("--due")
     p.add_argument("--promised")
+    p.add_argument("--priority")
 
     dep = command("dep")
     dep_sub = dep.add_subparsers(dest="dep_command", required=True)
@@ -1868,6 +1904,7 @@ def build_parser():
     p.add_argument("--team")
     p.add_argument("--meta", nargs="+", action="extend", default=[])
     p.add_argument("--due-before")
+    p.add_argument("--priority", nargs="+", action="extend")
     p.add_argument("--sort", choices=SORTS, default="id")
     p.add_argument("--all-projects", action="store_true")
 
@@ -1889,6 +1926,8 @@ def build_parser():
     p.add_argument("--type")
     p.add_argument("--parent", type=int)
     p.add_argument("--no-parent", action="store_true")
+    p.add_argument("--priority")
+    p.add_argument("--no-priority", action="store_true")
 
     p = command("date")
     p.add_argument("id", type=int)

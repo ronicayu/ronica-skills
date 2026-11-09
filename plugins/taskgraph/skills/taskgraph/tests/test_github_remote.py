@@ -90,6 +90,19 @@ def test_task_from_item_maps_state_labels_parent_and_block():
     assert fingerprint(item)["all"] != fingerprint(dict(item, title="u"))["all"]
 
 
+def test_task_from_item_reads_the_priority_from_the_label():
+    def item(*labels, body=""):
+        return {"number": 4, "id": 9, "title": "t", "body": body, "state": "open", "labels": [{"name": n} for n in ("taskgraph", *labels)],
+                "created_at": "c", "updated_at": "u", "closed_at": None}
+
+    assert task_from_item(item()).priority is None
+    assert task_from_item(item("tg:priority:P2")).priority == "P2" and task_from_item(item("tg:priority:P2")).problems == []
+    stray = '<!-- taskgraph:meta v1\n{"priority":"P0"}\ntaskgraph:end -->\n'
+    assert (task_from_item(item(body=stray)).priority, task_from_item(item(body=stray)).meta) == (None, {})
+    many = task_from_item(item("tg:priority:P3", "tg:priority:P1", "tg:priority:P7"))
+    assert many.priority == "P1" and many.problems == ["priority:tg:priority:P7", "two_priorities"]
+
+
 def test_push_creates_then_links_parent_then_edges_and_reports_ids(remote, fake):
     p = fake.add_issue("parent")["number"]
     x = fake.add_issue("x")["number"]

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from tgstore.base import ClaimLost, RateLimited, RemoteError, StoreError
-from tgstore.changes import DUE_KEYS
+from tgstore.changes import DUE_KEYS, PRIORITIES
 from tgstore.github import comments as cm
 from tgstore.github.body import START_LINE, check_size, parse, render, size
 from tgstore.github.gh import Gh, HttpError, pace
@@ -20,8 +20,9 @@ from tgstore.remote import KEEP, ClaimOutcome, Delta, Probe, Pushed, RemoteTask,
 IN_PROGRESS = "tg:in-progress"
 REMOVED = "tg:removed"
 TYPE = "tg:type:"
+PRIORITY = "tg:priority:"
 KINDS = set(DUE_KEYS)
-COLORS = {IN_PROGRESS: "fbca04", REMOVED: "cccccc"}
+COLORS = {IN_PROGRESS: "fbca04", REMOVED: "cccccc", **{PRIORITY + p: c for p, c in zip(PRIORITIES, ("b60205", "d93f0b", "fbca04", "c5def5"))}}
 PAGE = 100
 EDGE_BATCH = 50
 
@@ -34,9 +35,13 @@ def task_from_item(item, server_time=None):
     labels = label_names(item)
     notes, meta, problems = parse(item.get("body"))
     meta.pop("type", None)  # the type is a label; a stray key in the block does not count
+    meta.pop("priority", None)  # so is the priority
     kinds = [l for l in labels if l.startswith(TYPE)]
     known = [l for l in kinds if l[len(TYPE):] in KINDS]
     problems += [f"type:{l}" for l in kinds if l not in known]
+    ranks = [l for l in labels if l.startswith(PRIORITY)]
+    ranked = sorted(l[len(PRIORITY):] for l in ranks if l[len(PRIORITY):] in PRIORITIES)  # more than one label: the highest priority counts
+    problems += [f"priority:{l}" for l in ranks if l[len(PRIORITY):] not in PRIORITIES] + (["two_priorities"] if len(ranked) > 1 else [])
     parent = item.get("parent_issue_url")
     status = "done" if item["state"] == "closed" else "in_progress" if IN_PROGRESS in labels else "open"
     return RemoteTask(
@@ -44,6 +49,7 @@ def task_from_item(item, server_time=None):
         body=item.get("body") or "", state=item["state"], labels=labels, status=status, type=known[0][len(TYPE):] if known else "task",
         parent=int(parent.rsplit("/", 1)[1]) if parent else None, created_at=item["created_at"], updated_at=item["updated_at"],
         closed_at=item.get("closed_at"), removed=REMOVED in labels, comments=item.get("comments", 0), item=item, server_time=server_time,
+        priority=ranked[0] if ranked else None,
     )
 
 
@@ -247,7 +253,7 @@ class GitHubRemote:
             return go
 
         for c in plan.created:
-            labels = [self.entry.label] + ([TYPE + c.type] if c.type != "task" else [])
+            labels = [self.entry.label] + ([TYPE + c.type] if c.type != "task" else []) + ([PRIORITY + c.priority] if c.priority else [])
             body = render(c.notes, c.meta)
             check_size(f"new task {c.title!r}", body)
 
@@ -271,6 +277,8 @@ class GitHubRemote:
                 patch["title"] = e.title
             if e.type is not None:
                 labels = [l for l in labels if not l.startswith(TYPE)] + ([TYPE + e.type] if e.type != "task" else [])
+            if e.priority is not KEEP:  # at most one priority label: the others go
+                labels = [l for l in labels if not l.startswith(PRIORITY)] + ([PRIORITY + e.priority] if e.priority else [])
             if e.status is not None:
                 labels = [l for l in labels if l != IN_PROGRESS] + ([IN_PROGRESS] if e.status == "in_progress" else [])
                 if (e.status == "done") != (f.state == "closed"):
