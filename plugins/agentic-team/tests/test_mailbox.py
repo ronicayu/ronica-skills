@@ -47,7 +47,8 @@ class MailboxTest(unittest.TestCase):
 
     def write_ctx(self, **change):
         ctx = {"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": self.task, "attempt": 1,
-               "by": "task-1-1", "asks_cap": 3, "scope": "src/", "inbox_dir": self.inbox}
+               "by": "task-1-1", "asks_cap": 3, "scope": "src/", "inbox_dir": self.inbox,
+               "lock": os.path.join(self.dir, "locks", "task-1.lock")}
         ctx.update(change)
         with open(self.ctx_path, "w") as fh:
             json.dump(ctx, fh)
@@ -287,6 +288,86 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mailbox.ref_of("Re: #41\nAnswer: x"), 41)
         self.assertIsNone(mailbox.ref_of("Answer: x"))
         self.assertEqual(mailbox.field_text("Answer: line one\nline two\nSource: manager\n", "Answer"), "line one\nline two")
+
+    # --- fixes 4, 6, 7, 9, 10 of the model check
+
+    def test_fix04_the_hook_prints_the_pointer_only_for_its_own_task_and_attempt(self):
+        flag = os.path.join(self.dir, "task-1-1.flag")
+        with open(flag, "w") as fh:
+            fh.write("agentic-team: task 1 attempt 1 has message #9 (steer). Run: inbox\n")
+        run = lambda prefix: subprocess.run([sys.executable, "-S", MAILBOX, "hook", "--flag", flag, "--match", prefix],
+                                            capture_output=True, text=True, env=self.env)
+        self.assertIn("message #9", run("agentic-team: task 1 attempt 1 ").stdout)
+        self.assertEqual(run("agentic-team: task 1 attempt 2 ").stdout, "")  # a flag that is not for this attempt
+        self.assertEqual(run("agentic-team: task 2 attempt 1 ").stdout, "")
+
+    def test_fix06_a_newer_answer_that_is_acked_settles_the_older_one(self):
+        ask = self.message("ask", "Question: q\nDefault: d\n", by="task-1-1", status="OPEN", listed=False)
+        first = self.message("answer", f"Re: #{ask}\nAnswer: a\n", status="ANSWERED")
+        second = self.message("answer", f"Re: #{ask}\nAnswer: b\n", status="ANSWERED")
+        out = self.mb("inbox").stdout
+        self.assertIn(f"#{first} answer", out)
+        self.assertIn(f"#{second} answer", out)
+        self.assertEqual(self.mb("ack", str(second), "--action", "use b").returncode, 0)
+        self.assertIn("No messages for task", self.mb("inbox").stdout)  # the older answer is settled, not open
+        ctx = mailbox.read_ctx(self.ctx_path)
+        self.assertEqual(mailbox.unacked_steers(ctx), [])
+        other = self.message("answer", "Re: #999\nAnswer: c\n", status="ANSWERED")  # another ask: stays open
+        self.assertIn(f"#{other} answer", self.mb("inbox").stdout)
+
+    def test_fix07_a_row_filed_between_an_inbox_and_an_ack_prints_again(self):
+        first = self.message("steer", "Steer: one\n")
+        self.assertIn(f"#{first} steer", self.mb("inbox").stdout)
+        second = self.message("steer", "Steer: two\n")  # filed after that inbox, before the ack
+        self.assertEqual(self.mb("ack", str(first), "--action", "ok").returncode, 0)
+        out = self.mb("inbox").stdout
+        self.assertIn(f"#{second} steer by manager", out)  # not hidden because an ack with a higher id exists
+        self.assertNotIn(f"#{first} steer", out)
+
+    def report(self, status="PASS", env=None):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS\nCheckpoint: x\n")
+        return self.mb("report", "--status", status, "--body-file", path, env=env)
+
+    def test_fix09_the_report_is_refused_while_a_steer_has_no_ack_and_filed_after_it(self):
+        steer = self.message("steer", "Steer: one\n")
+        out = self.report()
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"steer #{steer} has no ack", out.stderr)
+        self.assertEqual([r for r in self.rows() if r["kind"] == "task"], [])
+        self.mb("ack", str(steer), "--action", "ok")
+        out = self.report("ISSUES")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        (row,) = [r for r in self.rows() if r["kind"] == "task"]
+        self.assertEqual((row["status"], row["author"], row["attempt"], row["body"]), ("ISSUES", "task-1-1", 1, "Task: 1\nStatus: PASS\nCheckpoint: x\n"))
+        self.assertIn(f"result #{row['id']} filed for task {self.task} attempt 1: ISSUES", out.stdout)
+        self.assertEqual(self.report("two words").returncode, 2)  # one word, as tg needs
+        self.assertEqual(len([r for r in self.rows() if r["kind"] == "task"]), 1)
+
+    def test_fix09_an_answer_does_not_hold_the_report_only_a_steer_does(self):
+        self.message("answer", "Re: #1\nAnswer: x\n", status="ANSWERED")
+        self.assertEqual(self.report().returncode, 0)
+
+    def test_fix10_the_report_waits_for_the_task_lock_and_the_lock_gives_up(self):
+        lock = os.path.join(self.dir, "locks", "task-1.lock")
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
+                                   "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
+                                   "fh = open(sys.argv[1], 'a+'); fcntl.flock(fh, fcntl.LOCK_EX)\n"
+                                   "print('locked', flush=True); time.sleep(2)", lock], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            with self.assertRaises(mailbox.Fail) as caught:
+                with mailbox.locked(lock, seconds=0.3):
+                    pass
+            self.assertIn("holds", str(caught.exception))
+            start = time.monotonic()
+            out = self.report()  # waits until the holder lets go
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertGreater(time.monotonic() - start, 1.0)
+        finally:
+            holder.wait()
+            holder.stdout.close()
 
 
 if __name__ == "__main__":

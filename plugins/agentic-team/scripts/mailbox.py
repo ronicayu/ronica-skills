@@ -7,7 +7,11 @@ Usage:
     mailbox.py --ctx FILE inbox         print the messages of the Manager that wait for this task and attempt
     mailbox.py --ctx FILE ack ID --action TEXT
                                         file the `ack` row of a message
-    mailbox.py hook --flag FILE         a PostToolUse hook: print the flag file's pointer line, if the file exists
+    mailbox.py --ctx FILE report --status S --body-file F
+                                        file the worker's report; refused while a steer has no ack
+    mailbox.py hook --flag FILE [--match PREFIX]
+                                        a PostToolUse hook: print the flag file's pointer line, if the file exists
+                                        and the line starts with PREFIX (this task and attempt)
 
 Every message is a Taskgraph result row (kind ask, answer, steer or ack); the row id is the message id. A doorbell
 (a line posted to a socket, or the hook's pointer) only wakes the receiver: it carries no instructions. The receiver
@@ -19,6 +23,7 @@ wakes the Manager with its SendMessage tool, as the brief says; this script post
 Exit codes: 0 done; 1 a tool failed (tg); 2 refused, the message names the fix. Stdlib only.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -102,12 +107,25 @@ def acked_ids(rows, attempt):
     return {ref_of(r.get("body")) for r in rows if r.get("kind") == ACK and r.get("attempt") == attempt} - {None}
 
 
+def settled_ids(rows, attempt):
+    """The answers that a newer answer to the same ask settles: when the newest answer to an ask is acked, each
+    older answer to it needs no ack (a supersede)."""
+    newest = {}
+    for r in rows:
+        if r.get("kind") == ANSWER and r.get("attempt") == attempt and ref_of(r.get("body")) is not None:
+            newest[ref_of(r["body"])] = max(newest.get(ref_of(r["body"]), 0), r["id"])
+    acked = acked_ids(rows, attempt)
+    return {r["id"] for r in rows if r.get("kind") == ANSWER and r.get("attempt") == attempt
+            and ref_of(r.get("body")) in newest and r["id"] < newest[ref_of(r["body"])] and newest[ref_of(r["body"])] in acked}
+
+
 def open_messages(rows, meta, attempt):
-    """The answer and steer rows of the attempt that a worker still has to read and ack: by the Manager or the
-    operator, listed in the `mailbox` meta, with no ack."""
-    listed, acked = listed_ids(meta), acked_ids(rows, attempt)
+    """Every answer and steer row of the attempt that a worker still has to read and ack: by the Manager or the
+    operator, listed in the `mailbox` meta, with no ack, and not settled by a newer answer. Not "the rows after the
+    last ack": a row filed between an inbox and an ack prints again."""
+    listed, done = listed_ids(meta), acked_ids(rows, attempt) | settled_ids(rows, attempt)
     return [r for r in rows if r.get("kind") in (ANSWER, STEER) and r.get("attempt") == attempt
-            and r.get("author") in SENDERS and r["id"] in listed and r["id"] not in acked]
+            and r.get("author") in SENDERS and r["id"] in listed and r["id"] not in done]
 
 
 def tg_json(ctx, *args, input=None):
@@ -141,6 +159,29 @@ def unacked_steers(ctx):
     rows = tg_json(ctx, "result", "ls", str(task)) or []
     meta = (tg_json(ctx, "show", str(task)) or {}).get("meta") or {}
     return [r for r in open_messages(rows, meta, ctx["attempt"]) if r["kind"] == STEER]
+
+
+@contextlib.contextmanager
+def locked(path, seconds=120):
+    """Hold the task's lock file (flock) for the block. run.py takes the same lock around the commands that change a
+    task, so a report cannot be filed between a steer and its delivery. Waits at most `seconds`."""
+    import fcntl
+    import time
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+") as fh:
+        end = time.monotonic() + seconds
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    raise Fail(f"another run.py or mailbox.py holds {path}; try again in a moment", 1)
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 # ------------------------------------------------------------------------------------------- the socket
@@ -190,14 +231,16 @@ def write_addr(path, socket_path, session_id=None, token=None, at=None):
 # ------------------------------------------------------------------------------------------- commands
 
 def cmd_hook(argv):
-    """The PostToolUse hook. It runs after every tool call, so it imports nothing and does one read."""
-    flag = argv[argv.index("--flag") + 1] if "--flag" in argv and argv.index("--flag") + 1 < len(argv) else None
+    """The PostToolUse hook. It runs after every tool call, so it imports nothing and does one read. The flag file is
+    of one attempt; with --match it also checks that the pointer line is for this task and attempt."""
+    def option(name):
+        return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
     try:
-        with open(flag, encoding="utf-8") as fh:
+        with open(option("--flag"), encoding="utf-8") as fh:
             text = fh.read().strip()
     except (OSError, TypeError):
         return 0
-    if text:
+    if text and text.startswith(option("--match") or ""):
         sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}))
     return 0
 
@@ -290,6 +333,24 @@ def cmd_ack(ctx, args):
     return 0
 
 
+def cmd_report(ctx, args):
+    """File the worker's report, with the same `tg result add` that the brief used to show, but refuse while a steer of
+    the attempt has no ack. The check and the filing run under the task's lock, so run.py cannot file a steer between
+    them."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.status):
+        raise Fail("--status is one word: PASS, ISSUES or BLOCKED")
+    with locked(ctx["lock"]):
+        waiting = unacked_steers(ctx)
+        if waiting:
+            raise Fail("steer " + ", ".join(f"#{r['id']}" for r in waiting) + " has no ack: run the inbox command from "
+                       "MAILBOX, act on it and ack it, then run this command again")
+        row = tg_json(ctx, "result", "add", str(ctx["task"]), "--kind", "task", "--attempt", str(ctx["attempt"]), "--by",
+                      ctx["by"], "--status", args.status, "--body-file", args.body_file)
+    print(f"result #{row['id']} filed for task {ctx['task']} attempt {ctx['attempt']}: {args.status}")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["hook"]:  # before anything else loads: it runs after every tool call
@@ -298,7 +359,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="mailbox.py", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ctx", help="the context file that run.py wrote for the attempt")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{checkin,ask,inbox,ack,hook}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{checkin,ask,inbox,ack,report,hook}")
     sub.add_parser("checkin", help="SessionStart hook: write the session's socket address")
     p = sub.add_parser("ask", help="file a question for the Manager")
     p.add_argument("--file", required=True, help="the question: Question, Options, Default, Blocking, Why")
@@ -306,13 +367,17 @@ def main(argv=None):
     p = sub.add_parser("ack", help="file the ack of a message")
     p.add_argument("id", type=int)
     p.add_argument("--action", required=True, help="one line: what you will do")
+    p = sub.add_parser("report", help="file the report of the attempt; refused while a steer has no ack")
+    p.add_argument("--status", required=True, help="PASS, ISSUES or BLOCKED")
+    p.add_argument("--body-file", required=True, help="the report file")
     sub.add_parser("hook", help="PostToolUse hook: print the pointer line of --flag")
     args = parser.parse_args(argv)
     try:
         if not args.ctx:
             raise Fail(f"{args.command} needs --ctx <the context file of your brief>")
         ctx = read_ctx(args.ctx)
-        return {"checkin": cmd_checkin, "ask": cmd_ask, "inbox": cmd_inbox, "ack": cmd_ack}[args.command](ctx, args)
+        return {"checkin": cmd_checkin, "ask": cmd_ask, "inbox": cmd_inbox, "ack": cmd_ack,
+                "report": cmd_report}[args.command](ctx, args)
     except Fail as exc:
         print(f"mailbox.py: {exc}", file=sys.stderr)
         return exc.code

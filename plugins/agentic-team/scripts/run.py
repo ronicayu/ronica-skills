@@ -89,6 +89,7 @@ bodies are a record, not the match.
 """
 
 import argparse
+import contextlib
 import datetime
 import fnmatch
 import glob
@@ -274,6 +275,7 @@ class Run:
         self.host_failed = False
         self._fetched = set()
         self._docker = None  # (what docker_read() returned,) once containers() has asked
+        self.locks = {}  # task id -> how deep this command holds the task's lock (task_lock)
         self.socket_failures, self.socket_off = 0, False  # failed socket posts of this command; two turn them off
 
     def find_tg(self, given):
@@ -870,9 +872,44 @@ def attempt_file(run, tid, attempt, ext):
     return inbox_path(run, f"{tid}-{attempt}.{ext}")
 
 
-def flag_file(run, tid):
-    """The pointer flag of a task: while it exists, the worker's PostToolUse hook shows its text after each tool call."""
-    return inbox_path(run, f"task-{tid}.flag")
+def flag_file(run, tid, attempt):
+    """The pointer flag of one attempt: while it exists, that worker's PostToolUse hook shows its text after each tool
+    call. It is per attempt, so a flag of an ended attempt can never reach the next attempt's worker."""
+    return inbox_path(run, f"task-{tid}-{attempt}.flag")
+
+
+def doorbell_prefix(tid, attempt):
+    return f"agentic-team: task {tid} attempt {attempt} "
+
+
+def lock_file(run, tid):
+    """The lock of one task: every run.py command that changes the task, and the worker's report command, hold it."""
+    return os.path.join(run.run_dir, "locks", f"task-{tid}.lock")
+
+
+@contextlib.contextmanager
+def task_lock(run, tid):
+    """Hold the task's lock (flock) for the block, so the operator's terminal run.py and the Manager's cannot
+    interleave a stop, a close or a launch with a delivery or a DIED row. It is re-entrant within one command."""
+    held = run.locks.get(tid, 0)
+    if held:
+        run.locks[tid] = held + 1
+        try:
+            yield
+        finally:
+            run.locks[tid] -= 1
+        return
+    try:
+        guard = mbx.locked(lock_file(run, tid))
+        guard.__enter__()
+    except mbx.Fail as exc:
+        raise Refused(str(exc), exc.code)
+    run.locks[tid] = 1
+    try:
+        yield
+    finally:
+        run.locks.pop(tid, None)
+        guard.__exit__(None, None, None)
 
 
 def mailbox_script():
@@ -901,7 +938,8 @@ def write_ctx(run, task, attempt, session, cap):
     attempt number left."""
     tid = task["id"]
     ctx = {"python": sys.executable, "tg": run.tg_path, "db": run.db, "project": run.project, "task": tid,
-           "attempt": attempt, "by": session, "asks_cap": cap, "scope": str((task.get("meta") or {}).get("scope", "")).strip(),
+           "attempt": attempt, "by": session, "asks_cap": cap, "lock": lock_file(run, tid),
+           "scope": str((task.get("meta") or {}).get("scope", "")).strip(),
            "inbox_dir": os.path.join(run.run_dir, INBOX_DIR)}
     path = attempt_file(run, tid, attempt, "ctx.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -921,7 +959,7 @@ def worker_settings(run, tid, attempt):
         "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command", "command": py, "args": [
             script, "--ctx", attempt_file(run, tid, attempt, "ctx.json"), "checkin"]}]}],
         "PostToolUse": [{"hooks": [{"type": "command", "command": py, "args": [
-            "-S", script, "hook", "--flag", flag_file(run, tid)]}]}]}}
+            "-S", script, "hook", "--flag", flag_file(run, tid, attempt), "--match", doorbell_prefix(tid, attempt)]}]}]}}
     if run.config["sessions"]["permission_mode"] == "bypassPermissions":
         settings["crossSessionInbound"] = "accept"
     return json.dumps(settings, separators=(",", ":"))
@@ -1022,8 +1060,10 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
                           f"check-report {quote(report)}{mailbox_arg}"),
         "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked." if kind != "verify" else ""),
-        "RESULT_COMMAND": result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
-                                         report),
+        "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
+                                          report) if kind == "verify" else
+                           # the same `tg result add`, behind a check that no steer of the attempt is unacked
+                           mailbox_command(run, tid, attempt, "report", "--status", "<STATUS>", "--body-file", quote(report))),
         "NOTIFY": notify_step(notify_target(run), tid, kind, attempt),
         "MAILBOX": ("None. You file no question and take no message: judge the output and report." if kind == "verify"
                     else mailbox_section(run, tid, attempt, session, cap, notify_target(run))),
@@ -1601,11 +1641,15 @@ def cmd_launch(run, args):
         raise Refused(f"#{tid} has a live session {live[0].describe()}; run run.py record, or run.py stop {tid}")
     latest = task_rows(rows, current)
     if current and not latest:
-        waiting = Thread(rows, task, current).blocking()
-        if waiting:  # a parked worker waits for its answer: a new attempt would end a conversation that is still there
-            raise Refused(f"#{tid} attempt {current} waits for an answer to ask #{waiting[-1]['id']}; run run.py answer "
-                          f"{tid} --ask {waiting[-1]['id']} (--file F, --default or --decision <id>). If the worker is gone, "
-                          "that answer's resume fails and files DIED, and the launch is free again")
+        thread = Thread(rows, task, current)
+        waiting = thread.blocking()
+        if waiting:  # a parked worker waits for its answer, or for the ack of it: a new attempt would end a live conversation
+            ask, answer = waiting[-1], thread.answer_of(waiting[-1]["id"])
+            raise Refused(f"#{tid} attempt {current} has an open ask #{ask['id']}: "
+                          + (f"its answer #{answer['id']} has no ack yet; run run.py record (it delivers again), or "
+                             f"run.py answer {tid} --ask {ask['id']} --supersede ..." if answer else
+                             f"run run.py answer {tid} --ask {ask['id']} (--file F, --default or --decision <id>)")
+                          + ". If the worker is gone, the resume fails and files DIED, and the launch is free again")
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
         raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
@@ -1708,6 +1752,8 @@ def cmd_launch(run, args):
     else:
         add_worktree(run, worktree, base)
     created = mode in ("first", "base", "head")
+    if current:
+        carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
     try:
         ignore_reports(run)
         clear_report(report_path(run, worktree, session))
@@ -2042,25 +2088,29 @@ class Thread:
         self.steers = [r for r in mine if r["kind"] == mbx.STEER and r.get("author") in mbx.SENDERS and r["id"] in listed]
         self.acks = [r for r in mine if r["kind"] == mbx.ACK]
         self.acked = {mbx.ref_of(r.get("body")) for r in self.acks} - {None}
+        self.open = mbx.open_messages(rows, task.get("meta"), attempt)  # what the worker's inbox prints
 
     def answer_of(self, ask_id):
         """The newest answer to an ask, or None."""
         found = [r for r in self.answers if mbx.ref_of(r["body"]) == ask_id]
         return found[-1] if found else None
 
-    def open_asks(self):
+    def unanswered(self):
         return [a for a in self.asks if self.answer_of(a["id"]) is None]
 
     def blocking(self):
-        """The asks that no answer settles and that make the worker wait."""
-        return [a for a in self.open_asks() if mbx.ask_blocking(a["body"])]
+        """The asks that make the worker wait: a blocking ask stays open until the worker acks its answer (or the answer
+        is settled), not merely until an answer row exists. The worker is then not dead and not stuck."""
+        open_ids = {r["id"] for r in self.open}
+        return [a for a in self.asks if mbx.ask_blocking(a["body"])
+                and (self.answer_of(a["id"]) is None or self.answer_of(a["id"])["id"] in open_ids)]
 
     def unacked(self):
-        """The answers and steers that no ack names yet, oldest first."""
-        return sorted((r for r in self.answers + self.steers if r["id"] not in self.acked), key=lambda r: r["id"])
+        """The answers and steers that no ack settles yet, oldest first."""
+        return list(self.open)
 
     def holds(self):
-        """True while the worker waits for a message, or has one it has not acked: it is not dead and not stuck."""
+        """True while the worker waits for a message, or has one it has not acked."""
         return bool(self.blocking() or self.unacked())
 
 
@@ -2138,16 +2188,20 @@ def forget_stopped(run, sid):
         pass
 
 
-def touch_flag(run, tid, text):
-    """Raise the pointer flag: the worker's PostToolUse hook shows its text after each tool call."""
-    os.makedirs(os.path.dirname(flag_file(run, tid)), exist_ok=True)
-    with open(flag_file(run, tid), "w", encoding="utf-8") as fh:
+def touch_flag(run, tid, attempt, text):
+    """Raise the attempt's pointer flag: the worker's PostToolUse hook shows its text after each tool call."""
+    os.makedirs(os.path.dirname(flag_file(run, tid, attempt)), exist_ok=True)
+    with open(flag_file(run, tid, attempt), "w", encoding="utf-8") as fh:
         fh.write(text + "\n")
 
 
-def lower_flag(run, tid):
-    if os.path.lexists(flag_file(run, tid)):
-        os.remove(flag_file(run, tid))
+def lower_flag(run, tid, attempt=None):
+    """Remove the pointer flag of one attempt, or of every attempt of the task."""
+    folder = inbox_path(run, "")
+    for name in (os.listdir(folder) if os.path.isdir(folder) else []):
+        m = re.fullmatch(rf"task-{tid}-(\d+)\.flag", name)
+        if m and (attempt is None or int(m.group(1)) == attempt):
+            os.remove(os.path.join(folder, name))
 
 
 def wait_for_exit(run, s):
@@ -2181,6 +2235,12 @@ def deliver(run, task, row, interrupt=False):
     entry = table.setdefault(str(row["id"]), {"kind": row["kind"], "attempt": row["attempt"], "filed": utc_stamp()})
     attempt, text = entry["attempt"], doorbell_text(run, tid, entry["attempt"], row)
     entry["tries"] = entry.get("tries", 0) + 1
+    if attempt != wanted_attempt(task) or task_rows(run.results_for(tid), attempt):
+        # the message's own attempt has ended: it is carried, and never rung into a later attempt's session
+        entry["carried"] = True
+        save_mailbox(run, task, table)
+        lower_flag(run, tid, attempt)
+        return "carried"
     s = worker_session(run, tid, attempt)
 
     def settle(via, word):
@@ -2206,7 +2266,7 @@ def deliver(run, task, row, interrupt=False):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the socket post did not work ({why}); "
                  + ("the pointer flag shows it at the next tool call" if busy else "resuming the session"))
     if busy and not interrupt:
-        touch_flag(run, tid, text)
+        touch_flag(run, tid, attempt, text)
         entry["hook"] = True
         return settle("pending", "hook")
     return resume_with(run, task, entry, row, s, text, settle)
@@ -2251,7 +2311,7 @@ def resume_with(run, task, entry, row, s, text, settle):
                  f"of {s.sid}; stopped the original")
         return settle("resume", "copy")
     forget_stopped(run, s.sid)
-    lower_flag(run, tid)
+    lower_flag(run, tid, attempt)
     return settle("resume", "resume")
 
 
@@ -2261,13 +2321,13 @@ def carry_thread(run, task, attempt):
     tid, table = task["id"], mailbox_table(task)
     th = Thread(run.results_for(tid), task, attempt)
     changed = False
-    for row in th.open_asks() + th.unacked():
+    for row in th.blocking() + th.unanswered() + th.unacked():
         entry = table.setdefault(str(row["id"]), {"kind": row["kind"], "attempt": attempt})
         if not entry.get("carried"):
             entry["carried"], changed = True, True
     if changed:
         save_mailbox(run, task, table)
-    lower_flag(run, tid)
+    lower_flag(run, tid, attempt)
 
 
 def carried_text(rows, task, attempt):
@@ -2294,14 +2354,17 @@ def carried_text(rows, task, attempt):
             "Apply them to this attempt; they are the Manager's, not the worker's.\n\n" + "\n\n".join(parts))
 
 
+DELIVERIES_MAX = 3  # deliveries of one message that the worker never acked, before record stops trying again
+
+
 def mailbox_events(run, task, attempt, th):
     """The part of `record` for a live attempt's thread: the asks, the due ones, the acks, and the retries of
     deliveries. A retry may stop or resume a session, so the caller reads the session rows again."""
     tid, table = task["id"], mailbox_table(task)
     messaging, dirty = run.config["messaging"], False
-    for ask in th.asks:
-        entry, answer = table.get(str(ask["id"])), th.answer_of(ask["id"])
-        if answer is not None or (entry or {}).get("carried"):
+    for ask in th.unanswered():
+        entry = table.get(str(ask["id"]))
+        if (entry or {}).get("carried"):
             continue
         question, blocking = mbx.ask_question(ask["body"]), mbx.ask_blocking(ask["body"])
         if not (entry or {}).get("seen"):
@@ -2324,22 +2387,30 @@ def mailbox_events(run, task, attempt, th):
         if entry is None or entry.get("carried"):
             continue
         word = "answer" if row["kind"] == mbx.ANSWER else "steer"
-        if row["id"] in th.acked:
+        if row["id"] not in {r["id"] for r in th.open}:  # acked, or settled by a newer answer that was acked
             if not entry.get("seen"):
-                ack = [a for a in th.acks if mbx.ref_of(a.get("body")) == row["id"]][-1]
+                acks = [a for a in th.acks if mbx.ref_of(a.get("body")) == row["id"]]
                 entry["seen"], dirty = True, True
-                via = {"resume": "resume", "socket": "socket"}.get(entry.get("via"), "hook" if entry.get("hook") else "pending")
-                run.emit(f"{word}-seen", tid, attempt, None,
-                         f"#{row['id']} acked by {ack.get('author')} (via {via}): {mbx.field_line(ack['body'], 'Action')}")
+                if acks:
+                    via = {"resume": "resume", "socket": "socket"}.get(entry.get("via"), "hook" if entry.get("hook") else "pending")
+                    run.emit(f"{word}-seen", tid, attempt, None,
+                             f"#{row['id']} acked by {acks[-1].get('author')} (via {via}): {mbx.field_line(acks[-1]['body'], 'Action')}")
                 if not th.unacked():
-                    lower_flag(run, tid)
+                    lower_flag(run, tid, attempt)
             continue
-        if entry.get("via") == "socket" and minutes_since(entry.get("at")) >= messaging["pending_minutes"]:
-            entry.update(via="pending", socket_failed=True)  # posted, never acked: a bypass worker may hold it
-            dirty = True
+        waited = minutes_since(entry.get("at"))
+        if entry.get("via") in ("socket", "resume") and waited >= messaging["pending_minutes"]:
+            was, entry["via"], dirty = entry["via"], "pending", True  # never acked: a bypass worker holds a post
+            if was == "socket":
+                entry["socket_failed"] = True
             run.emit("deliver-fallback", tid, attempt, None, f"#{row['id']}: no ack {messaging['pending_minutes']} minutes "
-                     "after the socket post; resuming the session instead")
+                     f"after the {'socket post' if was == 'socket' else 'resume'}; trying again")
         if entry.get("via") == "pending":
+            if entry.get("tries", 0) >= DELIVERIES_MAX:
+                run.emit("steer-pending", tid, attempt, None,
+                         f"#{row['id']} ({row['kind']}) was delivered {entry['tries']} times and never acked",
+                         f"run.py stop {tid} and look at the session; the message stays in the thread")
+                continue
             if dirty:
                 save_mailbox(run, task, table)
                 dirty = False
@@ -2383,7 +2454,8 @@ def file_message(run, task, attempt, kind, by, status, body):
     return row
 
 
-DELIVERED = {"socket": "posted to its socket; the worker's ack proves delivery",
+DELIVERED = {"carried": "its attempt has ended; the next brief carries it",
+             "socket": "posted to its socket; the worker's ack proves delivery",
              "resume": "the session was resumed with the doorbell",
              "copy": "the resume started a copy (the original is stopped)",
              "hook": "the worker is busy and has no socket: the pointer flag shows it at its next tool call",
@@ -2403,7 +2475,7 @@ def cmd_answer(run, args):
         if ask is None:
             raise Refused(f"#{tid} has no ask #{args.ask}; run.py inbox {tid} lists them")
     else:
-        found = th.open_asks()
+        found = th.unanswered()
         if not found:
             raise Refused(f"#{tid} attempt {attempt} has no open ask; run.py inbox {tid} shows its thread")
         ask = found[-1]
@@ -2448,11 +2520,11 @@ def cmd_steer(run, args):
     if verifiers and not (s and s.live):
         raise Refused(f"#{tid} has a verifier session {verifiers[0].describe()}; a verifier is read only and takes no "
                       f"steer. Stop it with run.py record, or start another with run.py verify {tid} --again")
-    gone = f"#{tid} has no live worker in attempt {attempt}; write the text in the task notes (tg edit {tid} --notes ...) "\
-           "so the next brief carries it"
-    if s is None or (not s.live and not th.holds()):
+    gone = (f"#{tid} has no live worker in attempt {attempt}; write it in the task notes for the next brief "
+            f"(tg edit {tid} --notes ...)")
+    if task_rows(rows, attempt):  # a report is filed: the attempt is over, whatever the process shows
         raise Refused(gone)
-    if task_rows(rows, attempt):
+    if s is None or (not s.live and not th.holds()):  # a waiting or parked worker (an open ask) still takes a steer
         raise Refused(gone)
     text = read_text(args.file)
     row = file_message(run, task, attempt, mbx.STEER, args.by, "SENT", f"Steer: {text}\nKind: {args.kind}\n")
@@ -2495,7 +2567,7 @@ def drop_mailbox(run, task):
         run.unset_meta(task, "mailbox")
     folder = inbox_path(run, "")
     for name in (os.listdir(folder) if os.path.isdir(folder) else []):
-        if re.fullmatch(rf"{tid}-\d+\.(addr|ctx\.json)|task-{tid}\.flag", name):
+        if re.fullmatch(rf"{tid}-\d+\.(addr|ctx\.json)|task-{tid}-\d+\.flag", name):
             try:
                 os.remove(os.path.join(folder, name))
             except OSError:
@@ -2783,7 +2855,7 @@ def record_in_progress(run, snap, task, unmanaged):
         th = Thread(rows, task, attempt)
         if task_rows(rows, attempt):  # the attempt ended: what is still open goes into the next brief
             table = mailbox_table(task)
-            if any(not (table.get(str(r["id"])) or {}).get("carried") for r in th.open_asks() + th.unacked()):
+            if any(not (table.get(str(r["id"])) or {}).get("carried") for r in th.blocking() + th.unanswered() + th.unacked()):
                 carry_thread(run, task, attempt)
         else:
             mailbox_events(run, task, attempt, th)
@@ -2864,6 +2936,7 @@ def record_in_progress(run, snap, task, unmanaged):
             record_row(run, task, s, attempt)
             model = session_model(task, s.sid)
             reason = file_stuck(run, tid, attempt, "task", s, "Session", model)
+            carry_thread(run, task, attempt)
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}{on_profile(s)}; filed BLOCKED ({reason})",
                      PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
         elif busy:
@@ -2881,6 +2954,7 @@ def record_in_progress(run, snap, task, unmanaged):
                 record_row(run, task, s, attempt)
             if found:
                 added = run.add_result(tid, "task", attempt, "manager", found[0], found[1])
+                carry_thread(run, task, attempt)
                 run.emit("salvaged", tid, attempt, s.sid if s else None,
                          f"{found[0]} from {found[2]} (result #{added['id']})")
                 record_arrived(run, snap, task, attempt, added)
@@ -2888,6 +2962,7 @@ def record_in_progress(run, snap, task, unmanaged):
                 where = (f"session {s.sid} {s.status}/{s.state}" if s
                          else f"no session recorded for attempt {attempt}")
                 run.add_result(tid, "task", attempt, "manager", "DIED", f"{where}, no result")
+                carry_thread(run, task, attempt)
                 run.emit("died", tid, attempt, s.sid if s else None, "filed DIED", retry_next(tid, attempt, "died"))
         return
     latest = results[-1]
@@ -2948,7 +3023,11 @@ def cmd_record(run, args):
     snap = Snapshot(run)
     unmanaged = []
     for task in sorted(snap.in_progress, key=lambda t: t["id"]):
-        host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
+        with task_lock(run, task["id"]):
+            if message_rows(snap.rows(task["id"])):  # read again under the lock: a steer or an ack may have come since
+                task["meta"] = run.show(task["id"]).get("meta") or {}
+                snap.results[task["id"]] = run.results_for(task["id"])
+            host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
     if unmanaged:
         run.emit("unmanaged", None, None, None, ids_text(unmanaged), "run.py adopt <id> --branch <b> --head <sha> [--pr <n>] "
                  "for work to bring under run.py; the others can stay")
@@ -4588,6 +4667,9 @@ COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "rec
             "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
+LOCKED = ("launch", "adopt", "verify", "close", "merged", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == "check-report":  # before Run: a session runs it in its worktree, with no config or Taskgraph
@@ -4598,7 +4680,11 @@ def main(argv=None):
         run = Run(args)
         if args.command != "wait" and not getattr(args, "dry_run", False):  # wait writes nothing; a dry run writes nothing
             refresh_manager_addr(run)
-        COMMANDS[args.command](run, args)
+        if args.command in LOCKED:  # one lock per task, so two run.py commands cannot interleave a stop with a resume
+            with task_lock(run, args.id):
+                COMMANDS[args.command](run, args)
+        else:
+            COMMANDS[args.command](run, args)
     except codehost.HostError as exc:  # Refused is one
         if run is not None:
             run.flush()
