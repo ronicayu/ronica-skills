@@ -1053,7 +1053,7 @@ class RunTest(Base):
 
     def test_99_the_project_verify_skill_skeletons(self):
         templates = os.path.join(os.path.dirname(HERE), "templates")
-        headings = {"project-verify-skill-code.md": ("Launch", "Doctor", "Drive", "Evidence", "Cleanup"),
+        headings = {"project-verify-skill-code.md": ("Checks", "Launch", "Doctor", "Drive", "Evidence", "Cleanup"),
                     "project-verify-skill-document.md": ("Sources", "Recompute", "Consistency", "Render", "Review")}
         for name, wanted in headings.items():
             with self.subTest(name):
