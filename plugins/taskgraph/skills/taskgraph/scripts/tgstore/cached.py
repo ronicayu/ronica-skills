@@ -218,7 +218,8 @@ class CachedRemoteStore:
             if delta.pages is not None:
                 put_state(conn, "pages", {str(k): v for k, v in delta.pages.items()})
             put_state(conn, "removed", sorted(removed))
-            put_state(conn, "last_pull_at", time.time())
+            if delta.pages is not None:  # a task read by id is not a pull: the next read still probes when its TTL is up
+                put_state(conn, "last_pull_at", time.time())
             if delta.full:
                 put_state(conn, "last_full_at", time.time())
             if not first:

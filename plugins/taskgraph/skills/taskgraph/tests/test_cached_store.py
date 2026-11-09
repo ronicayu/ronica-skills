@@ -437,10 +437,12 @@ def test_a_full_pull_notices_a_task_that_is_gone(env, fake):
 
 def test_a_task_the_list_page_lags_behind_is_found_by_id_and_not_dropped_by_a_full_pull(env, fake):
     env.ok("ls")
+    before = env.sql("SELECT value FROM sync_state WHERE key='last_pull_at'")
     n = fake.add_issue("made on another machine one second ago")["number"]
     fake.fault(hide_from_list=[n])  # GitHub's list page does not show it yet; the issue itself is there
     assert env.ok("show", str(n))["title"] == "made on another machine one second ago"
     assert env.run("show", "99")[0] == 1  # an id that does not exist is still an error
+    assert env.sql("SELECT value FROM sync_state WHERE key='last_pull_at'") == before  # reading one task by id is not a pull
     env.ok("sync", "--full")  # a full pull whose pages lack a task younger than two minutes does not drop it
     assert [t["id"] for t in env.ok("ls")] == [n]
     fake.fault(hide_from_list=[])
