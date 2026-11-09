@@ -986,6 +986,29 @@ class RunTest(Base):
         detail = self.one(self.events("verify", str(task)), "verifying")["detail"]
         self.assertIn(" kind code skill head", detail)
 
+    def test_108_code_verify_brief_runs_the_checks_at_base_and_head(self):
+        task = self.running_task()
+        self.pass_report(task)
+        _, verify, _ = self.verify_context(task)
+        method = verify[verify.index("### Method: code"):]
+        for want in ("Run every command of the project verify skill's `Checks` section at the\n   head commit, and at the base commit",
+                     "A problem that only the head has goes under\n   `Issues:`",
+                     "has goes under `Follow-ups:` as `found:`",
+                     "`doc: .claude/skills/verify/SKILL.md: no <kind> check; ask the user to add one`"):
+            self.assertIn(want, method)
+
+    def test_108_verify_skill_skeleton_checks_the_project_first(self):
+        with open(os.path.join(os.path.dirname(HERE), "templates", "project-verify-skill-code.md")) as fh:
+            text = fh.read()
+        self.assertLess(text.index("## Checks"), text.index("## Launch"))
+        checks = text[text.index("## Checks"):text.index("## Launch")]
+        for kind in ("- Lint: TODO", "- Format check: TODO", "- Type check: TODO", "- Other static analysis: TODO", "- Tests: TODO"):
+            self.assertIn(kind, checks)
+        for want in ("When a kind is missing, stop and tell the user.", "ask the user to add it",
+                     "do not add the tool yourself", "Write `none: <reason>` only when\nthe user says", "never `pre-commit install`"):
+            self.assertIn(want, checks)
+        self.assertIn("ask the user to add the ones it lacks", text.split("---")[1])
+
     def test_13_verify_brief_falls_back_to_the_main_checkout(self):
         task = self.running_task()
         wt, head = self.pass_report(task)

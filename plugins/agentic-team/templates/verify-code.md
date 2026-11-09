@@ -11,9 +11,16 @@ produced. Report every failure you can prove, not only the first.
    reproduce the failure at the base commit named in CONTEXT, then confirm it
    is gone at the head commit. Record both results under `Ran:`, each with its
    commit. A check that passes at both commits proves nothing about the fix.
-3. Read `git diff <base> <head>` and flag every change outside SCOPE under
+3. Run every command of the project verify skill's `Checks` section at the
+   head commit, and at the base commit named in CONTEXT. Record each run under
+   `Ran:` with its commit. A problem that only the head has goes under
+   `Issues:`, and the change fails that check. A problem that the base already
+   has goes under `Follow-ups:` as `found:`. When the section is missing, or a
+   kind is still `TODO`, say so under `Follow-ups:` as
+   `doc: .claude/skills/verify/SKILL.md: no <kind> check; ask the user to add one`.
+4. Read `git diff <base> <head>` and flag every change outside SCOPE under
    `Issues:`.
-4. Stop only the processes you started. Never stop a process by name.
+5. Stop only the processes you started. Never stop a process by name.
 
 Verdict levels for this kind:
 - `artifact-verified`: you drove the application or read the values it
