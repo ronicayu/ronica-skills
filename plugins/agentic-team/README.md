@@ -152,7 +152,8 @@ status, the worker commits on its branch (a `WIP task <id> attempt <n>: <status>
 `ISSUES` or `BLOCKED`), so `Head` is always set and the worktree is clean. It
 writes its report to a file with the Write tool, checks it with
 `run.py check-report`, and files it with
-`tg result add --body-file`, so no report text reaches a shell command, where a
+`mailbox.py report --body-file` (the same `tg result add`, behind a check that no steer of the
+attempt is unacked, run under the task's lock), so no report text reaches a shell command, where a
 project's guard could refuse it for a word. The report names the `Branch`, the
 `Head` commit SHA, and the `Worktree` path. If the Manager set its address
 with `run.py notify-to`, the session then sends it one line with SendMessage.
@@ -788,8 +789,16 @@ because a peer message asked it to, so the command comes from the brief, not fro
    `deliver-copy`. A resume that cannot start, or a conversation with no transcript, files `DIED`: only then is a
    waiting worker called dead.
 3. **Pointer flag.** For a busy worker whose socket post failed: `run.py` writes the doorbell line to
-   `.agentic-team/inbox/task-<id>.flag`, and the worker's `PostToolUse` hook shows it after the next tool call. After
+   `.agentic-team/inbox/task-<id>-<attempt>.flag`, and the worker's `PostToolUse` hook shows it after the next tool call
+(the flag is per attempt, and the hook prints it only when its text starts with its own task and attempt). After
    `pending_minutes` `record` prints `steer-pending` with the hint `run.py steer <id> --file <same text> --interrupt`.
+
+A message delivered by a socket post or by a resume that the worker does not ack within `pending_minutes` goes
+back to pending and is delivered again, at most 3 times; then `record` prints `steer-pending` and stops. A blocking
+ask stays open until the worker acks its answer, not merely until an answer row exists, so a worker that was
+answered and has not acked is never filed `DIED` or `stuck`, and `launch` refuses its task. When a newer answer to an ask
+is acked, the older answers to it are settled. `steer` refuses an attempt that has a filed report, whatever the process
+shows, and takes a waiting or parked worker. The worker's `inbox` prints every unacked row of its attempt.
 
 Two socket failures in one `run.py` command turn the socket off for the rest of that command.
 **The worker's doorbell to the Manager** is the existing SendMessage notify step. Its `to` is
@@ -812,9 +821,14 @@ SCOPE. A worker reports `BLOCKED` when a steer conflicts with a rule, and lists 
 `Deviations:`. A worker that has a steer with no ack cannot pass `check-report`. `tg` keeps no author check, so a
 worker could file a row `--by manager`; `inbox` ignores every row whose id `run.py` did not list.
 
-**When an attempt ends** (a report, `stop`, `close`, `abandon`, `DIED`) its open asks and unacked messages are
-marked carried in the `mailbox` meta, and the next brief's CONTEXT pastes them under `### Open thread of attempt <n>`.
-The `mailbox` meta, and the inbox files of the task (`<task>-<attempt>.ctx.json`, `.addr`, `task-<id>.flag`), are run
+**One lock per task.** `launch`, `adopt`, `verify`, `close`, `merged`, `stop`, `abandon`, `answer`, `steer`, each task's
+part of `record`, and the worker's report command hold `.agentic-team/locks/task-<id>.lock` (an `flock`, waited for at
+most 2 minutes), so the operator's terminal and the Manager cannot interleave a stop or a close with a resume, and a
+steer cannot arrive between the check and the filing of a report.
+
+**When an attempt ends** (a report, `stop`, `close`, `abandon`, `DIED`, a stuck session, the next `launch`) its open
+asks and unacked messages are marked carried in the `mailbox` meta, and its pointer flag is removed, and the next brief's CONTEXT pastes them under `### Open thread of attempt <n>`.
+The `mailbox` meta, and the inbox files of the task (`<task>-<attempt>.ctx.json`, `.addr`, `task-<id>-<attempt>.flag`), are run
 state: a new attempt drops the entries of earlier attempts, and the cleanup of a merged task and `abandon` remove
 the meta and the files. `manager.addr` is overwritten, never removed.
 
@@ -841,11 +855,11 @@ REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Pr
 `templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
 base commit, how it was found, and the head commit.
 
-The worker runs `result add` and `run.py check-report` from its own session, so
-its permission mode must allow both. Pin `--db` and allow only a `--body-file` path in the
+The worker runs `mailbox.py report` and `run.py check-report` from its own session, so
+its permission mode must allow both. Allow only a `--body-file` path in the
 worktree's `.agentic-team/` folder if you write a permission rule for it. In `auto` mode nothing enforces that rule: the
-brief gives the worker the paths to `tg.py` and the database, and only the
-worker's instructions keep it to the one `result add` command.
+brief gives the worker the paths to `mailbox.py`, its context file, `tg.py` and the database, and only the
+worker's instructions keep it to the one report command. A verifier still files with `tg result add`.
 
 ## Run directory
 
@@ -858,7 +872,8 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
 | `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
-| `inbox/` | Per attempt: `<task>-<attempt>.ctx.json` (the context that `mailbox.py` reads), `<task>-<attempt>.addr` (written by the worker's `SessionStart` hook); per task: `task-<id>.flag` (the pointer line that the `PostToolUse` hook shows while a message waits). Removed with the task's worktree. |
+| `inbox/` | Per attempt: `<task>-<attempt>.ctx.json` (the context that `mailbox.py` reads), `<task>-<attempt>.addr` (written by the worker's `SessionStart` hook); `task-<id>-<attempt>.flag` (the pointer line that the `PostToolUse` hook shows while a message waits). Removed with the task's worktree. |
+| `locks/task-<id>.lock` | The task's lock file (see Messaging). It is never removed. |
 | `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
 
 A session's report file is not in this folder. It is
@@ -936,7 +951,7 @@ then id, and the Manager launches them in that order.
 
 ### Upgrading from 0.15.0
 
-Version 0.16.0 lets a worker ask the Manager and lets the Manager answer and steer a running worker, across Claude profiles (see [Messaging](#messaging)): `mailbox.py`, the `answer`, `steer` and `inbox` commands, `ask`, `answer`, `steer` and `ack` result kinds, a MAILBOX brief section, a `[messaging]` table, and the `mailbox` meta. A project that never uses `ask`, `answer` or `steer` keeps today's behaviour, output and exit codes, with two intended exceptions. First, `launch` now passes a `--settings` JSON to each worker (a `SessionStart` check-in hook and a `PostToolUse` pointer hook), writes `.agentic-team/inbox/<task>-<attempt>.ctx.json`, and adds the MAILBOX section to the brief, so the `claude --bg` command line and the brief text change. Second, the worker's notify step still uses SendMessage, but its `to` is now `uds:<the Manager's inbox socket>` once any `run.py` call in the Manager's Bash has written `.agentic-team/manager.addr` (that makes the line reach a Manager from a worker on any profile), and the bare session name before that. The verifier gets no hooks and no MAILBOX. On the Taskgraph GitHub backend add `"mailbox"` to the `local` list under `[projects."<name>".meta]`. Rules 1 and 2 of "Three rules" changed on purpose; see the README. No migration.
+Version 0.16.0 lets a worker ask the Manager and lets the Manager answer and steer a running worker, across Claude profiles (see [Messaging](#messaging)): `mailbox.py`, the `answer`, `steer` and `inbox` commands, `ask`, `answer`, `steer` and `ack` result kinds, a MAILBOX brief section, a `[messaging]` table, and the `mailbox` meta. A project that never uses `ask`, `answer` or `steer` keeps today's behaviour, output and exit codes, with two intended exceptions. First, `launch` now passes a `--settings` JSON to each worker (a `SessionStart` check-in hook and a `PostToolUse` pointer hook), writes `.agentic-team/inbox/<task>-<attempt>.ctx.json`, adds the MAILBOX section to the brief, and gives the worker a new report command (`mailbox.py report`, which runs the same `tg result add` after a check that no steer is unacked), so the `claude --bg` command line and the brief text change. Second, the worker's notify step still uses SendMessage, but its `to` is now `uds:<the Manager's inbox socket>` once any `run.py` call in the Manager's Bash has written `.agentic-team/manager.addr` (that makes the line reach a Manager from a worker on any profile), and the bare session name before that. The verifier gets no hooks and no MAILBOX. On the Taskgraph GitHub backend add `"mailbox"` to the `local` list under `[projects."<name>".meta]`. Rules 1 and 2 of "Three rules" changed on purpose; see the README. No migration.
 
 ### Upgrading from 0.14.1
 

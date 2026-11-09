@@ -44,7 +44,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   `leftover ...` line (see Processes) keeps its own form and needs no label. The
   `check-report` command in REPORT refuses a Follow-ups line with no label.
 - **Your worktree.** Work and commit only inside your worktree, on its branch. Write
-  nothing outside it except the `result add` command in your brief. Before you write any
+  nothing outside it except the report command in your brief. Before you write any
   result, run `git status --porcelain`. Commit or delete anything your own VERIFY
   created, and list what you leave under `Files:`. Your report file does not show there,
   because git ignores it; leave it and do not list it. Then commit your work on your branch,
@@ -91,8 +91,9 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   the shared config. Read a setup target before you run it, and run only the steps you need,
   such as the dependency install. If your VERIFY cannot run without such a target, report
   `BLOCKED` and name it.
-- **Taskgraph is read only,** except the one `result add` command in your brief and the
-  MAILBOX commands, which file your `ask` and `ack` rows. The Manager runs `tg start`,
+- **Taskgraph is read only,** except the one report command in your brief (it runs
+  `tg result add`, and it refuses while a steer has no ack) and the MAILBOX commands,
+  which file your `ask` and `ack` rows. The Manager runs `tg start`,
   `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read
   `${CLAUDE_PLUGIN_ROOT}/skills/principle-decision-forks/SKILL.md` and apply it. You
@@ -155,8 +156,9 @@ brief, then end.
    `Files:`. Then run the `check-report` command in REPORT. It reads the file and changes
    nothing. Fix in the file what it names, with the Write tool, and run it again. If the
    command is refused, or it names a problem that you cannot fix, go on to step 2.
-2. Run the one `result add` command in REPORT. Copy it as it is and fill in only the
-   status. If it fails, run it again once.
+2. Run the one report command in REPORT. Copy it as it is and fill in only the
+   status. If it says that a steer has no ack, run the inbox command, act on it, ack it,
+   and run the report command again. If it fails for another reason, run it again once.
 3. If REPORT has a notify step and the command succeeded, send that one line to the
    Manager with SendMessage, as REPORT says. Send it once and do not wait for a reply. If
    the tool does not load, or the send fails or is refused, end anyway. Without a notify
