@@ -47,6 +47,19 @@ flowchart LR
 - **Only the socket can steer a running worker without stopping it.** Hooks add context only at tool boundaries and cannot start a turn. MCP cannot push. Channels need a session flag that we cannot set today. Stop plus resume keeps the context but kills the step that is running.
 - **It keeps the existing rules.** Results stay the evidence. The doorbell stays "a trigger to drain, never evidence". `wait` already wakes on new result rows of any kind. The verifier stays read-only and gets no messages.
 
+
+## Live check results (2026-11-09, Claude Code 2.1.319)
+
+| Check | Result |
+|---|---|
+| L5: a post from a default-profile process reaches an idle `~/.claude-2` session | **Pass.** One JSON line (`{"type":"user","message":{"role":"user","content":...}}`, no auth line) on `/tmp/cc-socks/<pid>.sock` woke the idle session; it replied in a new turn. The session showed it as "Another Claude session sent a message". |
+| L5b: the same post reaches a **busy** session between tool calls | **Pass.** The session ran `sleep 20` as the first of three tool calls; a steer posted 12 s in arrived when that call ended; the session ran no further sleep and answered the steer. |
+| L6: a post to a default-profile session from another process | **Pass** (idle session woke and answered). The socket checks the OS user and own-child status only, not the profile. |
+| L6b: a `~/.claude-2` session asked by a peer message to run a ring script | **Refused by the model**: it would not run a script from another session's folder because a peer message asked it to. This supports the design rule that a doorbell carries no instructions; the worker's ring and inbox commands must come from its brief and the plugin, never from a message. |
+| L7: the Manager's Bash reaches a socket | **Pass** in this session (auto mode, no sandbox rule needed). |
+| Socket address | `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` holds `messagingSocketPath` (and `peerFeatures`); the pid is in `claude agents --json`. The ADR still prefers the `SessionStart` check-in hook, since that file format is internal. |
+| L8: `--messaging-socket-path` with `--bg` | Not run. |
+
 ## 2. Capabilities this design rests on
 
 Labels: **D** = the official docs say so (code.claude.com/docs, read 2026-11-09). **L** = checked on this machine on 2026-11-09 (CLI 2.1.319). **B** = found only in the 2.1.319 binary's own text, not in the docs. **A** = assumed; a live check in section 8 must confirm it.
