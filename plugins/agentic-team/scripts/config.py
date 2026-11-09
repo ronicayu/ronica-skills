@@ -27,6 +27,12 @@ when agentic-team is not installed there. Without [profiles] nothing changes.
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
 
+[messaging] sets how the Manager and a worker message each other: the asks per
+attempt, the minutes before an unanswered ask is due and before an unacked
+message counts as undelivered, the doorbell ("socket" posts to the receiver's
+inbox socket and falls back to stop plus resume; "resume" only stops and
+resumes), and the seconds between two reads of Taskgraph in `run.py wait`.
+
 Python callers (run.py) may import load(root), problems(config),
 resolve_model(config, name) and profile_path(config, name).
 """
@@ -127,6 +133,13 @@ SCHEMA = {
         "disposable": ("patterns", []),
     },
     "verify": {"kind": ("choice:code,schema,design-doc", "code")},
+    "messaging": {
+        "asks_per_attempt": ("nonneg", 3),
+        "ask_due_minutes": ("posint", 60),
+        "pending_minutes": ("posint", 10),
+        "doorbell": ("choice:socket,resume", "socket"),
+        "tg_poll_seconds": ("posint", 5),
+    },
     "notifications": {"skill": ("str", "")},
 }
 
@@ -136,6 +149,7 @@ TYPE_NAMES = {
     "list": "a list of strings",
     "patterns": "a list of path patterns",
     "posint": "a positive integer",
+    "nonneg": "an integer that is 0 or more",
     "bool": "true or false",
     "timezone": "an IANA time zone name",
     "model": 'a model id or { model = "...", effort = "...", profile = "..." }',
@@ -323,6 +337,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    if kind == "nonneg":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
     if kind == "bool":
         return isinstance(value, bool)
     if kind == "timezone":
@@ -450,6 +466,32 @@ def installed_plugin(listing):
         elif isinstance(item, list):
             stack.extend(item)
     return None
+
+
+def manager_bypasses(config):
+    """True when a settings file that the Manager's session reads sets permissions.defaultMode to bypassPermissions:
+    the project's .claude/settings.json and settings.local.json, and the user settings of CLAUDE_CONFIG_DIR (else
+    ~/.claude). A session started with a flag is not visible here. Only a hint for `check`."""
+    user = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    for path in (os.path.join(config.root, ".claude", "settings.json"),
+                 os.path.join(config.root, ".claude", "settings.local.json"), os.path.join(user, "settings.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                mode = (json.load(fh).get("permissions") or {}).get("defaultMode")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if mode == "bypassPermissions":
+            return True
+    return False
+
+
+def messaging_warnings(config):
+    """Warnings for [messaging]. A Manager in bypassPermissions holds a peer message for approval, so the socket
+    doorbell cannot wake it (workers still reach it through `run.py wait`)."""
+    if config["messaging"]["doorbell"] == "socket" and manager_bypasses(config):
+        return ["messaging.doorbell is \"socket\" but the Manager runs in bypassPermissions, which holds a peer "
+                "message for approval; workers' doorbells will not wake it, run.py wait still does"]
+    return []
 
 
 def plugin_problems(config):
@@ -604,10 +646,11 @@ def main(argv=None):
     try:
         if args.command == "check":
             found = problems(config)
-            warnings = []
+            warnings = messaging_warnings(config)
             if config.get(PROFILES) and not getattr(config, "missing", False):
-                more, warnings = plugin_problems(config)
+                more, extra = plugin_problems(config)
                 found += more
+                warnings += extra
             for warning in warnings:
                 print(f"config.py: warning: {warning}", file=sys.stderr)
             if found:

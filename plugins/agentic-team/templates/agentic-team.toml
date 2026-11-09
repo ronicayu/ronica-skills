@@ -53,5 +53,12 @@ always_pause = []           # decisions that always need the operator
 # remove_worktrees = true # false: keep every worktree and session of a merged task (run.py removes nothing)
 # disposable = []          # ignored paths that run.py may delete with a merged worktree, added to the defaults; "!build/" turns a default off (README: Disposable patterns)
 
+[messaging]
+# asks_per_attempt = 3      # asks a worker may file per attempt; 0 forbids them (a task's `asks` meta overrides; the mechanical tier defaults to 0)
+# ask_due_minutes = 60      # an ask with no answer after this long prints ask-due
+# pending_minutes = 10      # a message with no ack after this long counts as not delivered
+# doorbell = "socket"       # "socket": post to the receiver's inbox socket, fall back to stop plus resume; "resume": stop plus resume only
+# tg_poll_seconds = 5       # run.py wait reads Taskgraph this often (claude agents is read at --interval)
+
 [verify]
 # kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta

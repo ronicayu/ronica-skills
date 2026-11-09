@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
@@ -21,8 +22,13 @@ class ConfigTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = self._tmp.name
+        self.user = os.path.join(self.root, "user-claude")  # the user settings that `check` reads: never the real ones
+        os.makedirs(self.user)
+        self._env = unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.user})
+        self._env.start()
 
     def tearDown(self):
+        self._env.stop()
         self._tmp.cleanup()
 
     def write(self, text, local=False):
@@ -316,6 +322,38 @@ class ConfigTest(unittest.TestCase):
         cfg = config.load(self.root)
         self.assertEqual(config.profile_path(cfg, "api"), os.path.expanduser("~/no-such-claude-dir-for-this-test"))
         self.assertIn("does not exist", " ".join(config.problems(cfg)))
+
+    def test_messaging_defaults_and_types(self):
+        self.write(MINIMAL)
+        cfg = config.load(self.root)
+        self.assertEqual(cfg["messaging"], {"asks_per_attempt": 3, "ask_due_minutes": 60, "pending_minutes": 10,
+                                            "doorbell": "socket", "tg_poll_seconds": 5})
+        self.assertEqual(self.run_cli("get", "messaging.doorbell")[:2], (0, "socket\n"))
+        self.write(MINIMAL + "[messaging]\nasks_per_attempt = 0\ndoorbell = \"resume\"\n")
+        self.assertEqual(config.problems(config.load(self.root)), [])  # 0 forbids asks
+        for bad, text in (('asks_per_attempt = -1', "asks_per_attempt must be an integer that is 0 or more"),
+                          ('pending_minutes = 0', "pending_minutes must be a positive integer"),
+                          ('doorbell = "smoke"', 'doorbell must be one of "socket", "resume"'),
+                          ('tg_poll = 5', "unknown key messaging.tg_poll")):
+            self.write(MINIMAL + "[messaging]\n" + bad + "\n")
+            self.assertIn(text, " ".join(config.problems(config.load(self.root))))
+
+    def test_check_warns_when_the_manager_bypasses_permissions_and_the_doorbell_is_a_socket(self):
+        self.write(MINIMAL)
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
+        os.makedirs(os.path.join(self.root, ".claude"))
+        with open(os.path.join(self.root, ".claude", "settings.local.json"), "w") as fh:
+            json.dump({"permissions": {"defaultMode": "bypassPermissions"}}, fh)
+        code, out, err = self.run_cli("check")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertIn("warning: messaging.doorbell is \"socket\" but the Manager runs in bypassPermissions", err)
+        self.write(MINIMAL + '[messaging]\ndoorbell = "resume"\n')
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
+        os.remove(os.path.join(self.root, ".claude", "settings.local.json"))  # the user settings count too
+        with open(os.path.join(self.user, "settings.json"), "w") as fh:
+            json.dump({"permissions": {"defaultMode": "bypassPermissions"}}, fh)
+        self.write(MINIMAL)
+        self.assertIn("bypassPermissions", self.run_cli("check")[2])
 
 
 if __name__ == "__main__":

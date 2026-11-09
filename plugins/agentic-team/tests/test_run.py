@@ -256,7 +256,8 @@ class Base(unittest.TestCase):
         self.rm_file = os.path.join(self.dir, "rm.json")
         self.db = os.path.join(self.dir, "tasks.db")
         self.env = {k: v for k, v in os.environ.items()
-                    if k not in ("TASKGRAPH_DB", "TASKGRAPH_TG", "CLAUDE_CONFIG_DIR")}
+                    if k not in ("TASKGRAPH_DB", "TASKGRAPH_TG", "CLAUDE_CONFIG_DIR",
+                                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")}
         self.env.update({
             "HOME": self.home, "TASKGRAPH_DB": self.db,
             "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
