@@ -2294,7 +2294,7 @@ def deliver(run, task, row, interrupt=False):
     return resume_with(run, task, entry, row, s, text, settle)
 
 
-GONE_CONVERSATION = re.compile(r"(?i)no (such )?(conversation|session)|(conversation|session)\b[^\n]*not found|not found")
+GONE_CONVERSATION = re.compile(r"(?i)no (such )?(conversation|session)|(conversation|session)\b[^\n]*not found")
 
 
 def resume_with(run, task, entry, row, s, text, settle):

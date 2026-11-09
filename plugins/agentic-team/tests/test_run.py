@@ -8209,7 +8209,8 @@ class DeliveryTest(Base):
         self.assertTrue(ask)
 
     def test_r3_3_only_a_conversation_that_cannot_be_resumed_files_died(self):
-        for said, died in (("No conversation found with session ID x", True), ("Credit balance is too low", False)):
+        for said, died in (("No conversation found with session ID x", True), ("Credit balance is too low", False),
+                           ("Agent agentic-team:worker not found", False)):
             with self.subTest(said):
                 self.fresh()
                 task = self.worker(status=None, state="done")
@@ -8220,7 +8221,7 @@ class DeliveryTest(Base):
                     self.one(events, "died")
                 else:
                     self.assertEqual(self.named(events, "died"), [])
-                    self.assertIn("claude --resume failed (Credit balance is too low)", self.one(events, "deliver-fallback")["detail"])
+                    self.assertIn(f"claude --resume failed ({said})", self.one(events, "deliver-fallback")["detail"])
                     entry = self.mailbox_meta(task)[str(answer["id"])]
                     self.assertEqual((entry["via"], entry["tries"]), ("pending", 1))  # one try counted
                     self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "task"], [])
