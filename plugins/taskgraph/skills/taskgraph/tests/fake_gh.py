@@ -228,9 +228,14 @@ class Fake:
             return self.issues_collection(s, method, query, body)
         if rest == "issues/comments" and method == "GET":
             return self.repo_comments(s, query)
-        if (m := re.fullmatch(r"issues/comments/(\d+)", rest)) and method == "DELETE":
+        if (m := re.fullmatch(r"issues/comments/(\d+)", rest)) and method in ("DELETE", "PATCH"):
             if m[1] not in s["comments"]:
                 return error(404, "Not Found")
+            if method == "PATCH":
+                if len(body["body"].encode("utf-8")) > BODY_LIMIT:
+                    return error(422, "Validation Failed")
+                s["comments"][m[1]].update(body=body["body"], updated_at=now())
+                return Resp(200, self.comment_json(s, s["comments"][m[1]]))
             del s["comments"][m[1]]
             return Resp(204)
         if (m := re.fullmatch(r"issues/(\d+)(?:/(.*))?", rest)):

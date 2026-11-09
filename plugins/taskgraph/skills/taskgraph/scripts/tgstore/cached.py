@@ -432,6 +432,8 @@ class CachedRemoteStore:
             fresh = {}
             for i in sorted({e.id for e in plan.edits} | set(plan.removed) | set(self.claimed)):
                 fresh[i] = self.fresh_task(i)
+            for i, outcome in self.claimed.items():
+                self.remote.check_deadline(outcome, fresh[i])
             pushed = self.remote.push(plan, fresh)
         self.finish(conn, plan, pushed, local_rows, new_pending)
         for i, outcome in self.claimed.items():
@@ -568,8 +570,23 @@ class CachedRemoteStore:
             )
         return out
 
+    def claimant(self, conn):
+        given = os.environ.get("TASKGRAPH_CLAIMANT") or self.entry.claimant
+        if given:
+            return given
+        login = get_state(conn, "login")
+        if login is None:
+            login = self.remote.login()
+            if conn.in_transaction:
+                put_state(conn, "login", login)
+            else:
+                with conn:
+                    put_state(conn, "login", login)
+        return f"{login}@{socket.gethostname().split('.')[0]}:{cfg.checkout_id()}"
+
     def claim(self, conn, task_id):
-        raise NotImplementedError
+        # Reads GitHub, never the cache. Raises ClaimLost; the label goes out with the write that follows (commit).
+        self.claimed[task_id] = self.remote.claim(task_id, self.claimant(conn))
 
     def claimant_of(self, conn, task_id):
         mine = self.unvoided(conn, task_id)

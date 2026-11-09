@@ -145,6 +145,9 @@ class SqliteStore:
     def claim(self, conn, task_id):
         pass
 
+    def claimant_of(self, conn, task_id):
+        return None
+
     def sync(self, *, full=False):
         raise StoreError("tg sync: this project uses the local store; nothing to sync")
 

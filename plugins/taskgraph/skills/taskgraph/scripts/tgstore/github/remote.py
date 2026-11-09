@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
+import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from tgstore.base import RateLimited, RemoteError, ResultInput, StoreError
+from tgstore.base import ClaimLost, RateLimited, RemoteError, StoreError
 from tgstore.changes import DUE_KEYS
 from tgstore.github import comments as cm
 from tgstore.github.body import START_LINE, check_size, parse, render, size
-from tgstore.github.gh import Gh, HttpError
+from tgstore.github.gh import Gh, HttpError, pace
 from tgstore.github.queries import EDGES_MORE, edges_query
-from tgstore.remote import KEEP, Delta, Probe, Pushed, RemoteTask, canon
+from tgstore.remote import KEEP, ClaimOutcome, Delta, Probe, Pushed, RemoteTask, canon
 
 IN_PROGRESS = "tg:in-progress"
 REMOVED = "tg:removed"
@@ -337,3 +340,84 @@ class GitHubRemote:
         self.run([(f"result comment {i} of {len(parts)}", op(t)) for i, t in enumerate(parts, 1)])
         return {"id": posted[0]["id"], "task_id": number, "at": posted[0]["created_at"], "status": row.status, "kind": row.kind, "attempt": row.attempt,
                 "author": row.author, "body": row.body}
+
+
+    # -- claim (spec 8, with the rules of the model check) ----------------------------------------------------------
+
+    STALE = 60  # seconds
+    DEADLINE = 30  # seconds from the claim comment to the label PATCH
+
+    def server_now(self):
+        return self.gh.server_time or time.time()
+
+    def age(self, claim):
+        return self.server_now() - calendar.timegm(time.strptime(claim["at"], "%Y-%m-%dT%H:%M:%SZ"))
+
+    def unvoided(self, parsed):
+        voided = {v for p in parsed for v in p["voids"]}
+        return [p for p in sorted(parsed, key=lambda p: p["id"]) if "claim" in p and p["id"] not in voided]
+
+    def stale(self, claim, issue):
+        # older than 60 s, and the issue shows nobody works on it: no label, or closed after the claim was posted
+        if self.age(claim) <= self.STALE:
+            return False
+        return IN_PROGRESS not in issue.labels or (issue.state == "closed" and claim["at"] < (issue.closed_at or ""))
+
+    def abandon(self, comment_id, voids):
+        # A comment that voids a stale claim keeps its void marker (deleting it would bring the stale claim back); any other is deleted.
+        try:
+            if voids:
+                self.gh.patch(f"{self.base}/issues/comments/{comment_id}", {"body": "\n".join(cm.marker("void", {"of": v}) for v in voids)})
+            else:
+                self.gh.delete(f"{self.base}/issues/comments/{comment_id}")
+        except RemoteError as e:
+            print(f"warning: could not clean up claim comment {comment_id}: {e}", file=sys.stderr)
+
+    def decide(self, number, comment_id):
+        for attempt in range(3):
+            parsed = self.read_comments(number)
+            if any(p["id"] == comment_id for p in parsed):
+                return parsed, self.unvoided(parsed)
+            time.sleep(min(1.0, pace()))
+        raise RemoteError(f"GitHub does not list the new claim comment on #{number}; run tg start again")
+
+    def claim(self, number, claimant):
+        parsed = self.read_comments(number)
+        unvoided = self.unvoided(parsed)
+        mine = lambda p: p["claim"]["claimant"] == claimant
+        voids = []
+        if unvoided:
+            issue = self.fetch(number)
+            voids = [p for p in unvoided if self.stale(p, issue) or (mine(p) and self.age(p) >= self.STALE)]
+            left = [p for p in unvoided if p not in voids]
+            if left:
+                first = left[0]
+                if mine(first):
+                    return ClaimOutcome(False, claimant, first["id"], first["at"], [], claim_rows(parsed))
+                raise ClaimLost(f"#{number} is claimed by {first['claim']['claimant']} since {first['at']}", first["claim"]["claimant"], first["id"])
+        ids = [p["id"] for p in voids]
+        text = cm.render_claim(uuid.uuid4().hex[:12], claimant, now(), ids)
+        posted = self.gh.post(f"{self.base}/issues/{number}/comments", {"body": text}).body
+
+        def lost(winner):
+            self.abandon(posted["id"], ids)
+            who = winner["claim"]["claimant"] if winner else "another claimant"
+            raise ClaimLost(f"#{number} is claimed by {who}", who, winner["id"] if winner else None)
+
+        parsed, unvoided = self.decide(number, posted["id"])
+        if not unvoided or unvoided[0]["id"] != posted["id"]:
+            lost(unvoided[0] if unvoided else None)
+        time.sleep(pace())  # the confirm read: a lagging replica that hid a lower claim from the first read shows it now
+        parsed, unvoided = self.decide(number, posted["id"])
+        if not unvoided or unvoided[0]["id"] != posted["id"]:
+            lost(unvoided[0] if unvoided else None)
+        return ClaimOutcome(True, claimant, posted["id"], posted["created_at"], ids, claim_rows(parsed))
+
+    def check_deadline(self, outcome, fresh):
+        # called with a read that came after the confirm read, right before the label PATCH
+        if outcome.comment_id is None or not outcome.won:
+            return
+        made = calendar.timegm(time.strptime(outcome.created_at, "%Y-%m-%dT%H:%M:%SZ"))
+        if (fresh.server_time or time.time()) - made > self.DEADLINE:
+            self.abandon(outcome.comment_id, outcome.voided)
+            raise StoreError("claim took too long; run tg start again")

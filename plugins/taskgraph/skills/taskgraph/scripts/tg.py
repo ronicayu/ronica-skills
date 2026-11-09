@@ -653,14 +653,17 @@ def cmd_show(store, conn, args):
         return {k: tasks[i][k] for k in ("id", "title", "status", "derived_status")}
 
     base = latest_baselines(conn, [task["project"]]).get(task["id"])
+    holder = store.claimant_of(conn, task["id"])
     found = [without_body({k: r[k] for k in RESULT_COLUMNS}) for r in result_rows(conn, "WHERE r.task_id=?", (task["id"],))]
     data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]], baseline=base, results=found)
+    if holder:
+        data["claimant"] = holder
     if args.brief:
         data = dict(brief_task(task), depends_on=task["depends_on"], blocks=task["blocks"])
     out = [
         f"#{task['id']} {task['title']}",
         f"type:    {task['type']}",
-        f"status:  {task['derived_status']}",
+        f"status:  {task['derived_status']}" + (f" (claimed by {holder})" if holder else ""),
         f"project: {task['project']}",
         f"created: {task['created_at']}",
         f"done:    {task['done_at'] or '-'}",
@@ -725,7 +728,12 @@ def set_status(store, conn, args, status):
             (status, ts if status == "done" else None, ts, args.id),
         )
     data = load(conn)[args.id]
-    emit(args, dict(data, warnings=warnings) if warnings else data, f"#{args.id} {status}")
+    holder = store.claimant_of(conn, args.id) if status == "in_progress" else None
+    if holder:
+        data = dict(data, claimant=holder)
+    if warnings:
+        data = dict(data, warnings=warnings)
+    emit(args, data, f"#{args.id} {status}" + (f" (claimed by {holder})" if holder else ""))
 
 
 def cmd_start(store, conn, args):
@@ -1716,6 +1724,12 @@ def cmd_serve(store, conn, args):
         server.server_close()
 
 
+def cmd_sync(store, conn, args):
+    done = store.sync(full=args.full)
+    text = f"synced: {done['changed']} changed, {done['flushed']} deferred sent" + (" (full)" if done["full"] else "")
+    emit(args, done, text)
+
+
 def cmd_projects(store, conn, args):
     tasks = load(conn)
     day = today().isoformat()
@@ -1778,6 +1792,7 @@ COMMANDS = {
     "graph": cmd_graph,
     "serve": cmd_serve,
     "projects": cmd_projects,
+    "sync": cmd_sync,
 }
 
 
@@ -1930,6 +1945,9 @@ def build_parser():
     p.add_argument("--no-open", action="store_true")
 
     command("projects")
+
+    p = command("sync")
+    p.add_argument("--full", action="store_true")
     return parser
 
 
