@@ -44,6 +44,12 @@ records a merge anyone else did. When the request is behind its target,
 rebases the branch in its worktree and pushes it again (merge.catch_up
 "local"). Local mode never runs gh or glab.
 
+With a [profiles] table a tier may name a Claude profile (a CLAUDE_CONFIG_DIR). run.py
+starts the session under it and records "profile" in its `sessions` entry (left out
+for the Manager's own profile, `default`). `claude agents` lists one profile only, so
+`record` and every later call on the session (`logs`, `stop`, `rm`, the transcript
+folder) use the profile of its entry; without [profiles] nothing changes.
+
 Text output is one line per event: `<event> #<id> attempt <n>: <detail>`, with
 ` | next: <step>` when a step follows. `--json` prints one JSON array of
 {"event", "task", "attempt", "session", "detail", "next"} and nothing else
@@ -87,7 +93,8 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
-from config import DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems, resolve_model  # noqa: E402
+from config import (DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
+                    profile_path, resolve_model, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -164,10 +171,10 @@ class Refused(codehost.HostError):
         super().__init__(message, code)
 
 
-def sh(cmd, cwd=None, input=None):
+def sh(cmd, cwd=None, input=None, env=None):
     try:  # no git call may wait on a credential prompt
         return subprocess.run(cmd, cwd=cwd, input=input, capture_output=True, text=True,
-                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})})
     except FileNotFoundError as exc:
         raise Refused(f"cannot run {cmd[0]}: {exc.strerror}", 1)
 
@@ -246,6 +253,7 @@ class Run:
         self.run_dir = os.path.abspath(args.run_dir or os.path.join(self.root, ".agentic-team"))
         self.wt_dir = os.path.realpath(os.path.join(self.root, ".claude", "worktrees"))
         self._sessions = None
+        self.extra_profiles = set()  # profiles to list although no `sessions` entry names them yet (a launch in flight)
         self._host = self._default = None
         self.host_failed = False
         self._fetched = set()
@@ -271,8 +279,16 @@ class Run:
             raise Refused(f"tg {' '.join(cmd[:2])} failed: {out.stderr.strip()}", 1)
         return json.loads(out.stdout or "null")
 
-    def claude(self, *cmd, check=True):
-        out = sh(["claude", *cmd], cwd=self.root)
+    def profile_dir(self, name):
+        """The CLAUDE_CONFIG_DIR of a profile, or None for `default` (the environment run.py inherited)."""
+        try:
+            return profile_path(self.config, name)
+        except ConfigError as exc:
+            raise Refused(str(exc))
+
+    def claude(self, *cmd, check=True, profile=None):
+        directory = self.profile_dir(profile)
+        out = sh(["claude", *cmd], cwd=self.root, env={"CLAUDE_CONFIG_DIR": directory} if directory else None)
         if check and out.returncode != 0:
             raise Refused(f"claude {cmd[0]} failed: {out.stderr.strip() or out.stdout.strip()}", 1)
         return out
@@ -354,23 +370,51 @@ class Run:
     def results_for(self, tid):
         return self.tg("result", "ls", str(tid)) or []
 
+    def agents(self, profile):
+        """The rows of `claude agents --json --all` under one profile."""
+        out = self.claude("agents", "--json", "--all", profile=profile)
+        where = f" (profile {profile})" if profile != DEFAULT_PROFILE else ""
+        try:
+            rows = json.loads(out.stdout or "[]")
+        except ValueError:
+            raise Refused(f"claude agents failed{where}: output is not JSON", 1)
+        if not isinstance(rows, list):
+            raise Refused(f"claude agents failed{where}: output is not a list", 1)
+        return rows
+
     def sessions(self):
+        """Every row of this machine's sessions that run.py can see: the Manager's own profile, and each other profile
+        that a `sessions` entry of this project names. `claude agents` lists one profile only, and a session is
+        known only to the profile that started it, so each row is tagged with the profile it came from."""
         if self._sessions is None:
-            out = self.claude("agents", "--json", "--all")
-            try:
-                rows = json.loads(out.stdout or "[]")
-            except ValueError:
-                raise Refused("claude agents failed: output is not JSON", 1)
-            if not isinstance(rows, list):
-                raise Refused("claude agents failed: output is not a list", 1)
+            found = [(DEFAULT_PROFILE, r) for r in self.agents(DEFAULT_PROFILE)]
             index = {}  # session id -> (task id, kind, attempt, worktree name), from the `sessions` meta run.py wrote
+            recorded = {}  # session id -> the profile its entry names
             for task in self.tg("ls", "--status", "open", "in_progress", "done") or []:
                 entries = (task.get("meta") or {}).get("sessions")
                 for entry in entries if isinstance(entries, list) else []:
                     if isinstance(entry, dict) and entry.get("id"):
                         index[str(entry["id"])] = (task["id"], entry.get("kind"), entry.get("attempt"),
                                                    entry.get("worktree") or f"task-{task['id']}")
-            self._sessions = [Session(r, self.wt_dir, index) for r in rows if isinstance(r, dict)]
+                        recorded[str(entry["id"])] = str(entry.get("profile") or DEFAULT_PROFILE)
+            others = sorted((set(recorded.values()) | self.extra_profiles) - {DEFAULT_PROFILE})
+            for name in others:
+                if name not in (self.config.get("profiles") or {}):
+                    raise Refused(f"a `sessions` entry names profile {name}, which [profiles] does not define; "
+                                  f'add {name} = "<CLAUDE_CONFIG_DIR>" under [profiles] (.agentic-team.local.toml)')
+                found += [(name, r) for r in self.agents(name)]
+            chosen, at = [], {}  # a session id that two profiles list stays once, under the profile its entry names
+            for name, row in found:
+                if not isinstance(row, dict):
+                    continue
+                sid = str(row.get("id") or "")
+                if sid and sid in at:
+                    if name == recorded.get(sid, DEFAULT_PROFILE) and chosen[at[sid]][0] != name:
+                        chosen[at[sid]] = (name, row)
+                    continue
+                at[sid] = len(chosen)
+                chosen.append((name, row))
+            self._sessions = [Session(r, self.wt_dir, index, p) for p, r in chosen]
             stopped = set()
             try:
                 with open(os.path.join(self.run_dir, STOPPED_FILE), encoding="utf-8") as fh:
@@ -434,7 +478,7 @@ class Orders:
 
 
 class Session:
-    """One row of `claude agents --json --all`, tied to a task.
+    """One row of `claude agents --json --all` (of one profile), tied to a task.
 
     A row is tied by its session id when run.py recorded the id in the task's
     `sessions` meta (`index`). A live or finished row that is not recorded is tied
@@ -443,8 +487,9 @@ class Session:
     None. A stopped row (what `claude stop` leaves) has no status and the
     repository root as its directory: only a recorded id ties it. Names never count."""
 
-    def __init__(self, row, wt_dir, index):
+    def __init__(self, row, wt_dir, index, profile=DEFAULT_PROFILE):
         self.row = row
+        self.profile = profile  # the Claude profile whose `claude agents` listed the row; every call on it uses it
         self.sid = str(row.get("id") or "")
         self.name = row.get("name") or ""
         self.cwd = row.get("cwd") or ""
@@ -484,14 +529,32 @@ class Session:
         return os.path.join(root, ".claude", "worktrees", self.wtname)
 
     def describe(self):
-        return f"{self.sid} ({self.name}, {self.status}/{self.state})"
+        label = profile_label(self.profile)
+        return f"{self.sid} ({self.name}, {self.status}/{self.state}{', ' + label if label else ''})"
 
 
-def stop_session(run, sid, check=True):
+def profile_field(profile):
+    """The `profile` key of a `sessions` entry: left out for `default`, so entries of a project without profiles stay
+    as they were."""
+    return {"profile": profile} if profile and profile != DEFAULT_PROFILE else {}
+
+
+def profile_label(profile):
+    """"profile api" for a session of another profile, else "": a project without profiles reads as before."""
+    return f"profile {profile}" if profile and profile != DEFAULT_PROFILE else ""
+
+
+def on_profile(session):
+    """", profile api" after a session's name in a record line, for a session of another profile."""
+    label = profile_label(session.profile)
+    return f", {label}" if label else ""
+
+
+def stop_session(run, sid, check=True, profile=None):
     """`claude stop <sid>`, and on success note the id in the run directory's stopped-sessions file. `claude stop`
     keeps the row's state and removes its status and pid, so a stopped `working` row looks like a row whose
     process died; Run.sessions reads this file to tell them apart."""
-    out = run.claude("stop", sid, check=check)
+    out = run.claude("stop", sid, check=check, profile=profile)
     if out.returncode == 0:
         try:
             os.makedirs(run.run_dir, exist_ok=True)
@@ -915,12 +978,39 @@ def session_args(run, worktree, name, model, effort):
     return cmd + ["--permission-mode", run.config["sessions"]["permission_mode"], "--name", name]
 
 
-def start_session(run, worktree, name, model, effort, text):
+def pick_profile(run, wanted, flag=None):
+    """The profile for a new session: --profile, else the tier's, else `default`. A tier that lists several names
+    gets the one with the fewest live sessions of this project (the count the session cap uses); a tie goes to the
+    name listed first. A name that [profiles] does not define is refused."""
+    names = [flag] if flag else list(wanted or []) or [DEFAULT_PROFILE]
+    for name in names:
+        run.profile_dir(name)
+    if len(names) == 1:
+        return names[0]
+    live = {}
+    for s in run.sessions():
+        if s.kind and s.live and not s.ghost:
+            live[s.profile] = live.get(s.profile, 0) + 1
+    return min(names, key=lambda name: (live.get(name, 0), names.index(name)))
+
+
+def claude_line(run, profile, worktree, name, model, effort):
+    """The command of a dry run: what start_session would run, with the profile's directory when it has one."""
+    directory = run.profile_dir(profile)
+    return ((f"CLAUDE_CONFIG_DIR={shlex.quote(directory)} " if directory else "") + "claude "
+            + " ".join(session_args(run, worktree, name, model, effort)) + " <brief>")
+
+
+def start_session(run, worktree, name, model, effort, text, profile=None):
     """Run `claude --bg`. Returns what it printed."""
-    out = run.claude(*session_args(run, worktree, name, model, effort), text, check=False)
+    out = run.claude(*session_args(run, worktree, name, model, effort), text, check=False, profile=profile)
     if out.returncode != 0:
         message = out.stderr.strip() or out.stdout.strip()
-        if "not trusted" in message:
+        if "not trusted" in message and run.profile_dir(profile):
+            # Trust is per profile. run.py never changes it: the operator accepts the prompt once per profile.
+            message = (f"profile {profile} does not trust {run.root}: run CLAUDE_CONFIG_DIR={run.profile_dir(profile)} "
+                       f"claude in {run.root} once and accept the trust prompt")
+        elif "not trusted" in message:
             message += "\n" + TRUST_HINT
         if any(word in message for word in ("Operation not permitted", "EPERM", "Read-only file system")):
             message += "\n" + SANDBOX_HINT
@@ -1206,13 +1296,14 @@ def decision_text(text, task, snap=None, extra=""):
 
 # ------------------------------------------------------------------ launch
 
-def session_entry(run, tid, kind, attempt, name, worktree, said, model=None):
+def session_entry(run, tid, kind, attempt, name, worktree, said, model=None, profile=None):
     """(entry, note) for the session `claude --bg` just started. The entry is what goes into the task's
     `sessions` meta, or None when no id is known. It never fails the launch: the session runs.
 
     A row that is not recorded yet and is live in the folder can be the session just started; a finished
     one cannot."""
     run._sessions = None
+    run.extra_profiles.add(profile or DEFAULT_PROFILE)  # no entry names it yet, and the new session is in its list
     try:
         rows = run.sessions()
     except Refused:
@@ -1231,7 +1322,8 @@ def session_entry(run, tid, kind, attempt, name, worktree, said, model=None):
         sid, note = printed, f"claude agents does not list {printed} yet"
     else:
         return None, "no session id printed; the row is matched by its folder"
-    return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree, "model": model}, note
+    return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree, "model": model,
+            **profile_field(profile)}, note
 
 
 def pinned_model(model):
@@ -1314,7 +1406,7 @@ def cmd_launch(run, args):
             sessions = recorded_sessions(task)
             if not any(e.get("id") == s.sid for e in sessions):
                 sessions.append({"id": s.sid, "kind": "task", "attempt": 1, "name": s.name or s.wtname,
-                                 "worktree": f"task-{tid}"})
+                                 "worktree": f"task-{tid}", **profile_field(s.profile)})
             run.tg("edit", str(tid), "--meta", meta_arg("session", s.name or s.wtname), meta_arg("attempt", s.attempt or 1),
                    meta_arg("started_at", run.now()), meta_arg("sessions", sessions))
         run.emit("repaired", tid, s.attempt or 1, s.sid, f"live session {s.sid} found for an open task; "
@@ -1325,7 +1417,7 @@ def cmd_launch(run, args):
     if live and current and all(idle_and_filed(run, tid, current, rows, s) for s in live):
         for s in live:
             if not args.dry_run:
-                stop_session(run, s.sid, check=False)
+                stop_session(run, s.sid, check=False, profile=s.profile)
                 record_row(run, task, s, current)
             run.emit("stopped-idle", tid, current, s.sid,
                      f"session {s.describe()} was {f'waiting on {s.waiting}' if s.waiting else 'idle'} "
@@ -1386,20 +1478,26 @@ def cmd_launch(run, args):
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
     text = render(run, task, "task", nxt, session, base=base, retry=continuing)
     check_cap(run)
+    tier = args.tier or str(meta.get("tier") or "implementation")
     if args.model:
         model, effort = args.model, args.effort
+        try:  # --model replaces the tier's model only; the tier still says which profile
+            chosen = resolve_model(run.config, tier)
+        except ConfigError:
+            chosen = None
     else:
         try:
-            chosen = resolve_model(run.config, args.tier or str(meta.get("tier") or "implementation"))
+            chosen = resolve_model(run.config, tier)
         except ConfigError as exc:
             raise Refused(str(exc))
         if not chosen["model"]:
             raise Refused("tier 'verifier' has no model; use mechanical, implementation, judgement "
                           "or a models.overrides key")
         model, effort = chosen["model"], args.effort or chosen["effort"]
+    profile = pick_profile(run, tier_profiles(chosen), args.profile)
     worktree = f"task-{tid}"
     if args.dry_run:
-        print("claude " + " ".join(session_args(run, worktree, session, model, effort)) + " <brief>", file=sys.stderr)
+        print(claude_line(run, profile, worktree, session, model, effort), file=sys.stderr)
         if run.json:
             run.emit("dry-run", tid, nxt, session, text)
         else:
@@ -1434,11 +1532,11 @@ def cmd_launch(run, args):
         ignore_reports(run)
         clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
-        said = start_session(run, worktree, session, model, effort, text)
+        said = start_session(run, worktree, session, model, effort, text, profile)
     except Exception as exc:
         started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
-    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model)
+    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model, profile)
     sessions = recorded_sessions(task) + ([entry] if entry else [])
     if task["status"] == "open":
         run.tg("start", str(tid))
@@ -1452,7 +1550,8 @@ def cmd_launch(run, args):
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_address(run)
-    detail = (f"{model}{'/' + effort if effort else ''} session {session} worktree {rel} {where} brief {path}"
+    detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
+              f"session {session} worktree {rel} {where} brief {path}"
               + "".join(f"; {n}" for n in notes)
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
               + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
@@ -1587,7 +1686,7 @@ def cmd_verify(run, args):
     if not args.dry_run:
         for s in [s for s in verifiers if s.live]:  # its turn is over and it filed nothing; it only holds a slot
             record_row(run, task, s, attempt)
-            stop_session(run, s.sid, check=False)
+            stop_session(run, s.sid, check=False, profile=s.profile)
             run._sessions = None
     names = {s.wtname for s in own_sessions(run, tid, "verify", attempt)}
     if os.path.isdir(run.wt_dir):
@@ -1603,6 +1702,7 @@ def cmd_verify(run, args):
         k += 1
     name = f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "")
     verifier = run.config["models"]["verifier"]
+    profile = pick_profile(run, tier_profiles(verifier), args.profile)
     if args.model:
         model, effort = args.model, args.effort
     elif verifier:
@@ -1617,7 +1717,7 @@ def cmd_verify(run, args):
     where = verify_skill(run, ref)[0] or "none"
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker)
     if args.dry_run:
-        print("claude " + " ".join(session_args(run, name, name, model, effort)) + " <brief>", file=sys.stderr)
+        print(claude_line(run, profile, name, name, model, effort), file=sys.stderr)
         if run.json:
             run.emit("dry-run", tid, attempt, name, text)
         else:
@@ -1630,17 +1730,18 @@ def cmd_verify(run, args):
         ignore_reports(run)
         clear_report(report_path(run, name, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
-        said = start_session(run, name, name, model, effort, text)
+        said = start_session(run, name, name, model, effort, text, profile)
     except Exception as exc:
         if is_sha(ref):
             started_or_cleaned(run, name, ref, exc)
         raise
     drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
-    entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said, model)
+    entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said, model, profile)
     if entry:  # the only meta verify writes
         run.edit_meta(tid, sessions=recorded_sessions(task) + [entry])
     notify = notify_address(run)
-    run.emit("verifying", tid, attempt, name, f"{model} session {name} ref {ref} kind {kind} skill {where}"
+    run.emit("verifying", tid, attempt, name,
+             f"{model}{' ' + profile_label(profile) if profile_label(profile) else ''} session {name} ref {ref} kind {kind} skill {where}"
              + (f"; {id_note}" if id_note else "") + (f"; {drift}" if drift else "")
              + (f"; notify {notify}" if notify else ""))
 
@@ -1722,16 +1823,16 @@ def record_row(run, task, session, attempt):
     if session.recorded or not session.sid:
         return
     entry = {"id": session.sid, "kind": session.kind, "attempt": session.attempt or attempt,
-             "name": session.name or session.wtname, "worktree": session.wtname}
+             "name": session.name or session.wtname, "worktree": session.wtname, **profile_field(session.profile)}
     run.set_meta(task, sessions=recorded_sessions(task) + [entry])
     session.recorded, session.attempt = True, entry["attempt"]
 
 
-def last_output(run, sid):
+def last_output(run, sid, profile=None):
     """The tail of `claude logs <sid>` without ANSI codes: the last LOG_LINES non-empty lines, at most LOG_CHARS
     characters cut from the front. A failed call gives one line that says so. It never raises."""
     try:
-        out = run.claude("logs", sid, check=False)
+        out = run.claude("logs", sid, check=False, profile=profile)
     except Refused as exc:
         return [f"claude logs failed: {first_line(str(exc))}"]
     if out.returncode != 0:
@@ -1745,8 +1846,8 @@ def last_output(run, sid):
 def file_stuck(run, tid, attempt, kind, session, label, model=None):
     reason = session.waiting or session.state
     waiting_for = json.dumps(session.waiting) if session.waiting else session.state
-    tail = last_output(run, session.sid)  # before the stop: the evidence is lost afterwards
-    stop_session(run, session.sid)
+    tail = last_output(run, session.sid, session.profile)  # before the stop: the evidence is lost afterwards
+    stop_session(run, session.sid, profile=session.profile)
     run.add_result(tid, kind, attempt, "manager", "BLOCKED",
                    f"Session: {session.sid}\nWorktree: {session.worktree(run.root)}\n"
                    f"{label} {session.sid} stopped: waiting on {reason}\n"
@@ -1824,12 +1925,12 @@ def salvage(run, tid, session, report, verifier=False):
         return (*found, f"report file {os.path.basename(report)}")
     if session is None:
         return None
-    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0]
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row, session.profile)[0]
     for text in reversed(transcript_texts(path) if path else []):
         found = parse_report(text, tid, verifier)
         if found:
             return (*found, f"transcript of {session.sid}")
-    out = run.claude("logs", session.sid, check=False)
+    out = run.claude("logs", session.sid, check=False, profile=session.profile)
     found = parse_report(out.stdout if out.returncode == 0 else "", tid, verifier)
     return (*found, f"claude logs {session.sid}") if found else None
 
@@ -1857,7 +1958,7 @@ def verifier_filed(rows, attempt, name, sid):
 def quiet_for(run, session, minutes):
     """True when the session's newest sign of activity, its transcript's last write or its start, is at least
     `minutes` old. False when the row gives neither time."""
-    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0] if session.wtname else None
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row, session.profile)[0] if session.wtname else None
     times = [os.path.getmtime(path)] if path else []
     if isinstance(session.row.get("startedAt"), (int, float)):
         times.append(session.row["startedAt"] / 1000)
@@ -1873,7 +1974,7 @@ def verifier_over(run, session):
         return True
     if not session.unknown:
         return False
-    path = find_transcript(run, session.worktree(run.root), session.sid, session.row)[0]
+    path = find_transcript(run, session.worktree(run.root), session.sid, session.row, session.profile)[0]
     times = [os.path.getmtime(path)] if path else []
     if isinstance(session.row.get("startedAt"), (int, float)):
         times.append(session.row["startedAt"] / 1000)
@@ -1910,7 +2011,7 @@ def salvage_verifier(run, task, attempt, session):
     added = run.add_result(tid, "verify", attempt, session.wtname, found[0], found[1])
     run.emit("salvaged", tid, attempt, session.sid, f"{found[0]} from {found[2]} (result #{added['id']})")
     if session.live:  # its turn is over; it only holds a slot
-        stop_session(run, session.sid, check=False)
+        stop_session(run, session.sid, check=False, profile=session.profile)
         run._sessions = None
     return added
 
@@ -1998,7 +2099,7 @@ def record_in_progress(run, snap, task, unmanaged):
             if s.stuck and work_filed(rows, attempt, s):
                 # its verdict is filed, so the prompt is for a step after it: stop it, and the verdict stands
                 record_row(run, task, s, attempt)
-                stop_session(run, s.sid)
+                stop_session(run, s.sid, profile=s.profile)
                 run._sessions = None
                 run.emit("stopped-idle", tid, attempt, s.sid,
                          f"verifier {s.describe()} waited on {s.waiting or s.state} with its verdict filed; stopped it")
@@ -2007,11 +2108,11 @@ def record_in_progress(run, snap, task, unmanaged):
                 record_row(run, task, s, attempt)
                 model = session_model(task, s.sid)
                 reason = file_stuck(run, tid, attempt, "verify", s, "Verifier", model)
-                run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}; filed verify BLOCKED ({reason})",
+                run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}{on_profile(s)}; filed verify BLOCKED ({reason})",
                          PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again") + pinned_hint(model))
             else:
                 held = True
-                run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status})")
+                run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status}{on_profile(s)})")
         if held:
             return
     lost = lost_verifier(verifiers, rows, attempt)
@@ -2062,13 +2163,13 @@ def record_in_progress(run, snap, task, unmanaged):
             record_row(run, task, s, attempt)
             model = session_model(task, s.sid)
             reason = file_stuck(run, tid, attempt, "task", s, "Session", model)
-            run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}; filed BLOCKED ({reason})",
+            run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}{on_profile(s)}; filed BLOCKED ({reason})",
                      PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
         elif busy:
-            run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name})")
+            run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name}{on_profile(busy[0])})")
         elif unknown:
             s = unknown[0]
-            run.emit("unknown", tid, attempt, s.sid, f"session {s.sid} status={s.status} state={s.state}; not filed as DIED",
+            run.emit("unknown", tid, attempt, s.sid, f"session {s.sid}{on_profile(s)} status={s.status} state={s.state}; not filed as DIED",
                      f"claude logs {s.sid}; if it has stopped working, "
                      + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and "))
         else:
@@ -2636,7 +2737,7 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
             run.emit("kept", tid, None, None, f"{branch}: branch stays, git said: {first_line(out.stderr or out.stdout)}")
     for s in rows:
         if s.sid and s.sid not in gone and (s.wtname == folder or cwd_in(s.cwd, path)):
-            out = run.claude("rm", s.sid, check=False)
+            out = run.claude("rm", s.sid, check=False, profile=s.profile)
             if out.returncode == 0:
                 gone.add(s.sid)
             else:
@@ -2699,7 +2800,7 @@ def cleanup(run, task, sweep=False):
                 held_back[s.wtname] = bool(status_reason(run, real)[0] or container_reason(run, real))
             if held_back[s.wtname]:
                 continue
-        out = run.claude("rm", s.sid, check=False)
+        out = run.claude("rm", s.sid, check=False, profile=s.profile)
         if out.returncode == 0:
             gone.add(s.sid)
             run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}")
@@ -2709,7 +2810,7 @@ def cleanup(run, task, sweep=False):
         if m:
             commit, wtid = m.groups()
             if merged_into(run, task, commit):
-                again = run.claude("rm", s.sid, "--discard-unpushed", f"{commit}@{wtid}", check=False)
+                again = run.claude("rm", s.sid, "--discard-unpushed", f"{commit}@{wtid}", check=False, profile=s.profile)
                 if again.returncode == 0:
                     gone.add(s.sid)
                     held.pop(s.wtname, None)
@@ -3129,17 +3230,18 @@ def transcript_texts(path):
     return ["\n".join(parts) for parts in texts.values()]
 
 
-def find_tokens(run, tid, sid, row):
+def find_tokens(run, tid, sid, row, profile=None):
     """(out, in, cache-read, cache-write), or the reason there is none."""
-    path, why = find_transcript(run, task_worktree(run, tid), sid, row)
+    path, why = find_transcript(run, task_worktree(run, tid), sid, row, profile)
     return transcript_usage(path) if path else why
 
 
-def find_transcript(run, worktree, sid, row):
+def find_transcript(run, worktree, sid, row, profile=None):
     """(path of the session's transcript, None), or (None, the reason there is none). Every session of a task
-    shares its worktree, so they share one transcript folder; the id prefix tells them apart."""
+    shares its worktree, so they share one transcript folder; the id prefix tells them apart. The transcripts of a
+    session are under its own profile's directory."""
     cwd = os.path.abspath(worktree)
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    base = run.profile_dir(profile) or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     folder = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
     row = row or {}
     ids = [str(i) for i in dict.fromkeys(filter(None, (row.get("sessionId"), row.get("id"), sid)))
@@ -3175,7 +3277,7 @@ def stop_live(run, task, attempt, branch):
             continue
         if s.kind == "verify":
             record_row(run, task, s, attempt)
-        out = stop_session(run, s.sid, check=False)
+        out = stop_session(run, s.sid, check=False, profile=s.profile)
         if out.returncode != 0:
             run.emit("kept", tid, attempt, s.sid,
                      f"session {s.sid} still live; claude stop said: {first_line(out.stderr or out.stdout)}")
@@ -3333,7 +3435,8 @@ def cmd_close(run, args):
     if not entry and not row:
         run.emit("tokens", tid, None, None, "no session recorded; none recorded")
     else:
-        found = find_tokens(run, tid, sid, row.row if row else None)
+        found = find_tokens(run, tid, sid, row.row if row else None,
+                            row.profile if row else (entry or {}).get("profile"))
         if isinstance(found, str):
             run.emit("tokens", tid, None, sid or None, f"{found}; none recorded")
         else:
@@ -3419,7 +3522,7 @@ def cmd_stop(run, args):
     # A STOP order makes this a pause, which does not use an attempt. Without one it recovers a session that went
     # quiet or broke, and the attempt counts toward the cap, as DIED does.
     reason = "pause" if run.orders().stop else "recover"
-    stop_session(run, s.sid)
+    stop_session(run, s.sid, profile=s.profile)
     wt = s.worktree(run.root)
     files = run.git("status", "--porcelain", cwd=wt, check=False).stdout.rstrip("\n") if os.path.isdir(wt) else ""
     branch = (run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() if os.path.isdir(wt) else "") or "None"
@@ -3441,13 +3544,13 @@ def cmd_abandon(run, args):
     attempt = wanted_attempt(task)
     for s in own_sessions(run, tid, "task"):
         if s.live:
-            stop_session(run, s.sid)
+            stop_session(run, s.sid, profile=s.profile)
             run.add_result(tid, "task", attempt, "manager", "ABANDONED",
                            f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nAbandoned: {args.mode}")
     for s in own_sessions(run, tid, "verify"):  # a verifier gets no row, only its session recorded
         if s.live:
             record_row(run, task, s, attempt)
-            stop_session(run, s.sid)
+            stop_session(run, s.sid, profile=s.profile)
     run.edit_meta(tid, abandoned=args.mode)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
@@ -3541,6 +3644,7 @@ def cmd_status(run, args):
         raise Refused(f"project '{run.project}' has no tasks (check the name with `tg projects`)")
     summary = run.tg("report", "--since", since.date().isoformat()) or {}
     done, in_flight, waiting, failed, closing, unmerged_rows, attempts = [], [], [], [], [], [], []
+    flight_profiles = []  # the Claude profile of each in-flight row; the table shows the column when one is not default
     gitlab = (run.pr_mode and any(unmerged(t) and (t.get("meta") or {}).get("pr") for t in snap.done)
               and run.host_class()[0].prefix == "!")
     for task in snap.done:
@@ -3574,6 +3678,7 @@ def cmd_status(run, args):
             in_flight.append((tid, task["title"], verifier.get("name"), verifier.get("model"), attempt,
                               meta.get("started_at"), last, f"verifier {verifier.get('name')} has filed no result; "
                               "run.py record checks it"))
+            flight_profiles.append(verifier.get("profile") or DEFAULT_PROFILE)
         elif unclosed(task):
             closing.append((tid, task["title"], meta.get("verdict"), attempt, last))
         elif arrived(task, rows):
@@ -3582,6 +3687,8 @@ def cmd_status(run, args):
             in_flight.append((tid, task["title"], meta.get("session") or ("not managed" if attempt is None else None),
                               meta.get("model"), attempt,
                               meta.get("started_at"), last, checkpoint))
+            named = [e for e in recorded_sessions(task) if e.get("name") == meta.get("session")]
+            flight_profiles.append((named[-1].get("profile") if named else None) or DEFAULT_PROFILE)
     changes = summary.get("changes") or {}
     change_text = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in changes.items() if v) or "no changes"
     decisions = [(f"#{d['id']} {d['title']}", (d.get("meta") or {}).get("decider"), d.get("due"),
@@ -3602,9 +3709,13 @@ def cmd_status(run, args):
     follow = [(label, counts[label]) for label in (*FOLLOW_UP_LABELS, "unlabelled") if counts.get(label)]
     mean = round(sum(attempts) / len(attempts), 2) if attempts else None
     limit = args.limit
+    flight_headers = ["Task", "Title", "Session", "Model", "Attempt", "Started", "Last result", "Checkpoint"]
+    if any(p != DEFAULT_PROFILE for p in flight_profiles):  # a project without profiles keeps its table as it was
+        flight_headers.append("Profile")
+        in_flight = [(*row, None if p == DEFAULT_PROFILE else p) for row, p in zip(in_flight, flight_profiles)]
     sections = [
         ("done", "Done since last report", ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"], done),
-        ("in_flight", "In flight", ["Task", "Title", "Session", "Model", "Attempt", "Started", "Last result", "Checkpoint"], in_flight),
+        ("in_flight", "In flight", flight_headers, in_flight),
         ("waiting", "Waiting for verification or triage", ["Task", "Title", "Result", "Session", "Checkpoint"], waiting),
         ("verdict_not_closed", "Verdict recorded, not closed", ["Task", "Title", "Verdict", "Attempt", "Last result"], closing),
         ("failed", "Failed or abandoned", ["Task", "Title", "Abandoned", "Attempt", "Last result", "Checkpoint"], failed),
@@ -3654,6 +3765,7 @@ def build_parser():
     p.add_argument("--tier", help="a tier or a models.overrides key (overrides the task's tier meta)")
     p.add_argument("--model", help="model alias (overrides the tier)")
     p.add_argument("--effort", help="effort level (with --model, or to override the tier's)")
+    p.add_argument("--profile", help="Claude profile of the session: a name from [profiles], or default (overrides the tier)")
     p.add_argument("--attempt", type=int, help="override the next attempt and lift the cap")
     p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
     p.add_argument("--base", help="start from this commit or branch instead of the default (a fix on an unmerged branch)")
@@ -3671,6 +3783,7 @@ def build_parser():
     p.add_argument("--result", type=int, help="worker result id (default: the latest for the current attempt)")
     p.add_argument("--model")
     p.add_argument("--effort")
+    p.add_argument("--profile", help="Claude profile of the verifier: a name from [profiles], or default (overrides the tier)")
     p.add_argument("--again", action="store_true", help="start a new verifier after a verify-blocked verdict or a no-verdict line")
     p.add_argument("--dry-run", action="store_true")
 

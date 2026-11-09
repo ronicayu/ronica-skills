@@ -26,6 +26,7 @@ PLUGINS = os.path.dirname(os.path.dirname(HERE))
 RUN = os.path.join(os.path.dirname(HERE), "scripts", "run.py")
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
+import config  # noqa: E402
 import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
 
@@ -33,8 +34,11 @@ FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, re, subprocess, sys
 
 argv = sys.argv[1:]
+config_dir = os.environ.get("CLAUDE_CONFIG_DIR")  # the Claude profile of this call; None is the default profile
 with open(os.environ["FAKE_CLAUDE_LOG"], "a") as fh:
     fh.write(json.dumps(argv) + "\n")
+with open(os.environ["FAKE_CLAUDE_LOG"] + ".dirs", "a") as fh:  # the same calls, with the profile directory of each
+    fh.write(json.dumps({"argv": argv, "dir": config_dir}) + "\n")
 
 
 def read(name):
@@ -42,9 +46,21 @@ def read(name):
     return open(path).read() if path and os.path.isfile(path) else None
 
 
+# Each profile has its own session list, as the real CLI has: the default profile's is $FAKE_CLAUDE_AGENTS, the list
+# of a profile with CLAUDE_CONFIG_DIR=<dir> is <dir>/agents.json (the test makes the folder). With
+# $FAKE_CLAUDE_PROFILES set, stop, logs and rm of a session that the profile's list lacks fail like the real CLI.
+agents_path = os.path.join(config_dir, "agents.json") if config_dir else os.environ.get("FAKE_CLAUDE_AGENTS")
 cmd = argv[0] if argv else ""
+if os.environ.get("FAKE_CLAUDE_PROFILES") and cmd in ("stop", "logs", "rm"):
+    known = json.load(open(agents_path)) if agents_path and os.path.isfile(agents_path) else []
+    if argv[1] not in [row.get("id") for row in known]:
+        sys.stderr.write("No job matching '%s'\n" % argv[1])
+        sys.exit(1)
 if cmd == "agents":
-    print(read("FAKE_CLAUDE_AGENTS") or "[]")
+    print((open(agents_path).read() if agents_path and os.path.isfile(agents_path) else None) or "[]")
+elif cmd == "plugin":  # `plugin list --json`: <dir>/plugins.json of the profile, else nothing installed
+    path = os.path.join(config_dir, "plugins.json") if config_dir else None
+    print((open(path).read() if path and os.path.isfile(path) else None) or "[]")
 elif cmd == "--bg":
     wt = os.path.join(".claude", "worktrees", argv[argv.index("--worktree") + 1])
     if os.environ.get("FAKE_CLAUDE_DIRTY"):  # the session wrote a file before it failed
@@ -61,7 +77,7 @@ elif cmd == "--bg":
         sys.stderr.write(os.environ["FAKE_CLAUDE_BG_ERROR"] + "\n")
         sys.exit(1)
     if os.environ.get("FAKE_CLAUDE_BG_ROW"):  # the new session shows up in `claude agents`
-        open(os.environ["FAKE_CLAUDE_AGENTS"], "w").write("[" + os.environ["FAKE_CLAUDE_BG_ROW"] + "]")
+        open(agents_path, "w").write("[" + os.environ["FAKE_CLAUDE_BG_ROW"] + "]")
     said = os.environ.get("FAKE_CLAUDE_BG_SAID")
     if said is None:  # what claude 2.1.311 prints: the short id and the name, then help lines
         name = argv[argv.index("--name") + 1]
@@ -73,7 +89,7 @@ elif cmd == "stop":
         sys.stderr.write("boom\n")
         sys.exit(1)
     if os.environ.get("FAKE_CLAUDE_STOP_STOPS_ROW"):  # like the real CLI: the row reads state "stopped" after it
-        path = os.environ.get("FAKE_CLAUDE_AGENTS")
+        path = agents_path
         if path and os.path.isfile(path):
             rows = json.load(open(path))
             for row in rows:
@@ -82,7 +98,7 @@ elif cmd == "stop":
                     row["state"] = "stopped"
             open(path, "w").write(json.dumps(rows))
     if os.environ.get("FAKE_CLAUDE_STOP_CLEARS_STATUS"):  # like the real CLI: the state stays, status and pid go
-        path = os.environ.get("FAKE_CLAUDE_AGENTS")
+        path = agents_path
         if path and os.path.isfile(path):
             rows = json.load(open(path))
             for row in rows:
@@ -105,7 +121,7 @@ elif cmd == "rm":
         sys.stderr.write(entry.get("stderr", "") + "\n")
         sys.exit(entry["exit"])
     if os.environ.get("FAKE_CLAUDE_AFTER_RM"):  # a session started while the rows were being removed
-        open(os.environ["FAKE_CLAUDE_AGENTS"], "w").write(open(os.environ["FAKE_CLAUDE_AFTER_RM"]).read())
+        open(agents_path, "w").write(open(os.environ["FAKE_CLAUDE_AFTER_RM"]).read())
     if not entry.get("row_only"):  # like the real claude rm: the worktree goes with the session that owns it
         folder = argv[1][len("sess-"):] if argv[1].startswith("sess-") else argv[1]
         if re.fullmatch(r"task-\d+-\d+", folder):  # sess-task-<id>-<attempt>: the folder is task-<id>
@@ -6661,6 +6677,282 @@ class PrTest(Base):
         verified = self.one(self.events("record"), "verified")
         self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <mode> "
                                            "(the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+
+
+class ProfileTest(Base):
+    """Workers on more than one Claude profile. The fake claude keeps one session list per CLAUDE_CONFIG_DIR
+    (<dir>/agents.json for a profile, $FAKE_CLAUDE_AGENTS for the default) and logs the directory of every call."""
+
+    def setUp(self):
+        super().setUp()
+        self.api = os.path.join(self.dir, "claude-api")
+        os.makedirs(self.api)
+        self.env["FAKE_CLAUDE_PROFILES"] = "1"  # stop, logs and rm of a session the profile does not list fail
+
+    def profile_config(self, tiers="", parallel=3):
+        self.write_config(f'[profiles]\napi = "{self.api}"\n' + tiers, sessions=f"max_parallel = {parallel}\n")
+
+    def api_agents(self, *rows):
+        with open(os.path.join(self.api, "agents.json"), "w") as fh:
+            json.dump(list(rows), fh)
+
+    def api_entry(self, *args, **kw):
+        return {**self.entry(*args, **kw), "profile": "api"}
+
+    def dir_calls(self, command):
+        """[(argv, CLAUDE_CONFIG_DIR or None)] of the claude calls that started with `command`."""
+        with open(self.log + ".dirs") as fh:
+            found = [json.loads(line) for line in fh if line.strip()]
+        return [(c["argv"], c["dir"]) for c in found if c["argv"] and c["argv"][0] == command]
+
+    def started_under(self):
+        return [d for _, d in self.dir_calls("--bg")]
+
+    def launch_api(self, task=None):
+        """Launch a task whose tier names the api profile; the new session shows up in the api profile's list."""
+        self.profile_config('[models]\nimplementation = { model = "sonnet", profile = "api" }\n')
+        task = task or self.add_task()
+        row = json.dumps(self.row(f"task-{task}"))
+        return task, self.events("launch", str(task), env=dict(self.env, FAKE_CLAUDE_BG_ROW=row))
+
+    def test_01_a_tier_with_a_profile_starts_the_session_under_it(self):
+        task, events = self.launch_api()
+        self.assertEqual(self.started_under(), [self.api])
+        entry = self.meta(task)["sessions"][0]
+        self.assertEqual(entry, {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
+                                 "worktree": "task-1", "model": "sonnet", "profile": "api"})
+        detail = self.one(events, "launched")["detail"]
+        self.assertTrue(detail.startswith("sonnet profile api session task-1-1 "), detail)
+        self.assertNotIn("does not list", detail)  # the id was checked against the api profile's own list
+        self.assertEqual([d for _, d in self.dir_calls("agents")], [None, None, self.api])
+
+    def test_02_a_tier_without_a_profile_changes_nothing(self):
+        for config in ("none", "defined but unused", "default named"):
+            with self.subTest(config):
+                self.fresh()
+                if config != "none":
+                    self.profile_config('[models]\nimplementation = { model = "sonnet", effort = "high"%s }\n'
+                                        % (', profile = "default"' if config == "default named" else ""))
+                task = self.add_task()
+                events = self.events("launch", str(task))
+                self.assertEqual(self.meta(task)["sessions"],
+                                 [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
+                                   "worktree": "task-1", "model": "sonnet"}])
+                self.assertEqual(self.one(events, "launched")["detail"].split(" session ")[0], "sonnet/high")
+                with open(self.log + ".dirs") as fh:
+                    self.assertEqual({json.loads(line)["dir"] for line in fh}, {None})
+
+    def test_03_record_sees_a_live_session_of_another_profile(self):
+        task, _ = self.launch_api()
+        self.assertEqual(self.calls("agents")[0], ["agents", "--json", "--all"])
+        events = self.events("record")
+        running = self.one(events, "running")
+        self.assertEqual(running["session"], "sess-task-1-1")
+        self.assertIn("profile api", running["detail"])
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual(self.results(task), [])
+        self.assertIn(self.api, [d for _, d in self.dir_calls("agents")])
+        self.assertEqual(self.status_of(task), "in_progress")
+        # the same row in the default profile only is a session nobody lists under the api profile: it ended
+        os.remove(os.path.join(self.api, "agents.json"))
+        self.assertEqual(len(self.named(self.events("record"), "died")), 1)
+
+    def fresh_profile(self, profile):
+        """A new fixture with [profiles]; (the directory the profile's calls must carry, the writer of its session
+        list, the `sessions` entry of its first session)."""
+        self.fresh()
+        self.profile_config()
+        if profile == "api":
+            return self.api, self.api_agents, self.api_entry(1)
+        return None, self.agents, self.entry(1)
+
+    def test_04_stop_logs_and_rm_use_the_profile_of_the_session(self):
+        for profile in ("default", "api"):
+            with self.subTest(profile):
+                want, put, entry = self.fresh_profile(profile)  # stop
+                task = self.running_task(sessions=[entry])
+                put(self.row("task-1"))
+                self.ok("stop", str(task))
+                self.assertEqual(self.dir_calls("stop"), [(["stop", "sess-task-1-1"], want)])
+                want, put, entry = self.fresh_profile(profile)  # logs and stop of a session that waits on a prompt
+                task = self.running_task(sessions=[entry])
+                put(self.row("task-1", status="waiting", state="working", waitingFor="Bash permission"))
+                self.one(self.events("record"), "stuck")
+                self.assertEqual(self.dir_calls("logs"), [(["logs", "sess-task-1-1"], want)])
+                self.assertEqual(self.dir_calls("stop"), [(["stop", "sess-task-1-1"], want)])
+                want, put, entry = self.fresh_profile(profile)  # cleanup's rm of a merged task
+                task = self.add_task(attempt=1, verdict_ref=SHA_A, merged_at="x", merged_by="operator",
+                                     sessions=json.dumps([entry]))
+                self.tg("done", str(task))
+                put(self.finished("task-1"))
+                events = self.events("merged", str(task))
+                self.assertEqual(self.one(events, "removed")["session"], "sess-task-1-1")
+                self.assertEqual(self.dir_calls("rm"), [(["rm", "sess-task-1-1"], want)])
+
+    def test_05_a_list_of_profiles_balances_by_live_sessions(self):
+        both = '[models]\nimplementation = { model = "sonnet", profile = ["default", "api"] }\n'
+        cases = (("none live", both, [], [], None),
+                 ("none live, api first", both.replace('["default", "api"]', '["api", "default"]'), [], [], "api"),
+                 ("one live on default", both, [self.entry(2)], [], "api"),
+                 ("one live on api", both, [], [self.api_entry(2)], None),
+                 ("one live on each", both, [self.entry(2)], [self.api_entry(3)], None),
+                 ("two live on default, one on api", both, [self.entry(2), self.entry(3)], [self.api_entry(4)], "api"))
+        for name, tiers, on_default, on_api, want in cases:
+            with self.subTest(name):
+                self.fresh()
+                self.profile_config(tiers, parallel=9)
+                task = self.add_task()
+                rows_default, rows_api = [], []
+                for entry, rows in [(e, rows_default) for e in on_default] + [(e, rows_api) for e in on_api]:
+                    number = int(entry["worktree"].split("-")[1])
+                    other = self.add_task(f"Other {number}", start=True, attempt=1)
+                    self.record_sessions(other, {**entry, "id": f"sess-task-{other}-1", "worktree": f"task-{other}"})
+                    rows.append(self.row(f"task-{other}"))
+                self.agents(*rows_default)
+                self.api_agents(*rows_api)
+                self.ok("launch", str(task))
+                self.assertEqual(self.started_under(), [self.api if want else None])
+                self.assertEqual(self.meta(task)["sessions"][0].get("profile"), want)
+
+    def test_06_a_session_that_both_profiles_list_is_one_row(self):
+        self.profile_config(parallel=2)
+        task = self.running_task(sessions=[self.api_entry(1)])
+        self.agents(self.row("task-1"))
+        self.api_agents(self.row("task-1"))
+        other = self.add_task("Other")
+        self.ok("launch", str(other))  # counted twice, the two live sessions would fill the cap of 2
+        self.one(self.events("record"), "running")  # one row for task 1, though both profiles list it
+        self.ok("stop", str(task))
+        self.assertEqual(self.dir_calls("stop"), [(["stop", "sess-task-1-1"], self.api)])  # the entry's profile
+
+    def test_07_an_untrusted_workspace_names_the_profile_and_writes_nothing(self):
+        self.profile_config('[models]\nimplementation = { model = "sonnet", profile = "api" }\n')
+        task = self.add_task()
+        before = self.worktree_state()
+        out = self.run_cmd("launch", str(task), env=dict(self.env, FAKE_CLAUDE_UNTRUSTED="1"))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn(f"profile api does not trust {self.root}: run CLAUDE_CONFIG_DIR={self.api} claude in {self.root} "
+                      "once and accept the trust prompt", out.stderr)
+        self.assertNotIn("Workspace not trusted", out.stderr)
+        self.assertEqual(self.status_of(task), "open")
+        self.assertNotIn("sessions", self.meta(task))
+        self.assertEqual(self.worktree_state(), before)
+
+    def config_check(self, plugins=None):
+        """`config.py check` under the fake claude. plugins: what the api profile's `plugin list --json` prints."""
+        path = os.path.join(self.api, "plugins.json")
+        if os.path.isdir(self.api):
+            if plugins is None and os.path.exists(path):
+                os.remove(path)
+            elif plugins is not None:
+                with open(path, "w") as fh:
+                    fh.write(plugins)
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(RUN), "config.py"), "--root", self.root, "check"],
+                             capture_output=True, text=True, env=self.env)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_08_config_check_of_profiles(self):
+        mine = config.manager_version()
+        listed = json.dumps([{"id": "agentic-team@ronica-skills", "version": mine}])
+        self.profile_config('[models]\nmechanical = { model = "haiku", profile = "api" }\n')
+        self.assertEqual(self.config_check(listed), (0, "ok\n", ""))
+        # a plugin missing in the profile: both install commands are named
+        code, out, _ = self.config_check("[]")
+        self.assertEqual(code, 2)
+        self.assertIn(f"profiles.api: the agentic-team plugin is not installed in {self.api}", out)
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.api} claude plugin marketplace add ronicayu/ronica-skills", out)
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.api} claude plugin install agentic-team@ronica-skills", out)
+        self.assertEqual(self.config_check("not json")[0], 2)
+        self.assertEqual(self.dir_calls("plugin")[-1], (["plugin", "list", "--json"], self.api))
+        # another plugin only is not enough; another version warns and passes
+        self.assertEqual(self.config_check(json.dumps([{"id": "taskgraph@ronica-skills"}]))[0], 2)
+        code, out, err = self.config_check(json.dumps([{"name": "agentic-team", "version": "0.0.1"}]))
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertIn(f"warning: profiles.api: agentic-team 0.0.1 is installed there, the Manager runs {mine}", err)
+        # an unknown profile name in a tier, an override, a missing directory, and `default` defined
+        self.write_config('[profiles]\ndefault = "/x"\ngone = "%s"\n[models]\njudgement = { model = "opus", profile = "ghost" }\n'
+                          '[models.overrides]\n"data migration" = { model = "opus", profile = ["default", "ghost2"] }\n'
+                          % os.path.join(self.dir, "missing"))
+        code, out, _ = self.config_check()
+        self.assertEqual(code, 2)
+        self.assertIn("profiles.default", out)
+        self.assertIn("reserved", out)
+        self.assertIn("profiles.gone: directory", out)
+        self.assertIn("models.judgement uses profile 'ghost', which [profiles] does not define", out)
+        self.assertIn("models.overrides.data migration uses profile 'ghost2'", out)
+        # without [profiles] the check never runs claude
+        self.write_config()
+        open(self.log + ".dirs", "w").close()
+        self.assertEqual(self.config_check(), (0, "ok\n", ""))
+        self.assertEqual(self.dir_calls("plugin"), [])
+
+    def test_09_a_session_of_another_profile_reads_its_transcript_there(self):
+        for profile in ("api", "default"):
+            with self.subTest(profile):
+                self.fresh()
+                self.profile_config()
+                entry = self.api_entry(1) if profile == "api" else self.entry(1)
+                task = self.running_task(sessions=[entry])
+                wt, _ = self.pass_report(task)
+                (self.api_agents if profile == "api" else self.agents)(self.finished("task-1"))
+                for base, tokens in ((os.path.join(self.api), 11), (os.path.join(self.home, ".claude"), 99)):
+                    folder = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+                    os.makedirs(folder)
+                    with open(os.path.join(folder, "sess-task-1-1.jsonl"), "w") as fh:
+                        fh.write(transcript(tokens))
+                self.ok("close", str(task), "--verdict", "test-verified")
+                self.assertEqual(self.meta(task)["tokens"], "11/3" if profile == "api" else "99/3")
+
+    def test_10_the_profile_flag_overrides_the_tier(self):
+        self.profile_config('[models]\nimplementation = { model = "sonnet", profile = "api" }\n')
+        task = self.add_task()
+        self.ok("launch", str(task), "--profile", "default")
+        self.assertEqual(self.started_under(), [None])
+        self.assertNotIn("profile", self.meta(task)["sessions"][0])
+        out = self.run_cmd("launch", str(self.add_task("Second")), "--profile", "ghost")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("no profile named 'ghost' in [profiles]", out.stderr)
+        # a tier without a profile, and --profile api; then a dry run shows the directory
+        self.profile_config()
+        third = self.add_task("Third")
+        dry = self.run_cmd("launch", str(third), "--profile", "api", "--dry-run")
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.api} claude --bg", dry.stderr)
+        self.ok("launch", str(third), "--profile", "api")
+        self.assertEqual(self.started_under(), [None, self.api])
+        # verify: the verifier tier names api; --profile default overrides it, a bare verify follows the tier
+        task = self.running_task(model="opus")
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.profile_config('[models]\nverifier = { model = "haiku", profile = "api" }\n')
+        self.ok("verify", str(task), "--profile", "default")
+        self.assertEqual(self.started_under()[-1], None)
+        self.assertNotIn("profile", self.meta(task)["sessions"][-1])
+        self.agents(self.finished(f"verify-{task}-1"))
+        events = self.events("verify", str(task), "--again")
+        self.assertEqual(self.started_under()[-1], self.api)
+        self.assertEqual(self.meta(task)["sessions"][-1]["profile"], "api")
+        self.assertIn("haiku profile api session verify-", self.one(events, "verifying")["detail"])
+
+    def test_11_status_shows_the_profile_only_when_there_is_one(self):
+        self.profile_config()
+        task = self.running_task(session="task-1-1", sessions=[self.api_entry(1)])
+        self.api_agents(self.row("task-1"))
+        flight = self.status_sections()["In flight"]
+        self.assertIn("| Checkpoint | Profile |", flight)
+        self.assertIn("| api |", flight)
+        self.assertEqual(self.json_status()["in_flight"][0]["Profile"], "api")
+        self.record_sessions(task, self.entry(1))
+        self.assertNotIn("Profile", self.status_sections()["In flight"])
+        self.assertNotIn("Profile", self.json_status()["in_flight"][0])
+
+    def test_12_a_recorded_profile_that_the_config_lost_is_refused_by_name(self):
+        self.write_config()
+        self.running_task(sessions=[self.api_entry(1)])
+        out = self.run_cmd("record")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("a `sessions` entry names profile api, which [profiles] does not define", out.stderr)
+
+    def json_status(self):
+        return json.loads(self.ok("status", pre=["--json"]).stdout)
 
 
 if __name__ == "__main__":
