@@ -525,6 +525,9 @@ class CachedRemoteStore:
                 base = r["base"]
                 if num(i) in flushed and r["old"] is not None:
                     base = r["old"]["value"] if r["old"]["op"] == "set" else None  # the earlier row went out; GitHub now holds its value
+                    if (num(i), r["key"]) in pushed.dropped:  # the earlier row did not go out: GitHub kept the value it had
+                        meta = pushed.meta.get(num(i), {})
+                        base = canon(meta[r["key"]]) if r["key"] in meta else None
                 conn.execute("INSERT OR REPLACE INTO pending_meta (task_id, key, op, value, base, at) VALUES (?, ?, ?, ?, ?, ?)",
                              (num(i), r["key"], r["op"], r["value"], base, r["at"]))
             touched.add(num(i))

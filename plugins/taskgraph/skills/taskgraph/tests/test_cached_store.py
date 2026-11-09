@@ -240,6 +240,27 @@ def test_a_pending_row_whose_key_changed_on_github_is_dropped_with_a_warning(env
     assert json.loads(out)["meta"] == {"model": "theirs"} and env.sql("SELECT * FROM pending_meta") == []
 
 
+def test_a_new_deferred_row_after_a_dropped_one_takes_githubs_value_as_its_base(env, fake, monkeypatch):
+    a = env.ok("add", "A")["id"]
+    env.ok("edit", str(a), "--meta", 'tokens="mine"')
+    refresh = CachedRemoteStore.refresh
+
+    def refresh_then_a_person_edits(self, *args, **kwargs):
+        done = refresh(self, *args, **kwargs)  # the person's edit lands after this write read GitHub and before it pushes
+        fake.edit_issue(a, body='\n\n<!-- taskgraph:meta v1\n{"tokens":"theirs"}\ntaskgraph:end -->\n')
+        return done
+
+    with monkeypatch.context() as patched:
+        patched.setattr(CachedRemoteStore, "refresh", refresh_then_a_person_edits)
+        code, out, err = env.run("edit", str(a), "--title", "T", "--meta", 'tokens="newer"')
+    assert code == 0 and f"warning: deferred tokens on #{a} dropped; GitHub has a newer value" in err
+    assert env.sql("SELECT value, base FROM pending_meta") == [('"newer"', '"theirs"')]
+    assert env.ok("--fresh", "show", str(a))["meta"] == {"tokens": "newer"}  # the pull keeps the user's value
+    assert env.sql("SELECT value FROM pending_meta") == [('"newer"',)]
+    env.ok("sync")
+    assert '"tokens":"newer"' in fake.issue(a)["body"]
+
+
 def test_failed_write_names_what_was_applied_and_leaves_the_cache_alone(env, fake):
     a, b = env.ok("add", "A")["id"], env.ok("add", "B")["id"]
     before = env.sql("SELECT id FROM tasks")
