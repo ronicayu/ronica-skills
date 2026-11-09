@@ -3,7 +3,7 @@
 \* section 8.1. With every FIX_* FALSE it is the first draft (main d1dbd04); the revised section 8.1 is
 \* FIX_CONFIRM_ACTIVE, FIX_KEEP_VOID, FIX_STALE_NEEDS_AGE, FIX_OWNER_REUSE_YOUNG and FIX_CLOSE_STAMP TRUE.
 \* FIX_CLOSE_PERMANENT, FIX_HOLD_CONFIRM and FIX_VERIFY_AFTER_PATCH are alternatives the check showed
-\* are not needed (NOTES.md). One issue, two Managers (claimants). A claim comment may also void one stale claim.
+\* are not needed (NOTES.md). One issue, two Managers (claimants). A claim comment may void one or more claims. IMPL_CODE follows the code.
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Claimants, MaxTries,
@@ -19,6 +19,7 @@ CONSTANTS Claimants, MaxTries,
           FIX_HOLD_CONFIRM, \* step 5 (held by me) also does the confirm read before it reports held
           FIX_OWNER_REUSE_YOUNG, \* step 5 reuses my own claim only while it is younger than 60 s; else I post a new claim
           ALLOW_STALL,      \* a claimant can pause 60 s or more in the middle of tg start
+          IMPL_CODE,        \* step 1-7 as tgstore/github/remote.py claim() does it: void every stale claim and my old ones, reuse mine only when it is the lowest unvoided claim, else void my young one too
           FIX_KEEP_VOID,    \* a loser whose comment also voids a claim edits it to keep the void, instead of deleting it
           FIX_CLOSE_STAMP   \* a close makes stale only the claims posted before it (comment created_at < closed_at)
 
@@ -29,7 +30,7 @@ vars == <<comments, aged, nextId, open, label, pc, vid, mine, tries, closedOver>
 
 None == 0
 
-Unvoided(S) == {c \in S : c.claim /\ ~\E d \in S : d.voids = c.id}
+Unvoided(S) == {c \in S : c.claim /\ ~\E d \in S : c.id \in d.voids}
 HasActive(S) == Unvoided(S) # {}
 Active(S) == CHOOSE c \in Unvoided(S) : \A d \in Unvoided(S) : c.id <= d.id
 Stale(c) ==
@@ -50,7 +51,7 @@ Init ==
   /\ comments = {} /\ aged = {} /\ nextId = 1
   /\ open = TRUE /\ label = FALSE
   /\ pc = [m \in Claimants |-> "idle"]
-  /\ vid = [m \in Claimants |-> None]
+  /\ vid = [m \in Claimants |-> {}]
   /\ mine = [m \in Claimants |-> None]
   /\ tries = [m \in Claimants |-> 0]
   /\ closedOver = {}
@@ -75,8 +76,28 @@ Begin(m) ==
        ELSE
           \* step 7 comes next: post a claim, voiding the stale one if there is one
           /\ pc' = [pc EXCEPT ![m] = "toPost"]
-          /\ vid' = [vid EXCEPT ![m] = IF HasActive(R) THEN Active(R).id ELSE None]
+          /\ vid' = [vid EXCEPT ![m] = IF HasActive(R) THEN {Active(R).id} ELSE {}]
           /\ mine' = [mine EXCEPT ![m] = None]
+  /\ UNCHANGED <<comments, aged, nextId, open, label, closedOver>>
+
+Lowest(S) == CHOOSE c \in S : \A d \in S : c.id <= d.id
+BeginCode(m) ==
+  /\ pc[m] = "idle" /\ tries[m] < MaxTries
+  /\ tries' = [tries EXCEPT ![m] = @ + 1]
+  /\ \E R \in Reads(m) :
+       LET U == Unvoided(R)
+           V == {c \in U : Stale(c) \/ (c.owner = m /\ c.id \in aged)}
+           L == U \ V
+       IN IF L # {} /\ Lowest(L).owner # m THEN
+             /\ pc' = [pc EXCEPT ![m] = "refused"] /\ mine' = [mine EXCEPT ![m] = None] /\ UNCHANGED vid
+          ELSE IF L # {} /\ Lowest(L) = Lowest(U) THEN
+             /\ mine' = [mine EXCEPT ![m] = Lowest(L).id]
+             /\ pc' = [pc EXCEPT ![m] = IF open /\ label THEN "held" ELSE "patching"]
+             /\ UNCHANGED vid
+          ELSE
+             /\ pc' = [pc EXCEPT ![m] = "toPost"]
+             /\ vid' = [vid EXCEPT ![m] = {c.id : c \in V \cup {d \in L : d.owner = m}}]
+             /\ mine' = [mine EXCEPT ![m] = None]
   /\ UNCHANGED <<comments, aged, nextId, open, label, closedOver>>
 
 \* Step 7: post one comment (void marker first, then the claim marker).
@@ -93,7 +114,7 @@ Mine(m) == CHOOSE c \in comments : c.id = mine[m]
 Ended(m) == FIX_CLOSE_PERMANENT /\ mine[m] \in closedOver
 DropMine(m) ==
   comments' = {c \in comments : c.id # mine[m]}
-              \cup {[c EXCEPT !.claim = FALSE] : c \in {d \in comments : d.id = mine[m] /\ d.voids # None /\ FIX_KEEP_VOID}}
+              \cup {[c EXCEPT !.claim = FALSE] : c \in {d \in comments : d.id = mine[m] /\ d.voids # {} /\ FIX_KEEP_VOID}}
 
 \* Steps 8-9: read again; the winner is the lowest unvoided claim.
 Decide(m) ==
@@ -185,7 +206,7 @@ Finished ==
 
 Next ==
   \/ \E m \in Claimants :
-       Begin(m) \/ Post(m) \/ Decide(m) \/ Confirm(m) \/ Patch(m) \/ PatchFails(m) \/ Verify(m)
+       (IF IMPL_CODE THEN BeginCode(m) ELSE Begin(m)) \/ Post(m) \/ Decide(m) \/ Confirm(m) \/ Patch(m) \/ PatchFails(m) \/ Verify(m)
        \/ Done(m) \/ Reopen(m) \/ Retry(m)
   \/ Age \/ PersonRemovesLabel \/ PersonCloses
   \/ Finished

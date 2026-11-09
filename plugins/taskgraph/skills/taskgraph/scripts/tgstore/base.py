@@ -62,7 +62,7 @@ class Store(Protocol):
     name: str  # "sqlite" or "github"
     caps: Capabilities
 
-    def connect(self, *, fresh: bool = False) -> sqlite3.Connection: ...
+    def connect(self, *, fresh: bool = False, mode: str = "read") -> sqlite3.Connection: ...  # mode: "read", "write" (always refresh) or "none"
 
     @contextmanager
     def write(self, conn: sqlite3.Connection, *, journal: bool = True) -> Iterator[None]: ...
@@ -74,6 +74,8 @@ class Store(Protocol):
     def add_result(self, conn, task_id: int, row: ResultInput) -> dict: ...
 
     def claim(self, conn, task_id: int) -> None: ...
+
+    def claimant_of(self, conn, task_id: int) -> str | None: ...  # who holds an in-progress task (GitHub); None for the local store
 
     def sync(self, *, full: bool = False) -> dict: ...
 

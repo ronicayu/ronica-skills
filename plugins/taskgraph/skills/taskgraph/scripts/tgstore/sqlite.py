@@ -109,8 +109,9 @@ class SqliteStore:
         self.db = db
         self.load = load  # the model reader of tg.py; the event journal compares two loads
         self.resolved = None
+        self.before = None  # tasks as they were when the write began; only a remote store keeps it
 
-    def connect(self, *, fresh=False):
+    def connect(self, *, fresh=False, mode="read"):
         conn = connect(self.db)
         self.resolved = db_path(conn)
         return conn
@@ -143,6 +144,9 @@ class SqliteStore:
 
     def claim(self, conn, task_id):
         pass
+
+    def claimant_of(self, conn, task_id):
+        return None
 
     def sync(self, *, full=False):
         raise StoreError("tg sync: this project uses the local store; nothing to sync")

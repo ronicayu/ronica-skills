@@ -5,7 +5,7 @@
 ## What the model holds
 
 - One issue, two claimants (`m1`, `m2`), up to `MaxTries` runs of `tg start` each.
-- `comments`: the claim comments on the issue. Each has an `id` (increasing), an `owner`, `voids` (the id of the claim it voids, or 0) and `claim` (FALSE when a loser kept only the void marker).
+- `comments`: the claim comments on the issue. Each has an `id` (increasing), an `owner`, `voids` (the set of claim ids it voids) and `claim` (FALSE when a loser kept only the void marker).
 - `open`, `label`: the issue state and the `tg:in-progress` label.
 - `aged`: the comments older than 60 s. Time is one bit per comment. `Age` makes one comment old at any moment; with `ALLOW_STALL = FALSE` only while no claimant is between its steps (no `tg start` pauses 60 s).
 - `closedOver`: the comments posted before a close of the issue (GitHub: `created_at < closed_at`).
@@ -17,6 +17,7 @@
 | Action | Step |
 |---|---|
 | `Begin` | 1-6: read the claims, find the active claim, decide: held by me (5), held by another (6), or post (7) |
+| `BeginCode` | steps 1-7 exactly as `tgstore/github/remote.py` `claim()` does them (`IMPL_CODE`): void every stale claim and my claims 60 s or older; refuse when the lowest claim left is another's; reuse mine only when it is the lowest unvoided claim; else post a claim that also voids my young claim |
 | `Post` | 7: one comment, voiding the stale claim if there is one |
 | `Decide` | 8-9: read again; I win when the lowest unvoided claim is mine |
 | `Confirm` | 10: the confirm read |
@@ -59,6 +60,9 @@
 |---|---|---|
 | `check-nolag.cfg` | hold | every rule holds, 183,062 states, 3 runs per claimant |
 | `check-lag.cfg` | hold | every rule holds, 592,300 states, 3 runs per claimant, reads with property 2 |
+| `check-code-nolag.cfg` | hold | the code's claim (`IMPL_CODE`): every rule holds, 183,062 states |
+| `check-code-lag.cfg` | hold | the code's claim with property-2 reads: every rule holds, 732,666 states |
+| `regress-code-loser-deletes-void.cfg` | break | the code's claim with step 9 as in the first draft |
 | `regress-spec-as-written.cfg` | break | first draft: `OneHolder`, `HolderIsActive`, `DoubleHoldIsVisible` break with no lag and no pause (path below) |
 | `regress-close-stales-at-once.cfg` | break | revised protocol with step 4 as in the first draft |
 | `regress-loser-deletes-void.cfg` | break | revised protocol with step 9 as in the first draft |
@@ -81,7 +85,7 @@ Setup once: `plugins/statechart/skills/statechart/scripts/setup.sh` (tla2tools.j
 
 ```sh
 RUNNER=../../../statechart/skills/statechart/scripts/statechart
-for c in check-nolag check-lag regress-spec-as-written regress-close-stales-at-once regress-loser-deletes-void regress-owner-reuses-old-claim accepted-stall accepted-person accepted-lag-any; do
+for c in check-nolag check-lag check-code-nolag check-code-lag regress-code-loser-deletes-void regress-spec-as-written regress-close-stales-at-once regress-loser-deletes-void regress-owner-reuses-old-claim accepted-stall accepted-person accepted-lag-any; do
   TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java \
     $RUNNER Claim.tla --config $c.cfg --view view.mjs --out /tmp/claim-$c-1
 done

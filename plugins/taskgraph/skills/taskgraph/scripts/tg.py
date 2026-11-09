@@ -183,6 +183,7 @@ def load(conn):
         task["threats"] = [r for r in effective_deps(tasks, task, "risk") if current[r] != "done"]
     finish_derived(tasks, effective, current)
     find_conflicts(tasks, effective, current)
+    remote_conflicts(conn, tasks)
     for task in tasks.values():
         task["outlook"] = outlook(tasks, task["id"]) if task["type"] in ("milestone", "objective") else None
     return tasks
@@ -323,6 +324,17 @@ def find_conflicts(tasks, effective, current):
             flag("promised", n["id"], None, promised, n["due"], f"#{n['id']} promised {promised} after needed {n['due']}")
 
 
+def remote_conflicts(conn, tasks):
+    # a cache of a remote store keeps the conflicts that its pull found (rule breaks made on the remote, broken meta blocks, claim conflicts)
+    try:
+        rows = conn.execute("SELECT task_id, message FROM remote_conflicts ORDER BY rowid").fetchall()
+    except sqlite3.OperationalError:
+        return
+    for task_id, message in rows:
+        if task_id in tasks:
+            tasks[task_id]["conflicts"].append({"kind": "remote", "from": task_id, "to": None, "due": None, "need": None, "gap": 0, "message": message, "with": None})
+
+
 def get(tasks, task_id):
     if task_id not in tasks:
         raise Fail(f"no such task: {task_id}")
@@ -425,7 +437,39 @@ def wait_edges(tasks):
     return edges
 
 
-def check_deadlock(conn):
+def cycle_groups(edges):
+    # Groups of tasks that wait for each other (strongly connected, or waiting for themselves); the deadlocks that already exist.
+    index, low, stack, on, groups = {}, {}, [], set(), []
+
+    def visit(node):
+        index[node] = low[node] = len(index)
+        stack.append(node)
+        on.add(node)
+        for target, _ in edges[node]:
+            if target not in index:
+                visit(target)
+                low[node] = min(low[node], low[target])
+            elif target in on:
+                low[node] = min(low[node], index[target])
+        if low[node] == index[node]:
+            group = set()
+            while True:
+                member = stack.pop()
+                on.discard(member)
+                group.add(member)
+                if member == node:
+                    break
+            if len(group) > 1 or any(t == node for t, _ in edges[node]):
+                groups.append(group)
+
+    for node in edges:
+        if node not in index:
+            visit(node)
+    return groups
+
+
+def check_deadlock(conn, known=()):
+    # known: deadlocks that were there before this write (a remote can hold some that tg would refuse); only a new one fails
     edges = wait_edges(load(conn))
     state = {}
 
@@ -435,6 +479,8 @@ def check_deadlock(conn):
             step = f"#{node} waits for #{target}{note}"
             if state.get(target) == "open":
                 start = next((i for i, (n, _) in enumerate(trail) if n == target), len(trail))
+                if any({n for n, _ in trail[start:]} | {node} <= group for group in known):
+                    continue
                 chain = [text for _, text in trail[start:]] + [step]
                 raise Fail("deadlock: " + ", ".join(chain))
             if target not in state:
@@ -446,7 +492,22 @@ def check_deadlock(conn):
             visit(node, [])
 
 
-def add_dep(conn, task_id, dep_id):
+def rule_breaks(tasks):
+    # (task, dependency) pairs that break the dependency rules of add_dep and place
+    found = set()
+    for task in tasks.values():
+        for dep in task["depends_on"]:
+            if tasks[dep]["project"] != task["project"] and tasks[dep]["type"] != "milestone" or dep in ancestors(tasks, task["id"]) or task["id"] in ancestors(tasks, dep):
+                found.add((task["id"], dep))
+    return found
+
+
+def known_breaks(before):
+    # what the remote already held when this write began: only a break that the write adds is refused
+    return (rule_breaks(before), cycle_groups(wait_edges(before))) if before else (set(), [])
+
+
+def add_dep(conn, task_id, dep_id, before=None):
     tasks = load(conn)
     get(tasks, task_id)
     get(tasks, dep_id)
@@ -457,10 +518,10 @@ def add_dep(conn, task_id, dep_id):
     if reaches(conn, dep_id, task_id):
         raise Fail(f"cycle: #{task_id} depending on #{dep_id} would create a cycle")
     conn.execute("INSERT OR IGNORE INTO deps (task_id, depends_on) VALUES (?, ?)", (task_id, dep_id))
-    check_deadlock(conn)
+    check_deadlock(conn, known_breaks(before)[1])
 
 
-def place(conn, task_id, kind, parent_id):
+def place(conn, task_id, kind, parent_id, before=None):
     tasks = load(conn)
     children = [tasks[c] for c in tasks[task_id]["children"]]
     if children and kind not in PARENT_TYPES:
@@ -478,14 +539,17 @@ def place(conn, task_id, kind, parent_id):
         if parent_id == task_id or task_id in ancestors(tasks, parent_id):
             raise Fail(f"cycle: #{task_id} cannot be its own ancestor")
     conn.execute("UPDATE tasks SET parent_id=? WHERE id=?", (parent_id, task_id))
+    known, groups = known_breaks(before)
     tasks = load(conn)
     for task in tasks.values():
         for dep in task["depends_on"]:
+            if (task["id"], dep) in known:
+                continue
             if tasks[dep]["project"] != task["project"] and tasks[dep]["type"] != "milestone":
                 raise Fail(f"#{task['id']} in project {task['project']} depends on #{dep} in {tasks[dep]['project']}, which must stay a milestone")
             if dep in ancestors(tasks, task["id"]) or task["id"] in ancestors(tasks, dep):
                 raise Fail(f"#{task['id']} depends on #{dep}, which would be its ancestor or descendant")
-    check_deadlock(conn)
+    check_deadlock(conn, groups)
 
 
 def cmd_add(store, conn, args):
@@ -512,18 +576,18 @@ def cmd_add(store, conn, args):
             (task_id, args.project, args.title, args.notes, json.dumps(meta), ts, ts),
         )
         if args.parent is not None:
-            place(conn, task_id, meta.get("type", "task"), args.parent)
+            place(conn, task_id, meta.get("type", "task"), args.parent, store.before)
         for dep in args.depends:
-            add_dep(conn, task_id, dep)
+            add_dep(conn, task_id, dep, store.before)
         for blocked in args.blocks:
-            add_dep(conn, blocked, task_id)
+            add_dep(conn, blocked, task_id, store.before)
     task_id = store.resolve_id(task_id)
     emit(args, load(conn)[task_id], task_id)
 
 
 def cmd_dep_add(store, conn, args):
     with store.write(conn):
-        add_dep(conn, args.task, args.depends_on)
+        add_dep(conn, args.task, args.depends_on, store.before)
     emit(args, {"task_id": args.task, "depends_on": args.depends_on}, f"#{args.task} depends on #{args.depends_on}")
 
 
@@ -589,14 +653,17 @@ def cmd_show(store, conn, args):
         return {k: tasks[i][k] for k in ("id", "title", "status", "derived_status")}
 
     base = latest_baselines(conn, [task["project"]]).get(task["id"])
+    holder = store.claimant_of(conn, task["id"])
     found = [without_body({k: r[k] for k in RESULT_COLUMNS}) for r in result_rows(conn, "WHERE r.task_id=?", (task["id"],))]
     data = dict(task, depends_on=[ref(i) for i in task["depends_on"]], blocks=[ref(i) for i in task["blocks"]], baseline=base, results=found)
+    if holder:
+        data["claimant"] = holder
     if args.brief:
         data = dict(brief_task(task), depends_on=task["depends_on"], blocks=task["blocks"])
     out = [
         f"#{task['id']} {task['title']}",
         f"type:    {task['type']}",
-        f"status:  {task['derived_status']}",
+        f"status:  {task['derived_status']}" + (f" (claimed by {holder})" if holder else ""),
         f"project: {task['project']}",
         f"created: {task['created_at']}",
         f"done:    {task['done_at'] or '-'}",
@@ -661,7 +728,12 @@ def set_status(store, conn, args, status):
             (status, ts if status == "done" else None, ts, args.id),
         )
     data = load(conn)[args.id]
-    emit(args, dict(data, warnings=warnings) if warnings else data, f"#{args.id} {status}")
+    holder = store.claimant_of(conn, args.id) if status == "in_progress" else None
+    if holder:
+        data = dict(data, claimant=holder)
+    if warnings:
+        data = dict(data, warnings=warnings)
+    emit(args, data, f"#{args.id} {status}" + (f" (claimed by {holder})" if holder else ""))
 
 
 def cmd_start(store, conn, args):
@@ -677,25 +749,25 @@ def cmd_reopen(store, conn, args):
 
 
 def cmd_edit(store, conn, args):
-    task = get(load(conn), args.id)
     if args.parent is not None and args.no_parent:
         raise Fail("--parent and --no-parent cannot be combined")
     changes = parse_meta(args.meta)
     if args.type is not None:
         changes["type"] = args.type
     check_meta(changes)
-    meta = {**task["meta"], **changes}
-    for key in args.unset_meta:
-        meta.pop(key, None)
-    if meta.get("type") == "task":
-        del meta["type"]
-    parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
     with store.write(conn):
+        task = get(load(conn), args.id)  # read inside the write: a task that another tg changed while this one waited is not overwritten
+        meta = {**task["meta"], **changes}
+        for key in args.unset_meta:
+            meta.pop(key, None)
+        if meta.get("type") == "task":
+            del meta["type"]
+        parent = None if args.no_parent else task["parent"] if args.parent is None else args.parent
         conn.execute(
             "UPDATE tasks SET title=?, notes=?, meta=?, updated_at=? WHERE id=?",
             (args.title if args.title is not None else task["title"], args.notes if args.notes is not None else task["notes"], json.dumps(meta), now(), args.id),
         )
-        place(conn, args.id, meta.get("type", "task"), parent)
+        place(conn, args.id, meta.get("type", "task"), parent, store.before)
     emit(args, load(conn)[args.id], f"#{args.id} updated")
 
 
@@ -829,23 +901,23 @@ def cmd_deps(store, conn, args):
 
 
 def cmd_date(store, conn, args):
-    task = get(load(conn), args.id)
-    meta = dict(task["meta"])
-    keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
     given = {"start": args.start, "due": args.due, "promised": args.promised}
     setting = {n for n, v in given.items() if v is not None}
     if not setting and not args.clear:
         raise Fail("nothing to change (pass --start, --due, --promised or --clear)")
-    if "promised" in setting | set(args.clear) and task["type"] != "external":
-        raise Fail(f"promised applies to externals, but #{task['id']} is a {task['type']}")
     if setting & set(args.clear):
         raise Fail("cannot set and clear the same date")
-    for name in setting:
-        meta[keys[name]] = resolve_date(given[name])
-    for name in args.clear:
-        meta.pop(keys[name], None)
-    check_span(meta)
     with store.write(conn):
+        task = get(load(conn), args.id)  # read inside the write, as cmd_edit does
+        meta = dict(task["meta"])
+        keys = {"start": "start", "due": DUE_KEYS[task["type"]], "promised": "promised"}
+        if "promised" in setting | set(args.clear) and task["type"] != "external":
+            raise Fail(f"promised applies to externals, but #{task['id']} is a {task['type']}")
+        for name in setting:
+            meta[keys[name]] = resolve_date(given[name])
+        for name in args.clear:
+            meta.pop(keys[name], None)
+        check_span(meta)
         conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
     data = load(conn)[args.id]
     text = f"#{args.id} start {data['start'] or '-'} due {data['due'] or '-'}"
@@ -868,7 +940,7 @@ def conflict_items(tasks, items):
     shown, found = {t["id"] for t in items}, {}
     for t in items:
         for c in t["conflicts"]:
-            key = (c["kind"], c["from"], c["to"])
+            key = (c["kind"], c["from"], c["to"]) if c["kind"] != "remote" else (c["kind"], c["message"])
             if key not in found and (c["from"] in shown or c["to"] in shown):
                 found[key] = c
     rows = sorted(found.values(), key=lambda c: (c["gap"], c["from"], c["to"] or 0))
@@ -877,6 +949,9 @@ def conflict_items(tasks, items):
     words = {"dependency": ("due", "needed"), "parent": ("due", "parent due"), "promised": ("promised", "needed")}
     text = []
     for c in rows:
+        if c["kind"] == "remote":
+            text.append(c["message"])
+            continue
         left = who_text(tasks[c["from"]]) + (f" → {who_text(tasks[c['to']])}" if c["to"] else "")
         due_word, need_word = words[c["kind"]]
         text.append(f"{left}: {due_word} {c['due']}, {need_word} {c['need']}, gap {c['gap']:+d}d")
@@ -1649,6 +1724,12 @@ def cmd_serve(store, conn, args):
         server.server_close()
 
 
+def cmd_sync(store, conn, args):
+    done = store.sync(full=args.full)
+    text = f"synced: {done['changed']} changed, {done['flushed']} deferred sent" + (" (full)" if done["full"] else "")
+    emit(args, done, text)
+
+
 def cmd_projects(store, conn, args):
     tasks = load(conn)
     day = today().isoformat()
@@ -1679,6 +1760,7 @@ def cmd_projects(store, conn, args):
     emit(args, rows, "\n".join(map(text, rows)))
 
 
+WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date")
 COMMANDS = {
     "add": cmd_add,
     "dep add": cmd_dep_add,
@@ -1710,6 +1792,7 @@ COMMANDS = {
     "graph": cmd_graph,
     "serve": cmd_serve,
     "projects": cmd_projects,
+    "sync": cmd_sync,
 }
 
 
@@ -1719,6 +1802,7 @@ def build_parser():
     common.add_argument("--project", default=argparse.SUPPRESS)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     common.add_argument("--brief", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument("--fresh", action="store_true", default=argparse.SUPPRESS)
 
     parser = argparse.ArgumentParser(prog="tg", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1861,6 +1945,9 @@ def build_parser():
     p.add_argument("--no-open", action="store_true")
 
     command("projects")
+
+    p = command("sync")
+    p.add_argument("--full", action="store_true")
     return parser
 
 
@@ -1874,15 +1961,30 @@ def join_offsets(argv):
     return out
 
 
+def named_ids(args):
+    # the task ids a command names, for a store that may need to look one up
+    found = []
+    for name in ("id", "task", "depends_on", "parent", "depends", "blocks"):
+        value = getattr(args, name, None)
+        found += value if isinstance(value, list) else [value] if isinstance(value, int) else []
+    return found
+
+
 def main(argv=None):
     argv = join_offsets(sys.argv[1:] if argv is None else argv)
-    args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False))
+    args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False, fresh=False))
     args.json = args.json or args.brief
     args.project = args.project or default_project()
     key = f"{args.command} {getattr(args, args.command + '_command')}" if args.command in ("dep", "baseline", "result") else args.command
     try:
         store = open_store(args)
-        COMMANDS[key](store, store.connect(), args)
+        mode = "write" if key in WRITES else "none" if key in ("result add", "sync") else "read"
+        if key == "edit" and getattr(store, "quiet", lambda a: False)(args):
+            mode = "read"  # only local-only and deferred keys: nothing goes to the remote, so there is nothing to refresh for
+        conn = store.connect(fresh=args.fresh, mode=mode)
+        if hasattr(store, "ensure"):
+            store.ensure(conn, named_ids(args))
+        COMMANDS[key](store, conn, args)
     except (Fail, StoreError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

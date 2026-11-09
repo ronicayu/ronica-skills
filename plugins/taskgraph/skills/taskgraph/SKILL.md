@@ -37,6 +37,17 @@ python3 scripts/tg.py --project NAME --json done ID
 
 To record what happened on a task, run `result add ID --status S --body TEXT`. It appends to the task's result log and changes nothing else. `edit --notes` replaces the task's spec. See [the CLI reference](./references/cli.md).
 
+## Share a plan through GitHub Issues
+
+A `.taskgraph.toml` that maps a project to a repository stores that project in GitHub Issues, so several people and machines share it; without the file, nothing changes. Commands, flags and output stay the same. Reads come from a local cache that refreshes every 30 seconds, so a change made elsewhere can take that long to show. Run `sync` to force it, or pass `--fresh` to a read command. `start` asks GitHub and refuses a task that another claimant holds (`error: #N is claimed by ...`); do not work on a task whose `start` failed. See [the GitHub backend](./references/cli.md#the-github-backend) for the file, the limits and the claim flow.
+
+```mermaid
+flowchart LR
+  A["tg start N"] --> B{"someone else holds N?"}
+  B -->|no| C["claim: label in-progress, exit 0"]
+  B -->|yes| D["exit 1: claimed by ..."]
+```
+
 ## Read and present project status
 
 - Run `ready` to find work that can start now. Run `agenda` to find items that need attention. Run `path ID` to inspect upstream work and schedule outlook.
