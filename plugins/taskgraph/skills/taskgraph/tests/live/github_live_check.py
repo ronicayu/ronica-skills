@@ -131,9 +131,24 @@ def probe_url():
 
 
 def probe(etag=None):
-    args = [probe_url()] + (["-H", f"If-None-Match: {etag}"] if etag else [])
-    status, headers, _ = gh(args, check=False)
-    return status, headers.get("etag"), headers.get("x-ratelimit-used")
+    """Conditional GET of every page of the task list, like tgstore does. `etag` is the composite string of an earlier call.
+    Returns (200 if any page changed else 304, composite etag, x-ratelimit-used of the last page)."""
+    old = json.loads(etag) if etag else {}
+    now_, page, changed, used = {}, 1, False, None
+    while True:
+        known = old.get(str(page))
+        args = [f"{probe_url()}&page={page}"] + (["-H", f"If-None-Match: {known[0]}"] if known else [])
+        status, headers, data = gh(args, check=False)
+        used = headers.get("x-ratelimit-used")
+        if status == 304 and known:
+            now_[str(page)] = known
+        else:
+            changed = True
+            now_[str(page)] = [headers.get("etag"), len(data or [])]
+        if now_[str(page)][1] < 100:
+            break
+        page += 1
+    return (200 if changed or set(old) != set(now_) else 304), json.dumps(now_), used
 
 
 def probe_until_changed(etag, limit=20):
