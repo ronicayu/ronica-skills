@@ -9,7 +9,7 @@ alone; silent body truncation at 262,144 bytes; comment 422 above that; cycle an
 blocked by its own child accepted; a 9th issue in a parent chain refused; more than 50 blockers accepted.
 
 Faults live in the state file (see Fake.fault): fail_after, rate_limited, hide_comment_ids, delay_ms, hold_after_post,
-advance (move the clock after some comment-list reads). clock_offset moves every timestamp and the Date header.
+hide_from_list (issue numbers the list pages leave out: a lagging list), advance (move the clock after some comment-list reads). clock_offset moves every timestamp and the Date header.
 Every call appends one JSON line to <state>.log, so a test can count calls.
 """
 import fcntl
@@ -66,7 +66,7 @@ class Fake:
         state = {
             "repo": repo, "login": login, "next_number": 1, "next_db_id": 5000, "next_comment_id": 100000, "issues": {}, "comments": {},
             "labels": [], "blocked_by": {}, "parent": {}, "writes": 0, "used": 0, "fail_after": None, "rate_limited": False,
-            "hide_comment_ids": None, "delay_ms": 0, "hold_after_post": None, "advance": None, "clock_offset": 0,
+            "hide_comment_ids": None, "delay_ms": 0, "hold_after_post": None, "advance": None, "clock_offset": 0, "hide_from_list": [],
         }
         with open(path, "w") as f:
             json.dump(state, f)
@@ -259,7 +259,7 @@ class Fake:
             return Resp(201, self.issue_json(s, issue))
         wanted = [x for x in query.get("labels", [""])[0].split(",") if x]
         state = query.get("state", ["open"])[0]
-        found = [i for i in s["issues"].values() if all(w in i["labels"] for w in wanted) and state in ("all", i["state"])]
+        found = [i for i in s["issues"].values() if all(w in i["labels"] for w in wanted) and state in ("all", i["state"]) and i["number"] not in s["hide_from_list"]]
         found.sort(key=lambda i: i["number"], reverse=query.get("direction", ["desc"])[0] == "desc")
         return self.etag_response([self.issue_json(s, i) for i in self.page(found, query)], {"if-none-match": self.header})
 

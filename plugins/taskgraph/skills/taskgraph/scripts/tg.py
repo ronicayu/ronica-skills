@@ -1961,6 +1961,15 @@ def join_offsets(argv):
     return out
 
 
+def named_ids(args):
+    # the task ids a command names, for a store that may need to look one up
+    found = []
+    for name in ("id", "task", "depends_on", "parent", "depends", "blocks"):
+        value = getattr(args, name, None)
+        found += value if isinstance(value, list) else [value] if isinstance(value, int) else []
+    return found
+
+
 def main(argv=None):
     argv = join_offsets(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv, argparse.Namespace(db=None, project=None, json=False, brief=False, fresh=False))
@@ -1972,7 +1981,10 @@ def main(argv=None):
         mode = "write" if key in WRITES else "none" if key in ("result add", "sync") else "read"
         if key == "edit" and getattr(store, "quiet", lambda a: False)(args):
             mode = "read"  # only local-only and deferred keys: nothing goes to the remote, so there is nothing to refresh for
-        COMMANDS[key](store, store.connect(fresh=args.fresh, mode=mode), args)
+        conn = store.connect(fresh=args.fresh, mode=mode)
+        if hasattr(store, "ensure"):
+            store.ensure(conn, named_ids(args))
+        COMMANDS[key](store, conn, args)
     except (Fail, StoreError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

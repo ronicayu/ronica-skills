@@ -123,6 +123,23 @@ class CachedRemoteStore:
         finally:
             handle.close()
 
+    def ensure(self, conn, ids):
+        """Tasks that a command names but the cache lacks: a list page can lag behind a new issue, a single issue does not."""
+        from tgstore.github.gh import HttpError
+
+        for i in sorted({i for i in ids if i > 0}):
+            if conn.execute("SELECT 1 FROM tasks WHERE id=?", (i,)).fetchone() is not None:
+                continue
+            try:
+                task = self.remote.fetch(i)
+            except HttpError as e:
+                if e.status == 404:
+                    continue
+                raise
+            if self.entry.label in task.labels and not task.removed and not task.item.get("pull_request"):
+                with self.locked(True):
+                    self.apply(conn, self.remote.single(task), self.sync_state(conn), first=False)
+
     def sync_state(self, conn):
         state = SyncState(pages={int(k): v for k, v in get_state(conn, "pages", {}).items()}, removed=set(get_state(conn, "removed", [])))
         for task_id, fp in conn.execute("SELECT task_id, fingerprint FROM remote_tasks WHERE fingerprint IS NOT NULL"):
@@ -175,7 +192,9 @@ class CachedRemoteStore:
             conn.execute("PRAGMA defer_foreign_keys=ON")
             gone = set(delta.removed)
             if delta.full and delta.seen is not None:
-                gone |= {i for i in before if i not in delta.seen}
+                # a list page can lag behind a new issue: a task made in the last two minutes is not gone just because the page lacks it
+                young = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
+                gone |= {i for i in before if i not in delta.seen and before[i]["created_at"] < young}
             for number in sorted(gone):
                 self.forget(conn, number)
             removed = (state.removed - set(remote_by_number)) | set(delta.removed)

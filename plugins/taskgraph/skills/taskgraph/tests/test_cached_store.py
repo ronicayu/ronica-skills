@@ -426,6 +426,7 @@ def test_sync_command_flushes_and_refreshes_and_full_reads_everything(env, fake)
 
 def test_a_full_pull_notices_a_task_that_is_gone(env, fake):
     a, b = fake.add_issue("a")["number"], fake.add_issue("b")["number"]
+    fake.edit_issue(b, created_at="2026-01-01T00:00:00Z")
     env.ok("ls")
     fake.edit_issue(b, labels=[])  # label removed in the browser: invisible to a page probe, found by the full pull
     env.ok("--fresh", "ls")
@@ -433,3 +434,16 @@ def test_a_full_pull_notices_a_task_that_is_gone(env, fake):
     env.ok("sync", "--full")
     assert [t["id"] for t in env.ok("ls")] == [a]
     assert env.ok("changes", "--since", "1d")["removed"][0]["id"] == b
+
+
+def test_a_task_the_list_page_lags_behind_is_found_by_id_and_not_dropped_by_a_full_pull(env, fake):
+    env.ok("ls")
+    n = fake.add_issue("made on another machine one second ago")["number"]
+    fake.fault(hide_from_list=[n])  # GitHub's list page does not show it yet; the issue itself is there
+    assert env.ok("show", str(n))["title"] == "made on another machine one second ago"
+    assert env.run("show", "99")[0] == 1  # an id that does not exist is still an error
+    env.ok("sync", "--full")  # a full pull whose pages lack a task younger than two minutes does not drop it
+    assert [t["id"] for t in env.ok("ls")] == [n]
+    fake.fault(hide_from_list=[])
+    env.ok("--fresh", "ls")
+    assert [t["id"] for t in env.ok("ls")] == [n]

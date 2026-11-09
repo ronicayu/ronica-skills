@@ -254,8 +254,9 @@ def c4_dependencies_and_updated_at(state):
     after = node_updated(b["number"])
     st2, _, _ = probe(etag2)
     st3, _, _ = comments_probe(cetag)
-    result("C4-comment-bumps", "CONFIRMED" if after["updatedAt"] != before["updatedAt"] and st2 == 200 else "REFUTED",
-           f"comment: updatedAt {before['updatedAt']} -> {after['updatedAt']}; issue probe HTTP {st2}; comments probe HTTP {st3}", expect="REFUTED")
+    # The probe answer depends on how fresh GitHub's list is (spec G16: 304 once, 200 another time); the design does not use this probe.
+    result("C4-comment-bumps", "CONFIRMED" if after["updatedAt"] != before["updatedAt"] else "REFUTED",
+           f"comment: updatedAt {before['updatedAt']} -> {after['updatedAt']}; sort=updated probe HTTP {st2} (lag dependent); comments probe HTTP {st3}")
     _, etag3, _ = probe()
     used2 = gh(["rate_limit"])[2]["resources"]["core"]["used"]
     sts = [probe(etag3)[0] for _ in range(5)]
@@ -606,7 +607,8 @@ def e_steps(tg, only, state):
             good += codes == [0, 1] and named and clean
             detail.append((codes, winner, named, clean))
             state[f"race{r}"] = t
-        result("E7", "CONFIRMED" if good == rounds else "REFUTED", f"{good} of {rounds} rounds had exactly one exit 0, a loser that names the winner, and no loser comment left; {detail}")
+        result("E7", "CONFIRMED" if good == rounds else "REFUTED", f"{good} of {rounds} rounds had exactly one exit 0, a loser that names the winner, and no loser comment left; {detail}"
+                                                               + ("" if good == rounds else f"; last loser stderr {out[loser][2].strip()[:200]!r}" if loser else ""))
         tg.ok("m1", "start", str(state["C"]))
 
     def e8():

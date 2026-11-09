@@ -159,6 +159,15 @@ class GitHubRemote:
             delta.claims[n] = claim_rows(parsed)
         return delta
 
+    def single(self, task):
+        # a task read directly (a list page can lag behind a new issue): everything a pull would hold for it
+        delta = Delta(tasks=[task], fingerprints={task.number: fingerprint(task.item)})
+        delta.edges = self.read_edges([task.number])
+        if task.comments:
+            parsed = self.read_comments(task.number)
+            delta.results[task.number], delta.claims[task.number] = cm.join_parts(parsed), claim_rows(parsed)
+        return delta
+
     def fetch(self, number):
         r = self.gh.get(f"{self.base}/issues/{number}")
         return task_from_item(r.body, self.gh.server_time)

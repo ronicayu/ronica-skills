@@ -54,7 +54,7 @@ class Delta:
     claims: dict = field(default_factory=dict)  # number -> claim rows; replaces the cached rows of that task
     removed: list = field(default_factory=list)  # numbers that now carry the removed label
     seen: set | None = None  # full pull: every issue number on the pages; a cached task not in it is gone
-    pages: dict = field(default_factory=dict)
+    pages: dict | None = None  # the page state to keep; None when the delta is not from a page walk
     full: bool = False
 
 
