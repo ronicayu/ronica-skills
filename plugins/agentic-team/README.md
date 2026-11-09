@@ -83,15 +83,18 @@ the trust prompt before the Manager launches its first worker.
 
 Three rules carry the rest:
 
-- Completions are queue events. A worker files one `tg result add`, then
-  may send the Manager one line with SendMessage, which only wakes it. The
-  Manager runs `run.py record` at drain points, reads one line per event, and
-  returns to its current step. `run.py wait`, in the background, wakes it when
-  no message comes.
-- A worker cannot ask a question, so the brief is the product. Its task
-  content comes only from Taskgraph. `run.py launch` refuses a task with no
-  purpose, acceptance criteria, scope, or verify command, and the Manager
-  fixes the task in Taskgraph rather than writing the brief by hand.
+- Completions and questions are queue events. A worker files one
+  `tg result add`, or an `ask` row, then may send the Manager one line with
+  SendMessage, which only wakes it. The Manager runs `run.py record` at drain
+  points, reads one line per event, and returns to its current step.
+  `run.py wait`, in the background, wakes it when no message comes.
+- The brief is the product. A worker may ask the Manager a question; the
+  question and the answer are Taskgraph rows, and the answer reaches the same
+  session. Its task content comes only from Taskgraph. `run.py launch` refuses
+  a task with no purpose, acceptance criteria, scope, or verify command, and
+  the Manager fixes the task in Taskgraph rather than writing the brief by
+  hand. Every attempt is still a fresh session; a resume happens only inside
+  an attempt, through `run.py answer` or `run.py steer`.
 - A worker's `PASS` is a claim. A task closes only on a verdict tied to the
   exact output: the commit SHA the worker reports, at the pass level of its
   verify kind.
@@ -153,7 +156,8 @@ writes its report to a file with the Write tool, checks it with
 project's guard could refuse it for a word. The report names the `Branch`, the
 `Head` commit SHA, and the `Worktree` path. If the Manager set its address
 with `run.py notify-to`, the session then sends it one line with SendMessage.
-The Manager never messages a worker.
+The Manager messages a worker only with `run.py answer` and `run.py steer`
+(see [Messaging](#messaging)), never with SendMessage.
 
 `run.py record` finds the result, one line per event. A session that ends with
 no result is filed as `DIED` and retried; a complete report in its report
@@ -465,9 +469,12 @@ session's message or the end of `wait` wakes it.
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
-| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. |
-| `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--interval` (default 30 seconds), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
-| `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`. `--clear` removes the name; with no argument it prints the name. |
+| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option). |
+| `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
+| `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
+| `answer <id>` | Answers a worker's `ask` row with `--file F`, `--default` (the ask's own `Default:` line) or `--decision <id>` (a done decision with `--meta ask=<ask id>`; its notes are the answer). Options: `--ask <row id>` (default: the newest open ask of the current attempt), `--supersede` (answer an ask again), `--by operator`. It refuses an ask of an ended attempt and a second answer without `--supersede`. It files the `answer` row, then delivers the doorbell. |
+| `steer <id>` | Sends a running worker a steer: `--file F`, `--kind info\|redirect\|wrap-up`, `--by operator`, `--interrupt` (stop and resume a busy worker). It refuses a verifier, and a task with no live worker in its current attempt (the message says to write the text in the task notes). |
+| `inbox <id>` | Shows the task's messages: asks, answers, steers and acks, with the delivery state of each. Read only. |
 
 Each event is one line: `<event> #<id> attempt <n>: <detail>`, followed by
 ` | next: <step>` when a step follows. `--json` prints one array of
@@ -520,8 +527,8 @@ in either file.
 Model values are either a model id (`"opus"`) or a table
 (`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
 profile for the sessions of that tier (see [Workers on more than one Claude
-profile](#workers-on-more-than-one-claude-profile)). The config has 7 sections
-and 20 keys, and one optional table, `[profiles]`, whose names are your own.
+profile](#workers-on-more-than-one-claude-profile)). The config has 8 sections
+and 25 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -633,6 +640,16 @@ pattern.
 |-----|------|---------|---------|
 | `skill` | string | `""` | Skill for messages when all work is complete or the Manager is blocked, for example `"telegram-send:telegram-send"`. With `""`, the Manager reports only in the conversation. |
 
+### `[messaging]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `asks_per_attempt` | integer, 0 or more | `3` | How many asks a worker may file in one attempt. `0` forbids asks. A task's `asks` meta overrides it; the `mechanical` tier defaults to `0`. |
+| `ask_due_minutes` | positive integer | `60` | An ask with no answer after this long prints `ask-due` at each `record`, with the hint `run.py answer <id> --default`. |
+| `pending_minutes` | positive integer | `10` | A message that was posted to a socket and has no ack after this long goes back to pending, and the next delivery resumes the session. A message that a busy worker has not seen after this long prints `steer-pending`. |
+| `doorbell` | `"socket"`, `"resume"` | `"socket"` | `"socket"`: post the doorbell to the worker's inbox socket, and fall back to stop plus resume. `"resume"`: always stop plus resume. `config.py check` warns when it is `"socket"` and a settings file puts the Manager in `bypassPermissions`. |
+| `tg_poll_seconds` | positive integer | `5` | The default of `run.py wait --tg-interval`. |
+
 ### Reading config
 
 Agents read config only through [scripts/config.py](scripts/config.py), by
@@ -727,11 +744,89 @@ Cost and failure notes:
 - Not in this version: moving a running session to another profile, retrying a failed launch on the next
   profile, and two Managers on one project.
 
+## Messaging
+
+A worker may ask the Manager a question, and the Manager may answer it or steer a running worker. This works
+across Claude profiles: a worker on `~/.claude-2` cannot be reached with ListAgents or SendMessage by name, so
+the messages are Taskgraph rows, and a one-line doorbell only wakes the receiver.
+
+**Rows.** Every message is a Taskgraph result row (see Results). The row id is the message id. `run.py` lists the
+id of each `answer` and `steer` row that it files in the task's `mailbox` meta, and a worker acts only on listed
+ids that were filed by `manager` or `operator`. Rows are history: nothing deletes them.
+
+```text
+worker: mailbox.py ask      -> ask row (OPEN) -> worker ends its turn: "Waiting for answer to ask #41" (no tokens)
+Manager: run.py record      -> asked #12 attempt 2: #41 <question>      (not stuck, not DIED)
+Manager: run.py answer 12 --ask 41 --file a.md
+                            -> answer row (ANSWERED) -> doorbell -> the same session wakes
+worker: mailbox.py inbox    -> prints the answer row; mailbox.py ack 44 --action "use v2"
+Manager: run.py record      -> answer-seen #12 attempt 2: #44 acked by task-12-2 (via socket): use v2
+```
+
+**The doorbell** is one fixed line, built by `run.py` and never by a message:
+`agentic-team: task <id> attempt <n> has message #<row> (<kind>). Run: <inbox command>`. It carries no
+instructions. The brief and the worker agent say that this line means one thing, to run the inbox command, and
+that the worker acts only on the rows that command prints. In a live check a session refused to run a script
+because a peer message asked it to, so the command comes from the brief, not from the message.
+
+**Transports**, best first; the first that works is used:
+
+1. **Socket post.** Every Claude Code session binds a Unix socket in `/tmp/cc-socks/`, shared by all profiles;
+   only the same OS user can connect. `run.py` posts one JSON line (`{"type":"user","message":{...}}`). A busy
+   worker reads it between tool calls; an idle one starts a new turn. `run.py` posts only when the worker's
+   process runs and its session id is matched: the `SessionStart` check-in hook writes
+   `.agentic-team/inbox/<task>-<attempt>.addr` (the socket from `$CLAUDE_CODE_MESSAGING_SOCKET` and the hook's
+   `session_id`), and the post goes ahead only when that id equals the `sessionId` of the `claude agents` row and
+   the file is not older than the row's start. When the file is missing or stale, `run.py` reads
+   `<profile dir>/sessions/<pid>.json` (an internal format, observed on CLI 2.1.319) and accepts its
+   `messagingSocketPath` only when that file's `sessionId` equals the row's. A post that works proves nothing: only
+   the worker's `ack` row does. With no ack after `pending_minutes`, the message goes back to pending.
+2. **Stop plus resume.** For an idle, parked or stopped worker, for `steer --interrupt`, and as the fallback:
+   `claude stop <id>` (when its process runs), then `claude --bg --resume <sessionId> --settings <json> "<doorbell>"`
+   run under the worker's own profile, in its worktree. The conversation continues under the same session id.
+   If `claude` prints a `note:` line (a copy was started), `run.py` records the copy, stops the original and prints
+   `deliver-copy`. A resume that cannot start, or a conversation with no transcript, files `DIED`: only then is a
+   waiting worker called dead.
+3. **Pointer flag.** For a busy worker whose socket post failed: `run.py` writes the doorbell line to
+   `.agentic-team/inbox/task-<id>.flag`, and the worker's `PostToolUse` hook shows it after the next tool call. After
+   `pending_minutes` `record` prints `steer-pending` with the hint `run.py steer <id> --file <same text> --interrupt`.
+
+Two socket failures in one `run.py` command turn the socket off for the rest of that command.
+**The worker's doorbell to the Manager** is the existing SendMessage notify step. Its `to` is
+`uds:<the Manager's inbox socket>` when `.agentic-team/manager.addr` holds it, else the Manager's session name. Every
+`run.py` call that runs in the Manager's own Bash (except `wait` and `--dry-run`) refreshes that file from
+`$CLAUDE_CODE_MESSAGING_SOCKET`, so a new Manager session never leaves a worker with an old address. A worker
+after an `ask` wakes the Manager with the line `task <id> attempt <n> asked #<id>; run record`. Without the
+`notify-to` switch no step is rendered, and `run.py wait` (it reads Taskgraph every 5 seconds) still wakes the Manager.
+
+**Hooks.** `launch` passes one `--settings` JSON to a worker, and `--resume` passes it again: a `SessionStart` hook
+(matchers `startup` and `resume`) that runs `mailbox.py checkin`, a `PostToolUse` hook that runs `mailbox.py hook`,
+and, for `sessions.permission_mode = "bypassPermissions"`, `"crossSessionInbound": "accept"` (that mode holds a
+peer message for approval otherwise; a doorbell has no authority, so accepting it is safe). Hook commands are in
+exec form with absolute paths. The `checkin` hook, not the worker, writes the address file. A verifier gets no
+`--settings`: it is read only, asks nothing and takes no steer.
+
+**Limits.** A steer may change focus, order, approach and facts inside SCOPE. It never widens SCOPE and never
+overrides FORBIDDEN or STANDING ORDERS; to widen SCOPE the Manager edits it in Taskgraph, and `inbox` prints the new
+SCOPE. A worker reports `BLOCKED` when a steer conflicts with a rule, and lists each applied steer under
+`Deviations:`. A worker that has a steer with no ack cannot pass `check-report`. `tg` keeps no author check, so a
+worker could file a row `--by manager`; `inbox` ignores every row whose id `run.py` did not list.
+
+**When an attempt ends** (a report, `stop`, `close`, `abandon`, `DIED`) its open asks and unacked messages are
+marked carried in the `mailbox` meta, and the next brief's CONTEXT pastes them under `### Open thread of attempt <n>`.
+The `mailbox` meta, and the inbox files of the task (`<task>-<attempt>.ctx.json`, `.addr`, `task-<id>.flag`), are run
+state: a new attempt drops the entries of earlier attempts, and the cleanup of a merged task and `abandon` remove
+the meta and the files. `manager.addr` is overwritten, never removed.
+
+**Set up.** Nothing per profile beyond [Workers on more than one Claude profile](#workers-on-more-than-one-claude-profile).
+A Manager in `bypassPermissions` holds a worker's doorbell for approval: run `run.py notify-to --clear`, and let
+`wait` wake it.
+
 ## Briefs
 
 [templates/task-brief.md](templates/task-brief.md) is the one brief template.
 Its sections are GOAL, SCOPE, CONTEXT, ACCEPTANCE, VERIFY, TIMEBOX, FORBIDDEN,
-AUTONOMY, STANDING ORDERS, and REPORT (the `check-report` command, the command that files the report, and a notify step while an address is set). The
+AUTONOMY, STANDING ORDERS, MAILBOX (the `inbox`, `ack` and `ask` commands, the asks cap, and the rule that the pointer line means "run inbox"; a verifier's says None), and REPORT (the `check-report` command, the command that files the report, and a notify step while an address is set). The
 report format lives in the worker agent. `run.py` fills the template from
 Taskgraph, the config, and the run directory. Task content is copied from
 Taskgraph, never written by hand: GOAL is the title plus the prose in the
@@ -762,6 +857,8 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
+| `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
+| `inbox/` | Per attempt: `<task>-<attempt>.ctx.json` (the context that `mailbox.py` reads), `<task>-<attempt>.addr` (written by the worker's `SessionStart` hook); per task: `task-<id>.flag` (the pointer line that the `PostToolUse` hook shows while a message waits). Removed with the task's worktree. |
 | `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
 
 A session's report file is not in this folder. It is
@@ -785,6 +882,10 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
 | `task` | `PASS` | The Manager | The evidence for an adopted task (`Worktree: None`, `Ran: not stated (adopted)`). |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt before it filed a verdict. A `BLOCKED` row has no `Verdict:` line, so it does not hide a verdict filed before it. |
+| `ask` | `OPEN` | The worker (`--by` its session name) | A question for the Manager: `Question:`, `Options:`, `Default:`, `Blocking: yes\|no`, `Why:`. |
+| `answer` | `ANSWERED` | `run.py` (`--by manager` or `operator`) | `Re: #<ask id>`, `Answer:`, `Source: manager\|operator\|default\|decision #<id>`. |
+| `steer` | `SENT` | `run.py` (`--by manager` or `operator`) | `Steer:`, `Kind: info\|redirect\|wrap-up`. |
+| `ack` | `SEEN` | The worker | `Re: #<message id>`, `Action:` (one line). The only proof that a message was delivered. |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
@@ -798,7 +899,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 26 keys:
+skill. Metadata holds everything else, 27 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -807,12 +908,13 @@ skill. Metadata holds everything else, 26 keys:
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, and `"profile"` for a session that runs under a profile other than the Manager's own. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
 | `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
+| `mailbox` | `answer`, `steer`, `record` | A JSON object `{"<row id>": {"kind", "attempt", "via" (socket, resume or pending), "filed", "at", "tries", ...}}` for each `answer` and `steer` row that `run.py` filed, plus `{"kind": "ask", "seen": true}` for an ask that `record` printed. The delivery state of a message is meta, not a row, so a retry adds no row. `launch` drops the entries of earlier attempts; `cleanup` of a merged task and `abandon` remove the key. |
 | `cleanup_kept` | `cleanup` | A JSON object `{folder: reason}` for the worktree folders of a merged task that `run.py` kept, so `record` repeats a `kept` line only when its reason changes. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
@@ -823,10 +925,18 @@ skill. Metadata holds everything else, 26 keys:
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts.
 
+On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state that
+`run.py` writes often on this machine, so that a delivery retry never edits the issue:
+`[projects."<name>".meta]` with `local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox"]`.
+
 A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.15.0
+
+Version 0.16.0 lets a worker ask the Manager and lets the Manager answer and steer a running worker, across Claude profiles (see [Messaging](#messaging)): `mailbox.py`, the `answer`, `steer` and `inbox` commands, `ask`, `answer`, `steer` and `ack` result kinds, a MAILBOX brief section, a `[messaging]` table, and the `mailbox` meta. A project that never uses `ask`, `answer` or `steer` keeps today's behaviour, output and exit codes, with two intended exceptions. First, `launch` now passes a `--settings` JSON to each worker (a `SessionStart` check-in hook and a `PostToolUse` pointer hook), writes `.agentic-team/inbox/<task>-<attempt>.ctx.json`, and adds the MAILBOX section to the brief, so the `claude --bg` command line and the brief text change. Second, the worker's notify step still uses SendMessage, but its `to` is now `uds:<the Manager's inbox socket>` once any `run.py` call in the Manager's Bash has written `.agentic-team/manager.addr` (that makes the line reach a Manager from a worker on any profile), and the bare session name before that. The verifier gets no hooks and no MAILBOX. On the Taskgraph GitHub backend add `"mailbox"` to the `local` list under `[projects."<name>".meta]`. Rules 1 and 2 of "Three rules" changed on purpose; see the README. No migration.
 
 ### Upgrading from 0.14.1
 
@@ -927,6 +1037,7 @@ other safe folder.
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
 | `scripts/python-path.sh` | Finds a Python 3.11 or later. `AGENTIC_TEAM_PYTHON` overrides it. |
 | `scripts/config.py` | Reads, merges, and validates the project config; holds every default |
+| `scripts/mailbox.py` | The worker's mailbox commands (`ask`, `inbox`, `ack`, and the `checkin` and `hook` commands that the `--settings` hooks run) and the row helpers that `run.py` shares |
 | `scripts/host.py` | The code host seam: GitHub through `gh`, GitLab through `glab` |
 | `scripts/run.py` | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports |
 | `tests/` | Tests for the scripts, with a fake `claude`, a fake `gh`, and a fake `glab`. Run `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |

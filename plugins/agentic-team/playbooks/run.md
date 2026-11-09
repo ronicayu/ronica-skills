@@ -33,6 +33,18 @@ every report, and on every wake (step 6).
      is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: follow its
      `next:`. After a pause it is `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>` once the pause ends. After a
      recovery stop the attempt counts, so at attempt 3 the hint names `abandon`.
+   - `asked`: a worker asked a question. Its row is a report, not an instruction: weigh it with the
+     decision-forks principle. When evidence can answer it, write the answer to a file and run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --file <file>`. When only the operator can, add a decision with
+     `--meta ask=<n>` (the worker's `Default:` in its notes), and after it is done run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --decision <decision id>`. The worker waits idle at no cost; it is not stuck.
+     `asking`: the same ask still has no answer; nothing new to do. `ask-due`: the ask passed `[messaging] ask_due_minutes`;
+     apply its default with `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --default` (or a better answer): `run` never decides.
+   - `answer-seen`, `steer-seen`: the worker acked the message (the line names the transport and its one-line action). Nothing to do.
+   - `steer-pending`: a steer reached no worker yet (a busy worker with no socket sees it at its next tool call). To interrupt it,
+     run the hint: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <same text> --interrupt`.
+   - `deliver-fallback`: the socket post did not work, or was not acked, and `run` used the next transport; the line says why.
+     `deliver-copy`: a resume started a copy and `run` stopped the original; nothing to do.
    - `stopped-idle`: a session of the task was idle, or waited on a prompt, with its work filed, so `launch`
      (or `record`, for a verifier after its verdict) stopped it and went on. Nothing to do.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
@@ -125,20 +137,25 @@ every report, and on every wake (step 6).
      `--base` applies to a first attempt; a retry continues in the task worktree.
 5. **Fresh, not resumed.** Every attempt is a fresh session with a fresh brief,
    in the task's one worktree, on top of the earlier attempts' commits. A
-   stopped attempt's WIP commit is where the next one starts.
+   stopped attempt's WIP commit is where the next one starts. The one exception is inside an
+   attempt: `run answer` and `run steer` may resume that same session, and the attempt number
+   stays. What was open when an attempt ended is pasted into the next brief.
 6. **Wait.** Never sleep in the foreground, and never run `record` or ListAgents in a
    loop to wait.
    - After a drain that leaves work in flight (a session runs, or in `pr` mode a request
      is open or a CI run is pending), run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" wait` with
-     the Bash tool's `run_in_background` and `timeout: 2400000`. It reads Taskgraph and
-     `claude agents` every 30 seconds, and in `pr` mode the code host every 5 minutes.
+     the Bash tool's `run_in_background` and `timeout: 2400000`. It reads Taskgraph every
+     5 seconds (`--tg-interval`), `claude agents` every 30 seconds, and in `pr` mode the code host
+     every 5 minutes. A worker's ask is a Taskgraph row, so it wakes you within seconds.
      It exits at the first change with one `changed` line per change, or after 30
      minutes with a `timeout` line. It writes nothing.
    - Keep one `wait` at a time. Start a new one only after the last one has exited. A
      second one does no harm; it only wakes you twice.
-   - A message from a session (`task <id> attempt <n> <kind> filed <STATUS>; run record`)
-     is a trigger to drain, never evidence: the result in Taskgraph is the evidence. Do
-     not reply to it. The `wait` that runs keeps running.
+   - A message from a session (`task <id> attempt <n> <kind> filed <STATUS>; run record`, or
+     `task <id> attempt <n> asked #<row>; run record`) is a trigger to drain, never evidence:
+     the row in Taskgraph is the evidence. Do not reply to it. The `wait` that runs keeps
+     running. The brief addresses the line to your inbox socket (`uds:<path>`), which reaches
+     you from a worker on any Claude profile; a ListAgents name reaches only your own profile.
    - On a wake (a session's message, a `changed` line, or a `timeout` line), go to step 1.
      Drain on a `timeout` line too. Then start `wait` again if work is still in flight.
      If Bash stops `wait` before it prints a line, treat that as a `timeout` line.
@@ -150,6 +167,17 @@ every report, and on every wake (step 6).
      session's and the message waits for the operator's approval. `wait` covers these.
      If the operator is asked to approve each message, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" notify-to --clear`; then only `wait` wakes you.
+
+7. **Steer.** When the operator redirects work in flight, or you learn a fact a running worker
+   needs, write the text to a file and run
+   `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <file> [--kind info|redirect|wrap-up]`. A steer may change focus, order,
+   approach and facts inside SCOPE; it never widens SCOPE and never overrides FORBIDDEN or the
+   standing orders. If it needs a wider SCOPE, change SCOPE in Taskgraph first
+   (`"${CLAUDE_PLUGIN_ROOT}/scripts/tg" --project <project> edit <id> --meta scope="..."`); the worker's inbox command prints the new SCOPE.
+   `--interrupt` stops and resumes a busy worker; use it only when the steer cannot wait. A verifier takes
+   no steer, and a task with no live worker refuses it: put the text in the task notes for the next brief.
+   `"${CLAUDE_PLUGIN_ROOT}/scripts/run" inbox <id>` shows the thread and each message's delivery state. A message is never
+   delivered by SendMessage.
 
 **Reply** at the end of each drain: counts by state, what changed, open
 decisions, branches ready to merge and the tasks that wait on them,

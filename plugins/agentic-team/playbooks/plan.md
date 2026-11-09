@@ -24,6 +24,9 @@ adds what Taskgraph cannot decide.
    - `--meta verify_mode=ci:<workflow>` when CI on the pushed branch is the
      right verifier (GitLab: `ci:pipeline` or `ci:<job>`); needs
      `merge.mode = "pr"`. Default: a verifier session.
+   - `--meta asks=<n>` (optional): how many questions the worker may ask the Manager in one
+     attempt. `0` forbids asks, as for a mechanical sweep (the mechanical tier defaults to 0);
+     unset takes `[messaging] asks_per_attempt` (3).
    - `--meta verify_kind=code|schema|design-doc` (default: the config's
      `verify.kind`, else `code`). `schema`: a data model, DDL or migration; the
      verifier recomputes numbers and runs the DDL. `design-doc`: an ADR, RFC or
