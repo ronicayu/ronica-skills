@@ -122,6 +122,21 @@ def test_my_own_claim_is_reused_only_while_younger_than_60_seconds(env, fake):
     assert env.sql("SELECT claimant FROM claims WHERE comment_id=?", comments[1][0]) == [("alice@host:1",)]
 
 
+def test_a_stale_claim_below_my_young_claim_is_voided_and_the_active_claim_is_mine(env, fake):
+    n = task(env)
+    stale = plant(fake, n, "old@host:0", age=300)  # no label on the issue: this claim is stale
+    young = plant(fake, n, "alice@host:1", age=5)
+    fake.clear_log()
+    env.ok("start", str(n))
+    assert [c["method"] for c in env.writes()] == ["POST", "PATCH"]
+    remote = GitHubRemote(env.entry)
+    [active] = remote.unvoided(remote.read_comments(n))
+    assert active["claim"]["claimant"] == "alice@host:1" and active["id"] not in (stale, young)
+    assert sorted(active["voids"]) == sorted([stale, young])
+    assert fake.issue(n)["labels"] == ["taskgraph", "tg:in-progress"]
+    assert env.ok("--fresh", "show", str(n))["conflicts"] == []
+
+
 def test_done_then_start_again_within_60_seconds_reuses_the_claim(env, fake):
     n = task(env)
     env.ok("start", str(n))

@@ -401,9 +401,11 @@ class GitHubRemote:
             left = [p for p in unvoided if p not in voids]
             if left:
                 first = left[0]
-                if mine(first):
+                if not mine(first):
+                    raise ClaimLost(f"#{number} is claimed by {first['claim']['claimant']} since {first['at']}", first["claim"]["claimant"], first["id"])
+                if first is unvoided[0]:  # mine is the active claim (the lowest unvoided one): reuse it
                     return ClaimOutcome(False, claimant, first["id"], first["at"], [], claim_rows(parsed))
-                raise ClaimLost(f"#{number} is claimed by {first['claim']['claimant']} since {first['at']}", first["claim"]["claimant"], first["id"])
+                voids += [p for p in left if mine(p)]  # a stale claim sits below mine: step 7 voids it, and my young claim goes with it (the new claim replaces it)
         ids = [p["id"] for p in voids]
         text = cm.render_claim(uuid.uuid4().hex[:12], claimant, now(), ids)
         posted = self.gh.post(f"{self.base}/issues/{number}/comments", {"body": text}).body
