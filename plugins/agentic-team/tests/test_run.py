@@ -889,7 +889,7 @@ class RunTest(Base):
         self.assertIn(expected, command)
         self.assertNotIn("result add", command)
         self.assertIn(f'"{sys.executable}" "{TG}" --db "{self.db}" --project demo show 1', text)
-        self.assertIn("--by task-1-1-sweep", self.brief(task, "--keyword", "sweep"))
+        self.assertIn("report-task-1-1-sweep.md", self.brief(task, "--keyword", "sweep"))  # the session name is in the report path
         bad = self.run_cmd("launch", str(task), "--dry-run", "--keyword", "bad name")
         self.assertEqual(bad.returncode, 2)
 
@@ -919,7 +919,8 @@ class RunTest(Base):
         self.assertIn(f"Last checkpoint: {CHECKPOINT}", context)
         for skipped in ("manager saw no session", "permission prompt", "verifier said fine"):
             self.assertNotIn(skipped, text)
-        self.assertIn("--attempt 2 --by task-2-2", text)
+        self.assertIn("2-2.ctx.json", text)  # the attempt is in the context file name; the session name in the report path
+        self.assertIn("report-task-2-2.md", text)
         self.add_result(task, "PASS", "report copied from the logs", attempt=1, by="manager")
         self.assertIn("report copied from the logs", self.brief(task))
 
@@ -957,7 +958,8 @@ class RunTest(Base):
         tg = os.path.join(odd, "bin", "tg.py")
         env = dict(self.env, TASKGRAPH_DB=os.path.join(odd, "my $db.sqlite"))
         task = self.add_task(env=env)
-        text = self.brief(task, tg=tg, env=env)
+        self.ok("launch", str(task), tg=tg, env=env)  # not a dry run: the command reads the context file that launch writes
+        text = self.calls("--bg")[0][-1]
         command = re.search(r"```sh\n(.*?)\n```", self.section(text, "REPORT"), re.S).group(1)
         body = "Task: 1\nStatus: PASS\nIssues: a $HOME `date` \"quoted\" line\n"
         path = re.search(r"(?m)^`(.+)`$", self.section(text, "REPORT")).group(1)
@@ -1336,15 +1338,15 @@ class RunTest(Base):
         self.worktree("task-1")
         override = self.run_cmd("launch", str(failed), "--dry-run", "--attempt", "4")
         self.assertIn("--worktree task-1 ", override.stderr)
-        self.assertIn("--attempt 4 --by task-1-4", override.stdout)
+        self.assertIn("1-4.ctx.json", override.stdout)
         paused = self.running_task(attempt=3)
         self.worktree("task-2")
         self.add_result(paused, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {SHA_A}\nReason: pause\nFiles: None\n",
                         attempt=3, by="manager")
-        self.assertIn("--attempt 4 --by task-2-4", self.run_cmd("launch", str(paused), "--dry-run").stdout)
+        self.assertIn("2-4.ctx.json", self.run_cmd("launch", str(paused), "--dry-run").stdout)
         retry = self.running_task(attempt=2)
         self.worktree("task-3")
-        self.assertIn("--attempt 3 --by task-3-3", self.run_cmd("launch", str(retry), "--dry-run").stdout)
+        self.assertIn("3-3.ctx.json", self.run_cmd("launch", str(retry), "--dry-run").stdout)
 
     def test_20_live_session_blocks_launch(self):
         task = self.running_task()
@@ -5111,7 +5113,7 @@ class RunTest(Base):
                 refused = self.run_cmd("launch", str(issues), "--dry-run")
                 self.assertEqual(refused.returncode, 2)
                 self.assertIn("attempt 3 has failed", refused.stderr)
-                self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(issues), "--dry-run", "--attempt", "4").stdout)
+                self.assertIn("1-4.ctx.json", self.ok("launch", str(issues), "--dry-run", "--attempt", "4").stdout)
 
     def test_104_an_idle_worker_with_no_result_gets_a_run_py_step(self):
         task = self.running_task()
@@ -5124,7 +5126,7 @@ class RunTest(Base):
         self.assertIn("Reason: recover", self.results(task)[-1]["body"])
         self.agents()
         self.assertEqual(self.one(self.events("record"), "stopped")["next"], "run.py launch 1")
-        self.assertIn("--attempt 2 --by task-1-2", self.ok("launch", str(task), "--dry-run").stdout)
+        self.assertIn("1-2.ctx.json", self.ok("launch", str(task), "--dry-run").stdout)
         self.fresh()
         self.running_task(attempt=3)
         self.agents(self.row("task-1", 3, status="idle", state="working"))
@@ -5147,7 +5149,7 @@ class RunTest(Base):
         self.assertIn("\nReason: pause\n", body)
         self.assertIn("Head: ", body)
         self.orders("None yet.\n")
-        self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(task), "--dry-run").stdout)
+        self.assertIn("1-4.ctx.json", self.ok("launch", str(task), "--dry-run").stdout)
 
     def test_104_a_recovery_stop_at_the_last_attempt_counts(self):
         task = self.running_task(attempt=3)
@@ -5163,7 +5165,7 @@ class RunTest(Base):
         out = self.run_cmd("launch", str(task), "--dry-run")
         self.assertEqual(out.returncode, 2)
         self.assertIn("attempt 3 has failed", out.stderr)
-        self.assertIn("--attempt 4 --by task-1-4", self.ok("launch", str(task), "--dry-run", "--attempt", "4").stdout)
+        self.assertIn("1-4.ctx.json", self.ok("launch", str(task), "--dry-run", "--attempt", "4").stdout)
 
     def test_104_a_stopped_row_with_no_reason_counts_as_an_attempt(self):
         task = self.running_task(attempt=3)
