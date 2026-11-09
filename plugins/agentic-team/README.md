@@ -798,7 +798,14 @@ because a peer message asked it to, so the command comes from the brief, not fro
 
 A message delivered by a socket post or by a resume that the worker does not ack within `pending_minutes` goes
 back to pending and is delivered again, at most 3 times (the count is socket posts and resumes; a pointer-flag touch is
-not a try); then `record` prints `steer-pending` and stops. A worker that waits on a permission prompt gets no doorbell and
+not a try); then `record` prints `steer-pending` and stops. A `claude --resume` that exits non-zero files `DIED` only when the conversation cannot be resumed (no transcript, or
+the CLI says the session is not found); any other failure leaves the message pending and counts one try. A session whose
+row is `failed` (an account out of credit, say) is never resumed: `record` files the attempt end even while the
+thread holds, carries the open asks and unacked messages, and the hint names `run.py launch <id> --profile <name>` or
+`abandon`. A process that does not exit after `claude stop` is not a try; the line names its pid and `run.py stop <id>`.
+A missing or stale socket address skips the socket for that try only; a post that fails turns it off for that message.
+`run.py stop` also accepts a parked or failed session that holds an open thread (there is nothing to kill).
+A worker that waits on a permission prompt gets no doorbell and
 no resume: `record` stops it once and files `BLOCKED`. `record` reads each task's rows, meta and session rows again under
 the task's lock, and files no `DIED` or salvaged report while a steer of the attempt has no ack. A blocking
 ask stays open until the worker acks its answer, not merely until an answer row exists, so a worker that was

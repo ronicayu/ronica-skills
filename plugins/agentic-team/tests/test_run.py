@@ -90,6 +90,9 @@ elif cmd == "--bg" and "--resume" in argv:  # `claude --bg --resume <sessionId> 
     else:  # no flag: the same session wakes, same id and sessionId, a new process
         for row in found:
             row.update(status="busy", state="working", pid=4300)
+            if os.environ.get("FAKE_CLAUDE_RESUME_ROW_FAILS"):  # the session starts and fails at once (credit balance too low)
+                row.update(state="failed")
+                row.pop("status"), row.pop("pid")
         if found:
             open(agents_path, "w").write(json.dumps(rows))
             sys.stderr.write("note: woke session %s with its saved options (--name, --settings, --model).\n" % found[0]["id"])
@@ -8155,6 +8158,118 @@ class DeliveryTest(Base):
         os.remove(path)
         self.ok("launch", str(self.add_task("Second")), "--profile", "c2", env=env)
         self.assertTrue(os.path.exists(path))
+
+    # --- fix round 3
+
+    def test_r3_1_a_failed_session_ends_the_attempt_even_while_the_thread_holds(self):
+        task = self.worker(status=None, state="done")
+        ask = self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_ROW_FAILS="1"))
+        self.assertEqual(len(self.resumes()), 1)
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        events = self.events("record")  # the row is `failed`: one record files the end and carries
+        died = self.one(events, "died")
+        self.assertIn("filed DIED (failed)", died["detail"])
+        self.assertIn("--profile <name> for another account", died["next"])
+        self.assertIn("or abandon", died["next"])
+        self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("DIED", "manager")])
+        self.assertTrue(self.mailbox_meta(task)[str(answer["id"])]["carried"])
+        self.assertEqual(len(self.resumes()), 1)  # never resumed again
+        again = self.one(self.events("record"), "died")
+        self.assertEqual(again["detail"], "filed earlier")  # the same end row, not a second one
+        self.assertEqual(len([r for r in self.results(task) if r["kind"] == "task"]), 1)
+        self.c2_agents(self.finished("task-1", 1))
+        brief = self.section(self.brief(task), "CONTEXT")  # the next brief pastes the thread
+        self.assertIn(f"Ask #{ask} (answered, not acked):", brief)
+        self.assertIn(f"Answer #{answer['id']} by manager:", brief)
+
+    def test_r3_1_a_pending_message_is_not_resumed_into_a_failed_session(self):
+        task = self.worker(status=None, state="failed")
+        self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertEqual(self.resumes(), [])
+        fallback = self.one(events, "deliver-fallback")
+        self.assertIn("failed", fallback["detail"])
+        self.assertIn(f"run.py launch {task}", fallback["next"])
+
+    def test_r3_2_a_missing_address_skips_the_socket_for_that_try_only(self):
+        task = self.worker(status="idle", state="blocked", pid=4242, startedAt=(time.time() - 60) * 1000)
+        ask = self.ask()
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))  # no check-in file yet
+        self.assertIn("no check-in file", self.one(events, "deliver-fallback")["detail"])
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertFalse(self.mailbox_meta(task)[str(answer["id"])].get("socket_failed"))  # nothing failed
+        bell = self.bell()
+        self.checkin(bell)  # a fresh check-in appears
+        self.c2_agents(self.row("task-1", status="busy", state="working", sessionId=UUID1, pid=4242, startedAt=(time.time() - 60) * 1000))
+        self.ack(answer["id"])
+        self.ok("steer", str(task), "--file", self.text_file("now"))  # a new row: it posts to the socket
+        self.assertEqual(len(bell.wait_for(1)), 1)
+        self.assertEqual(len(self.resumes()), 1)  # only the first answer was resumed
+        self.assertTrue(ask)
+
+    def test_r3_3_only_a_conversation_that_cannot_be_resumed_files_died(self):
+        for said, died in (("No conversation found with session ID x", True), ("Credit balance is too low", False)):
+            with self.subTest(said):
+                self.fresh()
+                task = self.worker(status=None, state="done")
+                self.ask()
+                events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL=said))
+                (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+                if died:
+                    self.one(events, "died")
+                else:
+                    self.assertEqual(self.named(events, "died"), [])
+                    self.assertIn("claude --resume failed (Credit balance is too low)", self.one(events, "deliver-fallback")["detail"])
+                    entry = self.mailbox_meta(task)[str(answer["id"])]
+                    self.assertEqual((entry["via"], entry["tries"]), ("pending", 1))  # one try counted
+                    self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "task"], [])
+
+    def test_r3_4_a_process_that_does_not_exit_is_not_a_try_and_the_hint_names_stop(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        env = {k: v for k, v in self.env.items() if k != "FAKE_CLAUDE_STOP_CLEARS_STATUS"}
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=env)
+        fallback = [e for e in self.named(events, "deliver-fallback") if "did not exit" in e["detail"]][0]
+        self.assertIn("the process (pid 4242) did not exit after claude stop", fallback["detail"])
+        self.assertEqual(fallback["next"], f"run.py stop {task}")
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(self.mailbox_meta(task)[str(answer["id"])].get("tries", 0), 0)
+        for _ in range(4):  # the cap is not spent however often record sees it
+            self.events("record", env=env)
+        self.assertEqual(self.mailbox_meta(task)[str(answer["id"])].get("tries", 0), 0)
+        self.assertNotIn("steer-pending", [e["event"] for e in self.events("record", env=env)])
+        self.ok("stop", str(task), env=env)  # the row is live, so the hint works
+
+    def test_r3_5_stop_accepts_a_parked_or_failed_session_that_holds_an_open_thread(self):
+        for state in ("done", "failed"):
+            with self.subTest(state):
+                self.fresh()
+                task = self.worker(status=None, state=state)
+                ask = self.ask()
+                events = self.events("stop", str(task))
+                self.assertEqual(self.calls("stop"), [])  # nothing to kill
+                self.assertIn("counts toward the cap", self.one(events, "stopped")["detail"])
+                self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "task"], ["STOPPED"])
+                self.assertTrue(self.mailbox_meta(task)[str(ask)]["carried"])
+        self.fresh()  # with no open thread a finished row still has nothing to stop
+        task = self.worker(status=None, state="done")
+        self.assertEqual(self.run_cmd("stop", str(task)).returncode, 2)
+
+    def test_r3_6_a_copy_is_recorded_with_its_own_session_id_and_later_resumes_use_it(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FORCE_COPY="1"))
+        copy = self.meta(task)["sessions"][1]
+        self.assertEqual((copy["id"], copy["sessionId"]), ("sess-copy", "copy-" + UUID1))
+        # the copy's conversation has a transcript of its own; the original's session id is never resumed again
+        folder = os.path.join(self.c2, "projects", re.sub(r"[^A-Za-z0-9]", "-", self.task_wt(task)))
+        with open(os.path.join(folder, "copy-" + UUID1 + ".jsonl"), "w") as fh:
+            fh.write(transcript_text(1))
+        self.ok("steer", str(task), "--file", self.text_file("again"), "--interrupt")
+        later = self.resumes()[-1]
+        self.assertEqual(later[2], "copy-" + UUID1)
+        self.assertEqual(self.calls_in("stop", self.c2)[-1][0], ["stop", "sess-copy"])
 
     # --- T15: wait reads Taskgraph on its own, shorter interval
 

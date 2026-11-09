@@ -2258,6 +2258,10 @@ def deliver(run, task, row, interrupt=False):
         lower_flag(run, tid, attempt)
         return "carried"
     s = worker_session(run, tid, attempt)
+    if s is not None and s.state == "failed":  # a failed session is never resumed: record ends the attempt
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: session {s.sid} failed{on_profile(s)}; "
+                 "record ends the attempt", f"run.py launch {tid} (--profile <name> for another account), or run.py abandon {tid}")
+        return "pending"
 
     def settle(via, word):
         entry.update(via=via, at=utc_stamp())
@@ -2279,7 +2283,8 @@ def deliver(run, task, row, interrupt=False):
                 return settle("socket", "socket")
             run.socket_failures += 1
             run.socket_off = run.socket_failures >= SOCKET_FAILURES_MAX
-        entry["socket_failed"] = True
+            entry["socket_failed"] = True  # only a post that failed turns the socket off for this row; a missing or stale
+            # address skips it for this try, and a fresh check-in makes the next delivery use it
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the socket post did not work ({why}); "
                  + ("the pointer flag shows it at the next tool call" if busy else "resuming the session"))
     if busy and not interrupt:
@@ -2289,9 +2294,13 @@ def deliver(run, task, row, interrupt=False):
     return resume_with(run, task, entry, row, s, text, settle)
 
 
+GONE_CONVERSATION = re.compile(r"(?i)no (such )?(conversation|session)|(conversation|session)\b[^\n]*not found|not found")
+
+
 def resume_with(run, task, entry, row, s, text, settle):
     """Stop the session when its process still runs, then `claude --bg --resume` it in its worktree with the doorbell
-    as the prompt. A resume that cannot start files DIED: only then is a waiting worker called dead."""
+    as the prompt. DIED is filed only when the conversation cannot be resumed (its transcript is gone, or the CLI says the
+    session or conversation is not found): any other failure, an account out of credit for one, leaves the row pending."""
     tid, attempt = task["id"], entry["attempt"]
     session_id = resume_id(task, s)
     wt = task_worktree(run, tid)
@@ -2305,9 +2314,9 @@ def resume_with(run, task, entry, row, s, text, settle):
         return "died"
     if s.row.get("pid"):
         stop_session(run, s.sid, check=False, profile=s.profile)
-        if not wait_for_exit(run, s):
-            run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the process did not exit after claude stop; "
-                     "record tries again")
+        if not wait_for_exit(run, s):  # not a try: a process that never exits must not spend the cap
+            run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the process (pid {s.row.get('pid')}) did not "
+                     "exit after claude stop; record tries again", f"run.py stop {tid}")
             return settle("pending", "pending")
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
@@ -2318,8 +2327,12 @@ def resume_with(run, task, entry, row, s, text, settle):
                      cwd=wt if os.path.isdir(wt) else None)
     run._sessions = None
     if out.returncode != 0:
-        file_died(run, task, attempt, s, f"claude --resume failed: {first_line(out.stderr.strip() or out.stdout.strip())}")
-        return "died"
+        said = first_line(out.stderr.strip() or out.stdout.strip())
+        if GONE_CONVERSATION.search(out.stderr + "\n" + out.stdout):  # only a conversation that cannot be resumed is dead
+            file_died(run, task, attempt, s, f"claude --resume failed: {said}")
+            return "died"
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: claude --resume failed ({said}); record tries again")
+        return settle("pending", "pending")  # one try is counted; the cap ends it
     match = BACKGROUNDED.search(out.stdout)
     if match and match.group(1) != s.sid:  # a copy was started anyway (stdout and stderr both say so): never leave it unrecorded
         new = match.group(1)
@@ -2875,6 +2888,7 @@ def record_in_progress(run, snap, task, unmanaged):
         commit_stopped(run, tid, attempt, rows, mine)  # finish the pause first: launch needs its Head line
         return
     holds = False  # a worker that waits for an answer, or has a message it has not acked, is not dead and not stuck
+    failed = False
     open_steers = []  # the steers of this attempt with no ack: no report is salvaged past them
     if message_rows(rows):  # a project that never uses ask, answer or steer skips this
         th = Thread(rows, task, attempt)
@@ -2886,10 +2900,13 @@ def record_in_progress(run, snap, task, unmanaged):
             # A worker that waits on a permission prompt is stuck, not parked: it gets no doorbell and no resume, and the
             # stuck step below stops it once.
             prompt = any(s.live and s.waiting for s in mine)
-            mailbox_events(run, task, attempt, th, deliver_ok=not prompt)
+            # A failed session (an account out of credit, say) ends the attempt even while the thread holds: it is never
+            # resumed, and the DIED step below carries the thread.
+            failed = any(s.state == "failed" for s in mine)
+            mailbox_events(run, task, attempt, th, deliver_ok=not prompt and not failed)
             mine = own_sessions(run, tid, "task", attempt)  # a delivery may have stopped or resumed the session
             table = mailbox_table(task)
-            holds = not prompt and (bool(th.blocking()) or any(
+            holds = not prompt and not failed and (bool(th.blocking()) or any(
                 (table.get(str(r["id"])) or {}).get("via") in ("pending", "socket") for r in th.unacked()))
             open_steers = [r for r in th.unacked() if r["kind"] == mbx.STEER]
     verifiers = own_sessions(run, tid, "verify", attempt)
@@ -2997,7 +3014,10 @@ def record_in_progress(run, snap, task, unmanaged):
                          else f"no session recorded for attempt {attempt}") + (f"; {where_steer}" if where_steer else "")
                 run.add_result(tid, "task", attempt, "manager", "DIED", f"{where}, no result")
                 carry_thread(run, task, attempt)
-                run.emit("died", tid, attempt, s.sid if s else None, "filed DIED", retry_next(tid, attempt, "died"))
+                way_out = (f"; a failed session may be an account problem: the open thread goes into the next brief, so relaunch "
+                           f"(run.py launch {tid} --profile <name> for another account) or abandon" if failed else "")
+                run.emit("died", tid, attempt, s.sid if s else None, "filed DIED" + (f" ({s.state})" if failed else ""),
+                         retry_next(tid, attempt, "died") + way_out)
         return
     latest = results[-1]
     if latest["status"] == "STOPPED":
@@ -4342,14 +4362,22 @@ def cmd_stop(run, args):
     task = run.show(tid)
     refuse_legacy(task)
     attempt = wanted_attempt(task)
-    live = [s for s in own_sessions(run, tid, "task", attempt) if s.live] if attempt is not None else []
+    found = own_sessions(run, tid, "task", attempt) if attempt is not None else []
+    live = [s for s in found if s.live]
     if not live:
-        raise Refused(f"#{tid} attempt {attempt or 0} has no live session")
+        # A parked asker whose process is gone, and a failed session, are not live but still hold an open thread: stop
+        # accepts them (there is nothing to kill), so that the attempt can end and the thread be carried.
+        rows = run.results_for(tid)
+        if found and not task_rows(rows, attempt) and Thread(rows, task, attempt).holds():
+            live = [found[-1]]
+        else:
+            raise Refused(f"#{tid} attempt {attempt or 0} has no live session")
     s = live[0]
     # A STOP order makes this a pause, which does not use an attempt. Without one it recovers a session that went
     # quiet or broke, and the attempt counts toward the cap, as DIED does.
     reason = "pause" if run.orders().stop else "recover"
-    stop_session(run, s.sid, profile=s.profile)
+    if s.live:
+        stop_session(run, s.sid, profile=s.profile)
     wt = s.worktree(run.root)
     files = run.git("status", "--porcelain", cwd=wt, check=False).stdout.rstrip("\n") if os.path.isdir(wt) else ""
     branch = (run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() if os.path.isdir(wt) else "") or "None"
