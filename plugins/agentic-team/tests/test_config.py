@@ -237,6 +237,86 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("did you mean taskgraph.project?", err)
 
+    def test_a_tier_may_name_a_profile_or_a_list_and_nothing_else_changes(self):
+        api = os.path.join(self.root, "api")
+        os.makedirs(api)
+        self.write(MINIMAL + f"""\
+            [profiles]
+            api = {json.dumps(api)}
+            [models]
+            mechanical = {{ model = "haiku", profile = "api" }}
+            implementation = {{ model = "sonnet", effort = "high", profile = ["default", "api"] }}
+            judgement = "opus"
+            [models.overrides]
+            "data migration" = {{ model = "opus", profile = "api" }}
+        """)
+        cfg = config.load(self.root)
+        self.assertEqual(config.problems(cfg), [])
+        self.assertEqual(config.resolve_model(cfg, "mechanical"), {"model": "haiku", "effort": None, "profile": "api"})
+        self.assertEqual(config.resolve_model(cfg, "implementation")["profile"], ["default", "api"])
+        self.assertEqual(config.resolve_model(cfg, "judgement"), {"model": "opus", "effort": None})
+        self.assertEqual(config.resolve_model(cfg, "data migration")["profile"], "api")
+        self.assertEqual(config.profile_path(cfg, "api"), api)
+        self.assertIsNone(config.profile_path(cfg, "default"))
+        self.assertIsNone(config.profile_path(cfg, None))
+        self.assertEqual(self.run_cli("get", "profiles.api")[:2], (0, api + "\n"))
+        self.assertIn(f"[profiles]\napi = {json.dumps(api)}", self.run_cli("show")[1])
+        self.write(MINIMAL)
+        cfg = config.load(self.root)
+        self.assertNotIn("profiles", cfg)
+        self.assertNotIn("[profiles]", self.run_cli("show")[1])
+        self.assertNotIn("profile", self.run_cli("show", "--json")[1])
+
+    def test_profile_problems(self):
+        api = os.path.join(self.root, "api")
+        os.makedirs(api)
+        self.write(MINIMAL + f"""\
+            [profiles]
+            api = {json.dumps(api)}
+            gone = {json.dumps(os.path.join(self.root, "missing"))}
+            default = {json.dumps(api)}
+            [models]
+            mechanical = {{ model = "haiku", profile = "apii" }}
+            implementation = {{ model = "sonnet", profile = ["default", "nope"] }}
+            judgement = {{ model = "opus", profile = "default" }}
+            [models.overrides]
+            "data migration" = {{ model = "opus", profile = "other" }}
+        """)
+        found = config.problems(config.load(self.root))
+        self.assertEqual(len(found), 5, found)
+        self.assertIn("profiles.gone: directory", found[0])
+        self.assertIn("does not exist", found[0])
+        self.assertIn("profiles.default", found[1])
+        self.assertIn("reserved", found[1])
+        self.assertIn("models.mechanical uses profile 'apii', which [profiles] does not define (did you mean api?)", found[2])
+        self.assertIn("models.implementation uses profile 'nope'", found[3])
+        self.assertIn("models.overrides.data migration uses profile 'other'", found[4])
+        self.assertEqual(self.run_cli("check")[0], 2)
+        self.write(MINIMAL + '[models]\njudgement = { model = "opus", profile = "api" }\n')
+        found = config.problems(config.load(self.root))
+        self.assertEqual(len(found), 1, found)
+        self.assertIn('add api = "<CLAUDE_CONFIG_DIR>" under [profiles]', found[0])
+        self.write(MINIMAL + '[models]\njudgement = { model = "opus", profile = [] }\n')
+        self.assertIn("models.judgement must be a model id", " ".join(config.problems(config.load(self.root))))
+        self.write(MINIMAL + '[profiles]\napi = 3\n')
+        self.assertIn("profiles.api must be the CLAUDE_CONFIG_DIR", " ".join(config.problems(config.load(self.root))))
+        self.write(MINIMAL + 'profiles = 3\n')
+        self.assertIn("profiles must be a table", " ".join(config.problems(config.load(self.root))))
+
+    def test_local_file_may_define_profiles_for_tiers_in_the_tracked_file(self):
+        api = os.path.join(self.root, "api")
+        os.makedirs(api)
+        self.write(MINIMAL + '[models]\nmechanical = { model = "haiku", profile = "api" }\n')
+        self.assertEqual(len(config.problems(config.load(self.root))), 1)
+        self.write(f"[profiles]\napi = {json.dumps(api)}\n", local=True)
+        self.assertEqual(config.problems(config.load(self.root)), [])
+
+    def test_a_home_relative_profile_path_is_expanded(self):
+        self.write(MINIMAL + '[profiles]\napi = "~/no-such-claude-dir-for-this-test"\n')
+        cfg = config.load(self.root)
+        self.assertEqual(config.profile_path(cfg, "api"), os.path.expanduser("~/no-such-claude-dir-for-this-test"))
+        self.assertIn("does not exist", " ".join(config.problems(cfg)))
+
 
 if __name__ == "__main__":
     unittest.main()
