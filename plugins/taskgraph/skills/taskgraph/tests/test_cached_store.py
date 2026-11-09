@@ -411,7 +411,7 @@ def test_sync_command_flushes_and_refreshes_and_full_reads_everything(env, fake)
     env.ok("edit", str(a), "--meta", 'tokens="3"')
     fake.add_issue("from a person")
     done = env.ok("sync")
-    assert done == {"changed": 1, "flushed": 1, "full": False}
+    assert done == {"changed": 2, "flushed": 1, "full": False}  # the flushed task is re-read too
     assert '"tokens":"3"' in fake.issue(a)["body"]
     code, out, _ = tg_text(env, "sync")
     assert out.strip() == "synced: 0 changed, 0 deferred sent"
