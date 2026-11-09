@@ -22,6 +22,8 @@ Keyboard controls: Press **F** to fit the view, **E** to expand all, and **C** t
 
 ## Items, lanes, and accessibility
 
+A task with a priority shows a `P0` to `P3` badge: before its title on a node and in the Timeline, and beside its status in the panel. A task without one shows nothing.
+
 The panel shows the owner, dates, baseline drift, lane, estimate, reasons for red or at-risk status, dependencies, driving chain, parent, children, and notes. Find the type, project, and other metadata under Details. Notes support Markdown headings, emphasis, lists, checklists, quotes, code, tables, and HTTP(S)/mailto links. HTML appears as text. Following a row adds a back step (Alt+Left). Select **Copy link** to copy the item URL. Drag the panel's left edge to resize it.
 
 Swimlane and Timeline group rows by lane. A child nests under its parent only if both use the same lane. Objectives appear in their own band. Milestones appear first in each lane. Lane headers show RED, AMBER, or GREEN, using the same rules as `report`. The colour reflects all open items in the lane. A collapsed summary reports how much late or conflicting work it hides.
