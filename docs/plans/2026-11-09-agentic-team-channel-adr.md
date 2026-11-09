@@ -60,6 +60,35 @@ flowchart LR
 | Socket address | `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` holds `messagingSocketPath` (and `peerFeatures`); the pid is in `claude agents --json`. The ADR still prefers the `SessionStart` check-in hook, since that file format is internal. |
 | L8: `--messaging-socket-path` with `--bg` | Not run. |
 
+## Model check results (2026-11-09)
+
+A TLA+ model of this design (`plugins/agentic-team/model/mailbox/`, built with the implementation) found that the design as written in section 4 breaks 7 of its rules:
+- a doorbell reaches a session after its attempt ended;
+- a worker waiting for an answer is filed DIED;
+- steers and answers are left unsettled;
+- a task closes with an unread steer;
+- `inbox` loses a row;
+- a doorbell reaches another attempt's session.
+
+The implementation adds ten fixes. With all of them, every rule holds: 1,038,611 states, and also under worker death, supervisor stop, account failure, pid reuse, a held socket post, an operator's second `run.py`, and superseded answers (18.8M states). Turning any one fix off breaks a rule, except fix 3, which is a guard that fix 2 makes redundant.
+
+| # | Fix | ADR text it changes |
+|---|---|---|
+| 1 | `record` treats a blocking ask as open until the worker acks its answer, not merely until an answer row exists | 5, `record_in_progress` |
+| 2 | Every attempt end marks the attempt's open messages Carried: a report, DIED, a failed row and the next launch, as well as stop, close and abandon | 5, `stop`, `close`, `abandon` |
+| 3 | `deliver` targets the message row's own attempt; a row of an ended attempt is carried, never rung | 4.2 `deliver` step 1 |
+| 4 | The hook flag is per attempt (`task-<id>-<attempt>.flag`) and is removed when the attempt ends | 4.3 |
+| 5 | A message delivered by resume with no ack also goes back to pending | 4.6 statechart |
+| 6 | Acking a newer answer settles the older one (`--supersede`) | 4.7 "Two answers to one ask" |
+| 7 | `inbox` prints every unacked row of the attempt, not only "rows after the last ack" | 4.2 `mailbox.py inbox` |
+| 8 | `run.py steer` refuses once the attempt has a filed report, and still allows a waiting or parked worker | 4.2 `run.py steer` |
+| 9 | Filing the report itself refuses while a steer has no ack; `check-report` alone is not enough | 4.7 last row, T12 |
+| 10 | One `run.py` lock per task covers deliver, record's DIED and failed rows, launch, close, abandon and stop | 4.2 `deliver` step 3, 9 |
+
+The session-id check before a socket post (4.2 step 2) is needed: without it, a doorbell reaches another attempt's session.
+
+The worker to Manager doorbell uses the SendMessage tool with `to: "uds:<Manager socket>"`. This was checked live: it delivers across profiles. It replaces the planned `mailbox.py notify` socket post. `run.py` (a script) still posts the raw line to the worker's socket.
+
 ## 2. Capabilities this design rests on
 
 Labels: **D** = the official docs say so (code.claude.com/docs, read 2026-11-09). **L** = checked on this machine on 2026-11-09 (CLI 2.1.319). **B** = found only in the 2.1.319 binary's own text, not in the docs. **A** = assumed; a live check in section 8 must confirm it.
