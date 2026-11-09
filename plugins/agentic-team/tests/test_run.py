@@ -8307,7 +8307,7 @@ class DeliveryTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn(f"attempt 1 has an open ask #{ask}: run run.py answer 1 --ask {ask}", out.stderr)
         self.assertEqual(self.calls("--bg"), [])
-        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="gone"))
+        events = self.events("answer", str(task), "--file", self.text_file("v2"), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="No conversation found"))
         self.one(events, "died")  # the worker could not be resumed: DIED frees the task
         self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
 
