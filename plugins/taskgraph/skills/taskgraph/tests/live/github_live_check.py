@@ -136,6 +136,16 @@ def probe(etag=None):
     return status, headers.get("etag"), headers.get("x-ratelimit-used")
 
 
+def probe_until_changed(etag, limit=20):
+    # GitHub's list lags behind a write by a few seconds (spec G16); poll until the page changes and report the lag
+    start = time.time()
+    while True:
+        status, _, _ = probe(etag)
+        if status == 200 or time.time() - start > limit:
+            return status, time.time() - start
+        time.sleep(1.5)
+
+
 def comments_probe(etag=None):
     url = f"repos/{REPO}/issues/comments?sort=updated&direction=desc&per_page=1"
     status, headers, _ = gh([url] + (["-H", f"If-None-Match: {etag}"] if etag else []), check=False)
@@ -216,9 +226,9 @@ def c4_dependencies_and_updated_at(state):
     result("C4-dep-bumps-updatedAt", "CONFIRMED" if bumped_c and bumped_b else "REFUTED",
            f"after addBlockedBy: blocked issue updatedAt {before_c['updatedAt']} -> {after_c['updatedAt']}; "
            f"blocking issue {before_b['updatedAt']} -> {after_b['updatedAt']}", expect="REFUTED")
-    st, _, used1 = probe(etag)
+    st, lag = probe_until_changed(etag)
     result("C4-probe-sees-dep", "CONFIRMED" if st == 200 else "REFUTED",
-           f"conditional probe after addBlockedBy -> HTTP {st} (200 = probe notices the change)")
+           f"conditional probe after addBlockedBy -> HTTP {st} after {lag:.1f} s more (200 = probe notices the change)")
     q = ("query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n){issue(number:$k){"
          "blockedBy(first:10){nodes{number}} issueDependenciesSummary{totalBlockedBy}}}}")
     got = gql(q, o=o, n=n, k=c["number"])["repository"]["issue"]
@@ -274,9 +284,8 @@ def c10_page_probe_sees_edges(state):
         _, et, _ = probe()
         time.sleep(1)
         fn()
-        time.sleep(1.5)
-        st, _, _ = probe(et)
-        result(f"C10-{label}", "CONFIRMED" if st == 200 else "REFUTED", f"page probe after {label} -> HTTP {st}")
+        st, lag = probe_until_changed(et)
+        result(f"C10-{label}", "CONFIRMED" if st == 200 else "REFUTED", f"page probe after {label} -> HTTP {st} after {lag:.1f} s")
 
     dep = lambda a, b: gh([f"repos/{REPO}/issues/{a['number']}/dependencies/blocked_by", "-X", "POST", "-F", f"issue_id={b['id']}"])
     undep = lambda a, b: gh([f"repos/{REPO}/issues/{a['number']}/dependencies/blocked_by/{b['id']}", "-X", "DELETE"])
