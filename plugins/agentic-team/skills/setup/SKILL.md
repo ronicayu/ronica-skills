@@ -52,7 +52,23 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
 7. **Trust the workspace.** `claude --bg` refuses to start in a workspace that
    is not trusted. A trusted parent folder does not count. Tell the user to
    run `claude` once in the repository and accept the trust prompt.
-8. **Check for the project verify skill.** The verifier reads
+8. **Offer a second Claude profile, only when the user wants one.** It lets
+   workers run under another account (for example an API-billed profile)
+   next to the Manager's own. Ask for the profile's name and its
+   `CLAUDE_CONFIG_DIR`. Add `[profiles]` with `<name> = "<dir>"` to
+   `.agentic-team.local.toml` (the path is machine-specific), and set
+   `profile = "<name>"` (or a list such as `["default", "<name>"]`) on the
+   tiers that should use it in `.agentic-team.toml`. Then, with the user's
+   agreement, run the two install commands for that profile:
+   `CLAUDE_CONFIG_DIR=<dir> claude plugin marketplace add ronicayu/ronica-skills`
+   and `CLAUDE_CONFIG_DIR=<dir> claude plugin install agentic-team@ronica-skills`.
+   Tell the user to run the trust step themselves: `CLAUDE_CONFIG_DIR=<dir>
+   claude` in the repository, accept the trust prompt. Do not do it for them
+   and do not edit trust settings. Tell the user that the profile needs the
+   same permission rules as the Manager's profile for the commands workers
+   run, or workers stop at permission prompts, and that an API profile bills
+   per token. Leave this step out when the user wants no second profile.
+9. **Check for the project verify skill.** The verifier reads
    `.claude/skills/verify/SKILL.md` from the repository: it says how to prove
    this project's artifacts (how to launch and drive the application, or where
    the sources are and which script recomputes a count). Run
@@ -80,7 +96,7 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
    the method step it could not carry out. When this skill runs inside a
    Manager session, the Manager does not write the file: it reports the gap
    to the operator.
-9. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
+10. **Check the result.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/config" check`. Setup is done only when it
    prints `ok`; otherwise fix each problem it lists and run it again. Make
    sure neither file holds a credential or secret. Show the user the final
    file and `"${CLAUDE_PLUGIN_ROOT}/scripts/config" show`, and say which keys use their defaults.

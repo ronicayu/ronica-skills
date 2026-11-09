@@ -25,9 +25,19 @@ always_pause = []           # decisions that always need the operator
 # implementation = { model = "sonnet", effort = "high" }
 # judgement = "opus"
 # verifier = "opus"         # default: a different model from the worker's
+# A tier table may add profile = "<name>" or a list of names, to start its sessions under another Claude profile
+# (see [profiles]); a list balances by fewest live sessions, ties to the first.
+# mechanical = { model = "haiku", profile = "api" }
+# implementation = { model = "sonnet", effort = "high", profile = ["default", "api"] }
 
 # [models.overrides]
 # "data migration" = { model = "opus", effort = "high" }   # use as a task's `tier`
+
+# Claude profiles for workers: name = the CLAUDE_CONFIG_DIR of that profile. "default" is the Manager's own and needs
+# no entry. Paths are machine-specific: put [profiles] in .agentic-team.local.toml and keep the tiers here. Each profile
+# needs the repository trusted and the agentic-team plugin installed (README: Workers on more than one Claude profile).
+# [profiles]
+# api = "~/.claude-api"
 
 [notifications]
 # skill = "telegram-send:telegram-send"
