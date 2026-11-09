@@ -430,7 +430,9 @@ def manager_version():
 
 def installed_plugin(listing):
     """The entry for agentic-team in the output of `claude plugin list --json`, or None. The shape is read loosely:
-    any object in the JSON whose name or id is agentic-team or agentic-team@<marketplace> is the entry."""
+    any object in the JSON whose name or id is agentic-team or agentic-team@<marketplace> is the entry, and so is the
+    value under a key of that name (the shape of the plugin registry file, installed_plugins.json: a list of
+    entries per plugin)."""
     stack = [listing]
     while stack:
         item = stack.pop()
@@ -439,6 +441,11 @@ def installed_plugin(listing):
                 label = item.get(key)
                 if isinstance(label, str) and label.split("@", 1)[0] == PLUGIN_NAME:
                     return item
+            for key, value in item.items():
+                if isinstance(key, str) and key.split("@", 1)[0] == PLUGIN_NAME:
+                    entries = [v for v in value if isinstance(v, dict)] if isinstance(value, list) else [value]
+                    entries = [v for v in entries if isinstance(v, dict)]
+                    return next((v for v in entries if v.get("version")), entries[0] if entries else {})
             stack.extend(item.values())
         elif isinstance(item, list):
             stack.extend(item)

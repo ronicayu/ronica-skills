@@ -6866,6 +6866,9 @@ class ProfileTest(Base):
         self.assertEqual(self.dir_calls("plugin")[-1], (["plugin", "list", "--json"], self.api))
         # another plugin only is not enough; another version warns and passes
         self.assertEqual(self.config_check(json.dumps([{"id": "taskgraph@ronica-skills"}]))[0], 2)
+        registry = {"plugins": {"agentic-team@ronica-skills": [{"scope": "user", "version": mine}]}}  # name as a key
+        self.assertEqual(self.config_check(json.dumps(registry)), (0, "ok\n", ""))
+        self.assertEqual(self.config_check(json.dumps({"plugins": {"taskgraph@ronica-skills": [{}]}}))[0], 2)
         code, out, err = self.config_check(json.dumps([{"name": "agentic-team", "version": "0.0.1"}]))
         self.assertEqual((code, out), (0, "ok\n"))
         self.assertIn(f"warning: profiles.api: agentic-team 0.0.1 is installed there, the Manager runs {mine}", err)
