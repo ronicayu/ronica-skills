@@ -78,7 +78,16 @@ CONSTANTS
   FIX_STOP_OPEN_THREAD,    \* item 5 (D7): run.py stop also accepts the attempt's session with no live row when its thread holds
   ALLOW_NO_EXIT,           \* a process does not exit after `claude stop` (wait_for_exit gives up); spends a fault
   FIX_EXIT_TIMEOUT_NOT_A_TRY, \* item 4 (D15): that timeout does not count toward the cap
-  IMPL_STALE_ADDR_FAILS    \* D9 (3330fc7, item 2 open): a missing or stale address marks the row socket_failed for good
+  IMPL_STALE_ADDR_FAILS,   \* D9 (3330fc7, item 2 open): a missing or stale address marks the row socket_failed for good
+  \* ---- round 4 (msg-fixes-r4.md items 2 and 4; the code at b75b176)
+  ALLOW_ROW_GONE,          \* a fault: the attempt's session disappears from `claude agents` (no row at all)
+  ROW_GONE_KEEPS_PROCESS,  \* the session's process keeps running after its row is gone (FALSE: it is gone too)
+  ALLOW_ABANDON_OPEN,      \* the Manager may abandon an attempt that has no end row (cmd_abandon needs only in_progress)
+  FIX_NO_ROW_ENDS,         \* item 2: an attempt whose session has no row: record files DIED and carries, even while it holds
+  FIX_NO_ROW_RESUMES,      \* an alternative (not in the list): deliver resumes a session with no row by its recorded sessionId
+  FIX_ABANDON_ENDS,        \* item 2: abandon of an attempt with no end row files its end row (and carries)
+  CLI_ROW_LAG,             \* item 4: right after an in-place resume, the row still reads "no process" for one read
+  FIX_RESUMED_HOLDS        \* item 4: an attempt that run.py just resumed holds for the rest of the command (no end row)
 
 ASSUME MaxAttempts \in {1, 2, 3} /\ ASKS \in {0, 1} /\ MaxSteers \in Nat /\ MaxFaults \in Nat
 
@@ -115,11 +124,14 @@ VARIABLES
   untracked,    \* copies that run.py did not record in the sessions meta (round 2)
   bad,          \* history for the round-2 rules: "endOverBusy", "reportOverSteer", "settledShownOpen", "carriedLost"
   metaGone,     \* the attempts whose mailbox meta entries run.py has dropped (launch prune, abandon)
-  noExit        \* sessions whose process does not exit after `claude stop` (round 3, ALLOW_NO_EXIT)
+  noExit,       \* sessions whose process does not exit after `claude stop` (round 3, ALLOW_NO_EXIT)
+  rowGone,      \* sessions that `claude agents` no longer lists (round 4, ALLOW_ROW_GONE)
+  lag           \* sessions resumed in place whose row still reads "no process" until the Manager's next step (CLI_ROW_LAG)
 
 vars == <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, msgs, lastAck, flag, acct,
-          faults, dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow, untracked, bad, metaGone, noExit>>
-newVars == <<untracked, bad, metaGone, noExit>>
+          faults, dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow, untracked, bad, metaGone, noExit,
+          rowGone, lag>>
+newVars == <<untracked, bad, metaGone, noExit, rowGone>>
 
 \* ---------------------------------------------------------------- values
 
@@ -187,7 +199,7 @@ RecordHolds(a) ==
 \* the model has no time, and after 30 quiet minutes the code ends it too.
 RowLive(s) == proc[s] = "busy" \/ (proc[s] = "idle" /\ wst[s] = "wait")
 \* What run.py sees: a copy that it did not record is invisible unless its row is tied to the task by its folder.
-Visible(s) == s \notin untracked \/ CLI_COPY_IN_WORKTREE
+Visible(s) == (s \notin untracked \/ CLI_COPY_IN_WORKTREE) /\ s \notin rowGone
 VisibleSet(S) == {s \in S : Visible(s)}
 
 \* run.py steer refuses "a task with no live worker in its current attempt" (4.2). The code (cmd_steer, 2511-2533)
@@ -195,7 +207,7 @@ VisibleSet(S) == {s \in S : Visible(s)}
 SteerAllowed ==
   /\ taskEnd = "no"
   /\ IF IMPL_LIVE_ROWS
-       THEN ends[attempt] = "none" /\ (RowLive(cur[attempt]) \/ ThreadHolds(attempt))
+       THEN ends[attempt] = "none" /\ cur[attempt] \notin rowGone /\ (RowLive(cur[attempt]) \/ ThreadHolds(attempt))
        ELSE /\ \E s \in SessOf(attempt) : Alive(s)
             /\ FIX_STEER_REFUSES_ENDED => ends[attempt] = "none"
 \* With the lock, a deliver starts, and record's DIED / failed rows, launch, close, abandon and stop run,
@@ -267,6 +279,8 @@ Init ==
   /\ bad = {}
   /\ metaGone = {}
   /\ noExit = {}
+  /\ rowGone = {}
+  /\ lag = {}
 
 \* ---------------------------------------------------------------- the worker
 
@@ -280,6 +294,7 @@ WorkerAsks(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* mailbox.py inbox: after a doorbell (a post wakes an idle session; a resume prompt), a hook pointer at a
 \* tool call, or a checkpoint (after a commit, before REPORT). It prints this attempt's rows only.
@@ -298,6 +313,7 @@ WorkerReadsInbox(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, cur, addr, msgs, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* mailbox.py ack: one ack row per row it read; for an ask with two answers it acks the latest it read
 \* (4.7 "Two answers"). The ack rows come after every row filed so far, which moves the inbox cursor.
@@ -327,6 +343,7 @@ WorkerAcks(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, bell, cur, addr, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* check-report: refuses while a steer of the attempt has no ack (4.7, T12). A doorbell that arrived
 \* between tool calls is read first.
@@ -343,6 +360,7 @@ WorkerChecksReport(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, bell, seen, cur, addr, msgs, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* The worker files its result row and ends its turn. A late report of an attempt that already has an
 \* end row changes no end row. The code: mailbox.py cmd_report (336-351), check and file under the task lock.
@@ -359,7 +377,8 @@ WorkerReports(s) ==
      ELSE UNCHANGED <<ends, msgs, bad>>
   /\ UNCHANGED <<attempt, taskEnd, conv, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, metaGone, noExit>>
+  /\ UNCHANGED <<untracked, metaGone, noExit, rowGone>>
+  /\ UNCHANGED lag
 
 \* ---------------------------------------------------------------- the environment
 
@@ -375,6 +394,7 @@ Die(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, wst, cur, msgs, lastAck, flag, acct,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* The supervisor stops an idle session with no terminal after about 1 hour (#15; 4.7).
 SupervisorStops(s) ==
@@ -387,6 +407,7 @@ SupervisorStops(s) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, wst, cur, msgs, lastAck, flag, acct,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* "Credit balance too low" (4.7): from now on a resume starts and fails at once.
 AccountFails ==
@@ -396,6 +417,7 @@ AccountFails ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, msgs, lastAck, flag,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* The pid in the .addr socket path is reused: /tmp/cc-socks/<pid>.sock now belongs to another process (4.7).
 PidReused(a) ==
@@ -406,6 +428,7 @@ PidReused(a) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, msgs, lastAck, flag, acct,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* A process stops answering `claude stop` (round 3, D15): from now on a stop from deliver does not end it.
 ProcessIgnoresStop(s) ==
@@ -413,7 +436,22 @@ ProcessIgnoresStop(s) ==
   /\ noExit' = noExit \cup {s}
   /\ faults' = faults + 1
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, msgs, lastAck, flag, acct,
-                 dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow, untracked, bad, metaGone>>
+                 dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow, untracked, bad, metaGone,
+                 rowGone, lag>>
+
+\* The attempt's session disappears from `claude agents` (round 4, msg-fixes-r4 item 2): removed, pruned, never
+\* recorded. The conversation is kept or lost; the process ends too unless ROW_GONE_KEEPS_PROCESS.
+RowGone(s) ==
+  /\ ALLOW_ROW_GONE /\ faults < MaxFaults /\ taskEnd = "no" /\ s \notin rowGone /\ proc[s] # "unborn"
+  /\ rowGone' = rowGone \cup {s}
+  /\ \E c \in {"kept", "lost"} : conv' = [conv EXCEPT ![s] = c]
+  /\ proc' = IF ROW_GONE_KEEPS_PROCESS THEN proc ELSE StopSet(proc, {s})
+  /\ bell' = IF ROW_GONE_KEEPS_PROCESS THEN bell ELSE [bell EXCEPT ![s] = FALSE]
+  /\ seen' = IF ROW_GONE_KEEPS_PROCESS THEN seen ELSE [seen EXCEPT ![s] = {}]
+  /\ addr' = IF ROW_GONE_KEEPS_PROCESS THEN addr ELSE AddrStop(addr, {s})
+  /\ faults' = faults + 1
+  /\ UNCHANGED <<attempt, ends, taskEnd, wst, cur, msgs, lastAck, flag, acct, dpc, dmsg, dsess, mgrSteers, opSteers,
+                 stray, resumeOverProc, overflow, untracked, bad, metaGone, noExit, lag>>
 
 \* ---------------------------------------------------------------- the Manager's run.py commands
 
@@ -429,6 +467,7 @@ Answer(k) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* Only the first answer gets fairness (live.cfg): a supersede is the Manager's choice.
 FirstAnswer(k) == k \in Ids /\ AnswersTo(k) = {} /\ Answer(k)
@@ -444,6 +483,7 @@ ManagerSteers ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dsess, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* The operator's `run.py steer --by operator` from a terminal (9.8): a second run.py, concurrent with the Manager's.
 OperatorSteers ==
@@ -455,6 +495,7 @@ OperatorSteers ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dsess, mgrSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* record retries a pending delivery (5, record_in_progress: "Retry pending deliveries"). The code
 \* (mailbox_events, 2357-2425) stops after DELIVERIES_MAX tries and prints steer-pending.
@@ -462,11 +503,14 @@ RecordRetries(i) ==
   /\ dpc["mgr"] = "idle" /\ LockFree /\ taskEnd = "no"
   /\ i \in Ids /\ IsMail(i) /\ msgs[i].st = "pending"
   /\ IMPL_DELIVERY_CAP => msgs[i].tries < DeliveriesMax
+  \* round 4: with no session row, deliver only prints "record tries again" (a step that changes nothing)
+  /\ (cur[msgs[i].att] \in rowGone /\ ~AttemptEnded(msgs[i].att)) => FIX_NO_ROW_RESUMES
   /\ dpc' = [dpc EXCEPT !["mgr"] = "decide"]
   /\ dmsg' = [dmsg EXCEPT !["mgr"] = i]
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, msgs, lastAck, flag, acct, faults,
                  dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* record: a Rung row with no ack within pending_minutes goes back to pending; the next deliver skips
 \* the socket for it (4.2 step 2, T8b). FIX: a Delivered row too.
@@ -478,6 +522,7 @@ RecordTimesOut(i) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* record files DIED for a worker whose turn is over (or with no pid) and no task row, unless an open
 \* blocking ask stops it (5, record_in_progress; 4.7). DIED also stands for stuck and a ghost end.
@@ -486,20 +531,25 @@ RecordTimesOut(i) ==
 RecordFilesDied ==
   LET a == attempt
       failedEnd == FIX_FAILED_ENDS /\ proc[cur[a]] = "failed"
+      noRow == cur[a] \in rowGone
+      \* CLI_ROW_LAG: the row of a session resumed just now still reads "no process"
+      readProc == IF cur[a] \in lag THEN "none" ELSE proc[cur[a]]
       salvaged == /\ IMPL_SALVAGE
                   /\ \E s \in SessOf(a) : wst[s] = "checked"
                   /\ ~(FIX_SALVAGE_REFUSES_UNACKED_STEER /\ UnackedSteers(a) # {})
   IN
   /\ dpc["mgr"] = "idle" /\ LockFree /\ taskEnd = "no" /\ ends[a] = "none"
-  /\ proc[cur[a]] \in (IF IMPL_DETAILS THEN {"idle", "none", "failed"} ELSE {"idle", "none"})
-  /\ failedEnd \/ (IF IMPL_HOLDS THEN ~RecordHolds(a) ELSE ~AskOpenForRecord(a))
+  /\ noRow \/ readProc \in (IF IMPL_DETAILS THEN {"idle", "none", "failed"} ELSE {"idle", "none"})
+  /\ FIX_RESUMED_HOLDS => cur[a] \notin lag
+  /\ failedEnd \/ (FIX_NO_ROW_ENDS /\ noRow) \/ (IF IMPL_HOLDS THEN ~RecordHolds(a) ELSE ~AskOpenForRecord(a))
   /\ ends' = [ends EXCEPT ![a] = IF salvaged THEN "report" ELSE IF failedEnd THEN "FAILED" ELSE "DIED"]
   /\ msgs' = CarryIf(msgs, a)
   /\ bad' = BadIf(bad, (IF \E s \in SessOf(a) : proc[s] = "busy" THEN {"endOverBusy"} ELSE {})
                        \cup (IF salvaged /\ UnackedSteers(a) # {} THEN {"reportOverSteer"} ELSE {}))
   /\ UNCHANGED <<attempt, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, metaGone, noExit>>
+  /\ UNCHANGED <<untracked, metaGone, noExit, rowGone>>
+  /\ lag' = {}
 
 \* record sees a failed row: the profiles spec's handling applies (4.7, account row); read as an end row.
 \* The code has no such branch (IMPL_DETAILS: RecordFilesDied takes it).
@@ -512,7 +562,8 @@ RecordFilesFailed ==
   /\ bad' = BadIf(bad, IF \E s \in SessOf(attempt) : proc[s] = "busy" THEN {"endOverBusy"} ELSE {})
   /\ UNCHANGED <<attempt, taskEnd, proc, conv, wst, bell, seen, cur, addr, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, metaGone, noExit>>
+  /\ UNCHANGED <<untracked, metaGone, noExit, rowGone>>
+  /\ lag' = {}
 
 \* run.py launch of the next attempt: refuses while a session of the attempt is busy; stops the idle
 \* ones (stopped-idle). A fresh session; its SessionStart hook checks in. The code (cmd_launch 1571-1790) renders
@@ -535,13 +586,16 @@ Launch ==
   /\ metaGone' = PruneBefore(n)
   /\ UNCHANGED <<ends, taskEnd, conv, wst, cur, lastAck, flag, acct,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, noExit>>
+  /\ UNCHANGED <<untracked, noExit, rowGone>>
+  /\ lag' = {}
 
 \* The operator's `run.py launch <id> --attempt <n+1>` after an abandon (cmd_launch 1592-1593 asks for --attempt).
 \* Abandon stopped the sessions it saw and dropped the mailbox meta.
 Relaunch ==
   LET n == attempt + 1 IN
   /\ ALLOW_RELAUNCH /\ taskEnd = "abandoned" /\ attempt < MaxAttempts
+  \* cmd_launch refuses while the attempt has no end row and an open ask (1642-1652)
+  /\ ends[attempt] # "none" \/ ~Blocking(attempt)
   /\ \A e \in Deliverers : dpc[e] = "idle"
   /\ \E ci \in CheckinChoices :
        /\ proc' = [proc EXCEPT ![Orig(n)] = "busy"]
@@ -553,7 +607,8 @@ Relaunch ==
   /\ metaGone' = PruneBefore(n)
   /\ UNCHANGED <<ends, conv, wst, bell, seen, cur, msgs, lastAck, flag, acct,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, noExit>>
+  /\ UNCHANGED <<untracked, noExit, rowGone>>
+  /\ lag' = {}
 
 \* run.py close after a report (PASS): stops the task's live sessions; marks open asks and unacked
 \* steers of the attempt Carried (5, stop/close/abandon). The code (stop_live 4059-4079) stops the rows it sees.
@@ -569,13 +624,18 @@ Close ==
   /\ UNCHANGED <<attempt, ends, conv, wst, cur, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* run.py abandon after an end row. The code (cmd_abandon 4328-4355) stops the rows it sees and drops the mailbox
 \* meta (drop_mailbox 2562-2574); it marks nothing Carried. The model still marks the rows Carried (no delivery is
 \* owed any more) and checks what a relaunched brief pastes (BriefPastesEveryCarriedMessage).
 Abandon ==
   LET vis == VisibleSet(Sids) IN
-  /\ dpc["mgr"] = "idle" /\ LockFree /\ taskEnd = "no" /\ ends[attempt] # "none"
+  /\ dpc["mgr"] = "idle" /\ LockFree /\ taskEnd = "no" /\ (ends[attempt] # "none" \/ ALLOW_ABANDON_OPEN)
+  \* an attempt with no end row: b75b176 files ABANDONED only for a live row it sees (4336-4340); item 2 always
+  /\ ends' = IF ends[attempt] = "none"
+                /\ (FIX_ABANDON_ENDS \/ \E s \in VisibleSet(SessOf(attempt)) : RowLive(s))
+             THEN [ends EXCEPT ![attempt] = "ABANDONED"] ELSE ends
   /\ proc' = StopSet(proc, vis)
   /\ addr' = AddrStop(addr, vis)
   /\ bell' = [s \in Sids |-> IF s \in vis THEN FALSE ELSE bell[s]]
@@ -583,16 +643,17 @@ Abandon ==
   /\ taskEnd' = "abandoned"
   /\ msgs' = CarryAtt(msgs, attempt)
   /\ metaGone' = IF IMPL_PRUNE_META THEN metaGone \cup {e \in Attempts : e <= attempt} ELSE metaGone
-  /\ UNCHANGED <<attempt, ends, conv, wst, cur, lastAck, flag, acct, faults,
+  /\ UNCHANGED <<attempt, conv, wst, cur, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
-  /\ UNCHANGED <<untracked, bad, noExit>>
+  /\ UNCHANGED <<untracked, bad, noExit, rowGone>>
+  /\ lag' = {}
 
 \* run.py stop of an attempt in progress (a pause or a recovery): STOPPED row; Carried. The code (cmd_stop
 \* 4303-4325) refuses an attempt with no live row.
 ManagerStops ==
   LET vis == VisibleSet(SessOf(attempt)) IN
   /\ MANAGER_STOPS /\ dpc["mgr"] = "idle" /\ LockFree /\ taskEnd = "no" /\ ends[attempt] = "none"
-  /\ IMPL_LIVE_ROWS => ((\E s \in vis : RowLive(s)) \/ (FIX_STOP_OPEN_THREAD /\ ThreadHolds(attempt)))
+  /\ IMPL_LIVE_ROWS => ((\E s \in vis : RowLive(s)) \/ (FIX_STOP_OPEN_THREAD /\ cur[attempt] \notin rowGone /\ ThreadHolds(attempt)))
   /\ proc' = StopSet(proc, vis)
   /\ addr' = AddrStop(addr, vis)
   /\ bell' = [s \in Sids |-> IF s \in vis THEN FALSE ELSE bell[s]]
@@ -602,6 +663,7 @@ ManagerStops ==
   /\ UNCHANGED <<attempt, taskEnd, conv, wst, cur, lastAck, flag, acct, faults,
                  dpc, dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ lag' = {}
 
 \* ---------------------------------------------------------------- deliver(run, task, row), 4.2
 
@@ -635,6 +697,20 @@ DeliverDecide(d) ==
         /\ msgs' = [msgs EXCEPT ![i].st = "carried"]
         /\ dpc' = [dpc EXCEPT ![d] = "idle"]
         /\ UNCHANGED <<flag, bell, seen, proc, addr, dsess, stray, faults>>
+     ELSE IF t \in rowGone /\ FIX_NO_ROW_RESUMES THEN
+        \* the alternative fix: resume the recorded sessionId although `claude agents` lists no row
+        /\ proc' = StopSet(proc, {t})
+        /\ bell' = [bell EXCEPT ![t] = FALSE]
+        /\ seen' = [seen EXCEPT ![t] = {}]
+        /\ addr' = AddrStop(addr, {t})
+        /\ dpc' = [dpc EXCEPT ![d] = "resume"]
+        /\ dsess' = [dsess EXCEPT ![d] = t]
+        /\ msgs' = tried(msgs, TRUE)
+        /\ UNCHANGED <<flag, stray, faults>>
+     ELSE IF t \in rowGone THEN
+        \* b75b176 (deliver 2251-2253): "no session row for attempt N; record tries again", no try
+        /\ dpc' = [dpc EXCEPT ![d] = "idle"]
+        /\ UNCHANGED <<msgs, flag, bell, seen, proc, addr, dsess, stray, faults>>
      ELSE IF SocketUsable(d) /\ ad.cur THEN
         \* step 2: the post reaches the process that checked in; it may hold the message
         \E held \in HoldChoices :
@@ -686,6 +762,7 @@ DeliverDecide(d) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, wst, cur, lastAck, acct, dmsg, mgrSteers, opSteers,
                  resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* Step 3, second half: CLAUDE_CONFIG_DIR=<profile> claude --bg --resume <sessionId> "<doorbell>".
 \* The code: resume_with (2275-2315). The copy takes the attempt's other slot.
@@ -705,19 +782,20 @@ DeliverResume(d) ==
         /\ bad' = IF ending /\ \E s \in SessOf(a) : proc[s] = "busy" THEN BadIf(bad, {"endOverBusy"}) ELSE bad
         /\ msgs' = CarryAtt(msgs, a)
         /\ dpc' = [dpc EXCEPT ![d] = "idle"]
-        /\ UNCHANGED <<proc, conv, wst, bell, seen, cur, addr, flag, faults, stray, overflow, untracked>>
+        /\ UNCHANGED <<proc, conv, wst, bell, seen, cur, addr, flag, faults, stray, overflow, untracked, rowGone, lag>>
      ELSE IF acct = "failed" /\ ~Alive(t) THEN
         \* the resume starts and the session fails at once (4.7, account row)
         /\ proc' = [proc EXCEPT ![t] = "failed"]
         /\ msgs' = mark("delivered")
         /\ flag' = lowered
         /\ dpc' = [dpc EXCEPT ![d] = "idle"]
-        /\ UNCHANGED <<ends, conv, wst, bell, seen, cur, addr, faults, stray, overflow, untracked, bad>>
+        /\ rowGone' = rowGone \ {t}
+        /\ UNCHANGED <<ends, conv, wst, bell, seen, cur, addr, faults, stray, overflow, untracked, bad, lag>>
      ELSE IF copying /\ slotTaken THEN
         \* a second live copy for one attempt: not tracked (TypeOK fails)
         /\ overflow' = TRUE
         /\ dpc' = [dpc EXCEPT ![d] = "idle"]
-        /\ UNCHANGED <<ends, msgs, proc, conv, wst, bell, seen, cur, addr, flag, faults, stray, untracked, bad>>
+        /\ UNCHANGED <<ends, msgs, proc, conv, wst, bell, seen, cur, addr, flag, faults, stray, untracked, bad, rowGone, lag>>
      ELSE IF copying THEN
         \* the CLI starts a copy (#12: the session still runs; CLI 2.1.319: any flag) and prints a note: line
         \E ci \in CheckinChoices :
@@ -741,7 +819,7 @@ DeliverResume(d) ==
                /\ dpc' = [dpc EXCEPT ![d] = "settle"]
                /\ untracked' = untracked \ {c}
                /\ UNCHANGED <<cur, flag>>
-          /\ UNCHANGED <<ends, overflow, bad>>
+          /\ UNCHANGED <<ends, overflow, bad, rowGone, lag>>
      ELSE
         \* the session continues in place with the doorbell as its prompt (Delivered)
         \E ci \in CheckinChoices :
@@ -753,6 +831,8 @@ DeliverResume(d) ==
           /\ msgs' = mark("delivered")
           /\ flag' = lowered
           /\ dpc' = [dpc EXCEPT ![d] = "idle"]
+          /\ rowGone' = rowGone \ {t}
+          /\ lag' = IF CLI_ROW_LAG THEN lag \cup {t} ELSE lag
           /\ UNCHANGED <<ends, conv, wst, seen, cur, overflow, untracked, bad>>
   /\ UNCHANGED <<attempt, taskEnd, lastAck, acct, dmsg, dsess, mgrSteers, opSteers, metaGone, noExit>>
 
@@ -771,6 +851,7 @@ DeliverSettle(d) ==
   /\ UNCHANGED <<attempt, ends, taskEnd, conv, wst, lastAck, flag, acct, faults,
                  dmsg, dsess, mgrSteers, opSteers, stray, resumeOverProc, overflow>>
   /\ UNCHANGED newVars
+  /\ UNCHANGED lag
 
 \* ---------------------------------------------------------------- next
 
@@ -783,7 +864,7 @@ Finished ==
 Next ==
   \/ \E s \in Sids :
        \/ WorkerAsks(s) \/ WorkerReadsInbox(s) \/ WorkerAcks(s) \/ WorkerChecksReport(s) \/ WorkerReports(s)
-       \/ Die(s) \/ SupervisorStops(s) \/ ProcessIgnoresStop(s)
+       \/ Die(s) \/ SupervisorStops(s) \/ ProcessIgnoresStop(s) \/ RowGone(s)
   \/ \E k \in Ids : Answer(k)
   \/ ManagerSteers \/ OperatorSteers
   \/ \E i \in Ids : RecordRetries(i) \/ RecordTimesOut(i)
@@ -816,7 +897,7 @@ TypeOK ==
   /\ ~overflow
   /\ \A s \in Sids : proc[s] \in {"unborn", "none", "busy", "idle", "failed"} /\ wst[s] \in {"work", "wait", "checked", "done"}
   /\ \A d \in Deliverers : dpc[d] \in {"idle", "decide", "resume", "settle"}
-  /\ untracked \subseteq Sids /\ metaGone \subseteq Attempts /\ noExit \subseteq Sids
+  /\ untracked \subseteq Sids /\ metaGone \subseteq Attempts /\ noExit \subseteq Sids /\ rowGone \subseteq Sids /\ lag \subseteq Sids
   /\ bad \subseteq {"endOverBusy", "reportOverSteer", "settledShownOpen", "carriedLost"}
 
 \* 1. No answer or steer is delivered to a session of another attempt: no doorbell for a row (socket
@@ -884,6 +965,11 @@ BriefNeverShowsSettledAsOpen == "settledShownOpen" \notin bad
 \* 13. The brief of the next attempt pastes every answer and steer that the ended attempt left without an ack
 \*     (Carried: "the next brief pastes it").
 BriefPastesEveryCarriedMessage == "carriedLost" \notin bad
+
+\* 14. (round 4) An abandoned task that has attempts left can be launched again: cmd_launch does not refuse it on an
+\*     open ask of an attempt that has no end row. (Abandoned is an end state, so the deadlock check cannot see this.)
+AbandonedTaskCanBeRelaunched ==
+  (ALLOW_RELAUNCH /\ taskEnd = "abandoned" /\ attempt < MaxAttempts) => (ends[attempt] # "none" \/ ~Blocking(attempt))
 
 \* Liveness (live.cfg, with FairSpec): every steer, and every answer, is eventually Acked or Carried.
 SteersSettle ==

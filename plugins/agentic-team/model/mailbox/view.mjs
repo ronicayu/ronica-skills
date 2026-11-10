@@ -57,7 +57,7 @@ const steerLabel = (v) => {
   return "Steer " + mailLabel(st[st.length - 1]);
 };
 
-const END = { report: "report filed", DIED: "DIED filed", FAILED: "failed end filed", STOPPED: "stopped" };
+const END = { report: "report filed", DIED: "DIED filed", FAILED: "failed end filed", STOPPED: "stopped", ABANDONED: "abandoned" };
 const taskLabel = (v) => {
   if (v.taskEnd === "closed") return "Closed";
   if (v.taskEnd === "abandoned") return "Abandoned";
@@ -104,6 +104,7 @@ const decideLabel = (from, to) => {
       && to.dpc[d] === "decide") return `${r}'s socket post is refused`;
   if (c && c.after.st === "pending") return `${r} stops the worker; the process does not exit (the row stays pending)`;
   const t = at(from.cur, from.attempt);
+  if (list(from.rowGone).includes(t) && to.dpc[d] === "idle") return `${r} finds no session row (record tries again)`;
   if (from.proc[t] === "failed" && from.dpc[d] === "decide" && list(from.msgs).some((m) => m.st === "pending"))
     return `${r} does not resume a failed session`;
   return `${r} finds the message already handled`;
@@ -132,6 +133,7 @@ export const step = (action, from, to) => {
     case "AccountFails": return "the worker's account fails";
     case "PidReused": return "another process takes the old pid";
     case "ProcessIgnoresStop": return "the worker's process stops answering claude stop";
+    case "RowGone": return "claude agents no longer lists the worker's session";
     case "Answer": return "the Manager answers";
     case "ManagerSteers": return "the Manager steers";
     case "OperatorSteers": return "the operator steers from a terminal";

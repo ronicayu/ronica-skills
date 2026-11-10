@@ -6,7 +6,7 @@ Round 2 (2026-11-09) maps the model to the code: `scripts/run.py` and `scripts/m
 
 The build ships Phase 1 and Phase 2 together: socket first, resume as the fallback, and the hook for a busy worker (`PHASE2 = TRUE`). With every `FIX_*` FALSE and every round-2 switch FALSE, the model is the ADR as written. Each `FIX_*` is one change that the model suspects the ADR needs. Each one names an ADR line below.
 
-Status: round 1 ran on 2026-11-09. With every `FIX_*` on, every rule held (`fixed.cfg`: 1,038,611 distinct states; `supersede.cfg`: 18,819,492). Not every round-1 prediction held: `phase1` also broke rules 2 and 4b, which the table below predicted to hold. Round 2 ran on 2026-11-09: every round-2 prediction held, and every round-1 config gave the same result with the same state count ("Round 2: results"). Round 3 (the fixes of `msg-fixes-r3.md`) is written, and SANY parses it. TLC has not run it: "Round 3: predictions" comes before any run.
+Status: round 1 ran on 2026-11-09. With every `FIX_*` on, every rule held (`fixed.cfg`: 1,038,611 distinct states; `supersede.cfg`: 18,819,492). Not every round-1 prediction held: `phase1` also broke rules 2 and 4b, which the table below predicted to hold. Round 2 ran on 2026-11-09: every round-2 prediction held, and every round-1 config gave the same result with the same state count ("Round 2: results"). Round 3 ran on 2026-11-10: every prediction held ("Round 3: results"). Round 4 (`msg-fixes-r4.md` items 2 and 4, the code at b75b176) is written, and SANY parses it. TLC has not run it: "Round 4: predictions" comes before any run.
 
 ## What the model holds
 
@@ -392,6 +392,82 @@ done
 ```
 
 Every older config gained five constants set to FALSE and is otherwise unchanged. To confirm, rerun `impl-r2` (181,886) and `fixed` (1,038,611) with `--out $OUT/<c>-r3`.
+
+## Round 3: results (measured, 2026-11-10)
+
+Every prediction held.
+
+| Config | Result | Distinct states |
+|---|---|---|
+| `impl-r3` | holds | 181,886 |
+| `impl-r3-env1` | holds | 1,591,135 |
+| `impl-r3-env1-nostop` | holds | 422,522 |
+| `impl-r3-env2` | holds | 885,632 |
+| `impl-r3-noexit` | holds | 2,395 |
+| `need-r3-d9` | holds | 7,628 |
+| `need-r3-d6`, `need-r3-d6-nostop` | deadlock (D6) | stopped at the deadlock |
+| `need-r3-d15` | deadlock (D15) | stopped at the deadlock |
+| `impl-r2`, `fixed` (rerun) | unchanged | 181,886; 1,038,611 |
+
+## Round 4: msg-fixes-r4.md items 2 and 4 (the code at b75b176)
+
+A Fable 5.2 review found a dead end the model could not see. It had no state where `claude agents` lists no row for the attempt's session, and its `Abandon` needed an end row. At b75b176, with a blocking ask and no session row:
+- `record` returns on `holds` and never files DIED.
+- `deliver` prints "no session row … record tries again" and counts no try.
+- `stop` refuses: it needs a row.
+- `launch` refuses on the open ask.
+- `abandon` (it needs only `in_progress`) files no end row and drops the meta. Then `launch --attempt 2` refuses on the open ask of an attempt that has no end row.
+
+| Switch | TRUE means |
+|---|---|
+| `ALLOW_ROW_GONE` | fault `RowGone(s)`: `s` leaves `claude agents` for good (`rowGone`); the conversation is kept or lost; the process ends too, unless `ROW_GONE_KEEPS_PROCESS` |
+| `ROW_GONE_KEEPS_PROCESS` | the process runs on without a row (run.py cannot see or stop it) |
+| `ALLOW_ABANDON_OPEN` | `Abandon` with no end row (the code's guard is `in_progress` only). A free move that hides dead ends, like `MANAGER_STOPS`: configs that check deadlocks keep it off |
+| `FIX_NO_ROW_ENDS` | item 2: with no session row, `RecordFilesDied` files DIED (or a salvaged report) and carries, even while the thread holds |
+| `FIX_NO_ROW_RESUMES` | an alternative to the line above, not in the list: deliver resumes the recorded `sessionId` although no row is listed; the row comes back |
+| `FIX_ABANDON_ENDS` | item 2: abandon of an attempt with no end row files `ABANDONED` (b75b176 files it only for a live row it sees, 4336-4340) |
+| `CLI_ROW_LAG` | item 4: after an in-place resume, the row reads "no process" until the Manager's next step (`lag`) |
+| `FIX_RESUMED_HOLDS` | item 4: record files no end row for a session in `lag` |
+
+The b75b176 behaviour needs no switch of its own. With `rowGone` empty, every new branch is dead code, so older configs are unchanged.
+- `SteerAllowed` and `ManagerStops` need a row: `worker_session` returns None, and `cmd_stop` needs a live row.
+- `DeliverDecide` takes no step for a session with no row. `RecordRetries` is not enabled for such a row: a retry that changes nothing is not a step, the Lifecycle convention.
+- `Relaunch` refuses while the attempt has no end row and `Blocking` holds (1642-1652).
+- Launch, close and abandon do not see a session with no row (`Visible`).
+
+New rule 14, `AbandonedTaskCanBeRelaunched`: an abandoned task with attempts left is not refused by `launch --attempt` on an open ask of an attempt that has no end row. "Abandoned" is an end state (`Finished`), so the deadlock check cannot see this dead end; the rule names it. It is in the r4 configs only.
+
+R4 (`impl-r4*`) = R3 with `FIX_NO_ROW_ENDS`, `FIX_ABANDON_ENDS`, `FIX_RESUMED_HOLDS` TRUE. Items 1, 3 and 5 to 9 are not modelled: forged rows were left out in round 1, there is no prompt state, and the rest are file and lock details. The configs are written by `mailbox-gen/gen_r4.py`. Every older config lists the eight new constants as FALSE and is otherwise unchanged.
+
+## Round 4: predictions (written before any run)
+
+| Config | Expect | Size |
+|---|---|---|
+| `impl-r4` (2 attempts; row gone, abandon with no end row, relaunch) | **Breaks `AskerNeverFiledDead` in 3**: `WorkerAsks`, `RowGone` (conversation kept), `RecordFilesDied`. Item 2 as written files DIED for a waiting asker whose conversation still exists. That is rule 2, and the ADR's L292/L301. The fix trades it for leaving the dead end. `impl-r4-alt` checks the other way out. **Holds:** every other rule, rule 14 too. The deadlock result is weak here: the free abandon hides dead ends | 300k to 1.5M |
+| `impl-r4-rowgone` (row gone, no free abandon) | **Breaks `AskerNeverFiledDead` in 3**, as above. **Holds:** every other rule; **no deadlock** | 150k to 500k |
+| `impl-r4-rowgone-live` (the process runs on without a row; 1 attempt) | **Breaks** `NoEndRowOverRunningWorker` in 2 (`RowGone` of the busy worker, `RecordFilesDied`); `AskerNeverFiledDead` in 3; `NoWorkerLeftAtEnd` in 3 (DIED, then `Abandon`; run.py cannot stop a session it cannot see). If the CLI can drop the row of a running session, item 2 files DIED over a running worker and a later attempt runs beside it | 5k to 30k |
+| `impl-r4-alt` (resume with no row instead of DIED) | **Every rule holds; no deadlock.** The answer resumes the recorded sessionId; a lost conversation files DIED through the failed resume, as in round 1. This needs a live check: does `claude --bg --resume <sessionId>` work for a session that `claude agents` no longer lists? | 150k to 500k |
+| `impl-r4-lag` (CLI lag, item 4 on; 1 attempt, a steer, a death) | **Every rule holds; no deadlock** | 200 to 2k |
+| `need-r4-rowgone` (item 2's record part off; 1 attempt) | **Must deadlock in 4**: `WorkerAsks`, `RowGone`, `Answer`, `DeliverDecide` (no row). `holds` blocks DIED, no retry is a step, steer and stop need a row, abandon needs an end row | 5k to 30k (stops early) |
+| `need-r4-abandon` (item 2's abandon part off; supervisor stop) | **Must break `AbandonedTaskCanBeRelaunched` in 3**: `WorkerAsks`, `SupervisorStops`, `Abandon` (no live row, so no end row). This is a rule break, not a deadlock: abandoned is an end state | 5k to 50k |
+| `need-r4-lag` (item 4 off) | **Must break `NoEndRowOverRunningWorker` in 5**: `ManagerSteers`, `Die`, `DeliverDecide` (step 3), `DeliverResume` (in place; the row still reads stopped), `RecordFilesDied` (the steer was delivered by resume, so nothing holds) | 200 to 2k |
+| every older config | unchanged result and count | — |
+
+## Round 4: run (new configs only)
+
+```sh
+M=/Users/ronica/projects/ronica-skills-msg/plugins/agentic-team/model/mailbox
+RUNNER=/Users/ronica/projects/ronica-skills-msg/plugins/statechart/skills/statechart/scripts/statechart
+OUT=/private/tmp/claude-501/-Users-ronica-projects/5e0c1f80-e89e-517b-8af4-7440e1660cbe/scratchpad/mbx
+cd $M
+for c in need-r4-lag impl-r4-lag need-r4-rowgone need-r4-abandon impl-r4-rowgone-live \
+         impl-r4-rowgone impl-r4-alt impl-r4; do
+  TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java \
+    $RUNNER $M/Mailbox.tla --config $M/$c.cfg --view $M/view.mjs --out $OUT/$c-r4
+done
+```
+
+To confirm that older configs are unchanged, rerun `impl-r3` (181,886) and `fixed` (1,038,611) with `--out $OUT/<c>-r4`.
 
 ## Run
 
