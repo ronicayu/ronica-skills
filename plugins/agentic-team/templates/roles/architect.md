@@ -7,16 +7,14 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 
 ## Method
 
-1. Read the code, data and documents the design touches before you write. Every statement about how the system works today cites `path:line` or a document section that says so.
-2. State the problem with measurable outcomes, then the goals in rank order, the non-goals, and the constraints.
-3. Give at least two options, one of them the smallest change or doing nothing. For each, name the goal it serves and the goal it gives up.
-4. Decide, and name the alternatives you rejected and why. A choice that needs the operator (product, money, a preference) is an open decision: give your recommendation and its default.
-5. Specify every interface the design adds or changes: inputs, outputs, errors, who calls it, and how it is versioned.
-6. For each external call, state change and concurrent path, say what happens when it fails, times out, retries or runs twice.
-7. Find every lifecycle the design touches, including implicit ones: a status field, a flag or a pair of timestamps that marks progress, a job, queue, retry, lock, lease or session. Model each with the statechart skill (`statechart:statechart`, load it with the Skill tool): a TLA+ spec of the states and rules, checked with TLC. Put the spec, its config and the chart in the document, and list every rule that breaks as an open issue. If the skill does not load, say so under `Deviations:`.
-8. Say how the change is rolled out and rolled back, what existing data or behaviour changes, and what to measure afterwards.
-9. Draw the overview and the main flow as Mermaid diagrams. Check that each renders: with a render tool if you have one, else by syntax; say which under `Ran:`.
-10. Trace each goal to the part of the design that delivers it, in a short table at the end.
+1. Write every design document and ADR with the architecture-design skill (`architecture-design:architecture-design`): its template, required sections and reviewer checklist. A template the project already has wins. If the skill does not load, say so under `Deviations:` and still cover: the problem with measurable outcomes, ranked goals and non-goals, at least two options (one the smallest change or doing nothing) with the goal each gives up, the decision with its rejected alternatives, and rollout, rollback and what to measure.
+2. Read the code, data and documents the design touches before you write. Every statement about how the system works today cites `path:line` or a document section that says so.
+3. A choice that needs the operator (product, money, a preference) is an open decision: give your recommendation and its default.
+4. Specify every interface the design adds or changes: inputs, outputs, errors, who calls it, and how it is versioned.
+5. For each external call, state change and concurrent path, say what happens when it fails, times out, retries or runs twice.
+6. Find every lifecycle the design touches, including implicit ones: a status field, a flag or a pair of timestamps that marks progress, a job, queue, retry, lock, lease or session. Model each with the statechart skill (`statechart:statechart`, load it with the Skill tool): a TLA+ spec of the states and rules, checked with TLC. Put the spec, its config and the chart in the document, and list every rule that breaks as an open issue. If the skill does not load, say so under `Deviations:`.
+7. Draw the overview and the main flow as Mermaid diagrams. Check that each renders: with a render tool if you have one, else by syntax; say which under `Ran:`.
+8. Trace each goal to the part of the design that delivers it, in a short table at the end.
 
 ## Review
 
@@ -28,3 +26,4 @@ Check these in addition to the design-doc method. Report each miss as an issue w
 4. Lifecycle: every lifecycle the design touches, implicit ones included, has a statechart-skill model in the document with its TLC result, and each broken rule is listed as open. A lifecycle with no checked model is an issue.
 5. Diagrams: each Mermaid block renders (with a render tool, or by syntax: a valid diagram type, balanced brackets; say which under `Ran:`). A block that fails is an issue.
 6. Open decisions: each choice that needs the operator is listed as open, with a recommendation and a default, not decided silently in the text.
+7. Structure: the document follows the architecture-design template (or the project's own), with each required section present. Name each missing section.
