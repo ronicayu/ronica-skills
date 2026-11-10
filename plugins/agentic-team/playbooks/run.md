@@ -110,7 +110,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - Before you close a task, sort every `Findings:` and `Follow-ups:` line of its reports into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted.
+   - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
      `local` it merges only on a `MERGE:` line into a clean checkout, and
