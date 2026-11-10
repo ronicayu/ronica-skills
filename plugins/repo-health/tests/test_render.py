@@ -116,6 +116,23 @@ class Sections(unittest.TestCase):
         with self.assertRaises(render.FindingsError):
             render.render(findings)
 
+    def test_chinese_report_text(self):
+        findings = sample()
+        findings["lang"] = "zh-CN"
+        text = render.render(findings)
+        for heading in ("# 仓库健康报告：demo", "提交：`0123456789ab`", "## 优先行动", "## 计分表", "## 细节", "## 未检查", "第一步："):
+            self.assertIn(heading, text)
+        self.assertIn("| 测试 | 2 强制 |", text)
+        self.assertIn("| 结构审查 | 未运行 |", text)
+        self.assertIn("*影响高 · 工作量小 · lint*", text)
+        for english in ("Top actions", "Scorecard", "First step", "Not checked", "enforced"):
+            self.assertNotIn(english, text)
+        out = render.summary(findings, "/x/report.md")
+        self.assertIn("优先行动：", out)
+        self.assertTrue(out.rstrip().endswith("报告：/x/report.md"))
+        findings["lang"] = "fr"                                   # no French text: English
+        self.assertIn("## Top actions", render.render(findings))
+
     def test_not_checked_section(self):
         text = render.render(sample())
         tail = text[text.index("## Not checked"):]
@@ -368,6 +385,15 @@ class Files(unittest.TestCase):
         out = proc.stdout.decode()
         self.assertIn("Tests run in CI", out)
         self.assertIn("Report: " + report, out)
+
+    def test_cli_prints_an_absolute_report_path(self):
+        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
+        proc = subprocess.run([sys.executable, SCRIPT, "findings-2026-11-10.json", "-o", "r.md"], cwd=self.dir,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        printed = proc.stdout.decode().rstrip().splitlines()[-1]
+        self.assertTrue(printed.startswith("Report: /"), printed)
+        self.assertEqual(os.path.realpath(printed[len("Report: "):]), os.path.realpath(os.path.join(self.dir, "r.md")))
 
     def test_cli_options(self):
         old = self.save("old.json", self.findings("2026-10-01"))
