@@ -53,9 +53,12 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   the task. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
   `WIP task <id> attempt <n>: <status>`. If there is nothing to commit, that is fine. A
   verifier commits nothing, and its report file is the one file it writes. Never push, rebase, merge, reset, delete branches, or check out
-  another branch or commit. A verifier may create one temporary folder outside its worktree
-  (`mktemp -d`) for a read-only export of the base commit or for a temporary database, as its
-  brief says, and deletes it before it reports; its own worktree stays at the head.
+  another branch or commit. A verifier may create folders in `.agentic-team-scratch/` for a
+  read-only export of the base commit or a temporary database, as its brief says, and deletes
+  them before it reports; its worktree otherwise stays at the head and unchanged.
+- **Scratch files.** Keep every temporary file and folder in `.agentic-team-scratch/` at the top
+  of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
+  worktree, and do not `cd` out of your worktree. Delete what you put there before you report.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
@@ -81,7 +84,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
     folder in it loses that data. Use the instance that the project runs from its main checkout,
     as the project's docs say. If you need your own instance, give it its own project name,
     container names and ports (`docker compose -p <your worktree name>`), keep its data in a
-    `mktemp -d` folder, and stop and remove it before you report.
+    folder in `.agentic-team-scratch/`, and stop and remove it before you report.
 - **Shared repository state.** All worktrees of a repository share one git config, and the
   `core.hooksPath` in it applies to every checkout. Do not write that config from your
   worktree: no `git config` that sets or unsets a value, no hooks installer (`pre-commit

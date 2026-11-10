@@ -56,7 +56,7 @@ worktree.
 
 - Prerequisites: TODO (toolchain, services, environment variables; how to install them in a fresh worktree)
 - Shared services: TODO (the services the main checkout runs and how to reach them; or how to start a private copy, for example `docker compose -p <worktree name> ...` with its data in the data folder)
-- Data folder: TODO (a path under `$(mktemp -d)`; never the developer's own data)
+- Data folder: TODO (a folder under `.agentic-team-scratch/` in your worktree; never the developer's own data)
 - Start: TODO (the exact command; record its pid as you start it, for example `cmd ... & pid=$!`)
 - Ready when: TODO (a URL or a log line to wait for, and a timeout)
 - Stop: TODO (`kill $pid`, then what else: its child processes, containers started with `--rm`)

@@ -168,6 +168,8 @@ DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
 COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
 REPORT_DIR = ".agentic-team"  # in a worktree, the folder of the session's report file
 REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it in every worktree
+SCRATCH_DIR = ".agentic-team-scratch"  # in a worktree, the one folder for a session's temporary files
+SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
@@ -1086,22 +1088,38 @@ def report_path(run, worktree, session):
     return os.path.join(run.wt_dir, worktree, REPORT_DIR, f"report-{session}.md")
 
 
-def ignore_reports(run):
-    """Add the report folder to the repository's info/exclude, once. Every linked worktree reads that file from the
-    common git dir, so `git status` does not show a report file and `git add -A` does not add it."""
+def add_exclude(run, line):
+    """Add one line to the repository's info/exclude, once. Every linked worktree reads that file from the common
+    git dir. Other lines stay as they are."""
     path = os.path.join(run.root, run.git("rev-parse", "--git-path", "info/exclude").stdout.strip())
+    text = ""
+    if os.path.isfile(path):
+        with open(path) as fh:
+            text = fh.read()
+    if line in text.splitlines():
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(("" if not text or text.endswith("\n") else "\n") + line + "\n")
+
+
+def ignore_reports(run):
+    """Ignore the report folder in every worktree, so `git status` does not show a report file and `git add -A`
+    does not add it."""
     try:
-        text = ""
-        if os.path.isfile(path):
-            with open(path) as fh:
-                text = fh.read()
-        if REPORT_EXCLUDE in text.splitlines():
-            return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a") as fh:
-            fh.write(("" if not text or text.endswith("\n") else "\n") + REPORT_EXCLUDE + "\n")
+        add_exclude(run, REPORT_EXCLUDE)
     except OSError as exc:
-        raise Refused(f"cannot write {path}: {exc.strerror}")
+        raise Refused(f"cannot write {exc.filename}: {exc.strerror}")
+
+
+def ignore_scratch(run, tid, attempt):
+    """Ignore the scratch folder in every worktree, before a session starts in one. A failure is a warning: a
+    session that cannot be ignored still works, and its worktree shows the folder until it deletes it."""
+    try:
+        add_exclude(run, SCRATCH_EXCLUDE)
+    except OSError as exc:
+        run.emit("warn", tid, attempt, None, f"cannot write {exc.filename}: {exc.strerror}; "
+                 f"git will show {SCRATCH_DIR}/ in the worktrees")
 
 
 def clear_report(path):
@@ -1409,9 +1427,10 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             if base_sha:
                 setup += ("\n- " + f"Base commit: {base_sha} ({how}). Head commit: {ref}. The change under review is "
                           f"`git diff {base_sha} {ref}`; `git log --oneline {base_sha}..{ref}` lists its commits. To run "
-                          f'anything at the base commit, export it read only: `git archive {base_sha} | tar -x -C '
-                          '"$(mktemp -d)"`, install what the run needs there (the export holds tracked files only), '
-                          "work in that folder, and delete it before you report. Never check out, reset, or add a "
+                          f'anything at the base commit, export it read only: `mkdir -p {SCRATCH_DIR}/base && '
+                          f'git archive {base_sha} | tar -x -C {SCRATCH_DIR}/base`, install what the run needs there (the '
+                          "export holds tracked files only), and work in that folder. Delete the export before you run the "
+                          "head's own test suites, and again before you report. Never check out, reset, or add a "
                           "worktree.")
             else:
                 setup += ("\n- " + f"Base commit: unknown ({how}). Head commit: {ref}. Judge the head against ACCEPTANCE "
@@ -2090,6 +2109,7 @@ def cmd_launch(run, args):
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
     try:
         ignore_reports(run)
+        ignore_scratch(run, tid, nxt)
         clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         write_ctx(run, task, nxt, session, cap)
@@ -2301,6 +2321,7 @@ def cmd_verify(run, args):
         add_worktree(run, name, ref)
     try:
         ignore_reports(run)
+        ignore_scratch(run, tid, attempt)
         clear_report(report_path(run, name, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         said = start_session(run, name, name, model, effort, text, profile)
@@ -2715,6 +2736,7 @@ def resume_with(run, task, entry, row, s, text, settle):
     if not os.path.isdir(wt):  # a resume outside the worktree would run the worker in the main checkout
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
         return "died"
+    ignore_scratch(run, tid, attempt)
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
     # flags the same command wakes the same session with its saved options, hooks included.

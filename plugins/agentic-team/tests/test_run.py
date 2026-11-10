@@ -1082,7 +1082,7 @@ class RunTest(Base):
         context, _, text = self.verify_context(task)
         self.assertIn(f"Base commit: {old_head} (the task's base meta). Head commit: {head}.", context)
         self.assertIn(f"git diff {old_head} {head}", context)
-        self.assertIn(f'git archive {old_head} | tar -x -C "$(mktemp -d)"', context)
+        self.assertIn(f"mkdir -p .agentic-team-scratch/base && git archive {old_head} | tar -x -C .agentic-team-scratch/base", context)
         self.assertIn("Never check out, reset, or add a worktree.", context)
         self.assertNotRegex(text, r"git (reset|checkout|switch)")
 
@@ -4513,7 +4513,7 @@ class RunTest(Base):
         self.ok("launch", str(task))
         self.ok("launch", str(other))
         with open(exclude) as fh:
-            self.assertEqual(fh.read(), ".claude/worktrees/\n.agentic-team.toml\n/.agentic-team/\n")
+            self.assertEqual(fh.read(), ".claude/worktrees/\n.agentic-team.toml\n/.agentic-team/\n/.agentic-team-scratch/\n")
         wt = self.wt_path("task-1")
         self.assertEqual(self.git("rev-parse", "--git-path", "info/exclude", cwd=wt), exclude)
         report = self.write_report("task-1", "task-1-1", "report\n")
@@ -4523,11 +4523,90 @@ class RunTest(Base):
         self.assertEqual(self.git("status", "--porcelain", "--ignored=matching", cwd=wt), "!! .agentic-team/")
         self.assertTrue(os.path.isfile(report))
 
+    def test_110_launch_and_verify_ignore_the_scratch_folder_once(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("# mine\n.claude/worktrees/\n/.agentic-team/")  # no newline at the end; no scratch line yet
+        task = self.add_task()
+        self.add_task()
+        self.ok("launch", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read(), "# mine\n.claude/worktrees/\n/.agentic-team/\n/.agentic-team-scratch/\n")
+        wt = self.wt_path("task-1")
+        self.touch(wt, ".agentic-team-scratch/base/a.txt")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored=matching", cwd=wt), "!! .agentic-team-scratch/")
+        self.ok("launch", "2")
+        self.pass_report(task, wt=wt)
+        self.ok("verify", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read().splitlines().count("/.agentic-team-scratch/"), 1)
+        verifier = self.wt_path("verify-1-1")
+        self.touch(verifier, ".agentic-team-scratch/base/b.txt")
+        self.assertEqual(self.git("status", "--porcelain", cwd=verifier), "")
+
+    def test_110_verify_adds_the_scratch_line_before_the_session_starts(self):
+        task = self.running_task()
+        self.pass_report(task)
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        self.ok("verify", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
+
+    def test_110_a_scratch_line_that_cannot_be_written_is_a_warning(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        os.chmod(exclude, 0o444)
+        self.add_task()
+        try:
+            events = self.events("launch", "1")
+        finally:
+            os.chmod(exclude, 0o644)
+        self.assertEqual(len(self.named(events, "launched")), 1)
+        warn = self.one(events, "warn")
+        self.assertIn("cannot write", warn["detail"])
+        self.assertIn(".agentic-team-scratch/", warn["detail"])
+
+    def test_110_the_verifier_brief_exports_the_base_into_the_scratch_folder(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        self.pass_report(task)
+        context = self.section(self.ok("verify", str(task), "--dry-run").stdout, "CONTEXT")
+        self.assertIn(".agentic-team-scratch/base", context)
+        self.assertIn("Delete the export before you run the head's own test suites, and again before you report.", context)
+        self.assertNotIn("mktemp", context)
+
+    def test_110_the_sweep_counts_the_scratch_folder_as_disposable(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(self.root, ".git", "info", "exclude"), "a") as fh:
+            fh.write("/.agentic-team-scratch/\n")  # what launch writes
+        self.touch(wt, ".agentic-team-scratch/base/a.txt")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 1: .agentic-team-scratch/)"])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_110_no_instruction_file_tells_a_session_to_use_mktemp(self):
+        base = os.path.dirname(HERE)
+        text = {}
+        for folder in ("agents", "templates", "playbooks"):
+            for where, _, names in os.walk(os.path.join(base, folder)):
+                for name in names:
+                    with open(os.path.join(where, name), encoding="utf-8") as fh:
+                        text[name] = re.sub(r"\s+", " ", fh.read())
+        mentions = {name: re.findall(r"mktemp|/tmp", body) for name, body in text.items() if re.search(r"mktemp|/tmp", body)}
+        self.assertEqual(mentions, {"worker.md": ["mktemp", "/tmp"]})  # only the rule that forbids both
+        self.assertIn("Do not use `mktemp`, `/tmp` or another folder outside your worktree", text["worker.md"])
+
     def test_101_a_missing_info_folder_is_created(self):
         shutil.rmtree(os.path.join(self.root, ".git", "info"))
         self.ok("launch", str(self.add_task()))
         with open(os.path.join(self.root, ".git", "info", "exclude")) as fh:
-            self.assertEqual(fh.read(), "/.agentic-team/\n")
+            self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
 
     def test_101_a_report_file_does_not_block_cleanup(self):
         task = self.merged_task()

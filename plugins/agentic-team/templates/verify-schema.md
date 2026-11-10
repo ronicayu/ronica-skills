@@ -11,8 +11,8 @@ values. Report every failure you can prove, not only the first.
    dropped or unchanged). Report a field that is missing or counted twice.
 3. Execution: the DDL parses. Each migration applies and rolls back on a
    temporary database. Keys, foreign keys and non-null constraints hold on
-   sample data. Use a container started with `--rm`, or a file database under
-   `mktemp -d`; remove it before you report. A leftover goes under
+   sample data. Use a container started with `--rm`, or a file database in
+   a folder under `.agentic-team-scratch/`; remove it before you report. A leftover goes under
    `Follow-ups:` as `leftover container: <name>` or `leftover file: <path>`.
 4. Consistency: names and numbers agree across every artifact of the task
    (the ADR text, the DDL, the review page). Each disagreement is an issue.

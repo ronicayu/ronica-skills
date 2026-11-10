@@ -24,7 +24,7 @@ Scripts that recompute every count and coverage claim from the sources.
 
 - Counts: TODO (the script and its arguments; what it prints; which numbers in which document it must match)
 - Coverage: TODO (the script that lists each source field with its one class: added, merged, dropped or unchanged)
-- DDL and migrations: TODO (how to apply and roll back on a temporary database: a container started with `--rm`, or a file database under `$(mktemp -d)`; the sample data for the constraints)
+- DDL and migrations: TODO (how to apply and roll back on a temporary database: a container started with `--rm`, or a file database in a folder under `.agentic-team-scratch/`; the sample data for the constraints)
 
 Remove the temporary database before you report. Stop only the processes this
 run started, by the pid you recorded or by a working directory inside your own
