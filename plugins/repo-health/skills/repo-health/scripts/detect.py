@@ -307,7 +307,8 @@ def run_git(root, args):
     env = dict(os.environ)
     env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
-        proc = subprocess.run(["git"] + args, cwd=root, env=env, timeout=120,
+        # A repository's own config can name a command for core.fsmonitor; never run it.
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false"] + args, cwd=root, env=env, timeout=120,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None

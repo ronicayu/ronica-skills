@@ -547,6 +547,25 @@ class GitRepo(Fixture):
         self.assertEqual(result["default_branch"], "main")
         self.assertEqual(result["languages"]["python"]["files"], 1)
 
+    def test_a_command_in_the_repos_git_config_is_never_run(self):
+        # `git ls-files --others` runs core.fsmonitor; a repo under review must not run code through it.
+        outside = tempfile.mkdtemp(prefix="repo-health-fsmonitor-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        marker = os.path.join(outside, "ran")
+        hook = os.path.join(outside, "hook.sh")
+        with open(hook, "w") as handle:
+            handle.write("#!/bin/sh\ntouch '%s'\n" % marker)
+        os.chmod(hook, 0o755)
+        git(self.root, "init", "-q")
+        self.write("a.py", "x = 1\n")
+        git(self.root, "add", "a.py")
+        git(self.root, "commit", "-q", "-m", "init")
+        git(self.root, "config", "core.fsmonitor", hook)
+        result = self.run_detect()
+        self.assertTrue(result["git"])
+        self.assertEqual(result["languages"]["python"]["files"], 1)
+        self.assertFalse(os.path.exists(marker), "detect.py ran the repo's core.fsmonitor command")
+
     def test_directory_inside_a_larger_repo_is_not_git(self):
         git(self.root, "init", "-q")
         self.write("outer.py", "x = 1\n")
