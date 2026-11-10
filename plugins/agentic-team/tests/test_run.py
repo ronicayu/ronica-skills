@@ -5383,12 +5383,13 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}"')  # 0.16.0: a worker's check also reads its steers
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.18.0: its evidence
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- caller: src/b.py: calls it\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
+                     f"Checkpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
         with open(path, "w") as fh:
@@ -5403,6 +5404,53 @@ class RunTest(Base):
         report = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}"`\n', report)
+
+    def evidence_report(self, status, evidence, after=""):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: {status}\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
+                     f"Checkpoint: {CHECKPOINT}\n")
+        return path
+
+    def test_109_check_report_counts_evidence_lines_of_a_pass(self):
+        problem = "run.py: PASS needs one `Evidence:` line per ACCEPTANCE line: found {}, ACCEPTANCE has 2\n"
+        cases = {
+            "two lines": ("PASS", "Evidence:\nfirst -> make test: ok\nsecond -> src/a.py:3\n", (0, "ok\n", "")),
+            "one line": ("PASS", "Evidence: first -> make test: ok\n", (2, "", problem.format(1))),
+            "none": ("PASS", "Evidence: None\n", (2, "", problem.format(0))),
+            "no field": ("PASS", "", (2, "", problem.format(0))),
+            "issues": ("ISSUES", "", (0, "ok\n", "")),
+            "blocked": ("BLOCKED", "Evidence: None\n", (0, "ok\n", "")),
+        }
+        for name, (status, evidence, expected) in cases.items():
+            with self.subTest(name):
+                out = self.run_cmd("check-report", self.evidence_report(status, evidence), "--acceptance", "2")
+                self.assertEqual((out.returncode, out.stdout, out.stderr), expected)
+
+    def test_109_check_report_without_acceptance_ignores_evidence(self):
+        out = self.run_cmd("check-report", self.evidence_report("PASS", ""))
+        self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
+
+    def test_109_evidence_starts_on_its_line_and_ends_at_the_next_field(self):
+        def found(text):
+            path = os.path.join(self.dir, "report.md")
+            with open(path, "w") as fh:
+                fh.write(f"Task: 1\nStatus: PASS\n{text}Checkpoint: {CHECKPOINT}\n")
+            out = self.run_cmd("check-report", path, "--acceptance", "99")
+            return int(re.search(r"found (\d+),", out.stderr).group(1))
+        self.assertEqual(found("Ran: make test\nOK\nEvidence: first -> ok\nsecond -> src/a.py:3\nFiles: a\n"), 2)
+        self.assertEqual(found("Evidence: first -> ok\nFiles: a.txt\nb.txt\nIssues: None\n"), 1)
+        self.assertEqual(found("Evidence:\n\n  - a -> b\n\nDeviations: None\n"), 1)
+        self.assertEqual(found("Ran: x\nEvidence: None\nFiles: a\n"), 0)
+
+    def test_109_a_worker_brief_names_the_acceptance_count_and_a_verifier_brief_none(self):
+        task = self.add_task(notes="Why: reason.\n- [ ] one\n- [ ] two\n- [ ] three")
+        report = self.section(self.brief(task), "REPORT")
+        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3`', report)
+        other = self.running_task()
+        self.add_result(other, "PASS", f"Task: {other}\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(other), "--dry-run").stdout, "REPORT")
+        self.assertNotIn("--acceptance", verify)
 
     def test_107_status_counts_worker_follow_ups_by_label_and_the_mean_attempts(self):
         first = self.add_task("First", attempt=3)

@@ -157,7 +157,7 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
-REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Files|Issues|Deviations|Follow-ups|"
+REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
 FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision")  # decision: a verifier's line
@@ -1370,7 +1370,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     forbidden = [f"- {item}" for item in config["constraints"]["forbidden"] if item.strip()]
     orders = run.orders()
     report = report_path(run, session if kind == "verify" else f"task-{tid}", session)
-    mailbox_arg = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))}" if kind != "verify" else "")
+    worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
+                   if kind != "verify" else "")
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -1385,8 +1386,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
-                          f"check-report {quote(report)}{mailbox_arg}"),
-        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked." if kind != "verify" else ""),
+                          f"check-report {quote(report)}{worker_args}"),
+        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked, and a `PASS` report with fewer "
+                       "`Evidence:` lines than ACCEPTANCE lines." if kind != "verify" else ""),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                           report) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
@@ -4158,6 +4160,12 @@ def follow_ups(body):
     return found
 
 
+def evidence_lines(body):
+    """The non-empty lines of a report's Evidence field, stripped. A line that says None does not count."""
+    lines = (line.strip() for line in report_field(strip_comments(body or ""), "Evidence").splitlines())
+    return [line for line in lines if line and line.rstrip(".").lower() != "none"]
+
+
 def verdict_marker(tid):
     return f"<!-- agentic-team verdict task={tid} -->"
 
@@ -4855,7 +4863,8 @@ def cmd_abandon(run, args):
 
 def cmd_check_report(args):
     """Check a report file before a session files it: a Status: line that STATUS_LINE reads, a Checkpoint: line,
-    and a label on each Follow-ups line (follow_ups). Prints `ok`, or prints one problem per line to stderr and
+    and a label on each Follow-ups line (follow_ups). With --acceptance N, a PASS also needs N lines under
+    `Evidence:` (evidence_lines). Prints `ok`, or prints one problem per line to stderr and
     exits 2. main() calls it before it builds Run: a session runs it in its worktree, which has no
     .agentic-team.local.toml and may not find tg.py, so it needs no config, no Taskgraph and no repository. It
     reads the file and writes nothing."""
@@ -4871,6 +4880,12 @@ def cmd_check_report(args):
         problems.append("no `Status:` line that says PASS, ISSUES or BLOCKED")
     if not CHECKPOINT_LINE.search(body):
         problems.append("no `Checkpoint:` line")
+    status = STATUS_LINE.search(body)
+    if args.acceptance is not None and status and status.group(1) == "PASS":
+        found = len(evidence_lines(body))
+        if found < args.acceptance:
+            problems.append(f"PASS needs one `Evidence:` line per ACCEPTANCE line: found {found}, "
+                            f"ACCEPTANCE has {args.acceptance}")
     for label, line in follow_ups(body):
         if label == "unlabelled":
             problems.append(f"Follow-ups line with no label: `{line}`; start it with one of "
@@ -5121,6 +5136,8 @@ def build_parser():
     p.add_argument("file", help="the report file that the brief's REPORT section names")
     p.add_argument("--mailbox", metavar="CTX", help="a worker's context file: also name a steer of its attempt that "
                    "has no ack (reads Taskgraph through the file's tg.py)")
+    p.add_argument("--acceptance", type=int, metavar="N", help="a PASS report needs at least N non-empty lines "
+                   "under Evidence:, one for each ACCEPTANCE line of the task")
 
     p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,

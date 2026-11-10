@@ -103,7 +103,10 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   `BLOCKED` report.
 - **Verify.** Run every VERIFY command yourself. Check the result against every
   ACCEPTANCE line. Report what you ran and what it showed. A passing build is not proof
-  of behavior.
+  of behavior. Prove each check from this run's output, never from memory: under `Ran:`,
+  give each command with the result line it printed (for example `Ran 605 tests in 162s`
+  and `OK`, or the exit code). A command whose result you did not see in this session did
+  not pass.
 - **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
   findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
 
@@ -180,6 +183,7 @@ Branch: <output of `git branch --show-current`>
 Head: <output of `git rev-parse HEAD`>
 Worktree: <output of `pwd`>
 Ran: <each VERIFY command and its result, one per line>
+Evidence: <one line per ACCEPTANCE line: <acceptance line, short> → <command and result, or path:line>>
 Files: <output files>
 Issues: <every issue you can prove, or None>
 Deviations: <where you departed from the brief, or None>
@@ -192,7 +196,14 @@ Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; bl
   them.
 - `BLOCKED`: you need a decision, access, or input you cannot get.
 
-A task report has no `Verdict:` line. A verifier adds one after `Status:`:
+Before you report `PASS`, write one `Evidence:` line for each ACCEPTANCE line: the
+ACCEPTANCE line in short, then the command and its result, or the `path:line`, that
+proves it. A known gap means `ISSUES`, not `PASS`. A change outside SCOPE goes under
+`Deviations:`. The `check-report` command refuses a `PASS` with fewer `Evidence:` lines
+than ACCEPTANCE lines.
+
+A task report has no `Verdict:` line. A verifier's report keeps its own format: it has no
+`Evidence:` line, and it adds a `Verdict:` line after `Status:`:
 `Verdict: artifact-verified | test-verified | check-only | verify-blocked | verify-failed`.
 A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
 The brief's VERIFY section defines each level for the task's verify kind. Only
