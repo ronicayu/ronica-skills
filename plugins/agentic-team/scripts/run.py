@@ -2400,14 +2400,16 @@ def resume_with(run, task, entry, row, s, text, settle):
     if not find_transcript(run, wt, s.sid, s.row, s.profile)[0]:  # after the stop: DIED is never filed over a live process
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its transcript is gone")
         return "died"
+    if not os.path.isdir(wt):  # a resume outside the worktree would run the worker in the main checkout
+        file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
+        return "died"
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
     # flags the same command wakes the same session with its saved options, hooks included.
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))  # its socket is the old process's: the wake's SessionStart writes a new one
     flags = rowless_flags(run, task, s) if getattr(s, "rowless", False) else []
-    out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile,
-                     cwd=wt if os.path.isdir(wt) else None)
+    out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile, cwd=wt)
     run._sessions = None
     if out.returncode != 0:
         said = first_line(out.stderr.strip() or out.stdout.strip())
@@ -2998,11 +3000,13 @@ def record_in_progress(run, snap, task, unmanaged):
             mailbox_events(run, task, attempt, th, deliver_ok=not prompt and not failed)
             mine = own_sessions(run, tid, "task", attempt)  # a delivery may have stopped or resumed the session
             table = mailbox_table(task)
-            # With no session row at all, the attempt still holds while its transcript exists: `claude rm` removes the row and
-            # keeps the conversation, and a resume brings the worker back. Without the transcript it is dead: DIED, carried.
+            # With no session row at all, the attempt still holds while its transcript and its worktree exist: `claude rm`
+            # removes the row and keeps the conversation, and a resume brings the worker back. Without either it is dead:
+            # DIED, carried. (On CLI 2.1.319 `claude rm` refuses a worktree with unpushed commits and keeps the row; with
+            # --discard-unpushed the worktree goes too.)
             ghost = None if mine else rowless_session(run, task, attempt)
-            alive_somewhere = bool(mine) or bool(ghost and find_transcript(run, task_worktree(run, tid), ghost.sid, ghost.row,
-                                                                              ghost.profile)[0])
+            alive_somewhere = bool(mine) or bool(ghost and os.path.isdir(task_worktree(run, tid)) and find_transcript(
+                run, task_worktree(run, tid), ghost.sid, ghost.row, ghost.profile)[0])  # no worktree: nowhere to resume it
             holds = alive_somewhere and not prompt and not failed and (bool(th.blocking()) or any(
                 (table.get(str(r["id"])) or {}).get("via") in ("pending", "socket") for r in th.unacked()))
             open_steers = [r for r in th.unacked() if r["kind"] == mbx.STEER]

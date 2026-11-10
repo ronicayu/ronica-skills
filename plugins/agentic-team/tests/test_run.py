@@ -8491,6 +8491,25 @@ class DeliveryTest(Base):
         self.ok("launch", str(task), "--profile", "c2")
         self.assertIn(f"Ask #{ask} (OPEN):", self.calls("--bg")[-1][-1])
 
+    def test_r4_2_a_job_whose_worktree_is_gone_is_never_resumed_in_the_main_checkout(self):
+        task = self.worker(status=None, state="done")  # `claude rm --discard-unpushed`: the row and the worktree are gone
+        ask = self.ask()
+        self.c2_agents()
+        shutil.rmtree(self.wt_path("task-1"))
+        died = self.one(self.events("record"), "died")
+        self.assertIn("no session recorded for attempt 1", self.results(task)[-1]["body"])
+        self.assertTrue(self.mailbox_meta(task)[str(ask)]["carried"])
+        self.assertIn("run.py launch", died["next"])
+        self.assertEqual(self.resumes(), [])
+
+    def test_r4_2_a_stopped_worker_whose_worktree_is_gone_files_died_on_answer(self):
+        task = self.worker(status=None, state="stopped")
+        self.ask()
+        shutil.rmtree(self.wt_path("task-1"))
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertIn("its worktree is gone", self.one(events, "died")["detail"])
+        self.assertEqual(self.resumes(), [])
+
     def test_r4_2_a_failed_resume_of_a_removed_job_stays_pending_unless_the_conversation_is_gone(self):
         for said, died in (("Credit balance is too low", False), ("No conversation found with session ID x", True)):
             with self.subTest(said):
