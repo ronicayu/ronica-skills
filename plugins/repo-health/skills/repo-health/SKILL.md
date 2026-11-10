@@ -49,15 +49,27 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/repo-health/scripts/detect.py <repo>   > <s
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/repo-health/scripts/hotspots.py <repo> > <scratch>/hotspots.json
 ```
 
-Both need Python 3.9 or later and nothing else. Read the JSON. For each language in `detect.json`, read its reference file: `references/python.md`, `typescript.md`, `rust.md`, `java.md`, `go.md`, `kotlin.md`, and always `references/shared.md`. Read only the files for languages found. Languages outside these six go under "Not checked".
+Both need Python 3.9 or later and nothing else. Read the JSON. For each language with files (`languages.<lang>.files > 0`), read its reference file: `references/python.md`, `typescript.md` (it covers JavaScript too; detect.py counts `.js`/`.mjs` under `typescript`), `rust.md`, `java.md`, `go.md`, `kotlin.md`. Always read `references/shared.md`. Languages in `other_languages` go under "Not checked". Shell scripts are not a language here: read any that CI or the README runs (for example `scripts/validate.sh`) as task runners.
 
-Branch protection: if `gh auth status` succeeds and the repo has a GitHub remote, run `gh api repos/<owner>/<repo>/rules/branches/<default branch>` (rulesets; readable without admin). Then try `gh api repos/<owner>/<repo>/branches/<default branch>/protection`. A 403 or 404 there means "not visible", not "absent". Record what was visible.
+The repo name in findings is the remote's name (`git remote get-url origin`), else the folder name. `<owner>/<repo>` for `gh` comes from the GitHub remote.
+
+GitHub settings (only if `gh auth status` succeeds and the repo has a GitHub remote):
+- Rulesets: `gh api repos/<owner>/<repo>/rules/branches/<default branch>`. `[]` means no ruleset applies.
+- Classic protection: `gh api repos/<owner>/<repo>/branches/<default branch>/protection`. A 404 whose message is "Branch not protected" means no classic protection. A 403, or a 404 "Not Found", means "not visible" (no admin access); never score that as absent.
+- Optional, same rule for 403/404: `gh api repos/<owner>/<repo> --jq .security_and_analysis` (secret scanning, push protection; shown to admins only) and `gh api "repos/<owner>/<repo>/code-scanning/alerts?state=open" --paginate --jq length` (CodeQL alerts).
 
 ### 3. Set tier 0 levels
 
-Use `references/dimensions.md`. A dimension whose level needs a tier 1 result (level 3 needs a warning count, for example) gets the highest level the tier 0 evidence proves, and the summary says what would decide level 3.
+Use `references/dimensions.md`. Status:
+- A guardrail dimension (`lint`, `types`, `static`, `secrets`, `tests`, `coverage`, `ci`, `setup`, `docs`, `deps`) checked at tier 0 is `checked` with its tier 0 level, even when its tier 1 part did not run; the missing part goes under `not_checked`.
+- A dimension whose only measure is tier 1 or tier 2 (`deadcode`, the four reviews; `coverage` when no config exists) and that was not run: `skipped` with `level: null` when the user did not choose it or the session could not ask; `not_run` with `not_run_reason` when it was chosen but failed.
+- `tier` is the highest tier the dimension's check needs.
+
+A dimension whose level needs a tier 1 result (level 3 needs a warning count, for example) gets the highest level the tier 0 evidence proves, and the summary says what would decide level 3.
 
 Reading `detect.json`:
+- `ci.files[].tools[]` rows carry every CI step that runs the tool (`lines`, `commands`). Use the commands to see which test folders or packages CI covers.
+- `languages.<lang>.test_files` counts test-like files, including helpers and `conftest.py`, so it can be higher than a `test_*.py` count.
 - CI, hook and script matches (`ci.files[].tools`, `precommit.tools`) are not filtered by language: `mvn verify` lists `junit`, `testng` and `kotest` together, and `jest --coverage` also lists `coverage.py`. Every row has `language`; count only rows for the subproject's languages, and check the subproject's dependencies before crediting a test framework.
 - Tools with no config file (`unittest`, `cargo-test`, `go-test`, `go-vet`) appear only in the CI, hook and script matches, never under `subprojects[].categories`.
 - A row with `via` was reached through a script or make target that CI runs (`npm run lint`, `make test`); it counts as run in CI.
@@ -96,7 +108,7 @@ Shape (schema 1):
 
 ```json
 {
-  "schema": 1,
+  "schema": 1, "lang": "zh",
   "repo": "name", "commit": "sha or null", "date": "YYYY-MM-DD",
   "headline": "one or two sentences: the state of the repo and the single most valuable change",
   "subprojects": [{"path": ".", "languages": ["python"]}],
@@ -117,7 +129,9 @@ Shape (schema 1):
 
 `level` is null for metric and review dimensions (`size`, `hotspots`, `structure`, `errors`, `testquality`, `docsaccuracy`); their summary carries the result.
 
-Write prose fields in the user's language. Keep tool names, commands and paths as they are.
+Write prose fields in the user's language and set `"lang"` to it (`"zh"` or `"en"`; `render.py` has headings in these two and uses English for any other value). Keep tool names, commands and paths as they are.
+
+A recommendation's `dimension` is one of the dimension ids in `references/dimensions.md`. Put a subproject path in `subproject` when the recommendation is for one subproject only; the report shows it.
 
 ### 8. Render and report
 
@@ -127,7 +141,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/repo-health/scripts/render.py <findings.jso
 
 `render.py` compares with the newest older `findings-*.json` beside the input, if one exists, and shows each dimension's change.
 
-In the terminal, print: the headline, the top 5 actions (title and first step), the report path. On a first run, add one line: `.repo-health/` is new; add it to `.gitignore` or commit it, the user's choice.
+Pass an absolute `-o` path. In the terminal, print `render.py`'s summary: the headline, the top 5 actions with first steps, the report path. If the report went into a `.repo-health/` that did not exist before, add one line: the folder is new; add it to `.gitignore` or commit it, the user's choice. Skip that line when the output is outside the repo.
 
 ## Ranking recommendations
 
@@ -136,7 +150,7 @@ Each recommendation gets impact and effort. `render.py` puts high impact and sma
 1. **Guardrails before rewrites.** A missing or unenforced lint, test or CI gate ranks above a structure change: it stops new damage cheaply.
 2. **Enforce before add.** Moving an existing tool into CI is small effort and high impact. Recommend it before adding a new tool.
 3. **Hotspots decide where.** Structure, test and error-handling recommendations name hotspot files. A messy file nobody changes is low impact.
-4. **Baseline, then ratchet.** For a repo with many existing warnings, recommend checking new and changed code only (baseline file, `--new-from-rev`, per-directory config) instead of "fix 2,000 warnings". The reference files name each tool's way to do this.
+4. **Baseline, then ratchet.** For a repo with many existing warnings, recommend checking new and changed code only instead of "fix 2,000 warnings". Use only the way the tool's reference file names (a detekt baseline, golangci-lint `--new-from-rev`, ESLint bulk suppressions, mypy per-module overrides); tools differ, and a flag from one tool does not exist in another. When the reference names none, recommend a narrower scope (the hotspot packages first) or a rule subset.
 5. **One tool per job, the ecosystem's usual one.** Do not recommend a second linter where one already covers the job.
 6. **First step is concrete.** A command, a config snippet or a CI step for this ecosystem, ready to paste. Not "consider adding linting".
 

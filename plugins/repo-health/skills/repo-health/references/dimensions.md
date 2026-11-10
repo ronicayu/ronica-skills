@@ -46,8 +46,8 @@ Security-focused analysis beyond the linter: semgrep, CodeQL, SonarQube, bandit,
 ### `tests`: tests (tier 0, tier 1)
 
 - 0: no test files.
-- 1: test files exist, CI does not run them.
-- 2: CI runs them.
+- 1: test files exist, CI does not run them, or CI runs only some of the test suites. The summary names the suites CI skips (compare the folders in `ci.files[].tools[].commands` with the test folders on disk).
+- 2: CI runs all of them.
 - 3: enforced, and the tier 1 run passes, finishes in under ~10 minutes, and no test was skipped without a reason. Report the test-to-source file ratio and the 5 slowest tests if the runner shows them.
 - A suite that fails on a clean checkout is level 2 with a high-impact recommendation: a red suite trains people to ignore it.
 
@@ -63,13 +63,15 @@ Security-focused analysis beyond the linter: semgrep, CodeQL, SonarQube, bandit,
 
 - 0: no CI config.
 - 1: CI exists but does not run on pull requests (push to the default branch only, or manual).
-- 2: CI runs on pull requests and runs at least the tests.
+- 2: CI runs on pull requests and runs at least the tests (all suites, or the summary says which it skips).
 - 3: CI runs on pull requests, runs tests and lint, and the default branch requires the checks to pass (branch protection or a ruleset, if visible). When protection is not visible, the most that can be proven is level 2; say so.
 - List which of lint, format, types, static, tests, coverage each CI file runs.
 
 ### `setup`: setup and reproducibility (tier 0)
 
 - 0: no lockfile for an ecosystem that has one (applications; libraries may skip lockfiles by choice, so say so instead of scoring 0), no toolchain pin, no documented setup.
+- A repo of scripts with no third-party dependencies (standard library only) needs no lockfile: judge it on the toolchain pin and the one-command tasks, and say so in the summary.
+- One-command tasks include shell scripts that CI or the README runs (`scripts/test.sh`, `scripts/validate.sh`), not only Makefile, justfile or `package.json` scripts.
 - 1: a lockfile exists.
 - 2: a lockfile, a toolchain pin (`.python-version`, `requires-python`, `.nvmrc`/`engines`/`packageManager`, `rust-toolchain.toml`, Maven/Gradle wrapper, the `go` directive, `.tool-versions`, `mise.toml`), and one-command tasks (Makefile, justfile, Taskfile, `package.json` scripts, `tox`/`nox`).
 - 3: level 2, and CI installs from the lockfile (`npm ci`, `pnpm install --frozen-lockfile`, `uv sync --locked`, `poetry install` with `poetry check --lock`, `cargo build --locked`, `go mod verify`), or a devcontainer exists.
@@ -78,7 +80,7 @@ Security-focused analysis beyond the linter: semgrep, CodeQL, SonarQube, bandit,
 
 - 0: no README.
 - 1: a README without install, run or test instructions.
-- 2: the README has install, run and test sections (or commands).
+- 2: the README tells a developer how to set up, run and check the code. Commands count wherever they are; heading names do not matter (a "Validation" section that runs `./scripts/validate.sh` is the test instruction). For a library or plugin, "install" can be installing it for use, but the developer must still find how to run its checks.
 - 3: level 2, and a CONTRIBUTING file or a developer guide, and architecture notes or ADRs for a codebase over ~20k lines.
 
 ### `deps`: dependencies (tier 0, tier 1)
