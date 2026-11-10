@@ -7,23 +7,27 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 
 ## Method
 
-1. Write every design document and ADR with the architecture-design skill (`architecture-design:architecture-design`): its template, required sections and reviewer checklist. A template the project already has wins. If the skill does not load, say so under `Deviations:` and still cover: the problem with measurable outcomes, ranked goals and non-goals, at least two options (one the smallest change or doing nothing) with the goal each gives up, the decision with its rejected alternatives, and rollout, rollback and what to measure.
-2. Read the code, data and documents the design touches before you write. Every statement about how the system works today cites `path:line` or a document section that says so.
-3. A choice that needs the operator (product, money, a preference) is an open decision: give your recommendation and its default.
-4. Specify every interface the design adds or changes: inputs, outputs, errors, who calls it, and how it is versioned.
+1. Write every design document and ADR with the architecture-design skill (`architecture-design:architecture-design`): its template, required sections and reviewer checklist. A project template wins. If the skill does not load, say so under `Deviations:` and still cover: the problem with measurable outcomes, ranked goals, options including the smallest change, the decision with rejected alternatives, and rollout and rollback.
+2. Read the code, data and documents the design touches first. Every statement about today's system cites `path:line` or a document section.
+3. A choice that needs the operator (product, money, a preference) is an open decision with your recommendation and its default.
+4. Specify every added or changed interface: inputs, outputs, errors, callers, versioning.
 5. For each external call, state change and concurrent path, say what happens when it fails, times out, retries or runs twice.
-6. Find every lifecycle the design touches, including implicit ones: a status field, a flag or a pair of timestamps that marks progress, a job, queue, retry, lock, lease or session. Model each with the statechart skill (`statechart:statechart`, load it with the Skill tool): a TLA+ spec of the states and rules, checked with TLC. Put the spec, its config and the chart in the document, and list every rule that breaks as an open issue. If the skill does not load, say so under `Deviations:`.
-7. Draw the overview and the main flow as Mermaid diagrams. Check that each renders: with a render tool if you have one, else by syntax; say which under `Ran:`.
-8. Trace each goal to the part of the design that delivers it, in a short table at the end.
+6. Find every lifecycle the design touches, implicit ones too: a status field, progress flags or timestamps, a job, queue, retry, lock, lease or session. Model each with the statechart skill (`statechart:statechart`): a TLA+ spec checked with TLC. Put the spec, config and chart in the document; list each broken rule as open. If the skill does not load, say so under `Deviations:`.
+7. Name the files that several tasks would change at once (large test files, shared tables, registries) and how the design splits them by entry point or moves them out. Generated files (contracts, maps) are generated at check time, not committed.
+8. For a plan in phases, add a start-check table, one row per phase: the test that proves it and why that test fails before the phase, and the files it changes, all inside its task's scope.
+9. Draw the overview and main flow in Mermaid. Check each renders, with a render tool or by syntax; say which under `Ran:`.
+10. End with a goal table: each goal, the mechanism that delivers it, and how it is measured (for example test time, change cost, merge conflicts).
 
 ## Review
 
-Check these in addition to the design-doc method. Report each miss as an issue with the section it is in.
+Check these in addition to the design-doc method. Report each miss as an issue with its section.
 
-1. Goal trace: every ranked goal maps to a named mechanism in the design. A goal with no mechanism, or a mechanism that serves no goal, is an issue.
-2. Interfaces: each added or changed interface lists inputs, outputs and errors. A missing error case is an issue.
-3. Failure behaviour: each external call, state change and concurrent path named in the design has its failure behaviour stated. Name each one that is missing.
-4. Lifecycle: every lifecycle the design touches, implicit ones included, has a statechart-skill model in the document with its TLC result, and each broken rule is listed as open. A lifecycle with no checked model is an issue.
-5. Diagrams: each Mermaid block renders (with a render tool, or by syntax: a valid diagram type, balanced brackets; say which under `Ran:`). A block that fails is an issue.
-6. Open decisions: each choice that needs the operator is listed as open, with a recommendation and a default, not decided silently in the text.
-7. Structure: the document follows the architecture-design template (or the project's own), with each required section present. Name each missing section.
+1. Goal table: every goal has a mechanism and a measure; every mechanism serves a goal.
+2. Interfaces: each lists inputs, outputs and errors.
+3. Failure behaviour: stated for each external call, state change and concurrent path.
+4. Lifecycle: each lifecycle, implicit ones included, has a statechart model with its TLC result, and broken rules are listed as open.
+5. Parallel work: shared hot files are named with a split; no new committed generated file.
+6. Start check: each phase names its test, why it fails first, and files inside its task's scope; the plan does not contradict itself.
+7. Diagrams render (by a tool or by syntax, as stated under `Ran:`).
+8. Open decisions are listed with a recommendation and a default, not decided silently.
+9. Structure: the architecture-design template (or the project's) with each required section present.

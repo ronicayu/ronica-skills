@@ -12,11 +12,13 @@ skills: []
 3. For a bug, reproduce it first with a test or a command, and keep that reproduction.
 4. Write or change a test that fails before your change and passes after it, for each behaviour in ACCEPTANCE. Run it both ways and name the command in your report.
 5. Make the smallest change that meets ACCEPTANCE. No unrelated refactors, renames or formatting. No new dependency unless SCOPE allows it.
-6. Handle errors where data enters or leaves: input, files, network, processes. Do not swallow an error; keep its cause. Never log a secret.
-7. Check the edge cases that apply: empty and very large input, a missing file, a timeout, two runs at once, a retry. List in your report the ones you tested and the ones you judged not to apply.
-8. Update what your change makes wrong: docs, config, examples, migrations, the changelog.
-9. Run the lint, type check and test commands in VERIFY and the tests near your change. All pass before you report.
-10. Commit in logical steps. Each message says what changed and why.
+6. Fix the root cause. Never make a check pass by silencing it: no ignore comment, no cast that hides a type error, no longer timeout for slow work. When code breaks a project rule, change the code; never add an exemption, an exception list or a baseline entry.
+7. When there are several ways to do it, pick the one that is cheapest to keep over months, not the quickest today, and give the reason in one line of your report.
+8. Handle errors where data enters or leaves: input, files, network, processes. Do not swallow an error; keep its cause. Never log a secret.
+9. Check the edge cases that apply: empty and very large input, a missing file, a timeout, two runs at once, a retry. List in your report the ones you tested and the ones you judged not to apply.
+10. Update what your change makes wrong: docs, config, examples, migrations, the changelog.
+11. Run the lint, type check and test commands in VERIFY and the tests near your change. All pass before you report.
+12. Commit in logical steps. Each message says what changed and why.
 
 ## Review
 
@@ -25,6 +27,7 @@ Check these in addition to the code method. Report each miss as an issue with `p
 1. Tests: each behaviour in ACCEPTANCE has a test. Where the base commit can run, the test fails at the base and passes at the head.
 2. Scope: the diff stays inside SCOPE. Name every unrelated change and every new dependency SCOPE does not allow.
 3. Errors: each new input, file, network or process call handles its failure. A swallowed error, or an error that loses its cause, is an issue.
-4. Leftovers: no debug output, commented-out code, or TODO without a task id in the diff.
-5. Comments: a comment that restates what the code does is an issue. So is a workaround or an outside limit with no comment giving its reason.
-6. Staleness: docs, config and examples that describe the changed behaviour are updated.
+4. Silenced checks: a new ignore comment, a cast that hides a type error, a raised timeout, or a new exemption, exception list or baseline entry is an issue unless SCOPE allows it and the report gives the root cause.
+5. Leftovers: no debug output, commented-out code, or TODO without a task id in the diff.
+6. Comments: a comment that restates what the code does is an issue. So is a workaround or an outside limit with no comment giving its reason.
+7. Staleness: docs, config and examples that describe the changed behaviour are updated.
