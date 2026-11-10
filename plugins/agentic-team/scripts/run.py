@@ -1728,14 +1728,21 @@ def verify_mode(run, task):
 
 
 def verify_kind(run, task, strict=True):
-    """"code", "schema" or "design-doc": the kind that launch or adopt stored for the attempt, else the task's verify_kind meta,
-    else its role's, else verify.kind from the config. A stored kind is never worked out again, so a role file that changed
-    or went away cannot fail a later command. strict refuses a bad meta value; record passes strict=False and passes it
-    over. A role problem is never refused here: it reads as no role, with one warn event."""
+    """"code", "schema" or "design-doc": the task's verify_kind meta, else the kind that launch or adopt stored for the
+    attempt, else its role's, else verify.kind from the config. The meta is read live, so the Manager can change it after a
+    launch; the stored kind stands in for the role, so a role file that changed or went away cannot fail a later command.
+    strict refuses a bad meta value; record passes strict=False and passes it over. A role problem is never refused here:
+    it reads as no role, with one warn event."""
+    value = (task.get("meta") or {}).get("verify_kind")
+    if value not in (None, ""):
+        if str(value) in VERIFY_KINDS:
+            return str(value)
+        if strict:
+            raise Refused(f'#{task["id"]} verify_kind must be "code", "schema" or "design-doc", not {value}')
     stored = stored_choice(task)
     if stored and stored.get("verify_kind") in VERIFY_KINDS:
         return stored["verify_kind"]
-    return choose(run, task, strict=False, kind_strict=strict).verify_kind
+    return choose(run, task, strict=False, kind_strict=False).verify_kind
 
 
 def verify_base(run, task, head):

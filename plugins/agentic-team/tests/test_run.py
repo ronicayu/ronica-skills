@@ -5580,6 +5580,16 @@ class RoleTest(Base):
         self.assertIn("design-doc", self.one(events, "verdict")["next"])
         self.assertEqual(self.named(events, "warn"), [])
 
+    def test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind(self):
+        self.role_file("judge", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("launch", str(task))
+        self.pass_report(task)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verify_kind=code")
+        events = self.events("close", str(task))  # code closes on test-verified; the stored design-doc would not
+        self.one(events, "closed")
+
     def test_04_the_verify_kind_comes_from_the_meta_then_the_role_then_the_config(self):
         self.role_file("doc", verify_kind="design-doc")
         cases = (("role", dict(role="doc"), "", "design-doc"), ("meta", dict(role="doc", verify_kind="schema"), "", "schema"),
