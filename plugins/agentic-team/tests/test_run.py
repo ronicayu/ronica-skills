@@ -4555,6 +4555,7 @@ class RunTest(Base):
         with open(exclude) as fh:
             self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
     def test_110_a_scratch_line_that_cannot_be_written_is_a_warning(self):
         exclude = os.path.join(self.root, ".git", "info", "exclude")
         with open(exclude, "w") as fh:
@@ -4601,6 +4602,11 @@ class RunTest(Base):
         mentions = {name: re.findall(r"mktemp|/tmp", body) for name, body in text.items() if re.search(r"mktemp|/tmp", body)}
         self.assertEqual(mentions, {"worker.md": ["mktemp", "/tmp"]})  # only the rule that forbids both
         self.assertIn("Do not use `mktemp`, `/tmp` or another folder outside your worktree", text["worker.md"])
+
+    def test_109_the_worker_report_format_has_an_evidence_line(self):
+        with open(os.path.join(os.path.dirname(HERE), "agents", "worker.md"), encoding="utf-8") as fh:
+            block = re.search(r"```text\n(.*?)```", fh.read(), re.S).group(1)
+        self.assertRegex(block, r"(?m)^Ran: .*\nEvidence: ")
 
     def test_101_a_missing_info_folder_is_created(self):
         shutil.rmtree(os.path.join(self.root, ".git", "info"))
