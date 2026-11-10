@@ -1,6 +1,7 @@
 """Tests for the wrapper scripts scripts/run, scripts/config and scripts/tg.
 
-Run: uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q
+Run: python3.11 plugins/agentic-team/tests/run_parallel.py (all tests, in parallel)
+or: uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q
 """
 
 import os

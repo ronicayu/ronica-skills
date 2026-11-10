@@ -1077,7 +1077,7 @@ other safe folder.
 | `scripts/mailbox.py` | The worker's mailbox commands (`ask`, `inbox`, `ack`, and the `checkin` and `hook` commands that the `--settings` hooks run) and the row helpers that `run.py` shares |
 | `scripts/host.py` | The code host seam: GitHub through `gh`, GitLab through `glab` |
 | `scripts/run.py` | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports |
-| `tests/` | Tests for the scripts, with a fake `claude`, a fake `gh`, and a fake `glab`. Run `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |
+| `tests/` | Tests for the scripts, with a fake `claude`, a fake `gh`, and a fake `glab`. Run them in parallel, the normal gate (about two minutes): `python3.11 plugins/agentic-team/tests/run_parallel.py` (`-j N` sets the worker count, `-k PATTERN` and test names pick a subset). `tests/run_parallel.py` finds the same tests as the serial reference, `python3.11 -m unittest discover -s plugins/agentic-team/tests` (about 25 minutes), and gives the same result. Every test works in its own temporary folders, so tests may run in any order and at the same time; a new test must not use a fixed path, socket name or port. `tests/.durations.json` (git-ignored) keeps the time of each test, to start the slow ones first. The `pytest` command also works: `uv run --python 3.11 --with pytest python -m pytest plugins/agentic-team/tests -q`. |
 
 ## Extending
 
