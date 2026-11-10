@@ -805,7 +805,15 @@ thread holds, carries the open asks and unacked messages, and the hint names `ru
 `abandon`. A process that does not exit after `claude stop` is not a try; the line names its pid and `run.py stop <id>`.
 A missing or stale socket address skips the socket for that try only; a post that fails turns it off for that message.
 `run.py stop` also accepts a parked or failed session that holds an open thread (there is nothing to kill).
-A worker that waits on a permission prompt gets no doorbell and
+`claude rm` removes a job's row and keeps its transcript: a blocking ask with no session row still holds while the
+transcript exists. A delivery then resumes the recorded session id in the worktree with the flags a launch passes
+(`--agent`, `--model`, `--effort`, `--permission-mode`, `--name`, `--settings`; no `--worktree`), because the job's saved
+options went with it, and counts a try; with no transcript `record` files `DIED` and carries the thread. `stop` and
+`abandon` accept such an attempt: `abandon` files the end row (`ABANDONED`) and carries, so `launch --attempt` works.
+A worker that waits on a permission prompt is never sent a doorbell by `steer` or `answer` either (the line names
+`claude attach <id>`). If another run.py holds a task's lock past the wait (`AGENTIC_TEAM_LOCK_SECONDS`, default 120;
+the worker's report command waits 90), `record` prints `locked #<id>: held by another run.py; record skips it this time`
+and goes on with the other tasks. A worker that waits on a permission prompt gets no doorbell and
 no resume: `record` stops it once and files `BLOCKED`. `record` reads each task's rows, meta and session rows again under
 the task's lock, and files no `DIED` or salvaged report while a steer of the attempt has no ack. A blocking
 ask stays open until the worker acks its answer, not merely until an answer row exists, so a worker that was
@@ -927,7 +935,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 27 keys:
+skill. Metadata holds everything else, 28 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -943,6 +951,7 @@ skill. Metadata holds everything else, 27 keys:
 | `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
 | `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
 | `mailbox` | `answer`, `steer`, `record` | A JSON object `{"<row id>": {"kind", "attempt", "via" (socket, resume or pending), "filed", "at", "tries", ...}}` for each `answer` and `steer` row that `run.py` filed, plus `{"kind": "ask", "seen": true}` for an ask that `record` printed. The delivery state of a message is meta, not a row, so a retry adds no row. `launch` drops the entries of earlier attempts; `cleanup` of a merged task and `abandon` remove the key. |
+| `mailbox_ids` | `answer`, `steer` | `{"<attempt>": [row ids]}`: the answer and steer rows that `run.py` filed, which nothing prunes. A later brief pastes only these from an earlier attempt, so a row that a worker filed `--by manager` is never carried as the Manager's. `abandon` keeps it; the cleanup of a merged task removes it. |
 | `cleanup_kept` | `cleanup` | A JSON object `{folder: reason}` for the worktree folders of a merged task that `run.py` kept, so `record` repeats a `kept` line only when its reason changes. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
@@ -955,7 +964,7 @@ request across attempts.
 
 On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state that
 `run.py` writes often on this machine, so that a delivery retry never edits the issue:
-`[projects."<name>".meta]` with `local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox"]`.
+`[projects."<name>".meta]` with `local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]`.
 
 A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
@@ -964,7 +973,7 @@ then id, and the Manager launches them in that order.
 
 ### Upgrading from 0.15.0
 
-Version 0.16.0 lets a worker ask the Manager and lets the Manager answer and steer a running worker, across Claude profiles (see [Messaging](#messaging)): `mailbox.py`, the `answer`, `steer` and `inbox` commands, `ask`, `answer`, `steer` and `ack` result kinds, a MAILBOX brief section, a `[messaging]` table, and the `mailbox` meta. A project that never uses `ask`, `answer` or `steer` keeps today's behaviour, output and exit codes, with two intended exceptions. First, `launch` now passes a `--settings` JSON to each worker (a `SessionStart` check-in hook and a `PostToolUse` pointer hook), writes `.agentic-team/inbox/<task>-<attempt>.ctx.json`, adds the MAILBOX section to the brief, and gives the worker a new report command (`mailbox.py report`, which runs the same `tg result add` after a check that no steer is unacked), so the `claude --bg` command line and the brief text change. Second, the worker's notify step still uses SendMessage, but its `to` is now `uds:<the Manager's inbox socket>` once any `run.py` call in the Manager's Bash has written `.agentic-team/manager.addr` (that makes the line reach a Manager from a worker on any profile), and the bare session name before that. The verifier gets no hooks and no MAILBOX. On the Taskgraph GitHub backend add `"mailbox"` to the `local` list under `[projects."<name>".meta]`. Rules 1 and 2 of "Three rules" changed on purpose; see the README. No migration.
+Version 0.16.0 lets a worker ask the Manager and lets the Manager answer and steer a running worker, across Claude profiles (see [Messaging](#messaging)): `mailbox.py`, the `answer`, `steer` and `inbox` commands, `ask`, `answer`, `steer` and `ack` result kinds, a MAILBOX brief section, a `[messaging]` table, and the `mailbox` meta. A project that never uses `ask`, `answer` or `steer` keeps today's behaviour, output and exit codes, with two intended exceptions. First, `launch` now passes a `--settings` JSON to each worker (a `SessionStart` check-in hook and a `PostToolUse` pointer hook), writes `.agentic-team/inbox/<task>-<attempt>.ctx.json`, adds the MAILBOX section to the brief, and gives the worker a new report command (`mailbox.py report`, which runs the same `tg result add` after a check that no steer is unacked), so the `claude --bg` command line and the brief text change. Second, the worker's notify step still uses SendMessage, but its `to` is now `uds:<the Manager's inbox socket>` once any `run.py` call in the Manager's Bash has written `.agentic-team/manager.addr` (that makes the line reach a Manager from a worker on any profile), and the bare session name before that. The verifier gets no hooks and no MAILBOX. `run.py wait` now reads Taskgraph every 5 seconds (`--tg-interval`; `claude agents` still every `--interval`), and `record` reads `claude agents` once for each task in progress (under that task's lock), not once for the whole command. On the Taskgraph GitHub backend add `"mailbox"` and `"mailbox_ids"` to the `local` list under `[projects."<name>".meta]`. Rules 1 and 2 of "Three rules" changed on purpose; see the README. No migration.
 
 ### Upgrading from 0.14.1
 

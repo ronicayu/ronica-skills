@@ -163,14 +163,29 @@ def unacked_steers(ctx):
     return [r for r in open_messages(rows, meta, ctx["attempt"]) if r["kind"] == STEER]
 
 
+def lock_seconds(default):
+    """How long a lock wait may last: AGENTIC_TEAM_LOCK_SECONDS (a number, for tests and unusual hosts), else `default`."""
+    try:
+        return float(os.environ["AGENTIC_TEAM_LOCK_SECONDS"])
+    except (KeyError, ValueError):
+        return default
+
+
 @contextlib.contextmanager
-def locked(path, seconds=120):
-    """Hold the task's lock file (flock) for the block. run.py takes the same lock around the commands that change a
-    task, so a report cannot be filed between a steer and its delivery. Waits at most `seconds`."""
+def locked(path, seconds=None):
+    """Hold a lock file (flock) for the block. run.py takes the task's lock around the commands that change the task, so
+    a report cannot be filed between a steer and its delivery; it takes a short lock of its own around the
+    stopped-sessions file. Waits at most `seconds` (default 120; Bash's own limit for a command is 120). A lock that
+    cannot be opened is a Fail, not a traceback."""
     import fcntl
     import time
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a+") as fh:
+    seconds = lock_seconds(120) if seconds is None else seconds
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "a+")
+    except OSError as exc:
+        raise Fail(f"cannot open the lock file {path}: {exc.strerror or exc}", 1)
+    with fh:
         end = time.monotonic() + seconds
         while True:
             try:
@@ -342,7 +357,7 @@ def cmd_report(ctx, args):
     import re
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.status):
         raise Fail("--status is one word: PASS, ISSUES or BLOCKED")
-    with locked(ctx["lock"]):
+    with locked(ctx["lock"], lock_seconds(90)):  # under Bash's 120 seconds, so the worker sees this message, not a timeout
         waiting = unacked_steers(ctx)
         if waiting:
             raise Fail("steer " + ", ".join(f"#{r['id']}" for r in waiting) + " has no ack: run the inbox command from "

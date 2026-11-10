@@ -275,6 +275,7 @@ class Run:
         self.host_failed = False
         self._fetched = set()
         self._docker = None  # (what docker_read() returned,) once containers() has asked
+        self.resumed = set()  # (task, attempt) that this command resumed: the CLI's rows may lag, so it holds for the rest of the command
         self.locks = {}  # task id -> how deep this command holds the task's lock (task_lock)
         self.socket_failures, self.socket_off = 0, False  # failed socket posts of this command; two turn them off
 
@@ -576,12 +577,18 @@ def stop_session(run, sid, check=True, profile=None):
     out = run.claude("stop", sid, check=check, profile=profile)
     if out.returncode == 0:
         try:
-            os.makedirs(run.run_dir, exist_ok=True)
-            with open(os.path.join(run.run_dir, STOPPED_FILE), "a", encoding="utf-8") as fh:
-                fh.write(f"{sid}\n")
-        except OSError:
+            with stopped_file_lock(run):  # another task's command may rewrite the file at the same moment
+                with open(os.path.join(run.run_dir, STOPPED_FILE), "a", encoding="utf-8") as fh:
+                    fh.write(f"{sid}\n")
+        except (OSError, mbx.Fail):
             pass  # the 30-minute rule still ends the row
     return out
+
+
+def stopped_file_lock(run):
+    """A short flock of its own around every append to, and rewrite of, the stopped-sessions file. The task locks do not
+    cover it: two tasks' commands, each under its own lock, write the one file."""
+    return mbx.locked(os.path.join(run.run_dir, "locks", "stopped-sessions.lock"), mbx.lock_seconds(10))
 
 
 def own_sessions(run, tid, kind=None, attempt=None):
@@ -817,12 +824,34 @@ def notify_address(run):
     return name if NOTIFY_NAME.fullmatch(name) and not NOTIFY_REF.search(name) else None
 
 
-def manager_socket(run):
-    """The Manager's inbox socket from the run directory's manager.addr, or None. The path is shown in a brief, so it
-    must be one absolute line with no backtick."""
+def recorded_socket(run):
+    """The socket path in the run directory's manager.addr, or None. The path is shown in a brief, so it must be one
+    absolute line with no backtick."""
     addr = mbx.read_addr(os.path.join(run.run_dir, MANAGER_ADDR))
     path = addr.get("socket") if addr else None
     return path if isinstance(path, str) and path.startswith("/") and not re.search(r"[\x00-\x1f\x7f`]", path) else None
+
+
+def socket_accepts(path):
+    """True when something listens on the socket: connect, then close, and send nothing."""
+    import socket
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(2)
+        sock.connect(path)
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def manager_socket(run):
+    """The Manager's inbox socket from manager.addr, when it exists and accepts a connection, else None: a brief names
+    `uds:<path>` only for a live socket, and falls back to the session name when the file is stale (the Manager's session
+    ended, or the file was written by a session that is gone)."""
+    path = recorded_socket(run)
+    return path if path and socket_accepts(path) else None
 
 
 def refresh_manager_addr(run):
@@ -830,7 +859,7 @@ def refresh_manager_addr(run):
     call from another terminal has none and leaves the file as it is, so a new Manager session never leaves the
     workers with an old address."""
     path = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-    if path and path.startswith("/") and path != manager_socket(run):
+    if path and path.startswith("/") and path != recorded_socket(run):
         try:
             mbx.write_addr(os.path.join(run.run_dir, MANAGER_ADDR), path)
         except OSError:
@@ -2069,6 +2098,12 @@ def minutes_since(stamp):
     return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds() / 60
 
 
+def durable_ids(task, attempt):
+    """The ids of the answer and steer rows that run.py listed for an attempt, from the `mailbox_ids` meta."""
+    found = ((task.get("meta") or {}).get("mailbox_ids") or {}).get(str(attempt))
+    return {i for i in found if isinstance(i, int)} if isinstance(found, list) else set()
+
+
 def mailbox_table(task):
     found = (task.get("meta") or {}).get("mailbox")
     return found if isinstance(found, dict) else {}
@@ -2079,12 +2114,13 @@ class Thread:
     when it is by the Manager or the operator and run.py listed its id: a worker can file any row, and `tg` keeps no
     author check."""
 
-    def __init__(self, rows, task, attempt, from_rows=False):
+    def __init__(self, rows, task, attempt, durable=False):
         self.attempt, self.table = attempt, mailbox_table(task)
         mine = [r for r in rows if r.get("attempt") == attempt]
-        # from_rows: the thread of an earlier attempt. Its meta entries are pruned at the next launch, so settled or open
-        # is decided from the answer and ack rows alone; a row by the Manager or the operator counts.
-        listed = ({r["id"] for r in mine if r["kind"] in (mbx.ANSWER, mbx.STEER)} if from_rows
+        # durable: the thread of an earlier attempt. Its `mailbox` entries are pruned at the next launch, so the ids that run.py
+        # listed come from `mailbox_ids`, which nothing prunes. A row that run.py never listed (a worker can file any row
+        # `--by manager`; tg keeps no author check) is never read as the Manager's, however old the attempt.
+        listed = (mbx.listed_ids(task.get("meta")) | durable_ids(task, attempt) if durable
                   else mbx.listed_ids(task.get("meta")))
         self.asks = [r for r in mine if r["kind"] == mbx.ASK]
         self.answers = [r for r in mine if r["kind"] == mbx.ANSWER and r.get("author") in mbx.SENDERS and r["id"] in listed]
@@ -2130,12 +2166,35 @@ def doorbell_text(run, tid, attempt, row):
                            inbox=mailbox_command(run, tid, attempt, "inbox"))
 
 
-def worker_session(run, tid, attempt):
+def recorded_entry(task, attempt):
+    """The newest `sessions` entry that run.py recorded for a task's attempt, or None."""
+    found = [e for e in recorded_sessions(task) if e.get("kind") == "task" and e.get("attempt") == attempt and e.get("id")]
+    return found[-1] if found else None
+
+
+def rowless_session(run, task, attempt):
+    """A Session built from the recorded entry, for an attempt that `claude agents` no longer lists (the job was removed;
+    its transcript stays). It reads as stopped: no process, no status. None when nothing with a full session id was
+    recorded."""
+    entry = recorded_entry(task, attempt)
+    if not entry or not entry.get("sessionId"):
+        return None
+    tid = task["id"]
+    row = {"id": entry["id"], "name": entry.get("name") or "", "cwd": task_worktree(run, tid), "sessionId": entry["sessionId"],
+           "state": "stopped"}
+    s = Session(row, run.wt_dir, {entry["id"]: (tid, "task", attempt, entry.get("worktree") or f"task-{tid}")},
+                entry.get("profile") or DEFAULT_PROFILE)
+    s.rowless = True
+    return s
+
+
+def worker_session(run, tid, attempt, task=None):
     """The session of the attempt that a message goes to: the newest live one, else the newest row (a parked or
-    stopped worker is resumed). None when the attempt has no row."""
+    stopped worker is resumed). With no row at all, the recorded session when `task` is given (see rowless_session);
+    else None."""
     found = own_sessions(run, tid, "task", attempt)
     live = [s for s in found if s.live]
-    return (live or found or [None])[-1]
+    return (live or found or [rowless_session(run, task, attempt) if task else None])[-1]
 
 
 def resume_id(task, s):
@@ -2197,11 +2256,12 @@ def forget_stopped(run, sid):
     """Take a session id out of the stopped-sessions file: it was resumed, so it is not stopped any more."""
     path = os.path.join(run.run_dir, STOPPED_FILE)
     try:
-        with open(path, encoding="utf-8") as fh:
-            kept = [line for line in fh.read().splitlines() if line.strip() and line.strip() != sid]
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("".join(f"{line}\n" for line in kept))
-    except OSError:
+        with stopped_file_lock(run):
+            with open(path, encoding="utf-8") as fh:
+                kept = [line for line in fh.read().splitlines() if line.strip() and line.strip() != sid]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("".join(f"{line}\n" for line in kept))
+    except (OSError, mbx.Fail):
         pass
 
 
@@ -2257,7 +2317,7 @@ def deliver(run, task, row, interrupt=False):
         save_mailbox(run, task, table)
         lower_flag(run, tid, attempt)
         return "carried"
-    s = worker_session(run, tid, attempt)
+    s = worker_session(run, tid, attempt, task)
     if s is not None and s.state == "failed":  # a failed session is never resumed: record ends the attempt
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: session {s.sid} failed{on_profile(s)}; "
                  "record ends the attempt", f"run.py launch {tid} (--profile <name> for another account), or run.py abandon {tid}")
@@ -2271,8 +2331,14 @@ def deliver(run, task, row, interrupt=False):
     if s is None:
         run.emit("deliver-fallback", tid, attempt, None, f"#{row['id']}: no session row for attempt {attempt}; record tries again")
         return settle("pending", "pending")
+    if s.live and s.waiting:
+        # the worker waits on a permission prompt: a post would not reach it, and a stop or resume would lose the prompt. The
+        # row stays pending; record stops a stuck worker once and files BLOCKED.
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the worker waits on a permission prompt "
+                 f"({s.waiting}); no doorbell, no stop and no resume until it is answered", f"claude attach {s.sid}")
+        return "pending"
     alive = bool(s.row.get("pid"))
-    busy = s.live and alive and s.status == "busy" and not s.stuck
+    busy = s.live and alive and s.status in ("busy", "waiting") and not s.stuck  # waiting with no waitingFor still works
     if (run.config["messaging"]["doorbell"] == "socket" and not interrupt and not run.socket_off
             and not entry.get("socket_failed") and s.live and alive):
         path, token, why = socket_address(run, tid, attempt, s)
@@ -2294,6 +2360,23 @@ def deliver(run, task, row, interrupt=False):
     return resume_with(run, task, entry, row, s, text, settle)
 
 
+def rowless_flags(run, task, s):
+    """The flags a launch passes, for a resume of a session whose job is gone: the job's saved options went with it. The same
+    --agent, --model, --effort, --permission-mode, --name and --settings, and no --bg or --worktree (the resume runs in
+    the worktree). With a job present a flag would start a copy, so this is only for a row that is not listed."""
+    entry = recorded_entry(task, wanted_attempt(task)) or {}
+    tier = str((task.get("meta") or {}).get("tier") or "implementation")
+    try:
+        chosen = resolve_model(run.config, tier)
+    except ConfigError:
+        chosen = None
+    model = entry.get("model") or (chosen or {}).get("model") or "sonnet"
+    effort = chosen.get("effort") if chosen and chosen.get("model") == model else None
+    args = session_args(run, f"task-{task['id']}", s.name or entry.get("name") or f"task-{task['id']}", model, effort,
+                        worker_settings(run, task["id"], entry.get("attempt") or wanted_attempt(task)))
+    return [a for i, a in enumerate(args) if a != "--bg" and a != "--worktree" and not (i and args[i - 1] == "--worktree")]
+
+
 GONE_CONVERSATION = re.compile(r"(?i)no (such )?(conversation|session)|(conversation|session)\b[^\n]*not found")
 
 
@@ -2308,22 +2391,22 @@ def resume_with(run, task, entry, row, s, text, settle):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: no full session id on file to resume; "
                  "record tries again")
         return settle("pending", "pending")
-    path = find_transcript(run, wt, s.sid, s.row, s.profile)[0]
-    if not path:
-        file_died(run, task, attempt, s, "the conversation cannot be resumed: its transcript is gone")
-        return "died"
     if s.row.get("pid"):
         stop_session(run, s.sid, check=False, profile=s.profile)
         if not wait_for_exit(run, s):  # not a try: a process that never exits must not spend the cap
             run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: the process (pid {s.row.get('pid')}) did not "
                      "exit after claude stop; record tries again", f"run.py stop {tid}")
             return settle("pending", "pending")
+    if not find_transcript(run, wt, s.sid, s.row, s.profile)[0]:  # after the stop: DIED is never filed over a live process
+        file_died(run, task, attempt, s, "the conversation cannot be resumed: its transcript is gone")
+        return "died"
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
     # flags the same command wakes the same session with its saved options, hooks included.
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))  # its socket is the old process's: the wake's SessionStart writes a new one
-    out = run.claude("--bg", "--resume", session_id, text, check=False, profile=s.profile,
+    flags = rowless_flags(run, task, s) if getattr(s, "rowless", False) else []
+    out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile,
                      cwd=wt if os.path.isdir(wt) else None)
     run._sessions = None
     if out.returncode != 0:
@@ -2345,8 +2428,12 @@ def resume_with(run, task, entry, row, s, text, settle):
         run._sessions = None
         run.emit("deliver-copy", tid, attempt, new, f"#{row['id']}: the resume started a copy {new} of {s.sid}; "
                  "stopped the original")
+        run.resumed.add((tid, attempt))
         return settle("resume", "copy")
+    if getattr(s, "rowless", False) and not any(isinstance(r, dict) and r.get("id") == s.sid for r in run.agents(s.profile)):
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: resumed {s.sid}, but claude agents does not list it yet")
     forget_stopped(run, s.sid)
+    run.resumed.add((tid, attempt))
     lower_flag(run, tid, attempt)
     return settle("resume", "resume")
 
@@ -2373,7 +2460,7 @@ def carried_text(rows, task, attempt):
     earlier = sorted({r["attempt"] for r in rows if isinstance(r.get("attempt"), int) and r["attempt"] < attempt})
     if not earlier:
         return ""
-    th = Thread(rows, task, earlier[-1], from_rows=True)
+    th = Thread(rows, task, earlier[-1], durable=True)
     unacked = {r["id"] for r in th.unacked()}
     parts = []
     for ask in th.asks:
@@ -2388,7 +2475,7 @@ def carried_text(rows, task, attempt):
     if not parts:
         return ""
     return (f"### Open thread of attempt {earlier[-1]}\n\nThese messages were not settled when that attempt ended. "
-            "Apply them to this attempt; they are the Manager's, not the worker's.\n\n" + "\n\n".join(parts))
+            "Apply the answers and the steers to this attempt: they are the Manager's. The asks are the earlier worker's own words.\n\n" + "\n\n".join(parts))
 
 
 DELIVERIES_MAX = 3  # socket posts and resumes of one message that the worker never acked, before record stops trying again
@@ -2487,7 +2574,9 @@ def file_message(run, task, attempt, kind, by, status, body):
     row = run.add_result(task["id"], kind, attempt, by, status, body)
     table = mailbox_table(task)
     table[str(row["id"])] = {"kind": kind, "attempt": attempt, "via": "pending", "filed": utc_stamp(), "at": utc_stamp(), "tries": 0}
-    save_mailbox(run, task, table)
+    ids = {k: list(v) for k, v in ((task.get("meta") or {}).get("mailbox_ids") or {}).items()}
+    ids.setdefault(str(attempt), []).append(row["id"])  # kept after the prune: later briefs read the thread from these
+    run.set_meta(task, mailbox=table, mailbox_ids=ids)
     return row
 
 
@@ -2551,7 +2640,7 @@ def cmd_steer(run, args):
     refuse_legacy(task)
     attempt = refuse_unless_running(task)
     rows = run.results_for(tid)
-    s = worker_session(run, tid, attempt)
+    s = worker_session(run, tid, attempt, task)
     th = Thread(rows, task, attempt)
     verifiers = [v for v in own_sessions(run, tid, "verify") if v.live]
     if verifiers and not (s and s.live):
@@ -2596,12 +2685,15 @@ def cmd_inbox(run, args):
                  f"#{r['id']} {r['kind']} {r['status']} by {r.get('author')}{state}: {text}")
 
 
-def drop_mailbox(run, task):
+def drop_mailbox(run, task, history=True):
     """The run state of a task's mailbox goes with its worktree and sessions (a merge, an abandon): the `mailbox` meta,
-    and the inbox files of its attempts. The message rows stay in Taskgraph, as history."""
+    and the inbox files of its attempts. The message rows stay in Taskgraph, as history. `mailbox_ids` (which ids run.py
+    listed, per attempt) goes with a merge but not with an abandon: a later `launch --attempt` still has to tell the
+    Manager's rows from forged ones."""
     tid = task["id"]
-    if "mailbox" in (task.get("meta") or {}):
-        run.unset_meta(task, "mailbox")
+    gone = [k for k in ("mailbox", "mailbox_ids" if history else None) if k and k in (task.get("meta") or {})]
+    if gone:
+        run.unset_meta(task, *gone)
     folder = inbox_path(run, "")
     for name in (os.listdir(folder) if os.path.isdir(folder) else []):
         if re.fullmatch(rf"{tid}-\d+\.(addr|ctx\.json)|task-{tid}-\d+\.flag", name):
@@ -2906,9 +2998,16 @@ def record_in_progress(run, snap, task, unmanaged):
             mailbox_events(run, task, attempt, th, deliver_ok=not prompt and not failed)
             mine = own_sessions(run, tid, "task", attempt)  # a delivery may have stopped or resumed the session
             table = mailbox_table(task)
-            holds = not prompt and not failed and (bool(th.blocking()) or any(
+            # With no session row at all, the attempt still holds while its transcript exists: `claude rm` removes the row and
+            # keeps the conversation, and a resume brings the worker back. Without the transcript it is dead: DIED, carried.
+            ghost = None if mine else rowless_session(run, task, attempt)
+            alive_somewhere = bool(mine) or bool(ghost and find_transcript(run, task_worktree(run, tid), ghost.sid, ghost.row,
+                                                                              ghost.profile)[0])
+            holds = alive_somewhere and not prompt and not failed and (bool(th.blocking()) or any(
                 (table.get(str(r["id"])) or {}).get("via") in ("pending", "socket") for r in th.unacked()))
             open_steers = [r for r in th.unacked() if r["kind"] == mbx.STEER]
+    if (tid, attempt) in run.resumed:
+        holds = True  # this command just resumed the worker: a row that still reads stopped is not a death
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
@@ -3077,11 +3176,19 @@ def cmd_record(run, args):
     snap = Snapshot(run)
     unmanaged = []
     for task in sorted(snap.in_progress, key=lambda t: t["id"]):
-        with task_lock(run, task["id"]):
-            # What this command read before the lock may be old: an operator's stop, resume, steer or ack can have come
-            # since. Read this task's meta and rows again, and the session rows, so that no DIED, stuck or salvage
-            # decision rests on a row from before the lock.
-            task["meta"] = run.show(task["id"]).get("meta") or {}
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(task_lock(run, task["id"]))
+            except Refused:  # another run.py holds the task past the wait: skip it this time, drain the others
+                run.emit("locked", task["id"], None, None, "held by another run.py; record skips it this time", "run.py record again")
+                continue
+            # What this command read before the lock may be old: an operator's stop, close, resume, steer or ack can have
+            # come since. Read this task's node and rows again, and the session rows, so that no DIED, stuck or salvage
+            # decision rests on a row from before the lock; a task that is no longer in progress is skipped.
+            node = run.show(task["id"])
+            if node["status"] != "in_progress":
+                continue
+            task["meta"] = node.get("meta") or {}
             snap.results[task["id"]] = run.results_for(task["id"])
             run._sessions = None
             host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
@@ -4363,6 +4470,8 @@ def cmd_stop(run, args):
     refuse_legacy(task)
     attempt = wanted_attempt(task)
     found = own_sessions(run, tid, "task", attempt) if attempt is not None else []
+    if attempt is not None and not found and rowless_session(run, task, attempt):
+        found = [rowless_session(run, task, attempt)]  # the job is gone; its recorded session stands for it
     live = [s for s in found if s.live]
     if not live:
         # A parked asker whose process is gone, and a failed session, are not live but still hold an open thread: stop
@@ -4407,8 +4516,15 @@ def cmd_abandon(run, args):
         if s.live:
             record_row(run, task, s, attempt)
             stop_session(run, s.sid, profile=s.profile)
+    rows = run.results_for(tid) if attempt is not None else []
+    if message_rows(rows):
+        if not task_rows(rows, attempt) and Thread(rows, task, attempt).holds():
+            # a parked asker (or a session whose row is gone) holds an open thread and has no live process: abandon ends
+            # the attempt as stop does, so that `launch --attempt` is not refused for an ask nobody can answer
+            run.add_result(tid, "task", attempt, "manager", "ABANDONED", f"Worktree: {task_worktree(run, tid)}\nAbandoned: {args.mode}")
+        carry_thread(run, task, attempt)
     run.edit_meta(tid, abandoned=args.mode)
-    drop_mailbox(run, task)
+    drop_mailbox(run, task, history=False)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or

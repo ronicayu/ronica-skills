@@ -369,6 +369,25 @@ class MailboxTest(unittest.TestCase):
             holder.wait()
             holder.stdout.close()
 
+    def test_r4_6_the_report_lock_wait_is_under_the_bash_limit_and_a_bad_lock_path_is_a_clear_error(self):
+        saved = os.environ.pop("AGENTIC_TEAM_LOCK_SECONDS", None)
+        try:
+            self.assertEqual(mailbox.lock_seconds(90), 90)
+            os.environ["AGENTIC_TEAM_LOCK_SECONDS"] = "1.5"
+            self.assertEqual(mailbox.lock_seconds(90), 1.5)
+        finally:
+            os.environ.pop("AGENTIC_TEAM_LOCK_SECONDS", None)
+            if saved is not None:
+                os.environ["AGENTIC_TEAM_LOCK_SECONDS"] = saved
+        with open(os.path.join(self.dir, "afile"), "w") as fh:
+            fh.write("x")
+        self.write_ctx(lock=os.path.join(self.dir, "afile", "locks", "task-1.lock"))  # a folder cannot be made under a file
+        out = self.report()
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("cannot open the lock file", out.stderr)
+        self.assertNotIn("Traceback", out.stderr)
+        self.assertEqual([r for r in self.rows() if r["kind"] == "task"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
