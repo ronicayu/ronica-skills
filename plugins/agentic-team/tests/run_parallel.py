@@ -45,8 +45,9 @@ def load(start, names, patterns):
     if names:
         suite = unittest.TestSuite()
         for name in names:
-            if name.endswith(".py") or os.sep in name:
-                name = os.path.splitext(os.path.relpath(os.path.abspath(name), start))[0].replace(os.sep, ".")
+            if name.endswith(".py"):  # a test file, from the current folder or from the tests folder
+                path = os.path.abspath(name) if os.path.exists(name) else os.path.join(start, name)
+                name = os.path.splitext(os.path.relpath(path, start))[0].replace(os.sep, ".")
             suite.addTests(loader.loadTestsFromName(name))
     else:
         suite = loader.discover(start)  # the same start directory and pattern as `unittest discover -s tests`
@@ -277,7 +278,7 @@ def main(argv=None):
                        ("expected failures", "xfail"), ("unexpected successes", "xpass")):
         if total[key]:
             infos.append(f"{label}={len(total[key])}")
-    success = not total["failures"] and not total["errors"]
+    success = not (total["failures"] or total["errors"] or total["xpass"])  # as TestResult.wasSuccessful
     stream.write(("OK" if success else "FAILED") + (f" ({', '.join(infos)})" if infos else "") + "\n")
     stream.write("\n10 slowest tests:\n")
     for test_id, seconds in sorted(times.items(), key=lambda kv: -kv[1])[:10]:
