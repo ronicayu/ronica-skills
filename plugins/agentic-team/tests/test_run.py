@@ -1,4 +1,5 @@
-"""Tests for scripts/run.py. Run: "$PY" -m unittest discover plugins/agentic-team/tests
+"""Tests for scripts/run.py. Run: "$PY" plugins/agentic-team/tests/run_parallel.py (in parallel, the normal gate)
+or: "$PY" -m unittest discover -s plugins/agentic-team/tests (serial, the reference)
 
 Each test builds a temporary git repository as the root with a bare origin.git
 beside it, a temporary Taskgraph database, a temporary HOME, the real tg.py from
