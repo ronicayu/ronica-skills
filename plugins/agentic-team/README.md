@@ -456,15 +456,15 @@ session's message or the end of `wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. |
+| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
-| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
+| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
 | `close <id>` | Records the verdict and tokens, runs `tg done`, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
-| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). |
+| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
 | `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--interval` (default 30 seconds), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send that name one line with SendMessage after its `result add`. `--clear` removes the name; with no argument it prints the name. |
@@ -518,7 +518,10 @@ marks a value someone still has to fill in. Never put credentials or secrets
 in either file.
 
 Model values are either a model id (`"opus"`) or a table
-(`{ model = "sonnet", effort = "high" }`). The config has 7 sections and 20 keys.
+(`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
+profile for the sessions of that tier (see [Workers on more than one Claude
+profile](#workers-on-more-than-one-claude-profile)). The config has 7 sections
+and 20 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -560,6 +563,10 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 | `judgement` | model | `"opus"` | Judgement, review, prose readers rely on, long unattended runs. |
 | `verifier` | model | unset | Verification sessions. Unset means a different model from the worker's: `opus`, or `sonnet` if the worker ran on `opus`. |
 | `overrides` | table | `{}` | `[models.overrides]` maps a work type to a model, for example `"data migration" = { model = "opus", effort = "high" }`. Matched case-insensitively before the tiers. A task's `tier` meta may name an override key. |
+
+Any tier or override table may also set `profile = "<name>"` or
+`profile = ["<name>", ...]`. A string tier (`"opus"`) uses the Manager's own
+profile.
 
 ### `[merge]`
 
@@ -641,14 +648,84 @@ brief carries what they need.
 "${CLAUDE_PLUGIN_ROOT}/scripts/config" model "data migration"     # a models.overrides key, else a tier
 ```
 
+A tier that names profiles prints them: `{"model": "haiku", "effort": null, "profile": "api"}`. A tier without
+`profile` prints no `profile` key.
+
 `check` reports a missing file, TOML syntax errors with their line, `"TODO"`
 values, an empty `taskgraph.project`, unknown sections or keys (with the
 closest known key), wrong types (a value outside a fixed choice reads `must be
-one of "local", "pr"`), and invalid time zones. It reads no git state and makes
+one of "local", "pr"`), and invalid time zones. With a `[profiles]` table it also
+reports a profile name that a tier uses and `[profiles]` does not define, a profile
+directory that does not exist, and `default` defined in `[profiles]`, and it runs
+`claude plugin list --json` under each profile and fails when `agentic-team` is
+not installed there (a different version only warns). It reads no git state and makes
 no network call. `get` and `model`
 refuse to answer while `check` fails. Exit codes: 0 OK, 2 config problem, 1
 unexpected error. It needs Python 3.11 or later; the `config` wrapper finds
 one through `scripts/python-path.sh`.
+
+## Workers on more than one Claude profile
+
+One Manager can start its worker and verifier sessions under more than one
+Claude profile (a `CLAUDE_CONFIG_DIR`), for example a subscription profile and
+an API-billed profile, to share the usage between accounts. A model tier names
+the profile, or a list of profiles to balance across. Without a `[profiles]`
+table nothing changes.
+
+```toml
+[profiles]
+# name = the CLAUDE_CONFIG_DIR of that profile; "default" is always the Manager's own environment and needs no entry
+api = "~/.claude-api"
+
+[models]
+mechanical = { model = "haiku", profile = "api" }
+implementation = { model = "sonnet", effort = "high", profile = ["default", "api"] }   # balance: fewest live sessions first
+judgement = "opus"                       # no profile: default
+verifier = { model = "opus", profile = "default" }
+
+[models.overrides]
+"data migration" = { model = "opus", effort = "high", profile = "api" }
+```
+
+- `[profiles]` maps a name to the profile's directory (`~` is expanded). `default` is the Manager's own
+  environment, is always there, and cannot be defined. Paths are machine-specific, so `[profiles]` may live in
+  `.agentic-team.local.toml` while the tiers that use it stay in the tracked file.
+- A tier value without `profile`, and a string tier, use `default`.
+- With a list, `launch` and `verify` pick the listed profile with the fewest live sessions of this project (the
+  count that `max_parallel` uses); a tie goes to the name listed first.
+- `launch --profile NAME` and `verify --profile NAME` override the tier. `--model` replaces the model only; the
+  tier still names the profile.
+- `run.py` writes `"profile": "<name>"` into the `sessions` entry of each session that is not on `default`, and
+  uses that profile for every later call on the session: `claude agents`, `logs`, `stop`, `rm`, and the
+  transcript folder (`<dir>/projects/...`). `claude agents` lists one profile only, so `run.py` reads the list of
+  `default` and of each profile that a `sessions` entry names, and keeps one row when two lists return the same
+  id. `record` and `status` show the profile next to a session that is not on `default`.
+- `claude --bg` under a profile that does not trust the repository refuses with `profile <name> does not trust
+  <repo>: run CLAUDE_CONFIG_DIR=<dir> claude in <repo> once and accept the trust prompt`. `run.py` never changes
+  trust, and writes no `sessions` entry.
+
+Set up each extra profile once, in this order:
+
+1. **Trust the repository.** Run `CLAUDE_CONFIG_DIR=<dir> claude` in the repository and accept the trust prompt.
+   Trust is per profile, and a trusted parent folder does not count.
+2. **Install the plugin.** Plugins are per profile. A worker starts with `--agent agentic-team:worker`, so the
+   profile needs `agentic-team`:
+   `CLAUDE_CONFIG_DIR=<dir> claude plugin marketplace add ronicayu/ronica-skills`, then
+   `CLAUDE_CONFIG_DIR=<dir> claude plugin install agentic-team@ronica-skills`. It does not need `taskgraph`: the
+   brief carries absolute paths to the Manager's `python`, `tg.py` and `run.py`. `config.py check` fails when
+   `agentic-team` is missing in a profile and warns when its version differs from the Manager's.
+3. **Mirror the permission rules.** `run.py` copies no permissions or settings between profiles. A worker
+   profile needs the same permission rules as the Manager's profile for the commands workers run, or workers
+   stop at permission prompts (`record` files them as BLOCKED).
+
+Cost and failure notes:
+
+- A profile on an API key bills per token. A subscription profile draws on its plan's limits. Put a tier on the
+  API profile only when you accept that bill.
+- A profile can fail at the account level, for example `Credit balance too low`. `launch` cannot see it (the
+  session starts); `record` sees an idle session with no result. Check the profile's account, then rerun.
+- Not in this version: moving a running session to another profile, retrying a failed launch on the next
+  profile, and two Managers on one project.
 
 ## Briefs
 
@@ -730,7 +807,7 @@ skill. Metadata holds everything else, 26 keys:
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, and `"profile"` for a session that runs under a profile other than the Manager's own. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
@@ -750,6 +827,10 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.14.1
+
+Version 0.15.0 lets a model tier name a Claude profile (a `CLAUDE_CONFIG_DIR`), so one Manager can start workers and verifiers under more than one account: a `[profiles]` table, a `profile` key on tiers and overrides, `--profile` on `launch` and `verify`, and a `profile` key in a `sessions` entry. A project without a `[profiles]` table sees no change: its `sessions` entries, its `claude` calls and its tables stay as they were. To use a second profile, follow [Workers on more than one Claude profile](#workers-on-more-than-one-claude-profile): trust the repository and install `agentic-team` in that profile, and mirror the permission rules. No migration.
 
 ### Upgrading from 0.14.0
 

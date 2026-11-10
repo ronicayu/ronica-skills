@@ -17,13 +17,18 @@ state and makes no network call; run.py detects the code host from [merge].
     show    print the merged config with defaults, as TOML-like text or JSON
     check   list every problem, or print `ok`
     model   resolve a tier or a models.overrides key to
-            {"model": ..., "effort": ...}
+            {"model": ..., "effort": ...}; a tier that names Claude
+            profiles adds "profile": a name or a list of names
+
+[profiles] is optional: name = the CLAUDE_CONFIG_DIR of a second Claude profile.
+`check` also runs `claude plugin list --json` under each profile and fails
+when agentic-team is not installed there. Without [profiles] nothing changes.
 
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
 
-Python callers (run.py) may import load(root), problems(config) and
-resolve_model(config, name).
+Python callers (run.py) may import load(root), problems(config),
+resolve_model(config, name) and profile_path(config, name).
 """
 
 import argparse
@@ -31,6 +36,7 @@ import datetime
 import difflib
 import json
 import os
+import subprocess
 import sys
 
 try:
@@ -47,6 +53,9 @@ TRACKED = ".agentic-team.toml"
 LOCAL = ".agentic-team.local.toml"
 TODO = "TODO"
 TIERS = ("mechanical", "implementation", "judgement", "verifier")
+PROFILES = "profiles"  # an optional table: profile name -> CLAUDE_CONFIG_DIR; the names are free, so it is not in SCHEMA
+DEFAULT_PROFILE = "default"  # the Manager's own environment; reserved, never defined in [profiles]
+PLUGIN_NAME = "agentic-team"
 
 # Ignored paths that run.py may delete with a merged worktree: dependencies, environments, caches, build output
 # and operating-system files that a command rebuilds. Nothing that can be data (an .env file, logs, a database).
@@ -129,8 +138,8 @@ TYPE_NAMES = {
     "posint": "a positive integer",
     "bool": "true or false",
     "timezone": "an IANA time zone name",
-    "model": 'a model id or { model = "...", effort = "..." }',
-    "model?": 'a model id or { model = "...", effort = "..." }',
+    "model": 'a model id or { model = "...", effort = "...", profile = "..." }',
+    "model?": 'a model id or { model = "...", effort = "...", profile = "..." }',
     "overrides": 'a table of "work type" = model',
 }
 
@@ -192,6 +201,10 @@ def unknown_keys(raw, source):
     """Problems for sections and keys in one file that SCHEMA lacks."""
     found = []
     for section, body in raw.items():
+        if section == PROFILES:
+            if not isinstance(body, dict):
+                found.append(f"{source}: {section} must be a table ([{section}])")
+            continue
         if section not in SCHEMA:
             if isinstance(body, dict):
                 found.append(f"{source}: unknown section [{section}]{suggest(section, list(SCHEMA))}")
@@ -208,14 +221,30 @@ def unknown_keys(raw, source):
     return found
 
 
+def normalize_profile(value):
+    """A profile name or a non-empty list of names, else None."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value):
+        return [v.strip() for v in value]
+    return None
+
+
 def normalize_model(value):
-    """Return {"model", "effort"} for a string or table, else None."""
+    """Return {"model", "effort"} for a string or table, else None. A table may add "profile" (a name or a list of
+    names); the key is there only when the table sets it, so a config without profiles reads as it always did."""
     if isinstance(value, str) and value.strip():
         return {"model": value.strip(), "effort": None}
     if isinstance(value, dict) and isinstance(value.get("model"), str) and value["model"].strip():
         effort = value.get("effort")
         if effort is None or isinstance(effort, str):
-            return {"model": value["model"].strip(), "effort": effort or None}
+            found = {"model": value["model"].strip(), "effort": effort or None}
+            if "profile" in value:
+                profile = normalize_profile(value["profile"])
+                if profile is None:
+                    return None
+                found["profile"] = profile
+            return found
     return None
 
 
@@ -259,6 +288,8 @@ def load(root="."):
                 value = {k: normalize_model(v) or v for k, v in value.items()}
             data[section][key] = value
 
+    if isinstance(merged.get(PROFILES), dict):  # present only when the project sets it
+        data[PROFILES] = dict(merged[PROFILES])
     sessions = data["sessions"]
     if sessions["timezone"] == "":
         sessions["timezone"] = system_timezone()
@@ -344,13 +375,127 @@ def problems(config):
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")
+    return found + profile_problems(config)
+
+
+def tier_profiles(value):
+    """The profile names a tier value lists: [] for none (the Manager's own profile)."""
+    profile = value.get("profile") if isinstance(value, dict) else None
+    return [profile] if isinstance(profile, str) else list(profile or [])
+
+
+def profile_problems(config):
+    """Problems with [profiles] and with the tiers that name a profile. Reads the file system, runs nothing."""
+    defined = config.get(PROFILES) or {}
+    found = []
+    for name, path in defined.items():
+        dotted = f"profiles.{name}"
+        if name == DEFAULT_PROFILE:
+            found.append(f'{dotted}: "{DEFAULT_PROFILE}" is the Manager\'s own profile and is reserved; '
+                         "remove it from [profiles]")
+        elif not isinstance(path, str) or not path.strip():
+            found.append(f"{dotted} must be the CLAUDE_CONFIG_DIR of the profile, a non-empty string, not {json.dumps(path)}")
+        elif not os.path.isdir(os.path.expanduser(path)):
+            found.append(f"{dotted}: directory {path} does not exist; run claude once with "
+                         f"CLAUDE_CONFIG_DIR={path} to create it, or fix the path")
+    tiers = [(f"models.{tier}", config["models"][tier]) for tier in TIERS]
+    tiers += [(f"models.overrides.{key}", value) for key, value in config["models"]["overrides"].items()]
+    for dotted, value in tiers:
+        for name in tier_profiles(value):
+            if name != DEFAULT_PROFILE and name not in defined:
+                found.append(f"{dotted} uses profile {name!r}, which [profiles] does not define"
+                             + (suggest(name, list(defined)) if defined else
+                                f'; add {name} = "<CLAUDE_CONFIG_DIR>" under [profiles]'))
     return found
+
+
+def profile_path(config, name):
+    """The expanded CLAUDE_CONFIG_DIR of a profile, or None for the Manager's own (`default`, or no name)."""
+    if not name or name == DEFAULT_PROFILE:
+        return None
+    path = (config.get(PROFILES) or {}).get(name)
+    if not isinstance(path, str) or not path.strip():
+        raise ConfigError(f"no profile named {name!r} in [profiles]"
+                          + suggest(name, list(config.get(PROFILES) or {})))
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def manager_version():
+    try:
+        with open(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def installed_plugin(listing):
+    """The entry for agentic-team in the output of `claude plugin list --json`, or None. The shape is read loosely:
+    any object in the JSON whose name or id is agentic-team or agentic-team@<marketplace> is the entry, and so is the
+    value under a key of that name (the shape of the plugin registry file, installed_plugins.json: a list of
+    entries per plugin)."""
+    stack = [listing]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in ("name", "id"):
+                label = item.get(key)
+                if isinstance(label, str) and label.split("@", 1)[0] == PLUGIN_NAME:
+                    return item
+            for key, value in item.items():
+                if isinstance(key, str) and key.split("@", 1)[0] == PLUGIN_NAME:
+                    entries = [v for v in value if isinstance(v, dict)] if isinstance(value, list) else [value]
+                    entries = [v for v in entries if isinstance(v, dict)]
+                    return next((v for v in entries if v.get("version")), entries[0] if entries else {})
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
+def plugin_problems(config):
+    """(problems, warnings) from `claude plugin list --json` under each profile in [profiles]. A profile needs the
+    agentic-team plugin for `--agent agentic-team:worker`; the brief holds absolute paths to the Manager's run.py
+    and tg.py, so no other plugin is needed."""
+    found, warnings = [], []
+    mine = manager_version()
+    for name in (config.get(PROFILES) or {}):
+        try:
+            directory = profile_path(config, name)
+        except ConfigError:
+            continue
+        if name == DEFAULT_PROFILE or not os.path.isdir(directory):
+            continue  # profile_problems said so
+        install = (f"CLAUDE_CONFIG_DIR={directory} claude plugin marketplace add ronicayu/ronica-skills; "
+                   f"CLAUDE_CONFIG_DIR={directory} claude plugin install {PLUGIN_NAME}@ronica-skills")
+        try:
+            out = subprocess.run(["claude", "plugin", "list", "--json"], capture_output=True, text=True,
+                                 env={**os.environ, "CLAUDE_CONFIG_DIR": directory})
+        except FileNotFoundError:
+            found.append(f"profiles.{name}: cannot run claude to check its plugins; put claude on PATH")
+            continue
+        try:
+            entry = installed_plugin(json.loads(out.stdout)) if out.returncode == 0 else None
+        except ValueError:
+            entry = None
+        if entry is None:
+            found.append(f"profiles.{name}: the {PLUGIN_NAME} plugin is not installed in {directory}; run: {install}")
+            continue
+        version = entry.get("version")
+        if mine and version and version != mine:
+            warnings.append(f"profiles.{name}: {PLUGIN_NAME} {version} is installed there, the Manager runs {mine}")
+    return found, warnings
 
 
 # ------------------------------------------------------------------ lookup
 
 def lookup(config, dotted):
     section, _, rest = dotted.partition(".")
+    if section == PROFILES and PROFILES in config:
+        if not rest:
+            return config[PROFILES]
+        if rest not in config[PROFILES]:
+            raise ConfigError(f"unknown key {dotted}{suggest(rest, list(config[PROFILES]))}")
+        return config[PROFILES][rest]
     if section not in SCHEMA:
         raise ConfigError(f"unknown key {dotted}{suggest(dotted, ALL_KEYS + list(SCHEMA))}")
     value = config[section]
@@ -423,6 +568,10 @@ def show_text(config):
             lines.append(f"\n[{name}]")
             lines += [f"{toml_key(k)} = {toml_value(v)}" for k, v in table.items()]
         lines.append("")
+    if config.get(PROFILES):
+        lines.append(f"[{PROFILES}]")
+        lines += [f"{toml_key(k)} = {toml_value(v)}" for k, v in config[PROFILES].items()]
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -455,6 +604,12 @@ def main(argv=None):
     try:
         if args.command == "check":
             found = problems(config)
+            warnings = []
+            if config.get(PROFILES) and not getattr(config, "missing", False):
+                more, warnings = plugin_problems(config)
+                found += more
+            for warning in warnings:
+                print(f"config.py: warning: {warning}", file=sys.stderr)
             if found:
                 print("\n".join(found))
                 sys.exit(2)
