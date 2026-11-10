@@ -5434,6 +5434,339 @@ class RunTest(Base):
                       self.status_sections("--since", "2099-01-01")["Follow-ups by label"])
 
 
+class RoleTest(Base):
+    """agentic-team 0.17.0: a task names a role (its `role` meta, else [roles] default); the role adds a method to the worker
+    brief and review checks to the verifier brief, and supplies the task's default tier and verify kind."""
+
+    def role_file(self, name, method="Method text of {name}.", review="Review text of {name}.", **front):
+        """A project role file. `front` overrides the frontmatter keys (a value None leaves the key out); `method` or
+        `review` None leaves the section out."""
+        keys = {"fits": f"tasks for the {name} tests", "tier": None, "verify_kind": None, "skills": None, **front}
+        lines = ["---"] + [f"{k}: {v}" for k, v in keys.items() if v is not None] + ["---", ""]
+        if method is not None:
+            lines += ["## Method", "", method.format(name=name), ""]
+        if review is not None:
+            lines += ["## Review", "", review.format(name=name), ""]
+        folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{name}.md")
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        return path
+
+    def bg_flag(self, flag, call=-1):
+        argv = self.calls("--bg")[call]
+        return argv[argv.index(flag) + 1] if flag in argv else None
+
+    def verify_text(self, task, *extra):
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\nFiles: out.txt\n")
+        return self.ok("verify", str(task), "--dry-run", *extra).stdout
+
+    def refused(self, *args, **kw):
+        out = self.run_cmd(*args, **kw)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        return out.stderr
+
+    # --- the briefs
+
+    def test_01_the_worker_brief_gets_the_method_and_the_verifier_brief_the_review(self):
+        path = self.role_file("designer", skills="[alpha:one, beta:two]")
+        task = self.add_task(role="designer")
+        role = self.section(self.brief(task), "ROLE")
+        self.assertTrue(role.startswith(f"Role: designer ({path})."), role)
+        self.assertIn("ROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS.", role)
+        self.assertIn("Load these skills with the Skill tool before you start: alpha:one, beta:two. If one does not load, "
+                      "say so under Deviations: and follow the method below.", role)
+        self.assertTrue(role.endswith("Method text of designer."), role)
+        self.assertNotIn("Review text", role)
+        running = self.running_task(role="designer")
+        text = self.verify_text(running)
+        role = self.section(text, "ROLE")
+        self.assertEqual(role, f"Task role: designer ({path}). Check these in addition to the method under VERIFY:\n\n"
+                               "Review text of designer.")
+        self.assertNotIn("Method text", text)
+        self.assertNotIn("Load these skills", text)
+
+    def test_01_a_role_with_no_review_says_so_in_the_verifier_brief(self):
+        self.role_file("plain", review=None)
+        self.assertEqual(self.section(self.verify_text(self.running_task(role="plain")), "ROLE"),
+                         "Task role: plain. No review checks.")
+
+    def test_02_no_role_reads_none_between_autonomy_and_standing_orders(self):
+        worker, verifier = self.brief(self.add_task()), self.verify_text(self.running_task())
+        for text in (worker, verifier):
+            self.assertEqual(self.section(text, "ROLE"), "None.")
+            self.assertLess(text.index("## AUTONOMY"), text.index("## ROLE"))
+            self.assertLess(text.index("## ROLE"), text.index("## STANDING ORDERS"))
+        self.assertNotIn("Role:", worker)
+
+    def test_11_a_role_with_no_skills_has_no_skills_paragraph(self):
+        for text in (self.brief(self.add_task(role="software-engineer")), self.brief(self.add_task(role="architect"))):
+            self.assertTrue(self.section(text, "ROLE").startswith("Role: "))
+        engineer = self.section(self.brief(self.add_task(role="software-engineer")), "ROLE")
+        architect = self.section(self.brief(self.add_task(role="architect")), "ROLE")
+        self.assertNotIn("Load these skills", engineer)
+        self.assertIn("Load these skills with the Skill tool before you start: ", architect)
+
+    def test_11_a_role_with_an_empty_skills_list_has_no_skills_paragraph(self):
+        self.role_file("bare", skills="[]")
+        self.assertNotIn("Load these skills", self.section(self.brief(self.add_task(role="bare")), "ROLE"))
+
+    # --- tier and verify kind
+
+    def test_03_the_tier_comes_from_the_flag_then_the_meta_then_the_role(self):
+        self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        cases = ((dict(role="judge"), (), "opus", "judgement", "role judge"),
+                 (dict(role="judge", tier="mechanical"), (), "haiku", "mechanical", "meta"),
+                 (dict(role="judge", tier="mechanical"), ("--tier", "implementation"), "sonnet", "implementation", "--tier"),
+                 (dict(role="judge"), ("--tier", "mechanical"), "haiku", "mechanical", "--tier"),
+                 (dict(), (), "sonnet", "implementation", "default"))
+        for meta, flags, model, tier, source in cases:
+            with self.subTest(meta=meta, flags=flags):
+                self.fresh()
+                self.role_file("judge", tier="judgement", verify_kind="design-doc")
+                task = self.add_task(**meta)
+                events = self.events("launch", str(task), *flags)
+                self.assertEqual(self.bg_flag("--model"), model)
+                detail = self.one(events, "launched")["detail"]
+                self.assertIn(f"tier {tier} ({source})", detail)
+                if meta.get("role") and source != "role judge":
+                    self.assertIn("; role judge", detail)
+                entry = self.meta(task)["sessions"][0]
+                want = "design-doc" if meta.get("role") else "code"
+                self.assertEqual((entry["role"], entry["tier"], entry["verify_kind"]),
+                                 (meta.get("role"), tier, want))
+
+    def test_03_the_launch_line_in_text_mode_names_the_role(self):
+        self.role_file("judge", tier="judgement")
+        out = self.ok("launch", str(self.add_task(role="judge"))).stdout
+        self.assertIn("tier judgement (role judge)", out)
+
+    def test_03_adopt_stores_the_role_and_close_still_finds_no_session(self):
+        tip = self.feature_branch("feat")  # before the role file: a commit would take the file along
+        self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        (entry,) = self.meta(task)["sessions"]
+        self.assertEqual((entry["kind"], entry["attempt"], entry["role"], entry["tier"], entry["verify_kind"]),
+                         ("task", 1, "judge", "judgement", "design-doc"))
+        self.assertNotIn("id", entry)
+        os.remove(os.path.join(self.root, ".claude", "agentic-team", "roles", "judge.md"))
+        closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertEqual(self.one(closed, "verdict")["detail"], "test-verified; not closed")  # the stored design-doc kind
+        self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
+
+    def test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify(self):
+        path = self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("launch", str(task))
+        wt, head = self.pass_report(task)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        for damage in ("broken", "deleted"):
+            with self.subTest(damage):
+                if damage == "broken":
+                    with open(path, "w") as fh:
+                        fh.write("no frontmatter at all\n")
+                else:
+                    os.remove(path)
+                for command in (("record",), ("status",)):
+                    self.ok(*command)
+                self.assertEqual(self.named(self.events("record"), "warn"), [])  # the stored values are used: nothing to warn about
+                err = self.refused("verify", str(task), "--again")
+                self.assertIn("no role named 'judge'" if damage == "deleted" else f"role file {path}: ", err)
+                self.assertIn("available roles:", err)
+        events = self.events("close", str(task))  # stored design-doc: test-verified does not close
+        self.assertEqual(self.one(events, "verdict")["detail"], "test-verified; not closed")
+        self.assertIn("design-doc", self.one(events, "verdict")["next"])
+        self.assertEqual(self.named(events, "warn"), [])
+
+    def test_04_the_verify_kind_comes_from_the_meta_then_the_role_then_the_config(self):
+        self.role_file("doc", verify_kind="design-doc")
+        cases = (("role", dict(role="doc"), "", "design-doc"), ("meta", dict(role="doc", verify_kind="schema"), "", "schema"),
+                 ("config", dict(), '[verify]\nkind = "schema"\n', "schema"),
+                 ("role over config", dict(role="doc"), '[verify]\nkind = "schema"\n', "design-doc"))
+        for label, meta, extra, kind in cases:
+            with self.subTest(label):
+                self.fresh()
+                self.role_file("doc", verify_kind="design-doc")
+                self.write_config(extra)
+                text = self.verify_text(self.running_task(**meta))
+                self.assertIn(f"### Method: {kind}", self.section(text, "VERIFY"))
+
+    # --- lookup
+
+    def test_05_a_project_file_overrides_the_plugin_file_and_a_project_role_is_added(self):
+        path = self.role_file("architect", fits="the project's own architect", method="Project architect method.")
+        self.role_file("solo", fits="only in this project")
+        text = self.section(self.brief(self.add_task(role="architect")), "ROLE")
+        self.assertIn(f"Role: architect ({path}).", text)
+        self.assertTrue(text.endswith("Project architect method."))
+        self.assertNotIn("Load these skills", text)  # the plugin file's skills are not merged in
+        self.assertTrue(self.section(self.brief(self.add_task(role="solo")), "ROLE").endswith("Method text of solo."))
+        rows = {r["name"]: r for r in json.loads(self.ok("roles", pre=["--json"]).stdout)}
+        self.assertEqual({n: r["source"] for n, r in rows.items()},
+                         {"architect": "project, overrides plugin", "solo": "project", "software-engineer": "plugin"})
+        self.assertEqual(rows["architect"]["fits"], "the project's own architect")
+        text = self.ok("roles").stdout
+        self.assertIn("role: architect (project, overrides plugin); fits: the project's own architect; tier -; verify kind -; skills -", text)
+        self.assertIn("role: software-engineer (plugin); fits: code changes", text)
+        self.assertIn("role: solo (project); fits: only in this project", text)
+
+    def test_05_the_roles_command_shows_each_default(self):
+        self.role_file("full", tier="judgement", verify_kind="schema", skills="[a:b, c]")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "full")
+        self.assertEqual((row["tier"], row["verify_kind"], row["skills"], row["error"]), ("judgement", "schema", ["a:b", "c"], None))
+        self.assertIn("tier judgement; verify kind schema; skills a:b, c", self.ok("roles").stdout)
+
+    def test_06_an_unknown_role_refuses_launch_and_verify_and_only_warns_in_record(self):
+        self.role_file("known")
+        task = self.add_task(role="nosuch")
+        err = self.refused("launch", str(task))
+        self.assertIn("no role named 'nosuch'", err)
+        self.assertIn("available roles: architect (plugin), known (project), software-engineer (plugin)", err)
+        self.assertEqual(self.calls("--bg"), [])
+        running = self.running_task(role="nosuch")
+        self.pass_report(running)
+        err = self.refused("verify", str(running), "--dry-run")
+        self.assertIn("no role named 'nosuch'", err)
+        self.assertIn("available roles:", err)
+        events = self.events("record")
+        warns = [e for e in self.named(events, "warn") if e["task"] == running]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("no role named 'nosuch'", warns[0]["detail"])
+        self.assertIn("read as no role", warns[0]["detail"])
+
+    def test_06_an_unknown_default_role_refuses_launch(self):
+        self.write_config('[roles]\ndefault = "nosuch"\n')
+        self.assertIn("[roles] default: no role named 'nosuch'", self.refused("launch", str(self.add_task())))
+
+    def test_07_a_broken_role_file_is_refused_with_its_path_and_the_problem(self):
+        cases = (("no fits", dict(fits=None), "no `fits` line"),
+                 ("no method", dict(method=None), "no ## Method section"),
+                 ("an empty method", dict(method="  "), "no ## Method section, or it is empty"),
+                 ("a bad tier", dict(tier="poetry"), "no tier or models.overrides entry named 'poetry'"),
+                 ("a tier with no model", dict(tier="verifier"), "tier 'verifier' has no model"),
+                 ("a bad verify kind", dict(verify_kind="essay"), "verify_kind must be one of code, schema, design-doc"),
+                 ("an unknown key", dict(color="blue"), "unknown key 'color'"),
+                 ("skills without brackets", dict(skills="a:b"), "skills must be a list in brackets"),
+                 ("an unclosed list", dict(skills="[a:b"), "a list has no closing ]"),
+                 ("a bad skill name", dict(skills="[a:b, c d]"), "'c d' is not a skill name"),
+                 ("text after a list", dict(skills="[a] b"), "text after the closing ]"))
+        for label, front, problem in cases:
+            with self.subTest(label):
+                self.fresh()
+                path = self.role_file("bad", **front)
+                task = self.add_task(role="bad")
+                err = self.refused("launch", str(task))
+                self.assertIn(f"role file {path}: ", err)
+                self.assertIn(problem, err)
+                self.assertIn("available roles:", err)
+                self.assertEqual(self.calls("--bg"), [])
+                out = self.run_cmd("roles")
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertIn(f"role-broken: bad (project): {path}: ", out.stdout)
+                self.assertIn(problem, out.stdout)
+                self.assertIn("software-engineer (plugin)", out.stdout)  # the good roles are still listed
+                rows = json.loads(self.run_cmd("roles", pre=["--json"]).stdout)
+                self.assertIn(problem, next(r for r in rows if r["name"] == "bad")["error"])
+
+    def test_07_a_file_with_no_frontmatter_and_a_bad_file_name_are_broken(self):
+        folder = os.path.dirname(self.role_file("ok"))
+        with open(os.path.join(folder, "plain.md"), "w") as fh:
+            fh.write("## Method\n\ntext\n")
+        with open(os.path.join(folder, "Bad Name.md"), "w") as fh:
+            fh.write("---\nfits: x\n---\n\n## Method\n\ntext\n")
+        out = self.run_cmd("roles")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("plain (project)", out.stdout)
+        self.assertIn("must start with a --- line", out.stdout)
+        self.assertIn("the file name must be lowercase letters, digits and -", out.stdout)
+        self.assertIn("2 role files broken", out.stderr)
+
+    def test_07_the_frontmatter_reads_colons_comments_and_blank_lines(self):
+        self.role_file("tidy", fits="code: features, fixes   # a comment", tier="judgement  # why", skills="[a:b]   # two\n\n# note")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "tidy")
+        self.assertEqual((row["fits"], row["tier"], row["skills"]), ("code: features, fixes", "judgement", ["a:b"]))
+
+    # --- [roles] default
+
+    def test_08_the_default_role_applies_to_a_task_with_no_role_and_the_meta_beats_it(self):
+        self.role_file("first")
+        self.role_file("second")
+        self.write_config('[roles]\ndefault = "first"\n')
+        self.assertTrue(self.section(self.brief(self.add_task()), "ROLE").endswith("Method text of first."))
+        self.assertTrue(self.section(self.brief(self.add_task(role="second")), "ROLE").endswith("Method text of second."))
+        self.assertTrue(self.section(self.brief(self.add_task(role='""')), "ROLE").endswith("Method text of first."))  # an empty meta is no role
+
+    def test_08_the_default_role_supplies_the_tier(self):
+        self.role_file("first", tier="mechanical")
+        self.write_config('[roles]\ndefault = "first"\n')
+        self.ok("launch", str(self.add_task()))
+        self.assertEqual(self.bg_flag("--model"), "haiku")
+
+    # --- size
+
+    def test_09_a_long_project_role_warns_and_the_shipped_roles_do_not(self):
+        words = lambda n: " ".join(["word"] * n)  # noqa: E731
+        self.role_file("long", method=words(400), review=words(201))
+        self.role_file("edge", method=words(400), review=words(200))
+        task = self.add_task(role="long")
+        events = self.events("launch", str(task), "--dry-run")
+        (warn,) = self.named(events, "warn")
+        self.assertIn("role long", warn["detail"])
+        self.assertIn("is 601 words; over 600 words", warn["detail"])
+        self.assertEqual(self.named(self.events("launch", str(self.add_task(role="edge")), "--dry-run"), "warn"), [])
+        events = self.events("launch", str(task))  # a real launch continues
+        self.assertEqual(len(self.named(events, "warn")), 1)
+        self.assertEqual(len(self.named(events, "launched")), 1)
+        running = self.running_task(role="long")
+        self.add_result(running, "PASS", f"Task: {running}\nStatus: PASS\nHead: {SHA_A}\n")
+        verifying = self.events("verify", str(running), "--dry-run")
+        self.assertEqual(len(self.named(verifying, "warn")), 1)
+        for name in ("architect", "software-engineer"):
+            events = self.events("launch", str(self.add_task(role=name)), "--dry-run")
+            self.assertEqual(self.named(events, "warn"), [], name)
+
+    def test_10_the_shipped_roles_parse_and_stay_under_the_size_limit(self):
+        import run as runner
+        fake = types.SimpleNamespace(config=config.load(self.root))
+        folder = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles")
+        names = sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md"))
+        self.assertEqual(names, ["architect", "software-engineer"])
+        for name in names:
+            with self.subTest(name):
+                role = runner.Role(name, os.path.join(folder, name + ".md"), "plugin")
+                runner.parse_role(fake, role)
+                self.assertIsNone(role.error)
+                self.assertTrue(role.fits)
+                self.assertTrue(role.method)
+                self.assertTrue(role.review)
+                self.assertLess(role.words, 600)
+        self.assertEqual(json.loads(self.ok("roles", pre=["--json"]).stdout)[0]["error"], None)
+
+    # --- the ask cap
+
+    def test_12_the_ask_cap_takes_the_resolved_tier(self):
+        self.role_file("sweeper", tier="mechanical")
+        for meta, want in ((dict(role="sweeper"), 0), (dict(role="sweeper", asks=2), 2), (dict(role="sweeper", tier="judgement"), 3)):
+            with self.subTest(meta=meta):
+                self.fresh()
+                self.role_file("sweeper", tier="mechanical")
+                task = self.add_task(**meta)
+                mailbox = self.section(self.brief(task), "MAILBOX")
+                self.assertEqual("Ask. This task allows no asks." in mailbox, want == 0)
+                self.ok("launch", str(task))
+                with open(os.path.join(self.root, ".agentic-team", "inbox", f"{task}-1.ctx.json")) as fh:
+                    self.assertEqual(json.load(fh)["asks_cap"], want)
+
+    def test_12_asks_cap_is_given_the_tier(self):
+        import run as runner
+        fake = types.SimpleNamespace(config=config.load(self.root))
+        self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "mechanical"), 0)
+        self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "judgement"), 3)
+        self.assertEqual(runner.asks_cap(fake, {"meta": {"asks": 1}}, "mechanical"), 1)
+
+
 class PrTest(Base):
     """merge.mode = "pr": close pushes and opens the request, record merges it. Each test runs for gh and glab."""
 
@@ -8723,6 +9056,49 @@ class DeliveryTest(Base):
         before = (self.results(task), self.meta(task))
         self.events("inbox", str(task))
         self.assertEqual((self.results(task), self.meta(task)), before)  # read only
+
+    # --- 0.17.0: a rowless resume keeps the tier that launch stored
+
+    def rowless_resume(self, *launch_flags, role_files=(), **meta):
+        """Launch on c2, lose the job (`claude rm`; the transcript stays), answer an ask: the resume passes the launch flags.
+        Returns the argv of that resume. The judgement tier is opus at max effort, so the effort shows which tier ran."""
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[models]\njudgement = {{ model = "opus", effort = "max" }}\n',
+                          sessions="max_parallel = 3\n")
+        for name, tier in role_files:
+            folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, name + ".md"), "w") as fh:
+                fh.write(f"---\nfits: x\ntier: {tier}\n---\n\n## Method\n\nDo it.\n")
+        task = self.add_task(**meta)
+        self.ok("launch", str(task), "--profile", "c2", *launch_flags)
+        for name, _ in role_files:  # the role file is gone before the resume
+            os.remove(os.path.join(self.root, ".claude", "agentic-team", "roles", name + ".md"))
+        entries = self.meta(task)["sessions"]
+        entries[0]["sessionId"] = UUID1
+        self.record_sessions(task, *entries)
+        folder = os.path.join(self.c2, "projects", re.sub(r"[^A-Za-z0-9]", "-", self.task_wt(task)))
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, UUID1 + ".jsonl"), "w") as fh:
+            fh.write(transcript_text(1))
+        self.c2_agents()
+        self.ask(task)
+        self.events("record")
+        env = dict(self.env, FAKE_CLAUDE_REMOVED_ID="sess-task-1-1")
+        self.events("answer", str(task), "--file", self.text_file("v2"), env=env)
+        (argv,) = [a for a, _ in self.calls_in("--bg", self.c2) if "--resume" in a]
+        return argv
+
+    def test_r17_a_tier_flag_at_launch_survives_a_rowless_resume(self):
+        argv = self.rowless_resume("--tier", "judgement")
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("opus", "max"))
+
+    def test_r17_a_role_tier_survives_a_rowless_resume_even_when_the_role_file_is_gone(self):
+        argv = self.rowless_resume(role_files=(("judge", "judgement"),), role="judge")
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("opus", "max"))
+
+    def test_r17_a_task_with_no_role_or_tier_resumes_as_before(self):
+        argv = self.rowless_resume()
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("sonnet", "high"))
 
 
 def transcript_text(tokens):
