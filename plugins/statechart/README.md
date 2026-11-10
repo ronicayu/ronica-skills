@@ -84,6 +84,10 @@ In `SKILL.md`:
 
 Scripts: `scripts/setup.sh` and `scripts/render.mjs`.
 
+Type check: `npm install && npm run typecheck` in `skills/statechart/scripts/`
+runs `tsc --noEmit`; CI runs it on every PR. `NOTICE.md` lists the two changes
+to upstream code that make it pass.
+
 ## License
 
 MIT. See [LICENSE](LICENSE): Lauren Tan for the upstream skill, Yu Rong for

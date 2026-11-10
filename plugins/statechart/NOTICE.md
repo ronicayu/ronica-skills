@@ -26,19 +26,32 @@ All paths are under `skills/statechart/`.
 | `SKILL.md` | Upstream, with additions (see below) |
 | `references/render.md` | Upstream, unchanged |
 | `scripts/statechart` (the runner) | Upstream, unchanged |
-| `scripts/statechart.ts`, `run.ts`, `worker.ts`, `pipeline.ts`, `ir.ts` | Upstream, unchanged |
+| `scripts/statechart.ts`, `worker.ts`, `pipeline.ts`, `ir.ts` | Upstream, unchanged |
+| `scripts/run.ts` | Upstream, one type annotation (see below) |
 | `scripts/frontends/`, `scripts/passes/`, `scripts/backends/` | Upstream, unchanged |
-| `scripts/package.json`, `scripts/tsconfig.json` | Upstream, unchanged |
+| `scripts/package.json` | Ours, replaces upstream's (see below) |
+| `scripts/tsconfig.json` | Upstream, unchanged |
 | `scripts/setup.sh` | Ours |
 | `scripts/render.mjs` | Ours |
 
 Left out: `scripts/test/`. It is a large test corpus, and it needs Java.
-`scripts/package.json` still names its `test` script and the `fast-check`
-dev dependency. We left that file unchanged. Do not run `npm test` here.
+Our `scripts/package.json` therefore has no `test` script and no `fast-check`
+dev dependency.
 
 ## What we changed
 
-Upstream code is unchanged. The only changed upstream file is `SKILL.md`:
+Two changes to upstream code, so that `tsc --noEmit` passes in CI:
+
+- `scripts/run.ts`: `exitClass` declares its return type,
+  `CheckResult["exit"]`. Without it the inferred `0 | 1 | 2` widened to
+  `number` inside the result object, and `tsc` reported two errors. Behaviour
+  is unchanged.
+- `scripts/package.json`: a `typecheck` script (`tsc --noEmit -p .`) and the
+  dev dependencies it needs, `typescript` and `@types/node`, at exact
+  versions. Upstream's `test` script and `fast-check` are removed, because
+  `scripts/test/` is not vendored.
+
+Upstream's `SKILL.md` has additions:
 
 - The frontmatter keeps the name `statechart`. It drops upstream's
   `disable-model-invocation: true`, so that Claude and other agents can pick the
@@ -79,7 +92,9 @@ Our two scripts:
 2. Read the upstream diff since `bb68f23`, mainly for `SKILL.md`, `run.ts`
    (the TLC version and checksum), and `references/render.md` (the CSS).
 3. Copy `references/render.md` and every file in `scripts/` except `test/`
-   over ours. Leave `scripts/setup.sh` and `scripts/render.mjs` in place.
+   and `package.json` over ours. Leave `scripts/setup.sh` and
+   `scripts/render.mjs` in place. Then make the `run.ts` change again if
+   upstream has not, and run `npm install && npm run typecheck` in `scripts/`.
 4. Check that only our two scripts differ:
 
    ```sh
@@ -87,7 +102,8 @@ Our two scripts:
    diff <upstream>/pstack/skills/statechart/references/render.md plugins/statechart/skills/statechart/references/render.md
    ```
 
-   The first command must list only `setup.sh` and `render.mjs`. The second
+   The first command must list only `setup.sh`, `render.mjs`,
+   `package.json` and `run.ts` (the one `exitClass` line). The second
    must print nothing.
 5. Merge the upstream `SKILL.md` changes into ours. Keep our attribution and
    sections, and check them against the new upstream text.
