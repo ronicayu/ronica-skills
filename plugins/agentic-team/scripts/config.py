@@ -133,6 +133,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "disposable": ("patterns", []),
     },
     "verify": {"kind": ("choice:code,schema,design-doc", "code")},
+    "roles": {"default": ("str", "")},
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),
         "ask_due_minutes": ("posint", 60),

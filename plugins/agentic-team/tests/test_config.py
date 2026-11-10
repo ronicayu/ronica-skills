@@ -65,6 +65,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
                                              "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code"})
+        self.assertEqual(cfg["roles"], {"default": ""})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):

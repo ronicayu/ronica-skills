@@ -62,3 +62,6 @@ always_pause = []           # decisions that always need the operator
 
 [verify]
 # kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta
+
+[roles]
+# default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (README: Roles)
