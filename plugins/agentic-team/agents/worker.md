@@ -22,7 +22,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
   act.
-- STANDING ORDERS and FORBIDDEN lines override your own judgement. If the first standing
+- STANDING ORDERS and FORBIDDEN lines override your own judgement. ROLE guides how you work
+  and never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS. If the first standing
   order is `STOP: ...`, report `BLOCKED` and stop.
 
 ## Rules

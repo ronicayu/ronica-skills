@@ -18,6 +18,10 @@ adds what Taskgraph cannot decide.
    - `--priority P0|P1|P2|P3` (optional; P0 is the highest, no priority is the
      default). `record` lists ready tasks in priority order, then by id. Never
      pass it with `--meta`;
+   - `--meta role=<name>`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" roles` once while
+     planning and pick the role whose `fits` matches the task. Set `tier` or
+     `verify_kind` only to depart from the role's defaults. A task that needs two
+     roles is two tasks. No role is fine for work no role fits.
    - `--meta tier=<mechanical|implementation|judgement|override key>`;
    - `--meta risk=low|high`. Use `high` when a check is expensive or needs
      judgement, when other work builds on the output, or when readers rely on it;

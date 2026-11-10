@@ -20,6 +20,9 @@ Usage:
     status         print the status report (tables), with the Follow-ups
                    lines of the worker reports counted by label and the mean
                    attempts of the tasks done in the period
+    roles          list the task roles (the plugin's and the project's) with
+                   their tier, verify kind and skills; read only; exit 1 when
+                   a role file is broken
     check-report <file>
                    check a report file before a session files it: Status,
                    Checkpoint, a label on each Follow-ups line; needs no
@@ -275,6 +278,7 @@ class Run:
         self.host_failed = False
         self._fetched = set()
         self._docker = None  # (what docker_read() returned,) once containers() has asked
+        self.warned = set()  # role problems already printed as a warn event by this command
         self.resumed = set()  # (task, attempt) that this command resumed: the CLI's rows may lag, so it holds for the rest of the command
         self.locks = {}  # task id -> how deep this command holds the task's lock (task_lock)
         self.socket_failures, self.socket_off = 0, False  # failed socket posts of this command; two turn them off
@@ -762,6 +766,298 @@ def ids_text(ids):
     return " ".join(f"#{i}" for i in ids) or "none"
 
 
+# ------------------------------------------------------------------- roles
+
+ROLE_KEYS = ("fits", "tier", "verify_kind", "skills")
+ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
+ROLE_NAME = re.compile(r"[a-z0-9-]+")
+ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
+STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
+
+
+class Role:
+    """One role file. `source` is "plugin" or "project"; `overrides` marks a project file that hides a plugin file of the
+    same name. parse_role fills the rest, or sets `error` to one line that names the problem."""
+
+    def __init__(self, name, path, source, overrides=False):
+        self.name, self.path, self.source, self.overrides = name, path, source, overrides
+        self.fits = self.tier = self.verify_kind = self.review = None
+        self.skills, self.method, self.error = [], "", None
+
+    @property
+    def where(self):
+        return "project, overrides plugin" if self.overrides else self.source
+
+    @property
+    def words(self):
+        return len(f"{self.method} {self.review or ''}".split())
+
+
+def role_value(raw):
+    """The value of one frontmatter line: a `[...]` list to its closing bracket, else the text up to a `#` comment (a `#`
+    that starts the value or follows a space)."""
+    value = raw.strip()
+    if value.startswith("["):
+        close = value.find("]")
+        if close < 0:
+            raise ValueError("a list has no closing ]")
+        if value[close + 1:].strip() and not value[close + 1:].strip().startswith("#"):
+            raise ValueError("text after the closing ] of a list")
+        return value[:close + 1]
+    return re.split(r"(?:^|\s)#", value, maxsplit=1)[0].strip()
+
+
+def parse_role(run, role):
+    """Read role.path into `role`. Any problem sets role.error and stops."""
+    try:
+        with open(role.path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        role.error = f"cannot read the file: {exc}"
+        return
+    try:
+        fields, body = role_frontmatter(run, lines)
+    except ValueError as exc:
+        role.error = str(exc)
+        return
+    role.fits, role.tier, role.verify_kind, role.skills = (fields.get(k) for k in ROLE_KEYS)
+    role.skills = role.skills or []
+    sections, current = {}, None
+    for line in body:
+        if line.startswith("## "):
+            current = line[3:].strip()
+            if current in ("Method", "Review"):  # any other `## ` heading ends the section and its text is dropped
+                if current in sections:
+                    role.error = f"two ## {current} sections"
+                    return
+                sections[current] = []
+            else:
+                current = None
+        elif current:
+            sections[current].append(line)
+    role.method = "\n".join(sections.get("Method", [])).strip()
+    role.review = "\n".join(sections.get("Review", [])).strip() or None
+    if not role.method:
+        role.error = "no ## Method section, or it is empty"
+
+
+def role_frontmatter(run, lines):
+    """({key: value}, the lines after the frontmatter) of a role file; ValueError names a problem."""
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("the file must start with a --- line that opens the frontmatter")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise ValueError("the frontmatter has no closing --- line")
+    fields = {}
+    for number, line in enumerate(lines[1:end], 2):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        key, colon, raw = text.partition(":")  # the first colon only: a `fits` value holds more
+        key = key.strip()
+        if not colon:
+            raise ValueError(f"line {number}: expected `key: value`")
+        if key not in ROLE_KEYS:
+            raise ValueError(f"line {number}: unknown key {key!r}; the keys are {', '.join(ROLE_KEYS)}")
+        if key in fields:
+            raise ValueError(f"line {number}: {key} is set twice")
+        try:
+            value = role_value(raw)
+        except ValueError as exc:
+            raise ValueError(f"line {number}: {key}: {exc}")
+        if key == "skills":
+            fields[key] = role_skills(value, number)
+        elif value:
+            fields[key] = value
+    if not fields.get("fits"):
+        raise ValueError("no `fits` line: say in one line which tasks the role is for")
+    if tier := fields.get("tier"):
+        try:
+            if not resolve_model(run.config, tier)["model"]:
+                raise ValueError(f"tier {tier!r} has no model; set [models] {tier} or name another tier")
+        except ConfigError as exc:
+            raise ValueError(f"tier: {exc}")
+    if fields.get("verify_kind") and fields["verify_kind"] not in VERIFY_KINDS:
+        raise ValueError(f"verify_kind must be one of {', '.join(VERIFY_KINDS)}, not {fields['verify_kind']!r}")
+    return fields, lines[end + 1:]
+
+
+def role_skills(value, number):
+    """The skill names of a `skills:` value: empty, `[]`, or `[plugin:skill, ...]`."""
+    if not value:
+        return []
+    if not value.startswith("["):
+        raise ValueError(f"line {number}: skills must be a list in brackets, as [plugin:skill, ...], not {value!r}")
+    names = [item.strip() for item in value[1:-1].split(",")] if value[1:-1].strip() else []
+    for name in names:
+        if not ROLE_SKILL.fullmatch(name):
+            raise ValueError(f"line {number}: skills: {name!r} is not a skill name such as plugin:skill")
+    return names
+
+
+def role_files(run):
+    """{name: Role} for every role file, not yet parsed. A project file hides the plugin file of the same name. A file
+    whose name is not lowercase letters, digits and `-` is kept under its name, with its error set."""
+    found = {}
+    for source, folder in (("plugin", os.path.join(PLUGIN_ROOT, "templates", "roles")),
+                           ("project", os.path.join(run.root, ".claude", "agentic-team", "roles"))):
+        for path in sorted(glob.glob(os.path.join(glob.escape(folder), "*.md"))):
+            name = os.path.basename(path)[:-3]
+            found[name] = Role(name, path, source, overrides=name in found)
+    return found
+
+
+def role_list(found):
+    return ", ".join(f"{name} ({found[name].source})" for name in sorted(found)) or "none"
+
+
+def load_role(run, name, origin):
+    """The parsed role `name`. Refused, with the problem and the roles there are, when no file has that name or its file is
+    broken. `origin` says where the name came from, for the message."""
+    found = role_files(run)
+    role = found.get(name)
+    if role is None:
+        raise Refused(f"{origin}: no role named {name!r}; available roles: {role_list(found)}")
+    if not ROLE_NAME.fullmatch(name):
+        role.error = "the file name must be lowercase letters, digits and -"
+    else:
+        parse_role(run, role)
+    if role.error:
+        raise Refused(f"{origin}: role file {role.path}: {role.error}; available roles: {role_list(found)}")
+    return role
+
+
+def role_size_warning(run, task, role, attempt=None):
+    """One `warn` event when the role is longer than ROLE_WORDS_MAX words."""
+    if role and role.words > ROLE_WORDS_MAX:
+        run.emit("warn", task["id"], attempt, None,
+                 f"role {role.name} ({role.path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
+                 "closely; shorten Method and Review")
+
+
+class Choice:
+    """The role, tier and verify kind of a task, and where the tier and the verify kind came from."""
+
+    def __init__(self, role, tier, tier_from, verify_kind, kind_from):
+        self.role, self.tier, self.tier_from, self.verify_kind, self.kind_from = role, tier, tier_from, verify_kind, kind_from
+
+    @property
+    def stored(self):
+        return {"role": self.role.name if self.role else None, "tier": self.tier, "verify_kind": self.verify_kind}
+
+    @property
+    def tier_text(self):
+        """`tier judgement (role architect)`; a role that did not set the tier is named after it."""
+        named = f"; role {self.role.name}" if self.role and self.tier_from != f"role {self.role.name}" else ""
+        return f"tier {self.tier} ({self.tier_from}){named}"
+
+
+def choose(run, task, tier=None, strict=True, kind_strict=None):
+    """The role, tier and verify kind of a task, from its meta, its role and the config.
+
+    Role: the task's `role` meta, else [roles] default, else none. A role that has no file, or a broken one, is refused when
+    `strict`; otherwise it is one `warn` event and no role.
+    Tier: `tier` (--tier), else the `tier` meta, else the role's tier, else implementation.
+    Verify kind: the `verify_kind` meta, else the role's, else [verify] kind. A bad meta value is refused when `kind_strict`
+    (default: `strict`), else it is passed over."""
+    meta = task.get("meta") or {}
+    tid = task["id"]
+    kind_strict = strict if kind_strict is None else kind_strict
+    named, origin = str(meta.get("role") or "").strip(), f"#{tid} role meta"
+    if not named:
+        named, origin = str(run.config["roles"]["default"]).strip(), "[roles] default"
+    role = None
+    if named:
+        try:
+            role = load_role(run, named, origin)
+        except Refused as exc:
+            if strict:
+                raise
+            if str(exc) not in run.warned:  # one line for the command, however many readers ask
+                run.warned.add(str(exc))
+                run.emit("warn", tid, None, None, f"{exc}; read as no role")
+    if tier:
+        chosen_tier, tier_from = tier, "--tier"
+    elif meta.get("tier"):
+        chosen_tier, tier_from = str(meta["tier"]), "meta"
+    elif role and role.tier:
+        chosen_tier, tier_from = role.tier, f"role {role.name}"
+    else:
+        chosen_tier, tier_from = "implementation", "default"
+    value = meta.get("verify_kind")
+    if value in (None, "") or (str(value) not in VERIFY_KINDS and not kind_strict):
+        value = None
+    elif str(value) not in VERIFY_KINDS:
+        raise Refused(f'#{tid} verify_kind must be "code", "schema" or "design-doc", not {value}')
+    if value:
+        kind, kind_from = str(value), "meta"
+    elif role and role.verify_kind:
+        kind, kind_from = role.verify_kind, f"role {role.name}"
+    else:
+        kind, kind_from = run.config["verify"]["kind"], "config"
+    return Choice(role, chosen_tier, tier_from, kind, kind_from)
+
+
+def stored_choice(task):
+    """The `sessions` entry of the current attempt that launch or adopt stored a role, tier and verify kind in, or None
+    for an attempt from before 0.17.0. It needs no session id: an adopted attempt has none."""
+    attempt = wanted_attempt(task)
+    found = [e for e in recorded_sessions(task)
+             if e.get("kind") == "task" and e.get("attempt") == attempt and "verify_kind" in e]
+    return found[-1] if found else None
+
+
+def verify_role(run, task):
+    """The role whose Review the verifier gets: the one the attempt was launched with, read from its file now, else the
+    one the task names now. Refused when that role has no file or a broken one: the operator fixes the file."""
+    stored = stored_choice(task)
+    if stored is None:
+        return choose(run, task).role
+    name = stored.get("role")
+    return load_role(run, name, f"#{task['id']} attempt {stored.get('attempt')} role") if name else None
+
+
+def role_section(role, kind):
+    """The text of the ROLE section of a worker brief (the Method) or of a verifier brief (the Review)."""
+    if role is None:
+        return "None."
+    if kind == "verify":
+        if not role.review:
+            return f"Task role: {role.name}. No review checks."
+        return (f"Task role: {role.name} ({role.path}). Check these in addition to the method under VERIFY:\n\n"
+                f"{role.review}")
+    parts = [f"Role: {role.name} ({role.path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
+    if role.skills:
+        parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
+                     "load, say so under Deviations: and follow the method below.")
+    return "\n\n".join(parts + [role.method])
+
+
+def cmd_roles(run, args):
+    """List every role file with its source and defaults. Read only. Exits 1 when a file is broken."""
+    found, rows, broken = role_files(run), [], 0
+    for name in sorted(found):
+        role = found[name]
+        if ROLE_NAME.fullmatch(name):
+            parse_role(run, role)
+        else:
+            role.error = "the file name must be lowercase letters, digits and -"
+        broken += bool(role.error)
+        rows.append({"name": name, "source": role.where, "path": role.path, "fits": role.fits, "tier": role.tier,
+                     "verify_kind": role.verify_kind, "skills": role.skills, "words": None if role.error else role.words,
+                     "error": role.error})
+        if role.error:
+            run.emit("role-broken", None, None, None, f"{name} ({role.where}): {role.path}: {role.error}")
+        else:
+            run.emit("role", None, None, None,
+                     f"{name} ({role.where}); fits: {role.fits}; tier {role.tier or '-'}; verify kind {role.verify_kind or '-'}; "
+                     f"skills {', '.join(role.skills) or '-'}")
+    if run.json:
+        run.payload = rows
+    if broken:
+        raise Refused(f"{broken} role file{'s' * (broken != 1)} broken; fix {'them' if broken != 1 else 'it'} before a launch", 1)
+
+
 # ------------------------------------------------------------------- brief
 
 def parse_notes(notes):
@@ -1047,8 +1343,9 @@ def result_command(py, tg, db, project, task_id, kind, attempt, session, report)
             f"--status <STATUS> --body-file {quote(report)}")
 
 
-def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0):
-    """The brief text. Taskgraph is the only source of task content."""
+def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None):
+    """The brief text. Taskgraph is the only source of task content. `role` is the task's role: its Method goes into a worker
+    brief and its Review into a verifier brief."""
     tid = task["id"]
     meta = task.get("meta") or {}
     tg_cmd = f"{quote(sys.executable)} {quote(run.tg_path)} --db {quote(run.db)} --project {shlex.quote(run.project)}"
@@ -1084,6 +1381,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "VERIFY": str(meta["verify"]).strip(),
         "TIMEBOX": timebox,
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
+        "ROLE": role_section(role, kind),
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
@@ -1430,17 +1728,14 @@ def verify_mode(run, task):
 
 
 def verify_kind(run, task, strict=True):
-    """"code", "schema" or "design-doc": the task's verify_kind meta, else verify.kind from the config.
-    strict refuses any other value; record passes strict=False and falls back to the config default."""
-    value = (task.get("meta") or {}).get("verify_kind")
-    if value is None or value == "":
-        return run.config["verify"]["kind"]
-    text = str(value)
-    if text in VERIFY_KINDS:
-        return text
-    if not strict:
-        return run.config["verify"]["kind"]
-    raise Refused(f'#{task["id"]} verify_kind must be "code", "schema" or "design-doc", not {text}')
+    """"code", "schema" or "design-doc": the kind that launch or adopt stored for the attempt, else the task's verify_kind meta,
+    else its role's, else verify.kind from the config. A stored kind is never worked out again, so a role file that changed
+    or went away cannot fail a later command. strict refuses a bad meta value; record passes strict=False and passes it
+    over. A role problem is never refused here: it reads as no role, with one warn event."""
+    stored = stored_choice(task)
+    if stored and stored.get("verify_kind") in VERIFY_KINDS:
+        return stored["verify_kind"]
+    return choose(run, task, strict=False, kind_strict=strict).verify_kind
 
 
 def verify_base(run, task, head):
@@ -1613,7 +1908,7 @@ def cmd_launch(run, args):
         raise Refused(f"#{tid} is done")
     refuse_legacy(task)
     verify_mode(run, task)
-    verify_kind(run, task)
+    picked = choose(run, task, args.tier)  # the role, tier and verify kind of this attempt; refused for a bad role
     blockers = waiting_for(run, task)
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
@@ -1727,9 +2022,10 @@ def cmd_launch(run, args):
     base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
     continuing = mode in ("continue", "reattach", "head")
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
-    tier = args.tier or str(meta.get("tier") or "implementation")
+    tier = picked.tier
+    role_size_warning(run, task, picked.role, nxt)
     cap = asks_cap(run, task, tier)
-    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap)
+    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
     check_cap(run)
     if args.model:
         model, effort = args.model, args.effort
@@ -1768,7 +2064,7 @@ def cmd_launch(run, args):
             shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
             notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
                             "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
-            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap)
+            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
     elif mode == "reattach":
         if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
             raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
@@ -1793,7 +2089,10 @@ def cmd_launch(run, args):
         started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
     entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model, profile)
-    sessions = recorded_sessions(task) + ([entry] if entry else [])
+    if entry is None:  # no session id is known; the attempt still keeps its role, tier and verify kind
+        entry = {"kind": "task", "attempt": nxt, "name": session, "worktree": worktree, "model": model,
+                 **profile_field(profile)}
+    sessions = recorded_sessions(task) + [{**entry, **picked.stored}]
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts. `base` is the commit the
@@ -1812,7 +2111,7 @@ def cmd_launch(run, args):
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
-              f"session {session} worktree {rel} {where} brief {path}"
+              f"session {session} worktree {rel} {where} brief {path}; {picked.tier_text}"
               + "".join(f"; {n}" for n in notes)
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
               + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
@@ -1851,7 +2150,7 @@ def cmd_adopt(run, args):
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
     verify_mode(run, task)
-    verify_kind(run, task)
+    chosen = choose(run, task)
     refuse_past_cap(tid, current + 1, task_rows(run.results_for(tid), current), None)
     if not re.fullmatch(r"[0-9a-f]{7,40}", args.head):
         raise Refused(f"--head {args.head} is not a commit SHA (7 to 40 hex characters)")
@@ -1883,9 +2182,10 @@ def cmd_adopt(run, args):
     nxt, now = current + 1, run.now()
     if task["status"] == "open":
         run.tg("start", str(tid))
-    fresh = {} if "sessions" in meta else {"sessions": []}
+    # No session ran, so the entry has no id; it holds the attempt's role, tier and verify kind for later commands.
+    sessions = recorded_sessions(task) + [{"kind": "task", "attempt": nxt, "name": "adopted", **chosen.stored}]
     run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in {"attempt": nxt, "session": "adopted", "started_at": now,
-           "base": base, **fresh, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
+           "base": base, "sessions": sessions, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
     run.add_result(tid, "task", nxt, "manager", "PASS",
                    f"Task: {tid}\nStatus: PASS\nBranch: {branch}\nHead: {head}\nWorktree: None\nRan: not stated (adopted)\n"
                    f"Files: None\nIssues: None\nDeviations: adopted by the Manager at {now}; the work was done outside run.py\n"
@@ -1926,10 +2226,13 @@ def cmd_verify(run, args):
     task = run.show(tid)
     refuse_legacy(task)
     mode = verify_mode(run, task)
-    kind = verify_kind(run, task)
     if mode != "session":
+        verify_kind(run, task)
         return verify_ci(run, args, task, mode[3:])
     attempt = refuse_unless_running(task)
+    role = verify_role(run, task)  # refused when the role of this attempt has no file or a broken one
+    role_size_warning(run, task, role, attempt)
+    kind = verify_kind(run, task)
     rows, worker = worker_for(run, tid, attempt, args.result)
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
     if not ref:
@@ -1976,7 +2279,7 @@ def cmd_verify(run, args):
         full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
         ref = full.stdout.strip() if full.returncode == 0 else ref
     where = verify_skill(run, ref)[0] or "none"
-    text = render(run, task, "verify", attempt, name, ref=ref, worker=worker)
+    text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role)
     if args.dry_run:
         print(claude_line(run, profile, name, name, model, effort), file=sys.stderr)
         if run.json:
@@ -2365,7 +2668,7 @@ def rowless_flags(run, task, s):
     --agent, --model, --effort, --permission-mode, --name and --settings, and no --bg or --worktree (the resume runs in
     the worktree). With a job present a flag would start a copy, so this is only for a row that is not listed."""
     entry = recorded_entry(task, wanted_attempt(task)) or {}
-    tier = str((task.get("meta") or {}).get("tier") or "implementation")
+    tier = (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier  # a --tier at launch survives
     try:
         chosen = resolve_model(run.config, tier)
     except ConfigError:
@@ -4383,7 +4686,8 @@ def cmd_close(run, args):
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
     run.edit_meta(tid, verdict=level, verdict_ref=ref)
-    entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt), None)
+    entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt
+                  and e.get("id")), None)  # an adopted attempt has an entry with no id
     if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
         sid, row = entry["id"], next((s for s in run.sessions() if s.sid == entry["id"]), None)
     else:  # an unrecorded row in the task folder is the current attempt's
@@ -4748,7 +5052,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -4803,6 +5107,8 @@ def build_parser():
     p.add_argument("--limit", type=int, default=25, help="max rows per table (default 25)")
     p.add_argument("--mark", action="store_true", help="save now as the start of the next report")
 
+    sub.add_parser("roles", help="list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken")
+
     p = sub.add_parser("check-report", help="check a report file before a session files it; needs no config, "
                                             "Taskgraph or repository")
     p.add_argument("file", help="the report file that the brief's REPORT section names")
@@ -4849,7 +5155,7 @@ def build_parser():
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and

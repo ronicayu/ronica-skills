@@ -473,6 +473,10 @@ class Base(unittest.TestCase):
         return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
                 "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet"}
 
+    def launched(self, task, attempt=1, **over):
+        """The entry that `launch` records: the session entry, with the role, tier and verify kind it stores."""
+        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code", **over}
+
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
 
@@ -1270,7 +1274,7 @@ class RunTest(Base):
         self.assertEqual(self.status_of(task), "in_progress")
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
-        self.assertEqual(meta["sessions"], [self.entry(task)])
+        self.assertEqual(meta["sessions"], [self.launched(task)])
         self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
         self.assertNotIn("verdict", meta)
         self.assertNotIn("verdict_ref", meta)
@@ -1464,7 +1468,7 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["session"], "task-1-2")
         self.assertEqual(meta["base"], first["base"])
-        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
         self.assertEqual(self.worktree_state()[2], ["task-1"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), first["base"])
 
@@ -1612,7 +1616,7 @@ class RunTest(Base):
         self.assertIn("It holds the commits of the earlier attempts of this task.", text)
         self.assertNotIn("Base commit:", text)
         meta = self.meta(task)
-        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
         self.assertEqual((meta["attempt"], meta["base"]), (2, first["base"]))
 
     def test_23_base_on_a_retry_is_refused_and_creates_nothing(self):
@@ -1705,8 +1709,8 @@ class RunTest(Base):
         self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
         meta = self.meta(task)
         self.assertEqual((meta["attempt"], meta["base"]), (2, base))
-        self.assertEqual(len(meta["sessions"]), 1)
-        self.assertEqual(meta["sessions"][0]["attempt"], 2)
+        self.assertEqual([e["attempt"] for e in meta["sessions"]], [1, 2])  # the adopted attempt's entry has no id
+        self.assertEqual(meta["sessions"][1]["id"], "sess-task-1-2")
 
     def test_23_nothing_to_continue_from_asks_for_a_base(self):
         task = self.running_task()
@@ -3427,7 +3431,8 @@ class RunTest(Base):
         self.assertTrue(arrived["detail"].endswith("; adopted"))
         closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
-        self.assertEqual(self.meta(task)["sessions"], [])
+        self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
+                                                        "tier": "implementation", "verify_kind": "code"}])
         self.assertEqual(self.status_of(task), "done")
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
@@ -3703,25 +3708,26 @@ class RunTest(Base):
         row = json.dumps(self.row("task-3"))  # the session appears in `claude agents` when it starts
         env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded \u00b7 garbage \u00b7 task-3-1", FAKE_CLAUDE_BG_ROW=row)
         detail = self.one(self.events("launch", str(wrong), env=env), "launched")["detail"]
-        self.assertEqual(sessions(wrong), [self.entry(wrong, 1)])
+        self.assertEqual(sessions(wrong), [self.launched(wrong, 1)])
         self.assertIn("claude printed garbage; recorded the row sess-task-3-1 found in the worktree", detail)
         silent = self.add_task()
         self.agents()
         detail = self.one(self.events("launch", str(silent), env=dict(self.env, FAKE_CLAUDE_BG_SAID="")), "launched")["detail"]
-        self.assertEqual(sessions(silent), [])
+        self.assertEqual(sessions(silent), [{"kind": "task", "attempt": 1, "name": "task-4-1", "worktree": "task-4", "model": "sonnet",
+                                             "role": None, "tier": "implementation", "verify_kind": "code"}])  # no id, but the stored values
         self.assertIn("no session id printed; the row is matched by its folder", detail)
         self.assertNotIn("claude said", detail)
         text_only = self.add_task()  # no `backgrounded` line: a finished row in the folder is not the new session
         self.agents(self.finished("task-5"))
         detail = self.one(self.events("launch", str(text_only), env=dict(self.env, FAKE_CLAUDE_BG_SAID="garbage")),
                           "launched")["detail"]
-        self.assertEqual(sessions(text_only), [])
+        self.assertEqual([e.get("id") for e in sessions(text_only)], [None])  # an entry with no id: it holds the stored values
         self.assertIn("no session id printed", detail)
         live_only = self.add_task()  # no `backgrounded` line, but exactly one live unrecorded row in the folder
         self.agents()
         env = dict(self.env, FAKE_CLAUDE_BG_SAID="garbage", FAKE_CLAUDE_BG_ROW=json.dumps(self.row("task-6")))
         detail = self.one(self.events("launch", str(live_only), env=env), "launched")["detail"]
-        self.assertEqual(sessions(live_only), [self.entry(live_only, 1)])
+        self.assertEqual(sessions(live_only), [self.launched(live_only, 1)])
         self.assertIn("no session id printed; recorded the row sess-task-6-1 found in the worktree", detail)
         stale = self.add_task()  # a printed id that is not listed, and only a finished row: the printed id stands
         self.agents(self.finished("task-7"))
@@ -6867,7 +6873,8 @@ class ProfileTest(Base):
         self.assertEqual(self.started_under(), [self.api])
         entry = self.meta(task)["sessions"][0]
         self.assertEqual(entry, {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
-                                 "worktree": "task-1", "model": "sonnet", "profile": "api"})
+                                 "worktree": "task-1", "model": "sonnet", "profile": "api", "role": None,
+                                 "tier": "implementation", "verify_kind": "code"})
         detail = self.one(events, "launched")["detail"]
         self.assertTrue(detail.startswith("sonnet profile api session task-1-1 "), detail)
         self.assertNotIn("does not list", detail)  # the id was checked against the api profile's own list
@@ -6884,7 +6891,8 @@ class ProfileTest(Base):
                 events = self.events("launch", str(task))
                 self.assertEqual(self.meta(task)["sessions"],
                                  [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
-                                   "worktree": "task-1", "model": "sonnet"}])
+                                   "worktree": "task-1", "model": "sonnet", "role": None, "tier": "implementation",
+                                   "verify_kind": "code"}])
                 self.assertEqual(self.one(events, "launched")["detail"].split(" session ")[0], "sonnet/high")
                 with open(self.log + ".dirs") as fh:
                     self.assertEqual({json.loads(line)["dir"] for line in fh}, {None})
