@@ -30,9 +30,9 @@ import subprocess
 import sys
 from collections import defaultdict
 
-try:  # Python 3.11+
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:  # pragma: no cover - depends on the interpreter
+else:  # pragma: no cover - depends on the interpreter
     tomllib = None
 
 # --------------------------------------------------------------------------
