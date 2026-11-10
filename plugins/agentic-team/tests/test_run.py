@@ -5468,7 +5468,7 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.18.0: its evidence
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.17.0: its evidence
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
