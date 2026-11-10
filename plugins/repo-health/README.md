@@ -41,6 +41,7 @@ cost. Nothing selected means the report covers tier 0 and lists the rest under
 | `lint` | Lint and formatting | 0, 1 |
 | `types` | Type checking | 0, 1 |
 | `static` | Static analysis and security | 0, 1 |
+| `secrets` | Secret scanning (redacted) | 0, 1 |
 | `tests` | Tests | 0, 1 |
 | `coverage` | Coverage | 1 |
 | `ci` | CI | 0 |

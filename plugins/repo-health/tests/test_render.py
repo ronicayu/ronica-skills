@@ -105,6 +105,17 @@ class Sections(unittest.TestCase):
         order = [line.split("|")[1].strip() for line in card.splitlines() if line.startswith("| ") and "---" not in line][1:]
         self.assertEqual(order, ["Lint and formatting", "Tests", "CI", "Size and structure metrics", "Structure review"])
 
+    def test_secret_scanning_is_a_named_guardrail_dimension(self):
+        findings = sample()
+        findings["dimensions"] += [dim("secrets", 2), dim("static", 0)]
+        card = render.render(findings)
+        card = card[card.index("## Scorecard"):card.index("## Details")]
+        self.assertIn("| Secret scanning | 2 enforced |", card)
+        self.assertLess(card.index("Static analysis and security"), card.index("Secret scanning"))
+        findings["dimensions"][-2] = dim("secrets", None)
+        with self.assertRaises(render.FindingsError):
+            render.render(findings)
+
     def test_not_checked_section(self):
         text = render.render(sample())
         tail = text[text.index("## Not checked"):]

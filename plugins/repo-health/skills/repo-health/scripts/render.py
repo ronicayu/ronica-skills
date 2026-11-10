@@ -43,6 +43,7 @@ DIMENSIONS = [
     ("lint", "Lint and formatting"),
     ("types", "Type checking"),
     ("static", "Static analysis and security"),
+    ("secrets", "Secret scanning"),
     ("tests", "Tests"),
     ("coverage", "Coverage"),
     ("ci", "CI"),
