@@ -311,6 +311,24 @@ class Matching(Fixture):
         mypy = [r for r in result["ci"]["files"][0]["tools"] if r["tool"] == "mypy"][0]
         self.assertEqual(mypy["line"], 9)
 
+    def test_every_ci_step_that_runs_a_tool_is_kept(self):
+        # Which test folders CI runs decides the tests level, so the second step must not be lost.
+        self.write(".github/workflows/ci.yml", """
+            on: pull_request
+            jobs:
+              a:
+                steps:
+                  - run: python -m unittest discover -s pkg_a/tests
+              b:
+                steps:
+                  - run: python -m unittest discover -s pkg_b/tests
+        """)
+        rows = [r for r in self.run_detect()["ci"]["files"][0]["tools"] if r["tool"] == "unittest"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lines"], [5, 8])
+        self.assertEqual(rows[0]["commands"], ["python -m unittest discover -s pkg_a/tests",
+                                               "python -m unittest discover -s pkg_b/tests"])
+
     def test_go_cover_does_not_match_coverage_flag(self):
         self.write(".github/workflows/ci.yml", "on: pull_request\njobs:\n  a:\n    steps:\n      - run: npx jest --coverage\n")
         tools = self.ci_tools(self.run_detect())

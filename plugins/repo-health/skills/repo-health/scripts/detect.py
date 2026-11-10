@@ -1053,16 +1053,18 @@ class Detector(object):
                 continue
             text = repo.text(rel)
             commands = shell_commands(text) if provider == "jenkins" else yaml_commands(text)
-            matches = {}
+            matches = {}  # (tool, via) -> (tool, [(line, command), ...]); every step that runs it, not only the first
             for line, command in commands:
                 for tool in self.match_tools(command, ALL_TOOLS):
-                    matches.setdefault((tool.name, None), (tool, line, None))
+                    matches.setdefault((tool.name, None), (tool, []))[1].append((line, command))
                 for tool, via in self.resolve(command, ALL_TOOLS):
-                    matches.setdefault((tool.name, via), (tool, line, via))
+                    matches.setdefault((tool.name, via), (tool, []))[1].append((line, command))
             tool_rows = []
-            for (name, via), (tool, line, via_name) in matches.items():
+            for (name, via_name), (tool, steps) in matches.items():
                 row = {"tool": tool.name, "category": tool.category, "language": tool.language,
-                       "file": rel, "line": line, "how": "ci"}
+                       "file": rel, "line": steps[0][0], "how": "ci",
+                       "lines": [line for line, _command in steps],
+                       "commands": [command.strip()[:200] for _line, command in steps]}
                 if via_name:
                     row["via"] = via_name
                 tool_rows.append(row)
