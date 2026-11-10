@@ -207,7 +207,7 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[merge]\ndisposable = ["TODO"]\n')
         self.assertEqual(config.problems(config.load(self.root)),
                          ['merge.disposable is TODO; set it, or "" / [] if it does not apply'])
-        self.assertEqual(len(config.DISPOSABLE_DEFAULT), 36)
+        self.assertEqual(len(config.DISPOSABLE_DEFAULT), 37)
         for pattern in config.DISPOSABLE_DEFAULT:
             self.assertEqual(config.pattern_problems("x", [pattern, "!" + pattern]), [], pattern)
 

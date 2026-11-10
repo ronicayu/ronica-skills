@@ -471,7 +471,7 @@ session's message or the end of `wait` wakes it.
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
 | `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, or `project, overrides plugin`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
-| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option). |
+| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
 | `answer <id>` | Answers a worker's `ask` row with `--file F`, `--default` (the ask's own `Default:` line) or `--decision <id>` (a done decision with `--meta ask=<ask id>`; its notes are the answer). Options: `--ask <row id>` (default: the newest open ask of the current attempt), `--supersede` (answer an ask again), `--by operator`. It refuses an ask of an ended attempt and a second answer without `--supersede`. It files the `answer` row, then delivers the doorbell. |
@@ -606,7 +606,7 @@ list:
 - Other build output and caches: `.cache/`, `dist/`, `build/`, `target/`,
   `.gradle/`.
 - Operating system files: `.DS_Store`, `Thumbs.db`.
-- Session report files: `.agentic-team/`.
+- Session report and scratch files: `.agentic-team/`, `.agentic-team-scratch/`.
 
 The list holds nothing that can be data: no `.env` file, log, database or
 editor file. `[merge] disposable` adds this project's patterns, for example
@@ -844,8 +844,8 @@ exec form with absolute paths. The `checkin` hook, not the worker, writes the ad
 `--settings`: it is read only, asks nothing and takes no steer.
 
 **Limits.** A steer may change focus, order, approach and facts inside SCOPE. It never widens SCOPE and never
-overrides FORBIDDEN or STANDING ORDERS; to widen SCOPE the Manager edits it in Taskgraph, and `inbox` prints the new
-SCOPE. A worker reports `BLOCKED` when a steer conflicts with a rule, and lists each applied steer under
+overrides FORBIDDEN or STANDING ORDERS. Once a worker has started, its task's SCOPE and ACCEPTANCE do not change: the
+Manager turns a requirement found later into a new task. A worker reports `BLOCKED` when a steer conflicts with a rule, and lists each applied steer under
 `Deviations:`. A worker that has a steer with no ack cannot pass `check-report`. `tg` keeps no author check, so a
 worker could file a row `--by manager`; `inbox` ignores every row whose id `run.py` did not list.
 
@@ -881,7 +881,10 @@ template. `run.py verify` fills the same template, with verifier values in
 GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
 REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Project verify skill` note (where `.claude/skills/verify/SKILL.md` is, or that it is missing), then
 `templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
-base commit, how it was found, and the head commit.
+base commit, how it was found, and the head commit. A verifier that needs the
+base commit exports it with `git archive` into `.agentic-team-scratch/base` in
+its own worktree, and deletes the export before it runs the head's test suites
+and before it reports.
 
 The worker runs `mailbox.py report` and `run.py check-report` from its own session, so
 its permission mode must allow both. Allow only a `--body-file` path in the
@@ -980,6 +983,16 @@ launch and verify, so git ignores the file in every worktree. It deletes a file
 of the same session name right before the session starts. The file goes with
 the worktree after the merge: `.agentic-team/` is on the disposable list.
 
+A session keeps every temporary file and folder in `.agentic-team-scratch/` at
+the top of its own worktree, never in `mktemp`, `/tmp` or another folder
+outside it: a write outside the worktree can raise a permission prompt that
+stalls a session nobody watches. Before a `launch`, a `verify` or a resume
+starts a session, `run.py` adds `/.agentic-team-scratch/` to the same
+`info/exclude` (once; other lines stay), so git ignores the folder in every
+worktree. A line that cannot be written is a `warn` event, not a refusal. The
+folder is on the disposable list too, and a session deletes what it put there
+before it reports.
+
 ## Results
 
 Worker reports live in the Taskgraph result log. A report file only carries the
@@ -987,7 +1000,7 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
-| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Files, Issues, Deviations, Follow-ups, Checkpoint. Each `Follow-ups:` line is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`); a `leftover ...` line keeps its own form. A verifier also uses `decision:`. |
+| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Evidence, Files, Issues, Deviations, Follow-ups, Checkpoint. Each `Follow-ups:` line is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`); a `leftover ...` line keeps its own form. A verifier also uses `decision:`. |
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker that `stop` stopped (a second row carries the WIP commit `Head:`), or a worker session `close` stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), or `close`. Only `Reason: pause` keeps the attempt from counting toward the cap; a row with no `Reason:` line counts. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
@@ -1046,6 +1059,10 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.17.0
+
+Version 0.18.0 makes a worker prove its `PASS`. A task report gains an `Evidence:` line, one line for each ACCEPTANCE line (the line in short, then the command and its result, or the `path:line`, that proves it), and the worker rule says to prove each check from this run's output. A worker brief's `check-report` command now carries `--acceptance <n>`, and a `PASS` report with fewer than `<n>` evidence lines fails the check; a session started before the upgrade has the old command and is not counted. Sessions now keep temporary files in `.agentic-team-scratch/` at the top of their worktree instead of a `mktemp` folder outside it: `launch`, `verify` and a resume add `/.agentic-team-scratch/` to the repository's `info/exclude`, the folder is on the default disposable list, and the verifier's base-commit export goes to `.agentic-team-scratch/base`. The Manager gains four rules in `agents/manager.md` and the `run` and `plan` playbooks: the brief of a started worker is frozen (a steer never adds a requirement), every slot stays busy, open requests that conflict with a new base are rebased after each merge in `pr` mode, and no `Follow-ups:` line is left unsorted when a task closes. No migration.
 
 ### Upgrading from 0.16.0
 
