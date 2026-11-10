@@ -43,6 +43,10 @@ Time zone: {{TIMEZONE}}
 
 {{STANDING_ORDERS}}
 
+## MAILBOX
+
+{{MAILBOX}}
+
 ## REPORT
 
 Write your report with the Write tool to this file, in the format in your
@@ -52,7 +56,7 @@ agent instructions. {{REPORT_NOTE}}
 
 Check the file with this command. It reads the file and changes nothing. It
 prints `ok`, or one line for each problem: no `Status:` line, no `Checkpoint:`
-line, or a `Follow-ups:` line with no label. Fix each problem in the file with
+line, or a `Follow-ups:` line with no label.{{CHECK_NOTE}} Fix each problem in the file with
 the Write tool and run the check again. If the check is refused or does not
 run, go on to the next step.
 

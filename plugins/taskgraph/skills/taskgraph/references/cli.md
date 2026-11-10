@@ -67,7 +67,7 @@ cache = "~/.taskgraph/cache/github/owner/name.db"   # optional
 claimant = "me@laptop"             # optional; default "<gh login>@<host>:<checkout id>"; TASKGRAPH_CLAIMANT overrides
 
 [projects."my-project".meta]
-local = ["sessions", "session", "cleanup_kept", "host_rebase"]   # stay in the cache on this machine, never sent
+local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]   # stay in the cache on this machine, never sent
 deferred = ["tokens", "model", "started_at"]                      # sent with the next write to the same issue, or by `sync`
 ```
 
