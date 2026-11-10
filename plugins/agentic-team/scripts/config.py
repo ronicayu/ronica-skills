@@ -101,7 +101,7 @@ def system_timezone():
 # A default of None means "unset"; callables are evaluated at load time.
 # A type "choice:a,b" holds one of the listed strings.
 # A type "patterns" is a list of path patterns; pattern_problems checks each one.
-SCHEMA = {
+SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     "taskgraph": {"project": ("str", "")},
     "constraints": {"forbidden": ("list", [])},
     "autonomy": {
