@@ -470,6 +470,7 @@ session's message or the end of `wait` wakes it.
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
+| `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, or `project, overrides plugin`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
 | `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option). |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
@@ -528,8 +529,8 @@ in either file.
 Model values are either a model id (`"opus"`) or a table
 (`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
 profile for the sessions of that tier (see [Workers on more than one Claude
-profile](#workers-on-more-than-one-claude-profile)). The config has 8 sections
-and 25 keys, and one optional table, `[profiles]`, whose names are your own.
+profile](#workers-on-more-than-one-claude-profile)). The config has 10 sections
+and 30 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -634,6 +635,12 @@ pattern.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `kind` | `"code"`, `"schema"`, `"design-doc"` | `"code"` | The verify kind of a task without a `verify_kind` meta. See Task metadata. |
+
+### `[roles]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `default` | string | `""` | The role of a task with no `role` meta: `"architect"`, `"software-engineer"`, or a project role. `""` means no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See [Roles](#roles). |
 
 ### `[notifications]`
 
@@ -861,7 +868,7 @@ A Manager in `bypassPermissions` holds a worker's doorbell for approval: run `ru
 
 [templates/task-brief.md](templates/task-brief.md) is the one brief template.
 Its sections are GOAL, SCOPE, CONTEXT, ACCEPTANCE, VERIFY, TIMEBOX, FORBIDDEN,
-AUTONOMY, STANDING ORDERS, MAILBOX (the `inbox`, `ack` and `ask` commands, the asks cap, and the rule that the pointer line means "run inbox"; a verifier's says None), and REPORT (the `check-report` command, the command that files the report, and a notify step while an address is set). The
+AUTONOMY, ROLE (the role's Method in a worker brief and its Review in a verifier brief; `None.` for a task with no role; see [Roles](#roles)), STANDING ORDERS, MAILBOX (the `inbox`, `ack` and `ask` commands, the asks cap, and the rule that the pointer line means "run inbox"; a verifier's says None), and REPORT (the `check-report` command, the command that files the report, and a notify step while an address is set). The
 report format lives in the worker agent. `run.py` fills the template from
 Taskgraph, the config, and the run directory. Task content is copied from
 Taskgraph, never written by hand: GOAL is the title plus the prose in the
@@ -881,6 +888,74 @@ its permission mode must allow both. Allow only a `--body-file` path in the
 worktree's `.agentic-team/` folder if you write a permission rule for it. In `auto` mode nothing enforces that rule: the
 brief gives the worker the paths to `mailbox.py`, its context file, `tg.py` and the database, and only the
 worker's instructions keep it to the one report command. A verifier still files with `tg result add`.
+
+## Roles
+
+A role is a method for one kind of task. A task names its role in the `role` meta (or the config's `[roles] default`). The role does three things:
+
+- Its **Method** goes into the worker's brief, in the ROLE section.
+- Its **Review** checks go into the verifier's brief, in the ROLE section, in addition to the method for the task's verify kind.
+- Its **defaults** fill the task's tier and verify kind when the task sets none.
+
+Every worker is still the one worker agent with the one report format. ROLE guides how the worker works. It never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS, and the brief says so. A task that needs two roles is two tasks. A task with no role and no `roles.default` is unchanged, except that its brief has a ROLE section that reads `None.`.
+
+Two roles ship with the plugin, in [templates/roles/](templates/roles/):
+
+| Role | Fits | Tier | Verify kind | Skills |
+|------|------|------|-------------|--------|
+| `architect` | design documents, ADRs, specs, interface contracts, data models, migration plans | `judgement` | `design-doc` | `architecture-design:architecture-design`, `writing-editor:writing-editor` |
+| `software-engineer` | code changes: features, bug fixes, refactors, tests, scripts, build and CI changes | `implementation` | `code` | none |
+
+`run.py roles` lists the roles a project has. The Manager runs it once while planning and sets `--meta role=<name>` on the task whose work matches a role's `fits`.
+
+### Where a role file is found
+
+A role has a name of lowercase letters, digits and `-`, and a file `<name>.md`. `run.py` looks in two places and the first wins:
+
+1. The project: `.claude/agentic-team/roles/<name>.md` in the main checkout. Track it in git. It is not `.agentic-team/`, which is run state and is git-ignored.
+2. The plugin: `templates/roles/<name>.md`.
+
+The roles a project has are the union of both folders. A project file with the name of a shipped role replaces it completely; nothing is merged.
+
+### The file format
+
+```markdown
+---
+fits: one line: what kinds of task this role is for (the Manager's role table shows it)
+tier: judgement              # optional; a tier name or a models.overrides key
+verify_kind: design-doc      # optional; code | schema | design-doc
+skills: [plugin:skill, ...]  # optional; [] or absent means none
+---
+
+## Method
+...text pasted into the worker brief...
+
+## Review
+...text pasted into the verifier brief...
+```
+
+The frontmatter is the lines between the first two `---` lines. Each line is `key: value`, split at the first colon, so a `fits` value may hold colons. A `#` that starts a value or follows a space starts a comment, except inside a list. There is no YAML library: only these four keys, one per line, and `skills` as `[a, b]` or empty. A section's text runs to the next `## ` heading or the end of the file. `## Method` is required and may not be empty; `## Review` is optional.
+
+A file with no `fits`, no `## Method`, an unknown key, a `tier` that the config does not know (or a tier with no model), a `verify_kind` that is not `code`, `schema` or `design-doc`, or a `skills` value that is not a list of names is broken. `launch`, `adopt` and `verify` refuse a task whose role is broken or has no file, and name the file, the problem and the roles there are. `run.py roles` lists a broken file with its error and exits 1. No other command fails because of a role: see "What a role fixes at launch".
+
+When Method plus Review is over 600 words, `launch` and `verify` print a `warn` line (an event in `--json`) and go on. A long role is followed less closely; keep it short. The shipped roles are under 600 words.
+
+### Tier and verify kind
+
+| | Order, first match wins |
+|---|---|
+| Tier | `launch --tier`, the task's `tier` meta, the role's `tier`, then `implementation` |
+| Verify kind | the task's `verify_kind` meta, the role's `verify_kind`, then `verify.kind` from the config |
+
+The `launched` line says where the tier came from, for example `tier judgement (role architect)`, `tier implementation (meta)` or `tier implementation (default)`. Set `tier` or `verify_kind` on a task only to depart from its role.
+
+### What a role fixes at launch
+
+`launch` and `adopt` work out the role, the tier and the verify kind once and store them in the attempt's `sessions` entry as `"role"` (a name or `null`), `"tier"` and `"verify_kind"`. Every later command for that attempt uses the stored values: a `--tier` given at launch survives a rowless resume, and `close` and `record` need the role file no more. You can change, break or delete a role file after a launch without hurting `close`, `merged`, `record`, `status`, `stop`, `abandon` or a resume. `verify` is the exception: it reads the Review from the role file, and it refuses when that file is gone or broken, so a verifier never runs without the checks silently. An attempt launched before 0.17.0 has no stored values; its role is worked out from the meta and the config, and a role problem there reads as no role, with one `warn` line. A `verify_kind` meta that you change after a launch does not change that attempt's verify kind; start a new attempt.
+
+### Skills
+
+A role's `skills` are loaded by the worker with the Skill tool, as its brief tells it. Skills belong to a Claude profile, so a worker on another profile may not have them. The brief tells the worker to say so under `Deviations:` when a skill does not load, and to follow the Method text instead. The Method must therefore work without the skills. `run.py` does not check that a profile has them.
 
 ## Run directory
 
@@ -935,16 +1010,17 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 28 keys:
+skill. Metadata holds everything else, 29 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
 | `scope`, `verify`, `tier`, `risk` | plan | Brief inputs. `tier` is a tier name or a `models.overrides` key. `risk=high` sends verification to a separate session. |
+| `role` | plan | The task's role: a name from `run.py roles`. Empty or absent means the config's `roles.default`, else no role. See [Roles](#roles). |
 | `estimate` | plan | Taskgraph's own estimate in hours. The worker's timebox is twice it. |
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `adopt` writes `[]`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` (see [Roles](#roles)); an adopted attempt has an entry with these and no `"id"`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
@@ -970,6 +1046,10 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.16.0
+
+Version 0.17.0 adds task roles (see [Roles](#roles)): the `role` meta, a `[roles] default` config key, `templates/roles/` with `architect` and `software-engineer`, project roles in `.claude/agentic-team/roles/`, and the `run.py roles` command. A task with no role and no `roles.default` behaves as before. Every brief gains a ROLE section, which reads `None.` for such a task. `launch` also adds the tier source to its `launched` line, and `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` to the attempt's `sessions` entry; `adopt` now writes an entry (with no `"id"`) where it wrote `[]`. A `verify_kind` meta that you change after a launch no longer changes that attempt. No migration.
 
 ### Upgrading from 0.15.0
 
@@ -1068,7 +1148,7 @@ other safe folder.
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
 | `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |
 | `skills/setup/` | `/agentic-team:setup`, which creates the project config |
-| `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), the project verify skill skeletons (`project-verify-skill-{code,document}.md`), and standing orders |
+| `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), the task roles (`roles/<name>.md`), the project verify skill skeletons (`project-verify-skill-{code,document}.md`), and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
 | `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
@@ -1095,6 +1175,7 @@ other safe folder.
   in [scripts/config.py](scripts/config.py), then document it under
   Configuration above and in [the template](templates/agentic-team.toml).
   Read it with `config.py get`.
+- **A role.** Add `.claude/agentic-team/roles/<name>.md` to the project (or `templates/roles/<name>.md` to the plugin), in the format under [Roles](#roles). Run `run.py roles` to check it. No release is needed for a project role. A project file with a shipped role's name replaces that role.
 - **Preloading.** The Manager's `skills:` list preloads only when it runs as a
   subagent; as the main agent it loads them itself (see `agents/manager.md`).
   Use qualified `plugin:skill` names, and keep the list short. Skills with
