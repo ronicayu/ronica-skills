@@ -14,7 +14,7 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 5. Specify every interface the design adds or changes: inputs, outputs, errors, who calls it, and how it is versioned.
 6. For each external call, state change and concurrent path, say what happens when it fails, times out, retries or runs twice. A lifecycle with concurrency, retries or money gets a Mermaid statechart and a transition table.
 7. Say how the change is rolled out and rolled back, what existing data or behaviour changes, and what to measure afterwards.
-8. Draw the overview and the main flow as Mermaid diagrams, and check that each one renders.
+8. Draw the overview and the main flow as Mermaid diagrams. Check each one with a Mermaid render tool when you have one; otherwise check its syntax, and say which under `Ran:`.
 9. Trace each goal to the part of the design that delivers it, in a short table at the end.
 
 ## Review
@@ -25,5 +25,5 @@ Check these in addition to the design-doc method. Report each miss as an issue w
 2. Interfaces: each added or changed interface lists inputs, outputs and errors. A missing error case is an issue.
 3. Failure behaviour: each external call, state change and concurrent path named in the design has its failure behaviour stated. Name each one that is missing.
 4. Lifecycle: a lifecycle with concurrency, retries or money has a statechart and a transition table, and every transition in the table appears in the chart.
-5. Diagrams: each Mermaid block renders. A block that does not render is an issue.
+5. Diagrams: each Mermaid block renders, checked with a Mermaid render tool when you have one; otherwise check that it is fenced as `mermaid`, starts with a valid diagram type and has balanced brackets, and say which check you ran under `Ran:`. A block that fails is an issue.
 6. Open decisions: each choice that needs the operator is listed as open, with a recommendation and a default, not decided silently in the text.
