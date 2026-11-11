@@ -67,7 +67,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
   worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
   then `cd` back to the worktree root in its own call before anything else. Run one command per
-  Bash call: no chaining, and never a deletion chained with other commands. A permission prompt
+  Bash call: no `&&`, `||` or `;` chains, and never a deletion together with another command. A
+  pipe into a filter (`| tail`, `| grep`) is fine. A permission prompt
   stalls a session that nobody watches for hours.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
