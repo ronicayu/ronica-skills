@@ -134,6 +134,44 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: var(--tip); border: 1px solid var(--line-2); border-radius: 6px; color: var(--text); font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px var(--shadow); }
 #tip[hidden] { display: none; }
 #cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
+#toolbar #searchBtn, #toolbar #fitMore { display: none; }
+#toolbar .seg [data-short]::after { content: attr(data-short); display: none; }
+/* Narrow screens: two rows. Row 1 is project, goal, options; row 2 is view, Filter, More and a search button
+   that opens the search box over the row. The rows dissolve so every control can be ordered on one wrapping line. */
+@media (max-width: 640px) {
+  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 10px; }
+  #toolbar .row { display: contents; }
+  #toolbar .row > .spacer { display: none; }
+  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 32px; padding: 3px 8px; }
+  #toolbar #project { order: 1; flex: 0 1 112px; min-width: 64px; max-width: 140px; text-overflow: ellipsis; }
+  #toolbar #goalWrap { order: 2; flex: 1 1 0; min-width: 72px; }
+  #toolbar #optsWrap { order: 3; }
+  #toolbar #stamp { order: 4; margin-left: -2px; }
+  #toolbar #stamp .t, #toolbar #goalInfo { display: none; }
+  #toolbar #stamp .dot { margin-right: 0; }
+  #toolbar #row1::after { content: ''; order: 5; flex: 0 0 100%; height: 0; }
+  #toolbar .seg { order: 6; }
+  #toolbar .seg button { padding: 3px 7px; }
+  #toolbar .seg [data-short] { font-size: 0; }
+  #toolbar .seg [data-short]::after { display: inline; font-size: 13px; }
+  #toolbar #filterWrap { order: 7; }
+  #toolbar #moreWrap { order: 8; }
+  #toolbar #searchWrap { order: 9; margin-left: auto; }
+  #toolbar #fit { display: none; }
+  #toolbar #fitMore, #toolbar #searchBtn { display: block; }
+  #toolbar #searchBtn { min-width: 36px; font-size: 18px; line-height: 1; }
+  #toolbar #chips, #toolbar #clearAll { order: 10; }
+  #toolbar #chips { flex: 1 1 0; overflow-x: auto; scrollbar-width: none; }
+  #toolbar #chips:empty { display: none; }
+  #toolbar #chips .chip[data-key="goal"] { display: none; }
+  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; top: calc(var(--bar) + 4px); left: 8px; right: 8px; width: auto; min-width: 0; max-height: calc(100vh - var(--bar) - 16px); }
+  #toolbar .box { display: none; position: fixed; left: 0; right: 0; top: var(--search-top, 0); z-index: 6; box-sizing: border-box; padding: 4px 10px; background: var(--surface); }
+  #toolbar.searching .box { display: flex; }
+  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 32px; }
+  #toolbar #searchClear { right: 12px; min-width: 32px; }
+  #toolbar #searchCount { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 20px); margin: 0 -10px -4px; box-sizing: border-box; padding: 3px 10px; }
+}
 #legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: var(--surface-a); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
 #legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
 #legend .col { display: contents; }
@@ -324,7 +362,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
       <div class="menu" id="goalList" role="listbox" aria-label="Goals"></div>
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
-    <span class="seg" role="group" aria-label="View"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button><button id="viewLoad" title="Hours per person per week, from estimates">Load</button></span>
+    <span class="seg" role="group" aria-label="View"><button id="viewGraph" aria-label="Graph"><span aria-hidden="true">Graph</span></button><button id="viewLanes" aria-label="Swimlane"><span aria-hidden="true" data-short="Lanes">Swimlane</span></button><button id="viewTimeline" aria-label="Timeline"><span aria-hidden="true" data-short="Time">Timeline</span></button><button id="viewLoad" aria-label="Load" title="Hours per person per week, from estimates"><span aria-hidden="true">Load</span></button></span>
     <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-expanded="false" aria-controls="opts" aria-label="View options" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
         <div class="grp" id="lanesBy" role="radiogroup" aria-labelledby="lanesHead"><div class="h" id="lanesHead">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
@@ -337,6 +375,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     </span>
     <span class="spacer"></span>
     <span class="menuWrap" id="searchWrap">
+      <button id="searchBtn" aria-expanded="false" aria-controls="search" aria-label="Search the plan" title="Search (/)">⌕</button>
       <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" aria-autocomplete="list" aria-label="Search the plan" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
       <div class="menu right" id="results" role="listbox" aria-label="Search results"></div>
     </span>
@@ -355,6 +394,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
       <div class="menu right" id="more">
         <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
+        <button class="item" id="fitMore" title="Show the whole plan (F)">Fit <kbd>F</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
         <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
         <button class="item" id="printPage" title="Print the whole current view, or save it as a PDF">Print…</button>
@@ -1755,6 +1795,7 @@ function applySearch() {
   const hits = searchHits(q), ids = new Set(hits.map(n => String(n.id)));
   tasks().forEach(n => n.toggleClass('dim', ids.size > 0 && !ids.has(n.id())));
   $('searchClear').hidden = !$('search').value;
+  $('searchBtn').classList.toggle('on', !!$('search').value);
   const count = $('searchCount');
   const added = Date.now() < fresh.until ? hits.filter(n => fresh.ids.has(n.id)).length : 0;
   if (!q) count.replaceChildren();
@@ -2915,12 +2956,31 @@ $('search').onkeydown = e => {
   }
 };
 $('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
-$('search').onblur = () => setTimeout(() => { if (document.activeElement !== $('search')) setMenu('searchWrap', false); }, 0);
+$('search').onblur = () => setTimeout(() => {
+  if (document.activeElement === $('search')) return;
+  setMenu('searchWrap', false);
+  openSearchBox(false);
+}, 0);
+// On a narrow screen the box is hidden behind a button and opens over the second toolbar row.
+function openSearchBox(open) {
+  if (toolbar.classList.contains('searching') === open) return;
+  if (open) toolbar.style.setProperty('--search-top', ($('searchBtn').getBoundingClientRect().top - 4) + 'px');
+  toolbar.classList.toggle('searching', open);
+  $('searchBtn').setAttribute('aria-expanded', String(open));
+}
+function focusSearch() {
+  openSearchBox(true);
+  $('search').focus();
+  $('search').select();
+}
+$('searchBtn').onclick = focusSearch;
+$('fitMore').onclick = () => $('fit').click();
 $('searchClear').onclick = () => {
   clearSearch();
   $('search').focus();
 };
 $('results').addEventListener('mousedown', e => e.preventDefault());
+$('searchClear').addEventListener('mousedown', e => e.preventDefault());
 $('results').addEventListener('click', e => {
   const r = e.target.closest('.hit');
   if (r) openHit(Number(r.dataset.i));
@@ -2932,7 +2992,10 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (!$('tip').hidden) return hideTip();
     if (document.activeElement === $('search') && $('search').value) clearSearch();
-    else if (closeMenus()) return;
+    else if (document.activeElement === $('search') && toolbar.classList.contains('searching')) {
+      openSearchBox(false);
+      $('searchBtn').focus();
+    } else if (closeMenus()) return;
     else if ($('panel').style.display === 'block') closePanel();
     return;
   }
@@ -2945,8 +3008,7 @@ document.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
   if (e.key === '/') {
     e.preventDefault();
-    $('search').focus();
-    $('search').select();
+    focusSearch();
   } else if (key === 'f') $('fit').click();
   else if (key === 'e') $('expandAll').click();
   else if (key === 'c') $('collapseAll').click();
@@ -3118,7 +3180,7 @@ const setLegend = (open, save = true) => {
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
 // Closed by default so it never sits on the plan; the PNG export carries it either way.
-setLegend(store.get('taskgraph.legend') === 'open', false);
+setLegend(store.get('taskgraph.legend') === 'open' && !narrowScreen.matches, false);
 $('legendToggle').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
   fitIfOutside();
@@ -3146,7 +3208,7 @@ if (DATA.live) {
     connected = ok;
     const when = new Date().toLocaleTimeString([], HM);
     if (ok) lastOk = when;
-    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), lastOk || when);
+    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), el('span', { className: 't', textContent: lastOk || when }));
     $('stamp').title = ok ? 'Live · checked ' + when : `Disconnected · tried ${when} · last good ${lastOk || 'never'}`;
     $('banner').hidden = ok;
     if (!ok) $('banner').replaceChildren(`Not live since ${lastOk || 'the page opened'} · the server is not answering, so this may be out of date.`,
@@ -3180,7 +3242,8 @@ if (DATA.live) {
   $('refresh').hidden = false;
   $('refresh').onclick = () => poll(true);
 } else {
-  $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
+  $('stamp').replaceChildren(el('span', { className: 't', textContent: 'Generated ' + fmt(DATA.generated_at) }));
+  $('stamp').title = 'Generated ' + fmt(DATA.generated_at);
 }
 
 if (goal != null && !byId.has(goal)) goal = null;

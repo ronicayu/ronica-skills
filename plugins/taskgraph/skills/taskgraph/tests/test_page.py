@@ -1661,6 +1661,90 @@ def test_priority_badge_shows_in_the_panel(browser, priority_file):
     page.close()
 
 
+def open_phone(browser, path, query="?view=graph"):
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}{query}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    return page, problems
+
+
+def test_phone_toolbar_is_two_short_rows_without_overflow(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert page.evaluate("document.getElementById('toolbar').scrollWidth") <= 390
+    seen = page.evaluate(
+        """() => [...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
+            .filter(e => e.offsetParent && e.closest('.menu') === null && getComputedStyle(e).visibility !== 'hidden')
+            .map(e => { const r = e.getBoundingClientRect(); return [e.id, r.left, r.right, r.height]; })"""
+    )
+    assert {"project", "goal", "optsBtn", "viewGraph", "filterBtn", "moreBtn", "searchBtn"} <= {row[0] for row in seen}
+    assert all(left >= -0.5 and right <= 390.5 for _, left, right, _ in seen)
+    assert all(height >= 32 for _, _, _, height in seen)
+    assert problems == []
+    page.close()
+
+
+def test_phone_toolbar_rows_are_two(browser, page_file):
+    page, _ = open_phone(browser, page_file)
+    rows = page.evaluate(
+        """() => new Set([...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
+            .filter(e => e.offsetParent && e.closest('.menu') === null)
+            .map(e => Math.round(e.getBoundingClientRect().top))).size"""
+    )
+    assert rows == 2
+    page.close()
+
+
+def test_phone_search_opens_types_and_closes(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    assert not page.is_visible("#search")
+    page.click("#searchBtn")
+    assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
+    page.keyboard.type("docs")
+    page.wait_for_function("document.querySelectorAll('#results .hit').length > 0")
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
+    page.keyboard.press("Escape")
+    page.keyboard.press("Escape")
+    assert not page.is_visible("#search")
+    page.click("#cy")
+    page.keyboard.press("/")
+    assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
+    page.evaluate("document.activeElement.blur()")
+    page.wait_for_function("!document.getElementById('toolbar').classList.contains('searching')")
+    assert problems == []
+    page.close()
+
+
+def test_phone_every_view_and_fit_are_reachable(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    for button, name in (("viewLanes", "lanes"), ("viewTimeline", "timeline"), ("viewLoad", "load"), ("viewGraph", "graph")):
+        page.click(f"#{button}")
+        assert page.evaluate("view") == name
+        assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    page.click("#moreBtn")
+    assert page.is_visible("#fitMore")
+    page.click("#fitMore")
+    assert not page.evaluate("document.getElementById('moreWrap').classList.contains('open')")
+    page.click("#optsBtn")
+    assert page.is_visible("#opts")
+    right = page.evaluate("document.getElementById('opts').getBoundingClientRect().right")
+    assert right <= 390
+    assert problems == []
+    page.close()
+
+
+def test_phone_legend_starts_collapsed_even_if_remembered_open(browser, page_file):
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    page.add_init_script("try { localStorage.setItem('taskgraph.legend', 'open'); } catch (e) {}")
+    page.goto(f"{page_file.as_uri()}?view=graph")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("document.getElementById('legend').classList.contains('closed')")
+    page.close()
+
+
 def test_graph_edges_are_orthogonal_routes_and_respace_on_narrow(browser, page_file):
     page, problems = open_page(browser, page_file, "?view=graph")
     span = "Math.max(...tasks().map(n => n.position('y'))) - Math.min(...tasks().map(n => n.position('y')))"
