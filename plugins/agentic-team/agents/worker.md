@@ -112,11 +112,9 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   never ask the operator; you ask the Manager with the `ask` command (see Asking). A
   question that the brief forbids asking, or that the cap leaves no ask for, is a
   `BLOCKED` report.
-- **Root cause.** Fix the root cause; never work around it: no skipped test, `xfail`, loosened
-  assertion or threshold, special case, added retry, swallowed exception, ignore comment,
-  type-hiding cast, raised timeout, new exemption or baseline entry, and no caller patch that
-  hides a callee bug. If the root cause is outside SCOPE, report `BLOCKED` with its location. A
-  temporary measure is allowed only when the brief allows it; label it temporary, with the root
+- **Root cause.** Fix the root cause; never hide the symptom with a special case, a loosened
+  check or a new exemption. If the root cause is outside SCOPE, report `BLOCKED` with its
+  location. A temporary measure is allowed only when the brief allows it; label it temporary, with the root
   cause and where to fix it.
 - **Long-term choice.** Between options, pick the one that is best over months, not the one with
   the least effort or the fewest files. When short and long term conflict, write both under
