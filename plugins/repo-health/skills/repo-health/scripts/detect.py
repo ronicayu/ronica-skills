@@ -31,7 +31,8 @@ Top-level keys
     commit, default_branch
     languages, other_languages     per language {files, loc, test_files, test_loc}
     subprojects[]                  {path, manifest, manifests, languages, stats,
-                                   categories, dependencies, workspace, members}.
+                                   categories, dependencies, workspace, members,
+                                   test_suites, publishable}.
                                    A workspace root (Cargo [workspace] members, Maven
                                    <modules>, Gradle include(), go.work use, npm and
                                    pnpm workspaces) is one subproject: workspace is
@@ -40,6 +41,14 @@ Top-level keys
                                    members[].members is empty). The root's categories
                                    also list the rows of its members ("member": path).
                                    --max-subprojects counts roots only.
+                                   test_suites[] is {path, language, files, loc}: test
+                                   files grouped by the first folder named tests, test,
+                                   __tests__ or spec below the subproject (or member);
+                                   tests outside such a folder form one suite whose path
+                                   is the subproject folder. A root lists its members'
+                                   suites too. publishable is {kind, file} when a
+                                   manifest makes the project a published package
+                                   (npm, pypi, crate, maven), else null.
     more_subprojects[]             {path, manifest, languages, loc} beyond the cap
     shared[]                       tool rows found at the repo root
     ci                             see below
@@ -66,7 +75,14 @@ Top-level keys
                                    requires-python, rust-toolchain(.toml), rust-version,
                                    go directive, go toolchain, java.toolchain, wrappers,
                                    .tool-versions, mise.toml, .sdkmanrc, .java-version),
-                                   task_runners, devcontainer, dockerfiles, compose
+                                   task_runners, devcontainer, dockerfiles, compose,
+                                   update_bots[] ({tool: dependabot|renovate, file, line,
+                                   ecosystems}: the ecosystems of dependabot's
+                                   package-ecosystem lines, named python, typescript,
+                                   rust, go, java, actions, docker; ["*"] for renovate)
+    architecture_docs[]            {kind: architecture|adr|model|readme-section, path,
+                                   last_commit, files? (adr), line? (readme-section)}: see
+                                   Detector.architecture_docs
     docs                           readme, headings[], install/run/test ({found, via,
                                    line}), contributing, adr_dirs, architecture_docs,
                                    docs_dir, and commands[] (below)
@@ -191,12 +207,12 @@ JVM_TEST_CI = [
 ]
 
 # A Kotlin project also gets these rows of the java language.
-KOTLIN_FROM_JAVA = ("junit", "jacoco", "spotless", "dependency-check")
+KOTLIN_FROM_JAVA = ("junit", "jacoco", "spotless", "dependency-check", "archunit")
 
 WHOLE_WORD = {"tsc", "pmd", "nox", "tox", "c8", "nyc", "jest", "black", "ruff", "knip"}
 
 CATEGORIES = ("lint", "format", "types", "static", "secrets", "tests",
-              "coverage", "deps_audit", "deps_bot", "deadcode", "hooks")
+              "coverage", "deps_audit", "deps_bot", "deadcode", "arch", "hooks")
 
 TOOLS = [
     # language    tool                  category      config evidence                                                                                                  CI words
@@ -216,6 +232,9 @@ TOOLS = [
     ("python",     "coverage.py",        "coverage",   [".coveragerc", "pyproject.toml::[tool.coverage", "setup.cfg::[coverage:"],                                      ["coverage", "--cov"]),
     ("python",     "pip-audit",          "deps_audit", [],                                                                                                              ["pip-audit"]),
     ("python",     "vulture",            "deadcode",   ["pyproject.toml::[tool.vulture]"],                                                                              ["vulture"]),
+    ("python",   "import-linter",        "arch",       [".importlinter", "setup.cfg::[importlinter]", "pyproject.toml::[tool.importlinter]"],["lint-imports"]),
+    ("python",   "tach",                 "arch",       ["tach.toml"],                                              ["tach check"]),
+    ("python",   "pytestarch",           "arch",       ["pyproject.toml::~pytestarch", "requirements{,-dev,_dev,-test}.txt::~pytestarch", "dev-requirements.txt::~pytestarch"],[]),
 
     ("typescript", "eslint",             "lint",       ["eslint.config.{js,mjs,cjs,ts,mts,cts}", ".eslintrc", ".eslintrc.{js,cjs,json,yml,yaml}", "package.json::eslintConfig"], ["eslint"]),
     ("typescript", "biome",              "lint",       ["biome.json", "biome.jsonc"],                                                                                   ["biome"]),
@@ -234,6 +253,9 @@ TOOLS = [
     ("typescript", "nyc",                "coverage",   [".nycrc", ".nycrc.*"],                                                                                          ["nyc"]),
     ("typescript", "npm-audit",          "deps_audit", [],                                                                                                              ["npm audit", "pnpm audit", "yarn audit", "yarn npm audit"]),
     ("typescript", "knip",               "deadcode",   ["knip.json", "knip.jsonc", ".knip.json", "knip.config.*"],                                                      ["knip"]),
+    ("typescript","dependency-cruiser",   "arch",       [".dependency-cruiser.{js,cjs,mjs,json}"],                  ["depcruise"]),
+    ("typescript","eslint-plugin-boundaries","arch",       ["eslint.config.{js,mjs,cjs,ts,mts,cts}::~boundaries/", ".eslintrc.{js,cjs,json,yml,yaml}::~boundaries/", ".eslintrc::~boundaries/"],[]),
+    ("typescript","nx-module-boundaries", "arch",       ["eslint.config.{js,mjs,cjs,ts,mts,cts}::~enforce-module-boundaries", ".eslintrc.{js,cjs,json,yml,yaml}::~enforce-module-boundaries", ".eslintrc::~enforce-module-boundaries"],[]),
 
     ("rust",       "clippy",             "lint",       ["clippy.toml", ".clippy.toml", "Cargo.toml::[lints.clippy]", "Cargo.toml::[workspace.lints.clippy]"],           ["clippy"]),
     ("rust",       "rustfmt",            "format",     ["rustfmt.toml", ".rustfmt.toml"],                                                                               ["cargo fmt", "rustfmt"]),
@@ -257,6 +279,8 @@ TOOLS = [
     ("java",       "testng",             "tests",      ["build::testng"],                                                                                               JVM_TEST_CI),
     ("java",       "jacoco",             "coverage",   ["build::jacoco"],                                                                                               ["jacoco"]),
     ("java",       "dependency-check",   "deps_audit", ["build::dependency-check"],                                                                                     ["dependency-check"]),
+    ("java",     "archunit",             "arch",       ["build::archunit"],                                        []),
+    ("java",     "spring-modulith",      "arch",       ["build::spring-modulith"],                                 []),
 
     ("go",         "golangci-lint",      "lint",       [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"],                                         ["golangci"]),
     ("go",         "staticcheck",        "lint",       ["staticcheck.conf"],                                                                                            ["staticcheck"]),
@@ -269,6 +293,8 @@ TOOLS = [
     ("go",         "go-test",            "tests",      [],                                                                                                              ["go test"]),
     ("go",         "go-cover",           "coverage",   [],                                                                                                              ["-cover", "-coverprofile"]),
     ("go",         "deadcode",           "deadcode",   [],                                                                                                              ["deadcode"]),
+    ("go",       "depguard",             "arch",       [".golangci.{yml,yaml,toml}::~depguard"],                   []),
+    ("go",       "go-arch-lint",         "arch",       [".go-arch-lint.yml"],                                      ["go-arch-lint"]),
 
     ("kotlin",     "detekt",             "lint",       ["detekt.yml", "detekt-config.yml", "config/detekt/*.yml", "build::detekt"],                                     ["detekt"]),
     ("kotlin",     "ktlint",             "lint",       [".editorconfig::~ktlint_", "build::ktlint"],                                                                    ["ktlint"]),
@@ -276,6 +302,7 @@ TOOLS = [
     ("kotlin",     "kotlin-strict",      "types",      ["build::allWarningsAsErrors"],                                                                                  []),
     ("kotlin",     "kotest",             "tests",      ["build::kotest"],                                                                                               JVM_TEST_CI),
     ("kotlin",     "kover",              "coverage",   ["build::kover"],                                                                                                ["kover"]),
+    ("kotlin",   "konsist",              "arch",       ["build::konsist"],                                         []),
 
     ("shared",     "semgrep",            "static",     [".semgrep.yml", ".semgrep.yaml", ".semgrep/"],                                                                  ["semgrep"]),
     ("shared",     "codeql",             "static",     [".github/workflows/*codeql*"],                                                                                  ["codeql-action", "codeql"]),
@@ -444,6 +471,11 @@ class Tool(object):
 
 
 ALL_TOOLS = [Tool(row) for row in TOOLS]
+
+# Architecture tools that run inside another tool; rows carry rides_on so score.py can
+# ask whether the host runs in blocking CI.
+RIDES_ON = {"pytestarch": "tests", "archunit": "tests", "spring-modulith": "tests", "konsist": "tests",
+            "eslint-plugin-boundaries": "eslint", "nx-module-boundaries": "eslint", "depguard": "golangci-lint"}
 
 
 def tools_for_language(language):
@@ -3007,6 +3039,26 @@ def count_loc(data, file_size):
     return loc
 
 
+TEST_DIR_NAMES = ("tests", "test", "__tests__", "spec")
+
+
+def test_suite_path(rel, sub):
+    """The folder of the test suite a test file belongs to.
+
+    The first folder named tests, test, __tests__ or spec below the subproject
+    (or workspace member) folder; a test file outside such a folder (a Go
+    `_test.go`, a TypeScript `.test.ts` next to its source) belongs to the
+    suite of the whole subproject, whose path is the subproject folder.
+    """
+    base = sub if sub not in (".", "") else ""
+    below = rel[len(base) + 1:] if base and rel.startswith(base + "/") else rel
+    dirs = below.split("/")[:-1]
+    for index, name in enumerate(dirs):
+        if name in TEST_DIR_NAMES:
+            return "/".join(([base] if base else []) + dirs[:index + 1])
+    return sub
+
+
 def new_stats():
     return {"files": 0, "loc": 0, "test_files": 0, "test_loc": 0}
 
@@ -3457,6 +3509,7 @@ class Detector(object):
         self.hook_defs = []
         self.ci_facts = []
         self.script_facts = []
+        self.suites = {}
         self._gradle_verification = None
         self.reader = CommandReader(self)
 
@@ -3473,6 +3526,7 @@ class Detector(object):
         supp = {lang: {"total": 0, "markers": defaultdict(int), "files": defaultdict(int)}
                 for lang in SUPPRESSIONS}
         per_sub = defaultdict(lambda: {lang: new_stats() for lang in LANGUAGES})
+        suites = defaultdict(dict)
         cache = {}
         for rel in repo.files:
             ext = posixpath.splitext(rel)[1].lower()
@@ -3504,6 +3558,10 @@ class Detector(object):
                 else:
                     stats["files"] += 1
                     stats["loc"] += loc
+            if test and sub is not None:
+                entry = suites[sub].setdefault((test_suite_path(rel, sub), lang), {"files": 0, "loc": 0})
+                entry["files"] += 1
+                entry["loc"] += loc
             if lang == "rust" and not test and b"#[cfg(test)]" in data:
                 languages["rust"]["inline_test_files"] += 1
             for marker in SUPPRESSIONS[lang]:
@@ -3522,7 +3580,7 @@ class Detector(object):
                 "markers": dict(sorted(info["markers"].items())),
                 "top_files": [{"file": f, "count": c} for f, c in top],
             }
-        return languages, dict(other), suppressions, per_sub, excluded
+        return languages, dict(other), suppressions, per_sub, excluded, suites
 
     @staticmethod
     def owner(d, subproject_dirs, cache):
@@ -4049,10 +4107,49 @@ class Detector(object):
         lockfiles.sort(key=lambda r: r["file"])
         self.lockfile_age(lockfiles)
         return {"lockfiles": lockfiles,
+                "update_bots": self.update_bots(),
                 "requirements_files": requirements,
                 "toolchain_pins": sorted(pins, key=lambda r: (r["file"], r["kind"])),
                 "task_runners": sorted(runners, key=lambda r: r["file"]),
                 "devcontainer": devcontainer, "dockerfiles": dockerfiles[:20], "compose": compose[:20]}
+
+    DEPENDABOT_ECOSYSTEMS = {
+        "pip": "python", "uv": "python", "poetry": "python", "pipenv": "python", "npm": "typescript",
+        "yarn": "typescript", "pnpm": "typescript", "bun": "typescript", "cargo": "rust", "gomod": "go",
+        "maven": "java", "gradle": "java", "github-actions": "actions", "docker": "docker",
+        "docker-compose": "docker",
+    }
+
+    def update_bots(self):
+        """Dependency update bots: {tool, file, line, ecosystems}.
+
+        dependabot lists the ecosystems of its `package-ecosystem:` lines, named like
+        the languages of detect.py (python, typescript, rust, go, java; kotlin
+        builds are java) plus "actions" and "docker". Renovate covers every
+        ecosystem by default: ["*"].
+        """
+        repo = self.repo
+        bots = []
+        for name in (".github/dependabot.yml", ".github/dependabot.yaml"):
+            for rel in repo.files:
+                if rel == name or rel.endswith("/" + name):
+                    ecosystems = set()
+                    first = 1
+                    for number, line in enumerate(repo.text(rel).splitlines(), 1):
+                        m = re.match(r"^\s*-?\s*package-ecosystem\s*:\s*[\"']?([\w\-]+)", line)
+                        if m:
+                            first = first if ecosystems else number
+                            ecosystems.add(self.DEPENDABOT_ECOSYSTEMS.get(m.group(1), m.group(1)))
+                    bots.append({"tool": "dependabot", "file": rel, "line": first, "ecosystems": sorted(ecosystems)})
+        for tool in ALL_TOOLS:
+            if tool.name != "renovate":
+                continue
+            for spec in tool.specs:
+                hit = repo.match_spec(spec, ".")
+                if hit:
+                    bots.append({"tool": "renovate", "file": hit[0], "line": hit[1], "ecosystems": ["*"]})
+                    break
+        return sorted(bots, key=lambda b: (b["file"], b["tool"]))
 
     # ---- strictness and coverage thresholds --------------------------------
 
@@ -4235,6 +4332,61 @@ class Detector(object):
                 docs["docs_dir"] = name
                 break
         return docs
+
+    ADR_DIRS = ("docs/adr", "doc/adr", "docs/decisions", "docs/architecture/decisions", "adr")
+    GIT_DATE_CAP = 20
+
+    def architecture_docs(self, docs):
+        """architecture_docs[]: {kind, path, last_commit, files?, line?} with the committer date of the newest commit.
+
+        kinds: architecture (ARCHITECTURE.md at the root or in docs/, docs/architecture*),
+        adr (one row per ADR folder: docs/adr, doc/adr, docs/decisions,
+        docs/architecture/decisions, adr, or the folder named in .adr-dir; files counts
+        its files), model (workspace.dsl, *.c4, *.likec4) and readme-section (a README
+        heading with "Architecture"; last_commit is the README's). At most 20 git calls;
+        rows beyond that have last_commit null.
+        """
+        repo = self.repo
+        rows = []
+        files = sorted(repo.files)
+        adr_dirs = list(self.ADR_DIRS)
+        for rel in repo.by_name.get(".adr-dir", []):
+            named = repo.text(rel).strip().splitlines()
+            if named and ".." not in named[0] and not named[0].startswith("/"):
+                adr_dirs.append(posixpath.normpath(posixpath.join(dir_of(rel), named[0].strip())))
+        taken = set()
+        for folder in sorted(set(adr_dirs)):
+            inside = [f for f in files if f.startswith(folder + "/")]
+            if inside:
+                taken.add(folder)
+                rows.append({"kind": "adr", "path": folder, "files": len(inside)})
+        for rel in files:
+            low = rel.lower()
+            base = posixpath.basename(low)
+            if any(rel.startswith(f + "/") for f in taken):
+                continue
+            if low in ("architecture.md", "docs/architecture.md") or re.match(r"^docs/architecture[^/]*$", low):
+                rows.append({"kind": "architecture", "path": rel})
+            elif base == "workspace.dsl" or base.endswith((".c4", ".likec4")):
+                rows.append({"kind": "model", "path": rel})
+        for rel in files:
+            if re.match(r"^docs/architecture/", rel.lower()) and not any(rel.startswith(f + "/") for f in taken):
+                if not any(r["kind"] == "architecture" and r["path"] == "docs/architecture" for r in rows):
+                    rows.append({"kind": "architecture", "path": "docs/architecture"})
+        for heading in docs.get("headings") or []:
+            if re.search(r"architecture", heading["text"], re.I) and docs.get("readme"):
+                rows.append({"kind": "readme-section", "path": docs["readme"], "line": heading["line"]})
+                break
+        for index, row in enumerate(rows):
+            row["last_commit"] = None
+            if not repo.is_git or index >= self.GIT_DATE_CAP:
+                continue
+            target = row["path"]
+            out = run_git(repo.git_root, ["log", "-1", "--no-show-signature", "--format=%cI", "--",
+                                          repo.top_rel(target)])
+            if out:
+                row["last_commit"] = out.decode("utf-8", "replace").strip() or None
+        return rows
 
     @staticmethod
     def headings(text, rel):
@@ -4621,7 +4773,8 @@ class Detector(object):
         if "." not in subs and (orphans or not subs):
             subs["."] = {"manifests": [], "languages": set()}
         subproject_dirs = set(subs) | member_dirs
-        languages, other, suppressions, per_sub, excluded = self.scan_sources(subproject_dirs)
+        languages, other, suppressions, per_sub, excluded, suites = self.scan_sources(subproject_dirs)
+        self.suites = suites
         self.collect_scripts()
         self.npm_workspaces = npm_workspaces(repo)
         owner_cache = {}
@@ -4700,6 +4853,7 @@ class Detector(object):
                         branch = name
                         break
         strictness, thresholds = self.detect_facts(subproject_dirs)
+        docs = self.detect_docs()
         return {
             "repo": repo.root,
             "git": has_git,
@@ -4715,7 +4869,8 @@ class Detector(object):
             "ci": ci,
             "precommit": precommit,
             "setup": self.detect_setup(subproject_dirs),
-            "docs": self.detect_docs(),
+            "docs": docs,
+            "architecture_docs": self.architecture_docs(docs),
             "suppressions": suppressions,
             "strictness": strictness,
             "coverage_thresholds": thresholds,
@@ -4737,6 +4892,8 @@ class Detector(object):
     @staticmethod
     def row(tool, hit, how, **extra):
         row = {"tool": tool.name, "category": tool.category, "file": hit[0], "line": hit[1], "how": how}
+        if tool.name in RIDES_ON:
+            row["rides_on"] = RIDES_ON[tool.name]
         row.update(extra)
         return row
 
@@ -4807,6 +4964,12 @@ class Detector(object):
             for key in ("direct", "dev"):
                 dependencies[key] += member["dependencies"][key]
             dependencies["files"].extend(member["dependencies"]["files"])
+        suites = {}
+        for owner in [d] + [m["path"] for m in members]:
+            for (path, lang), counts in self.suites.get(owner, {}).items():
+                found = suites.setdefault((path, lang), {"files": 0, "loc": 0})
+                found["files"] += counts["files"]
+                found["loc"] += counts["loc"]
         record = {
             "path": d,
             "manifest": (entry["manifests"] or [None])[0],
@@ -4817,8 +4980,38 @@ class Detector(object):
             "dependencies": dependencies,
             "workspace": {"kind": workspace["kind"], "manifest": workspace["manifest"]} if workspace else None,
             "members": list(members),
+            "test_suites": [{"path": path, "language": lang, "files": c["files"], "loc": c["loc"]}
+                            for (path, lang), c in sorted(suites.items())],
+            "publishable": self.publishable(entry["manifests"]),
         }
         return record
+
+    def publishable(self, manifests):
+        """The first manifest that makes this project a published package, else None.
+
+        package.json with a name and no "private": true; pyproject.toml with a
+        [project] table and a [build-system] table; Cargo.toml with a [package]
+        table and no `publish = false`; a pom.xml or Gradle file that names
+        maven-publish, distributionManagement or a publishing block.
+        """
+        repo = self.repo
+        for rel in manifests:
+            base = posixpath.basename(rel)
+            text = repo.text(rel)
+            if base == "package.json":
+                obj, error = repo.json_file(rel)
+                if error is None and isinstance(obj, dict) and obj.get("name") and obj.get("private") is not True:
+                    return {"kind": "npm", "file": rel}
+            elif base == "pyproject.toml":
+                if re.search(r"^\[project\]", text, re.M) and re.search(r"^\[build-system\]", text, re.M):
+                    return {"kind": "pypi", "file": rel}
+            elif base == "Cargo.toml":
+                if re.search(r"^\[package\]", text, re.M) and not re.search(r"^\s*publish\s*=\s*false", text, re.M):
+                    return {"kind": "crate", "file": rel}
+            elif base in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                if re.search(r"maven-publish|distributionManagement|\bpublishing\s*\{", text):
+                    return {"kind": "maven", "file": rel}
+        return None
 
 
 def main(argv=None):
