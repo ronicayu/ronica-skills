@@ -7,6 +7,7 @@ import datetime
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -79,7 +80,10 @@ def hfile(path, language="python", score_=0.9, commits=10, share=0.5):
 
 def run(detect_json=None, hotspots=None, gh=None, t1=None, **kw):
     kw.setdefault("now", NOW)
-    return score.build(detect_json or det(), hotspots or hot(), gh, t1, **kw)
+    result = score.build(detect_json or det(), hotspots or hot(), gh, t1, **kw)
+    for item in result["dimensions"]:
+        assert re.search("[\u4e00-\u9fff]", item["summary_zh"]), "no Chinese summary for: " + item["summary"]
+    return result
 
 
 def dim(result, dim_id, path="."):
@@ -204,6 +208,69 @@ class Types(unittest.TestCase):
         self.assertEqual((row["level"], row["rule"]), (0, "types.0"))
         self.assertEqual(row["partial"]["missing"], ["typescript"])
         self.assertIn("types:.:types.0:typescript", gap_ids(run(d)))
+
+
+class CiRowsJoinByFolder(unittest.TestCase):
+    def two_subs(self):
+        return [sub(langs=("typescript",), test_files=0), sub(path="web", langs=("typescript",), loc=100, test_files=0)]
+
+    def types_rule(self, rows, path):
+        return dim(run(det(self.two_subs(), rows=rows)), "types", path)["rule"]
+
+    def test_working_directory_puts_the_row_in_the_subproject_that_holds_it(self):
+        row = ci_row("tsc", "types", "typescript", ["tsc --noEmit"], dir="web")
+        self.assertEqual(self.types_rule([row], "web"), "types.2")
+        self.assertEqual(self.types_rule([row], "."), "types.0")
+
+    def test_cd_prefix_flags_and_followed_scripts(self):
+        for extra in ({"dir": "web"}, {"commands": ["tsc -p web/tsconfig.json"]}, {"commands": ["npm --prefix web run tc"]},
+                      {"commands": ["make -C web tc"]}, {"commands": ["tsc"], "via": "tc", "via_file": "web/package.json"}):
+            row = ci_row("tsc", "types", "typescript", **extra)
+            self.assertEqual(self.types_rule([row], "web"), "types.2", extra)
+            self.assertEqual(self.types_rule([row], "."), "types.0", extra)
+
+    def test_no_known_folder_falls_back_to_language(self):
+        row = ci_row("tsc", "types", "typescript", ["tsc --noEmit"])
+        self.assertEqual(self.types_rule([row], "web"), "types.2")
+        self.assertEqual(self.types_rule([row], "."), "types.2")
+
+    def test_a_folder_inside_the_root_subproject_belongs_to_the_root(self):
+        row = ci_row("tsc", "types", "typescript", ["tsc"], dir="tools/x")
+        self.assertEqual(self.types_rule([row], "."), "types.2")
+        self.assertEqual(self.types_rule([row], "web"), "types.0")
+
+    def test_test_rows_are_scoped_too(self):
+        suites = [{"path": "web/tests", "language": "typescript", "files": 1, "loc": 1}]
+        subs = [sub(langs=("typescript",), test_files=0), sub(path="web", langs=("typescript",), suites=suites)]
+        elsewhere = ci_row("jest", "tests", "typescript", ["jest"], dir="other")
+        self.assertEqual(dim(run(det(subs, rows=[elsewhere])), "tests", "web")["rule"], "tests.1")
+        here = ci_row("jest", "tests", "typescript", ["jest"], dir="web")
+        self.assertEqual(dim(run(det(subs, rows=[here])), "tests", "web")["rule"], "tests.2")
+
+
+class TestScripts(unittest.TestCase):
+    def test_a_script_inside_a_suite_folder_runs_that_suite(self):
+        suites = [{"path": "plugins/a/tests", "language": "python", "files": 2, "loc": 10},
+                  {"path": "plugins/b/tests", "language": "python", "files": 1, "loc": 5}]
+        row = ci_row("test-script", "tests", "shared", ["python plugins/a/tests/run_all.py"],
+                     via="plugins/a/tests/run_all.py", via_file="plugins/a/tests/run_all.py")
+        d = det([sub(suites=suites)], rows=[row])
+        result = run(d, hot([hfile("plugins/a/scripts/x.py"), hfile("plugins/b/scripts/y.py")]))
+        self.assertEqual(dim(result, "tests")["partial"]["missing"], ["plugins/b/tests"])
+        self.assertNotIn("tests:.:missing-suite:plugins/a/tests", gap_ids(result))
+        self.assertEqual([h["tests_in_ci"] for h in result["hotspots"]], [True, False])
+
+
+class NoTestsAtAll(unittest.TestCase):
+    def test_hotspot_no_tests_gap_folds_into_tests_0(self):
+        d = det([sub(test_files=0)])
+        result = run(d, hot([hfile("a/x.py")]))
+        ids = gap_ids(result)
+        self.assertIn("tests:.:tests.0", ids)
+        self.assertFalse([i for i in ids if i.startswith("hotspots:") and "no-tests" in i])
+        gap = [g for g in result["gaps"] if g["id"] == "tests:.:tests.0"][0]
+        self.assertEqual(gap["hotspot_files"], ["a/x.py"])
+        self.assertEqual(gap["priority"], 20.0)
 
 
 class Static(unittest.TestCase):
@@ -776,7 +843,7 @@ class Output(unittest.TestCase):
     def test_row_shape(self):
         for row in run()["dimensions"]:
             self.assertEqual(sorted(row), ["facts", "id", "level", "needs", "partial", "rule", "status", "subproject",
-                                           "summary"])
+                                           "summary", "summary_zh"])
         for gap in run()["gaps"]:
             self.assertEqual(sorted(gap), ["dimension", "effort", "facts", "hotspot_files", "id", "priority", "rule",
                                            "subproject", "what"])

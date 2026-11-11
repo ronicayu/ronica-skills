@@ -26,7 +26,8 @@ Output (score.json)
                   kind: application|library|scripts, facts: {authors, visibility, kind: [...]}}
     dimensions[] {id, subproject, level 0-3 or null, status checked|unknown|not_applicable,
                   rule ("tests.1p"), partial null or {covered, total, missing, unit},
-                  needs null or text, facts [short strings], summary (15 words at most)}
+                  needs null or text, facts [short strings], summary (15 words at most),
+                  summary_zh (the same sentence in Chinese, from ZH_SUMMARIES)}
                  Facts are "file:line (tool)" for the repository or a pointer such as
                  "ghfacts.json#/runs/overall/pass_rate" or "detect.json#/docs/run".
                  Repository-wide dimensions (static, secrets, ci, docs, deps) use subproject ".".
@@ -157,6 +158,99 @@ NAME_FLAGS = {"cargo": {"-p", "--package"}, "npm": {"-w", "--workspace"}, "pnpm"
 
 
 # --------------------------------------------------------------------------
+# Chinese summaries
+# --------------------------------------------------------------------------
+
+ZH_WORDS = {"lockfile": "锁文件", "toolchain pin": "工具链版本固定", "task entry": "任务入口", "install": "安装",
+            "run": "运行", "test": "测试", "python": "Python", "typescript": "TypeScript"}
+
+# (regex over the English summary, Chinese template); \1 and the like are the captured parts.
+ZH_SUMMARIES = [
+    (r"^No source files\.$", "没有源码文件。"),
+    (r"^No linter for (.*)\.$", "没有 \\1 的 linter。"),
+    (r"^Linter configured, not blocking in CI\.$", "已配置 linter，CI 中不阻塞。"),
+    (r"^Blocking linter and formatter check; zero errors\.$", "linter 与格式检查阻塞合并，错误为零。"),
+    (r"^Blocking linter and formatter check in CI\.$", "CI 中 linter 与格式检查阻塞合并。"),
+    (r"^Linter blocks in CI, but (\d+) errors remain\.$", "CI 中 linter 阻塞合并，但仍有 \\1 个错误。"),
+    (r"^Linter blocks in CI\.$", "CI 中 linter 阻塞合并。"),
+    (r"^No type checker for (.*)\.$", "没有 \\1 的类型检查。"),
+    (r"^Type checker configured, not blocking in CI\.$", "已配置类型检查，CI 中不阻塞。"),
+    (r"^Type checker blocks in CI\.$", "CI 中类型检查阻塞合并。"),
+    (r"^Strict type checker blocks, zero errors\.$", "严格类型检查阻塞合并，错误为零。"),
+    (r"^CI does not build the code\.$", "CI 不构建代码。"),
+    (r"^CI builds the code\.$", "CI 构建代码。"),
+    (r"^CI builds with warnings as errors\.$", "CI 构建时把警告当作错误。"),
+    (r"^Security analysis blocks; no open serious alerts\.$", "安全分析阻塞合并，没有未处理的严重告警。"),
+    (r"^Security analysis blocks in CI\.$", "CI 中安全分析阻塞合并。"),
+    (r"^Security analysis configured, not blocking in CI\.$", "已配置安全分析，CI 中不阻塞。"),
+    (r"^No static security analysis\.$", "没有静态安全分析。"),
+    (r"^Push protection and a blocking CI scanner\.$", "已开启推送保护，且 CI 中有阻塞的扫描器。"),
+    (r"^GitHub secret scanning and push protection on\.$", "GitHub 密钥扫描和推送保护已开启。"),
+    (r"^A secret scanner blocks in CI\.$", "CI 中密钥扫描器阻塞合并。"),
+    (r"^Secret scanning present, not blocking\.$", "有密钥扫描，但不阻塞。"),
+    (r"^Secret scanning setting not visible\.$", "看不到密钥扫描设置。"),
+    (r"^No secret scanning\.$", "没有密钥扫描。"),
+    (r"^No test files\.$", "没有测试文件。"),
+    (r"^Tests exist; no blocking CI step runs them\.$", "有测试，但没有阻塞的 CI 步骤运行它们。"),
+    (r"^Blocking CI test steps do not reach any suite\.$", "阻塞的 CI 测试步骤没有覆盖任何测试套件。"),
+    (r"^CI runs (\d+) of (\d+) test suites\.$", "CI 只运行了 \\2 个测试套件中的 \\1 个。"),
+    (r"^Blocking CI runs every suite, and it passes\.$", "阻塞的 CI 运行全部套件，且通过。"),
+    (r"^Blocking CI runs every suite\.$", "阻塞的 CI 运行全部套件。"),
+    (r"^Blocking CI runs every suite; results are weak\.$", "阻塞的 CI 运行全部套件，但结果不理想。"),
+    (r"^No tests to measure\.$", "没有可度量的测试。"),
+    (r"^A coverage threshold fails the build\.$", "覆盖率阈值会让构建失败。"),
+    (r"^Blocking CI measures coverage\.$", "阻塞的 CI 度量覆盖率。"),
+    (r"^Coverage configured, not measured in CI\.$", "已配置覆盖率，CI 中未度量。"),
+    (r"^No coverage measurement\.$", "没有覆盖率度量。"),
+    (r"^No CI configuration\.$", "没有 CI 配置。"),
+    (r"^CI exists; nothing runs on pull requests\.$", "有 CI，但拉取请求上不运行任何东西。"),
+    (r"^CI runs on pull requests; tests do not run there\.$", "CI 在拉取请求上运行，但不跑测试。"),
+    (r"^Pull requests run the tests; lint is not enforced\.$", "拉取请求会跑测试，但 lint 不强制。"),
+    (r"^Pull requests run tests and lint; checks are required\.$", "拉取请求跑测试和 lint，且检查为必需。"),
+    (r"^Solo repository; tests and lint run, main passes\.$", "单人仓库，测试和 lint 在跑，主分支通过。"),
+    (r"^Tests and lint run on pull requests; required checks unknown\.$", "拉取请求跑测试和 lint，必需检查未知。"),
+    (r"^Tests and lint run on pull requests; no required checks\.$", "拉取请求跑测试和 lint，没有必需检查。"),
+    (r"^No lockfile, toolchain pin or task entry\.$", "没有锁文件、工具链版本固定和任务入口。"),
+    (r"^No toolchain pin or task entry\.$", "没有工具链版本固定和任务入口。"),
+    (r"^Missing: (.*)\.$", "缺少：\\1。"),
+    (r"^Pin, task entry, lockfile present\.$", "有版本固定、任务入口和锁文件。"),
+    (r"^Pin, task entry present\.$", "有版本固定和任务入口。"),
+    (r"^Reproducible setup; CI installs from the lockfile\.$", "环境可复现，CI 按锁文件安装。"),
+    (r"^No README\.$", "没有 README。"),
+    (r"^(\d+) README commands do not exist\.$", "README 中有 \\1 条命令不存在。"),
+    (r"^README lacks (.*) commands\.$", "README 缺少 \\1 命令。"),
+    (r"^README commands work; a guide gives the lint command\.$", "README 命令可用，且有指南给出 lint 命令。"),
+    (r"^README has install, run and test commands; all exist\.$", "README 有安装、运行、测试命令，且都存在。"),
+    (r"^No dependencies to keep current\.$", "没有需要保持更新的依赖。"),
+    (r"^Update bot misses (.*)\.$", "更新机器人漏了 \\1。"),
+    (r"^Lockfile present; no update bot or audit\.$", "有锁文件，但没有更新机器人或审计。"),
+    (r"^No lockfile, update bot or audit\.$", "没有锁文件、更新机器人或审计。"),
+    (r"^Dependencies are covered and current\.$", "依赖有覆盖且保持最新。"),
+    (r"^Update bot or CI audit covers the dependencies\.$", "更新机器人或 CI 审计覆盖了依赖。"),
+    (r"^Scripts project\.$", "脚本类项目，不适用。"),
+    (r"^Under 3,000 source lines\.$", "源码不足 3,000 行，不适用。"),
+    (r"^Architecture rules block in CI; docs are current\.$", "CI 中架构规则阻塞合并，文档是最新的。"),
+    (r"^Architecture rules run in blocking CI\.$", "架构规则在阻塞的 CI 中运行。"),
+    (r"^Architecture documented, rules not enforced in CI\.$", "有架构文档，但规则未在 CI 中强制。"),
+    (r"^Architecture tool configured, rules not enforced in CI\.$", "已配置架构规则工具，但未在 CI 中强制。"),
+    (r"^No architecture doc or rule tool\.$", "没有架构文档或规则工具。"),
+]
+
+
+def zh_summary(text):
+    """The Chinese summary for an English one; the English text when no template matches."""
+    for pattern, template in ZH_SUMMARIES:
+        found = re.match(pattern, text)
+        if found:
+            out = found.expand(template)
+            if text.startswith(("Missing:", "README lacks")):
+                for word, zh in ZH_WORDS.items():
+                    out = re.sub(r"\b%s\b" % word, zh, out)
+            return out
+    return text
+
+
+# --------------------------------------------------------------------------
 # Small helpers
 # --------------------------------------------------------------------------
 
@@ -216,6 +310,41 @@ def days_between(later, earlier_iso):
 # --------------------------------------------------------------------------
 # Test commands and suites
 # --------------------------------------------------------------------------
+
+DIR_FLAGS = {"--prefix", "-C", "--project", "--cwd", "--directory", "--manifest-path"}
+
+
+def row_dir(row):
+    """The folder a CI row ran in, relative to the repository root, or None when no path is known.
+
+    From detect's `dir` (working-directory or a `cd` prefix), a `--prefix`, `-C`, `--project`
+    (and `tsc -p`) path of its command, or the folder of the package.json of a followed npm script.
+    """
+    base = row.get("dir")
+    base = norm(base) if base else None
+    tokens = []
+    for command in (row.get("commands") or [])[:1]:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+    flags = DIR_FLAGS | ({"-p"} if row.get("tool") == "tsc" else set())
+    for index, token in enumerate(tokens):
+        flag, _eq, value = token.partition("=")
+        if flag in flags and "$" not in token and "{{" not in token:
+            if not _eq and index + 1 < len(tokens):
+                value = tokens[index + 1]
+            if value and "$" not in value:
+                if value.endswith(".json") or value.endswith(".toml"):
+                    value = posixpath.dirname(value)
+                return norm(posixpath.join(base or "", value))
+    if base:
+        return base
+    via = row.get("via_file")
+    if via and posixpath.basename(via) == "package.json":
+        return norm(dir_of(via))
+    return None
+
 
 def command_reach(row, command, known_dirs):
     """What a test command runs: (paths, names, unresolved) with paths relative to the repository root.
@@ -347,10 +476,20 @@ class Scorer(object):
             row.setdefault("language", TOOL_LANGUAGE.get(row.get("tool"), "shared"))
         return rows
 
-    def ci_of(self, category, languages=None, only_blocking=False):
+    def in_sub(self, row, sub):
+        """A CI row that ran in a folder belongs to the subproject that holds the folder; no known folder: yes."""
+        where = row_dir(row)
+        if where is None:
+            return True
+        owner = self.owner_of(where if where else ".")
+        return owner is None or owner == sub["path"]
+
+    def ci_of(self, category, languages=None, only_blocking=False, sub=None):
         out = []
         for row in self.ci_rows_all:
             if row.get("category") != category:
+                continue
+            if sub is not None and not self.in_sub(row, sub):
                 continue
             if languages is not None and not lang_ok(row.get("language"), languages):
                 continue
@@ -405,7 +544,8 @@ class Scorer(object):
         if words(summary) > 15:
             raise ValueError("summary too long: " + summary)
         self.rows.append({"id": dim, "subproject": sub, "level": level, "status": status, "rule": rule,
-                          "partial": partial, "needs": needs, "facts": list(facts)[:8], "summary": summary})
+                          "partial": partial, "needs": needs, "facts": list(facts)[:8], "summary": summary,
+                          "summary_zh": zh_summary(summary)})
 
     def gap(self, dim, sub, rule, detail, what, facts, effort, hotspots=(), moot=None):
         gap_id = "%s:%s:%s" % (dim, sub, rule if detail is None else "%s:%s" % (rule, detail))
@@ -451,7 +591,7 @@ class Scorer(object):
     def suite_state(self, sub, suite):
         key = (sub["path"], suite["path"], suite["language"])
         if key not in self.coverage_cache:
-            rows = [r for r in self.test_rows if lang_ok(r.get("language"), self.langs(sub))]
+            rows = [r for r in self.test_rows if lang_ok(r.get("language"), self.langs(sub)) and self.in_sub(r, sub)]
             self.coverage_cache[key] = suite_covered(suite, rows, self.known_dirs)
         return self.coverage_cache[key]
 
@@ -476,7 +616,7 @@ class Scorer(object):
         has, block, facts = {}, {}, []
         for lang in langs:
             cfg = [r for r in self.cfg_rows(sub, "lint") if r["language"] == lang]
-            ci = self.ci_of("lint", [lang])
+            ci = self.ci_of("lint", [lang], sub=sub)
             has[lang] = bool(cfg or ci)
             block[lang] = any(blocking(r) for r in ci)
             for row in (cfg + ci)[:1]:
@@ -503,7 +643,7 @@ class Scorer(object):
                     self.gap("lint", path, "lint.1", lang, "Run the %s linter as a blocking CI step" % lang, facts,
                              "enforce", self.hot_in(sub, [lang]))
             return
-        formats_ok = all(any(blocking(r) and not r.get("writes") for r in self.ci_of("format", [lang]))
+        formats_ok = all(any(blocking(r) and not r.get("writes") for r in self.ci_of("format", [lang], sub=sub))
                          for lang in langs)
         kloc, supp = self.suppression_density(langs)
         notes = ["detect.json#/suppressions: %.1f per 1,000 lines" % supp] if kloc else []
@@ -583,7 +723,7 @@ class Scorer(object):
         if lang in ("python", "typescript"):
             names = ("mypy", "pyright") if lang == "python" else ("tsc",)
             cfg = [r for r in self.cfg_rows(sub, "types") if r["tool"] in names]
-            ci = [r for r in self.ci_of("types", [lang]) if r["tool"] in names]
+            ci = [r for r in self.ci_of("types", [lang], sub=sub) if r["tool"] in names]
             facts = [evidence(r) for r in (cfg + ci)[:2]]
             if not cfg and not ci:
                 return 0, "types.0", facts, None
@@ -602,7 +742,7 @@ class Scorer(object):
             if errors is None:
                 return 2, "types.2", facts, "tier 1 type-check count"
             return 2, "types.2", facts + ["tier1: %d type errors" % errors], None
-        rows = [r for r in self.ci_rows_all if blocking(r) and r.get("language") == lang]
+        rows = [r for r in self.ci_rows_all if blocking(r) and r.get("language") == lang and self.in_sub(r, sub)]
         if not rows:
             return 1, "types.1c", [], None
         facts = [evidence(rows[0])]
@@ -701,7 +841,7 @@ class Scorer(object):
             self.add("tests", path, 0, "tests.0", "No test files.", [])
             return self.gap("tests", path, "tests.0", None, "Add tests for the most changed files and run them in CI",
                             [], "add", hot)
-        rows = [r for r in self.test_rows if lang_ok(r.get("language"), langs)]
+        rows = [r for r in self.test_rows if lang_ok(r.get("language"), langs) and self.in_sub(r, sub)]
         state = [(s, self.suite_state(sub, s)) for s in suites]
         covered = [s for s, v in state if v is True]
         missing = sorted([s for s, v in state if v is not True],
@@ -774,7 +914,7 @@ class Scorer(object):
             return self.add("coverage", path, None, "coverage.na", "No tests to measure.", [],
                             status="not_applicable")
         cfg = self.cfg_rows(sub, "coverage")
-        ci = [r for r in self.ci_of("coverage", langs) if blocking(r)]
+        ci = [r for r in self.ci_of("coverage", langs, sub=sub) if blocking(r)]
         thresholds = [t for t in self.det.get("coverage_thresholds") or []
                       if THRESHOLD_LANGUAGE.get(t["kind"], "x") in (None, *langs) and
                       (t.get("how") == "ci" or self.scope_match(sub, t.get("subproject")))]
@@ -1028,7 +1168,7 @@ class Scorer(object):
         langs = self.langs(sub)
         docs = self.det.get("architecture_docs") or []
         cfg = self.cfg_rows(sub, "arch")
-        ci_all = self.ci_of("arch", langs)
+        ci_all = self.ci_of("arch", langs, sub=sub)
         names = sorted({r["tool"] for r in cfg + ci_all})
         facts = ["%s %s%s" % (d["kind"], d["path"], ":%s" % d["line"] if d.get("line") else "") for d in docs[:3]]
         facts += [evidence(r) for r in (cfg + ci_all)[:2]]
@@ -1043,7 +1183,7 @@ class Scorer(object):
                           or name in ("archunit",)]
                 ok = bool(suites) and all(self.suite_state(sub, s) is True for s in suites)
             else:
-                ok = any(blocking(r) and r["tool"] == host for r in self.ci_of("lint", langs))
+                ok = any(blocking(r) and r["tool"] == host for r in self.ci_of("lint", langs, sub=sub))
             if ok:
                 enforced.append(name)
         members = sub.get("members") or []
@@ -1065,7 +1205,7 @@ class Scorer(object):
                                 "enforce")
             return self.gap("arch", path, "arch.1", "rules", "Add architecture rules to CI (import-linter, ArchUnit, "
                             "dependency-cruiser or similar)", facts, "add")
-        self.add("arch", path, 0, "arch.0", "No architecture doc, ADR or rule tool.", [])
+        self.add("arch", path, 0, "arch.0", "No architecture doc or rule tool.", [])
         self.gap("arch", path, "arch.0", None, "Write ARCHITECTURE.md and add one enforced architecture rule", [], "add")
 
     # ---- hotspots --------------------------------------------------------------
@@ -1084,7 +1224,10 @@ class Scorer(object):
                 sub, suite, _scope = match
                 suite_path = suite["path"]
                 state = self.suite_state(sub, suite)
-            linted = any(blocking(r) for r in self.ci_of("lint", [item.get("language")]))
+            owner = self.owner_of(item["path"])
+            record = [x for x in self.subs if x["path"] == owner]
+            linted = any(blocking(r) for r in self.ci_of("lint", [item.get("language")],
+                                                         sub=record[0] if record else None))
             out.append({"path": item["path"], "language": item.get("language"), "score": item.get("score"),
                         "loc": item.get("loc"), "commits": item.get("commits"), "authors": item.get("authors"),
                         "top_author_share": item.get("top_author_share"), "tests_in_ci": state,
@@ -1095,7 +1238,9 @@ class Scorer(object):
     def hotspot_gaps(self, table):
         for row in table:
             owner = self.owner_of(row["path"]) or "."
-            if row["test_suite"] is None:
+            no_tests_at_all = any(r["id"] == "tests" and r["subproject"] == owner and r["rule"] == "tests.0"
+                                  for r in self.rows)
+            if row["test_suite"] is None and not no_tests_at_all:
                 self.gap("hotspots", owner, "no-tests", row["path"],
                          "Add tests for the hotspot %s (no test suite covers it)" % row["path"],
                          ["hotspots.json#/files/%d: %s commits" % (row["rank"] - 1, row["commits"])], "add",
