@@ -36,7 +36,9 @@ Validation
 Previous runs: the newest findings-<stamp>.json older than this one beside it (an old
 findings-YYYY-MM-DD.json counts; schema 1 files give level changes only, no gap changes).
 The score.json `changes` block (made with score.py --previous) wins when present.
-In a zh report the scorecard uses summary_zh of score.json. The Change column is left out
+A "Security data" section after the scorecard lists score.json's security_freshness (tools, last
+data and source, age, fresh or stale, and the counts of a tier 1 security run). share.md gets one
+line only when an entry is stale. In a zh report the scorecard uses summary_zh of score.json. The Change column is left out
 on a first run (no previous run).
 """
 
@@ -84,7 +86,17 @@ TEXT = {
         "units": {}, "yes": "yes", "no": "no", "unk": "unknown", "new_row": "new", "names": {},
         "summary_first": "Do these first:", "summary_cmd": "   first step: %s", "report": "Report: %s",
         "summary_since": "Since last run: %d closed, %d new, %d regressed.", "share_first": "Do first:",
-        "share_card": "Scorecard: %s", "no_gaps_note": "Gap changes are not available: the previous run has no score file.",
+        "share_card": "Scorecard: %s",
+        "security": "## Security data",
+        "security_table": "| Check | Tools | Last data | Age | State |",
+        "security_note": "Security tools are checked by config, CI rows and GitHub settings. Data older than %d days, "
+                         "or with no visible run date, is stale: the skill runs the tools only if you agree.",
+        "age": "%d days", "fresh": "fresh", "stale": "stale", "continuous": "continuous",
+        "why_old": "older than %d days", "why_none": "no run date visible",
+        "security_run": "%s ran %s: %d high, %d critical, %d findings (%s)",
+        "share_stale": "Security data is %d days old: rerun with consent",
+        "share_no_date": "Security data has no visible run date: rerun with consent",
+        "no_gaps_note": "Gap changes are not available: the previous run has no score file.",
     },
     "zh": {
         "title": "# 仓库健康报告：%s", "commit": "提交：`%s`", "date": "日期：%s", "compared": "对比 %s",
@@ -110,7 +122,17 @@ TEXT = {
                   "deps": "依赖", "arch": "架构"},
         "summary_first": "优先行动：", "summary_cmd": "   第一步：%s", "report": "报告：%s",
         "summary_since": "自上次运行：关闭 %d，新增 %d，回退 %d。", "share_first": "先做：",
-        "share_card": "计分：%s", "no_gaps_note": "无法比较缺口：上次运行没有 score 文件。",
+        "share_card": "计分：%s",
+        "security": "## 安全数据",
+        "security_table": "| 检查 | 工具 | 最近数据 | 距今 | 状态 |",
+        "security_note": "安全工具只按配置、CI 行和 GitHub 设置检查。数据超过 %d 天，或看不到运行日期，即为过期："
+                         "只有你同意，才会运行这些工具。",
+        "age": "%d 天", "fresh": "新", "stale": "过期", "continuous": "持续扫描",
+        "why_old": "超过 %d 天", "why_none": "看不到运行日期",
+        "security_run": "%s 于 %s 运行：高危 %d，严重 %d，共 %d 条（%s）",
+        "share_stale": "安全数据已过期 %d 天：征得同意后重新运行",
+        "share_no_date": "安全数据看不到运行日期：征得同意后重新运行",
+        "no_gaps_note": "无法比较缺口：上次运行没有 score 文件。",
     },
 }
 
@@ -278,6 +300,33 @@ def level_text(row, level, t):
     return text
 
 
+def security_state(entry, t):
+    if not entry.get("stale"):
+        return t["fresh"] + (" (%s)" % t["continuous"] if entry.get("last_data") is None else "")
+    why = t["why_none"] if entry.get("age_days") is None else t["why_old"] % scoring.SECURITY_STALE_DAYS
+    return "%s (%s)" % (t["stale"], why)
+
+
+def security_section(score, t):
+    entries = score.get("security_freshness") or []
+    if not entries:
+        return []
+    out = [t["security"], "", t["security_note"] % scoring.SECURITY_STALE_DAYS, "", t["security_table"],
+           "| --- | --- | --- | --- | --- |"]
+    for entry in entries:
+        last = "%s (%s)" % (entry["last_data"], entry["source"]) if entry.get("last_data") else "—"
+        age = t["age"] % entry["age_days"] if entry.get("age_days") is not None else "—"
+        out.append("| %s | %s | %s | %s | %s |" % (
+            cell(dimension_name(entry["dimension"], t)), cell(", ".join(entry.get("tools") or [])), cell(last), age,
+            cell(security_state(entry, t))))
+    for entry in entries:
+        run = entry.get("run")
+        if run:
+            out += ["", "- " + t["security_run"] % (dimension_name(entry["dimension"], t), run["ran_at"], run["high"],
+                                                    run["critical"], run["findings"], ", ".join(run["tools"]))]
+    return out + [""]
+
+
 def changes_text(change, t):
     return {"up": "↑", "down": "↓", "same": "=", "new": t["new_row"], "changed": "~"}.get(change, "—")
 
@@ -370,6 +419,7 @@ def render(findings, score, previous_changes=None, compared=None):
         else:
             out.append("| %s | %s | %s |" % (cell(label), cell(shown), cell(text)))
     out += ["", t["legend"], ""]
+    out += security_section(score, t)
 
     if len(recs) > TOP:
         out += [t["more"], ""]
@@ -442,7 +492,12 @@ def share(findings, score):
         worst[row["id"]] = min(worst.get(row["id"], 9), value)
     card = " · ".join("%s %s" % (k, "?" if v < 0 else v) for k, v in sorted(
         worst.items(), key=lambda kv: DIMENSION_ORDER.get(kv[0], 99)))
-    lines = ["**%s**" % findings["headline"].strip(), "", t["share_card"] % card, "", t["share_first"]]
+    lines = ["**%s**" % findings["headline"].strip(), "", t["share_card"] % card]
+    stale = [e for e in score.get("security_freshness") or [] if e.get("stale")]
+    if stale:
+        ages = [e["age_days"] for e in stale if e.get("age_days") is not None]
+        lines.append(t["share_stale"] % max(ages) if ages else t["share_no_date"])
+    lines += ["", t["share_first"]]
     for number, rec in enumerate(findings["recommendations"][:3], 1):
         lines.append("%d. %s — `%s`" % (number, rec["title"].strip(), first_command(rec).replace("`", "'")))
     return "\n".join(lines[:SHARE_LINES]) + "\n"

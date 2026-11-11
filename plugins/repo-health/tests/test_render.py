@@ -324,6 +324,83 @@ class Validation(unittest.TestCase):
         self.check(lambda f: f["not_checked"][0].pop("why"), "not_checked[0].why")
 
 
+def freshness_entry(dimension="secrets", **kw):
+    entry = {"dimension": dimension, "tools": ["gitleaks"], "last_data": "2026-10-31",
+             "source": "ci:.github/workflows/scan.yml", "age_days": 10, "stale": False, "why": "last data 10 days ago",
+             "run": None}
+    entry.update(kw)
+    return entry
+
+
+def security_text(text, heading="## Security data"):
+    start = text.index(heading)
+    return text[start:text.index("\n## ", start + 4)]
+
+
+class SecurityData(unittest.TestCase):
+    def test_no_entries_no_section_and_share_unchanged(self):
+        self.assertNotIn("Security data", render.render(sample_findings(), sample_score()))
+        score = sample_score()
+        score["security_freshness"] = []
+        self.assertEqual(render.share(sample_findings(), score), render.share(sample_findings(), sample_score()))
+
+    def test_section_lists_fresh_and_stale_entries_after_the_scorecard(self):
+        score = sample_score()
+        score["security_freshness"] = [
+            freshness_entry("static", tools=["bandit"], last_data=None, source=None, age_days=None, stale=True),
+            freshness_entry("secrets"),
+            freshness_entry("deps", tools=["pip-audit"], age_days=45, last_data="2026-09-26", source="lockfile",
+                            stale=True)]
+        text = render.render(sample_findings(), score)
+        self.assertLess(text.index("## Scorecard"), text.index("## Security data"))
+        self.assertLess(text.index("## Security data"), text.index("## More recommendations"))
+        section = security_text(text)
+        self.assertIn("| Static analysis and security | bandit | — | — | stale (no run date visible) |", section)
+        self.assertIn("| Secret scanning | gitleaks | 2026-10-31 (ci:.github/workflows/scan.yml) | 10 days | fresh |",
+                      section)
+        self.assertIn("| Dependencies | pip-audit | 2026-09-26 (lockfile) | 45 days | stale (older than 30 days) |",
+                      section)
+
+    def test_a_tier1_run_shows_its_counts(self):
+        score = sample_score()
+        score["security_freshness"] = [freshness_entry(source="tier1", age_days=0, last_data="2026-11-10", run={
+            "tools": ["gitleaks"], "high": 1, "critical": 2, "findings": 7, "ran_at": "2026-11-10"})]
+        self.assertIn("- Secret scanning ran 2026-11-10: 1 high, 2 critical, 7 findings (gitleaks)",
+                      security_text(render.render(sample_findings(), score)))
+
+    def test_github_continuous_scanning_is_fresh_without_a_date(self):
+        score = sample_score()
+        score["security_freshness"] = [freshness_entry(tools=["github-secret-scanning"], last_data=None, source=None,
+                                                       age_days=None)]
+        self.assertIn("| — | — | fresh (continuous) |", security_text(render.render(sample_findings(), score)))
+
+    def test_share_gets_one_line_only_when_an_entry_is_stale(self):
+        score = sample_score()
+        score["security_freshness"] = [freshness_entry()]
+        self.assertNotIn("Security data", render.share(sample_findings(), score))
+        score["security_freshness"] = [freshness_entry(), freshness_entry("deps", age_days=45, stale=True),
+                                       freshness_entry("static", age_days=60, stale=True)]
+        text = render.share(sample_findings(), score)
+        self.assertEqual(text.count("Security data"), 1)
+        self.assertIn("Security data is 60 days old: rerun with consent", text)
+        self.assertLessEqual(len(text.splitlines()), 15)
+        score["security_freshness"] = [freshness_entry(last_data=None, source=None, age_days=None, stale=True)]
+        self.assertIn("Security data has no visible run date: rerun with consent",
+                      render.share(sample_findings(), score))
+
+    def test_chinese_report_and_share_have_no_english_labels(self):
+        findings = sample_findings()
+        findings["lang"] = "zh"
+        score = sample_score()
+        score["security_freshness"] = [freshness_entry(), freshness_entry("deps", age_days=45, stale=True)]
+        section = security_text(render.render(findings, score), "## 安全数据")
+        for word in ("## 安全数据", "| 检查 | 工具 | 最近数据 | 距今 | 状态 |", "10 天", "新 |", "过期 (超过 30 天)"):
+            self.assertIn(word, section)
+        for english in ("Security data", "fresh", "stale", "days", "Tools"):
+            self.assertNotIn(english, section)
+        self.assertIn("安全数据已过期 45 天：征得同意后重新运行", render.share(findings, score))
+
+
 class Chinese(unittest.TestCase):
     def test_zh_has_no_english_headings_or_labels(self):
         findings = sample_findings()
