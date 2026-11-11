@@ -108,5 +108,36 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.out, "share-%s.md" % stamp)))
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(REPO_ROOT, ".git")) and
+                     os.path.exists(os.path.join(REPO_ROOT, ".github", "workflows", "validate.yml")),
+                     "not a git checkout of ronica-skills")
+class ThisRepository(unittest.TestCase):
+    def test_a_suite_that_ci_runs_through_a_script_is_not_a_missing_suite(self):
+        out = tempfile.mkdtemp(prefix="rh-self-")
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+
+        def call(name, *args):
+            done = subprocess.run([sys.executable, os.path.join(SCRIPTS, name)] + list(args), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, universal_newlines=True, cwd=out, env=ENV)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return done.stdout
+
+        for key, script in (("d", "detect.py"), ("h", "hotspots.py")):
+            with open(os.path.join(out, key + ".json"), "w") as handle:
+                handle.write(call(script, REPO_ROOT))
+        call("score.py", "--detect", os.path.join(out, "d.json"), "--hotspots", os.path.join(out, "h.json"),
+             "-o", os.path.join(out, "s.json"))
+        with open(os.path.join(out, "s.json")) as handle:
+            result = json.load(handle)
+        ids = [g["id"] for g in result["gaps"]]
+        self.assertFalse([i for i in ids if i.startswith("tests:.:missing-suite:plugins/agentic-team")], ids[:5])
+        agentic = [h for h in result["hotspots"] if h["path"].startswith("plugins/agentic-team/scripts/")]
+        self.assertTrue(agentic)
+        self.assertTrue(all(h["tests_in_ci"] is True for h in agentic))
+
+
 if __name__ == "__main__":
     unittest.main()

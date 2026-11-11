@@ -28,7 +28,8 @@ _spec.loader.exec_module(render)
 
 def row(dim_id, level, summary="a summary", sub=".", status="checked", **extra):
     entry = {"id": dim_id, "subproject": sub, "level": level, "status": status, "rule": dim_id + ".x",
-             "partial": None, "needs": None, "facts": ["pyproject.toml:12 (ruff)"], "summary": summary}
+             "partial": None, "needs": None, "facts": ["pyproject.toml:12 (ruff)"], "summary": summary,
+             "summary_zh": "中文摘要：" + dim_id}
     entry.update(extra)
     return entry
 
@@ -161,6 +162,14 @@ class Layout(unittest.TestCase):
         self.assertNotIn("Type checking", evidence)
         self.assertNotIn("Coverage", evidence)
 
+    def test_a_row_without_facts_says_what_was_searched(self):
+        score = sample_score()
+        score["dimensions"][0] = row("lint", 0, "No linter for python.", facts=[])
+        text = render.render(sample_findings(), score)
+        evidence = text[text.index("## Evidence"):text.index("## Not checked")]
+        self.assertIn("**Lint and formatting** — 0 absent\n- Searched: linter configs, package scripts, hooks, CI steps",
+                      evidence)
+
     def test_override_changes_the_scorecard_level(self):
         findings = sample_findings()
         findings["overrides"] = [{"dimension": "lint", "subproject": ".", "level": 3, "reason": "seen in CI log"}]
@@ -235,8 +244,10 @@ class SinceLastRun(unittest.TestCase):
         rows = card_rows(render.render(sample_findings(), self.changed_score()))
         by = {r.split("|")[1].strip(): r.split("|")[-2].strip() for r in rows}
         self.assertEqual((by["Lint and formatting"], by["Tests"], by["CI"], by["Type checking"]), ("↑", "↓", "=", "—"))
-        first_run = card_rows(render.render(sample_findings(), sample_score()))
-        self.assertTrue(all(r.rstrip().endswith("| — |") for r in first_run))
+        first = render.render(sample_findings(), sample_score())
+        self.assertIn("| Dimension | Level | Summary |\n| --- | --- | --- |", first)
+        self.assertNotIn("Change", first)
+        self.assertNotIn("| — |", first)
 
     def test_summary_counts(self):
         out = render.summary(sample_findings(), self.changed_score(), "/x/report.md")
@@ -326,7 +337,11 @@ class Chinese(unittest.TestCase):
             self.assertIn(heading, text)
         self.assertIn("| 测试 | 1 有配置 (部分：2/4 个测试套件) |", text)
         self.assertIn("| 密钥扫描 | 未知（需要：GitHub secret-scanning setting） |", text)
-        self.assertIn("| 覆盖率 | 不适用 |", text)
+        self.assertIn("| 覆盖率 | 不适用 | 中文摘要：coverage |", text)
+        self.assertIn("| Lint 与格式化 | 1 有配置 | 中文摘要：lint | ↑ |", text)
+        self.assertNotIn("a summary", text)
+        self.assertNotIn("Linter configured", text)
+        self.assertIn("已查找：", render.render(findings, dict(score, dimensions=[row("lint", 0, "x", facts=[])])))
         for english in ("Do these first", "Scorecard", "Since last run", "Verify:", "Hotspots", "Evidence",
                         "Not checked", "More recommendations", "Dismissed", "enforced", "Why:"):
             self.assertNotIn(english, text)

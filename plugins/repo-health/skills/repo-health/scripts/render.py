@@ -36,7 +36,8 @@ Validation
 Previous runs: the newest findings-<stamp>.json older than this one beside it (an old
 findings-YYYY-MM-DD.json counts; schema 1 files give level changes only, no gap changes).
 The score.json `changes` block (made with score.py --previous) wins when present.
-In a zh report the one-line summaries of score.py stay in English.
+In a zh report the scorecard uses summary_zh of score.json. The Change column is left out
+on a first run (no previous run).
 """
 
 import argparse
@@ -71,6 +72,15 @@ TEXT = {
         "override": "Override to level %s: %s", "not_checked": "## Not checked", "to_run": " To run it: `%s`",
         "none_skipped": "Nothing was skipped.", "dismissed": "Dismissed", "reason": "reason",
         "levels": LEVEL_NAMES, "unknown": "unknown (needs: %s)", "na": "n/a", "partial": "partial: %d of %d %s",
+        "searched": "Searched: %s",
+        "searched_in": {"lint": "linter configs, package scripts, hooks, CI steps",
+                        "types": "type checker configs, package scripts, CI steps",
+                        "static": "security analysis configs, CI steps, GitHub settings",
+                        "secrets": "scanner configs, CI steps, GitHub settings",
+                        "tests": "test files and CI steps", "coverage": "coverage configs and CI steps",
+                        "ci": "CI workflow files", "setup": "lockfiles, toolchain pins, task runners",
+                        "docs": "README and CONTRIBUTING", "deps": "lockfiles, update bot configs, CI audits",
+                        "arch": "architecture docs and rule tool configs"},
         "units": {}, "yes": "yes", "no": "no", "unk": "unknown", "new_row": "new", "names": {},
         "summary_first": "Do these first:", "summary_cmd": "   first step: %s", "report": "Report: %s",
         "summary_since": "Since last run: %d closed, %d new, %d regressed.", "share_first": "Do first:",
@@ -88,6 +98,12 @@ TEXT = {
         "none_skipped": "没有跳过任何项。", "dismissed": "已忽略", "reason": "原因",
         "levels": {0: "没有", 1: "有配置", 2: "强制", 3: "有效"}, "unknown": "未知（需要：%s）", "na": "不适用",
         "partial": "部分：%d/%d %s", "units": {"test suites": "个测试套件", "languages": "种语言", "ecosystems": "个生态"},
+        "searched": "已查找：%s",
+        "searched_in": {"lint": "linter 配置、包脚本、钩子、CI 步骤", "types": "类型检查配置、包脚本、CI 步骤",
+                        "static": "安全分析配置、CI 步骤、GitHub 设置", "secrets": "扫描器配置、CI 步骤、GitHub 设置",
+                        "tests": "测试文件和 CI 步骤", "coverage": "覆盖率配置和 CI 步骤", "ci": "CI 工作流文件",
+                        "setup": "锁文件、工具链版本固定、任务运行器", "docs": "README 和 CONTRIBUTING",
+                        "deps": "锁文件、更新机器人配置、CI 审计", "arch": "架构文档和规则工具配置"},
         "yes": "是", "no": "否", "unk": "未知", "new_row": "新",
         "names": {"lint": "Lint 与格式化", "types": "类型检查", "static": "静态分析与安全", "secrets": "密钥扫描",
                   "tests": "测试", "coverage": "覆盖率", "ci": "CI", "setup": "环境搭建与可复现", "docs": "文档",
@@ -340,14 +356,19 @@ def render(findings, score, previous_changes=None, compared=None):
     rows = effective_rows(score, findings)
     change_of = {(c["id"], c["subproject"]): c["change"] for c in (changes or {}).get("dimensions", [])}
     several = len({r["subproject"] for r, _l, _o in rows}) > 1
-    out += [t["scorecard"], "", t["table"], "| --- | --- | --- | --- |"]
+    table_head = t["table"] if changes else t["table"].rsplit(" | ", 1)[0] + " |"
+    out += [t["scorecard"], "", table_head, "| --- | --- | --- |" + (" --- |" if changes else "")]
     for row, level, override in rows:
         label = dimension_name(row["id"], t)
         if several and row["subproject"] != ".":
             label += " (%s)" % row["subproject"]
         shown = level_text(row, level, t)
-        change = changes_text(change_of.get((row["id"], row["subproject"])), t) if changes else "—"
-        out.append("| %s | %s | %s | %s |" % (cell(label), cell(shown), cell(row["summary"]), change))
+        text = (row.get("summary_zh") or row["summary"]) if t is TEXT["zh"] else row["summary"]
+        if changes:
+            change = changes_text(change_of.get((row["id"], row["subproject"])), t)
+            out.append("| %s | %s | %s | %s |" % (cell(label), cell(shown), cell(text), change))
+        else:
+            out.append("| %s | %s | %s |" % (cell(label), cell(shown), cell(text)))
     out += ["", t["legend"], ""]
 
     if len(recs) > TOP:
@@ -379,6 +400,8 @@ def render(findings, score, previous_changes=None, compared=None):
             if partial and partial.get("missing"):
                 out.append("- %s" % ", ".join("`%s`" % m for m in partial["missing"][:6]))
             out += ["- " + real_fact(f, names) for f in row["facts"][:5]]
+            if not row["facts"] and not (partial and partial.get("missing")) and not override:
+                out.append("- " + t["searched"] % t["searched_in"].get(row["id"], row["id"]))
             out.append("")
 
     out += [t["not_checked"], ""]
