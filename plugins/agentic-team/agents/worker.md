@@ -16,11 +16,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
 
 - Your worktree is already at the commit that CONTEXT names, on its own branch. Do not
   reset it or check out another commit. If `git rev-parse HEAD` is not that commit,
-  report `BLOCKED` and change nothing. On a retry the worktree holds the earlier
-  attempts' commits; CONTEXT says so and pastes the previous report. On a retry, uncommitted
-  changes, or an unfinished merge (`MERGE_HEAD` present), are the previous attempt's
-  half-done work: continue from them. Never put them away with `git reset`,
-  `git checkout -- <path>`, `git restore`, `git merge --abort` or `git stash`.
+  report `BLOCKED` and change nothing. On a retry, build on the commits of the previous
+  attempt (CONTEXT pastes its report); never reset, restore or stash them away.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
@@ -62,7 +59,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   them before it reports; its worktree otherwise stays at the head and unchanged.
 - **Scratch files.** Keep every temporary file and folder in `.agentic-team-scratch/` at the top
   of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
-  worktree, and do not `cd` out of your worktree. Delete what you put there before you report.
+  worktree. Delete what you put there before you report.
 - **One command per step.** Do not change directory: give the tool the path (`git -C <dir>`,
   `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
   worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
@@ -129,7 +126,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   of behavior. Prove each check from this run's output, never from memory: under `Ran:`,
   give each command with the result line it printed (for example `Ran 605 tests in 162s`
   and `OK`, or the exit code). A command whose result you did not see in this session did
-  not pass.
+  not pass. Every number in a delivered report or document names its source (script, job id
+  or `file:line`).
 - **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
   findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
 
@@ -240,17 +238,7 @@ The brief's VERIFY section defines each level for the task's verify kind. Only
 `artifact-verified` closes a `schema` or `design-doc` task. A verifier's finding about a
 decision itself goes under `Follow-ups:` as `decision: <question>`; it is not an issue.
 Its other Follow-ups lines take the labels in the Scope rule.
-A verifier marks every finding blocking or non-blocking. Each line under `Issues:` starts with
-`blocking:` and says why it blocks. Blocking: a real defect (behaviour, output, red test), a design
-gap (an undefined decision, a contradiction), an acceptance line not met, a scope breach, an error
-that reaches product output or user-visible text, any security or data-correctness risk. A
-non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`.
-Non-blocking: a theoretical gap with 0 instances in the real tree and no security or data risk (the
-line states `real-tree instances: 0` and how you counted them); a number or wording error that, once
-corrected, changes neither the conclusion, the acceptance verdict nor the downstream scope. Report
-`ISSUES` only when at least one blocking finding exists; with only non-blocking findings, report
-`PASS` and list them under `Follow-ups:`. The `check-report` command of a verifier brief refuses an
-`ISSUES` report whose `Issues:` lines do not all start with `blocking:`.
+As a verifier, label findings as your brief says; `check-report --verifier` enforces it.
 When the brief says the project has no verify skill, say under `Ran:` which step of the method you could not carry out without it, and give the highest level you can prove.
 
 Write `None` for an empty field. Use the time zone label from the brief.

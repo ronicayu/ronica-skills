@@ -1,5 +1,7 @@
 Then exercise the real output: run the scripts, apply the DDL, read the
-values. Report every failure you can prove, not only the first.
+values. Report every failure you can prove, not only the first. A miss is a
+`blocking:` finding under `Issues:`, or a `nonblocking:` line under Follow-ups
+when the non-blocking test in your brief holds.
 
 ### Method: schema
 
@@ -15,10 +17,10 @@ values. Report every failure you can prove, not only the first.
    a folder under `.agentic-team-scratch/`; remove it before you report. A leftover goes under
    `Follow-ups:` as `leftover container: <name>` or `leftover file: <path>`.
 4. Consistency: names and numbers agree across every artifact of the task
-   (the ADR text, the DDL, the review page). Each disagreement is an issue.
+   (the ADR text, the DDL, the review page). Each disagreement is a miss.
 5. Compare with the base commit named in CONTEXT: `git diff --stat <base>
    <head>` lists what changed. Flag every file, field or decision that
-   changed outside SCOPE under `Issues:`.
+   changed outside SCOPE.
 
 Verdict levels for this kind:
 - `artifact-verified`: scripts recomputed the numbers and the coverage, the

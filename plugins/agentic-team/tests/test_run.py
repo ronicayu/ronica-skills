@@ -1082,7 +1082,9 @@ class RunTest(Base):
         context, _, text = self.verify_context(task)
         self.assertIn(f"Base commit: {old_head} (the task's base meta). Head commit: {head}.", context)
         self.assertIn(f"git diff {old_head} {head}", context)
-        self.assertIn(f"mkdir -p .agentic-team-scratch/base && git archive {old_head} | tar -x -C .agentic-team-scratch/base", context)
+        self.assertIn(f"run `mkdir -p .agentic-team-scratch/base` in one call, then `git archive {old_head} | tar -x -C "
+                      ".agentic-team-scratch/base` in the next", context)
+        self.assertNotIn("&&", context)
         self.assertIn("Never check out, reset, or add a worktree.", context)
         self.assertNotRegex(text, r"git (reset|checkout|switch)")
 
@@ -1153,7 +1155,7 @@ class RunTest(Base):
         _, verify, _ = self.verify_context(task)
         method = verify[verify.index("### Method: code"):]
         for want in ("Run every command of the project verify skill's `Checks` section at the\n   head commit, and at the base commit",
-                     "A problem that only the head has goes under\n   `Issues:`",
+                     "A problem that only the head has is a miss, and\n   the change fails that check",
                      "has goes under `Follow-ups:` as `found:`",
                      "`doc: .claude/skills/verify/SKILL.md: no <kind> check; ask the user to add one`"):
             self.assertIn(want, method)
@@ -6022,6 +6024,14 @@ class Issue89Test(Base):
         self.write_config("[scope]\nadjacent = []\n")
         self.assertNotIn("Also allowed outside SCOPE", self.brief(task))
         self.assertNotIn("Adjacent changes", self.verify_text(self.running_task()))
+
+    def test_verifier_brief_holds_the_findings_rule_once(self):
+        text = self.verify_text(self.running_task())
+        self.assertEqual(text.count("### Findings"), 1)
+        self.assertIn("Each line under `Issues:` starts with `blocking:`", text)
+        self.assertIn("`nonblocking: <finding>: <why it does not block>`", text)
+        self.assertIn("`real-tree instances: 0`", text)
+        self.assertIn("report `PASS` and list them under `Follow-ups:`", text)
 
     def test_adjacent_kinds_go_into_the_worker_and_verifier_briefs(self):
         self.write_config('[scope]\nadjacent = ["lower-ratchet", "own-lint"]\n')

@@ -162,6 +162,17 @@ EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
 REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
+VERIFIER_FINDINGS = """### Findings
+
+Label every finding. Each line under `Issues:` starts with `blocking:` and says why it blocks. Blocking: a real defect \
+(behaviour, output, red test), a design gap (an undefined decision, a contradiction), an acceptance line not met, a \
+scope breach, an error that reaches product output or user-visible text, any security or data-correctness risk. A \
+non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`. Non-blocking: a \
+theoretical gap with 0 instances in the real tree and no security or data risk (the line states `real-tree instances: 0` \
+and how you counted them); a number or wording error that, once corrected, changes neither the conclusion, the \
+acceptance verdict nor the downstream scope. Report `ISSUES` only when at least one blocking finding exists; with only \
+non-blocking findings, report `PASS` and list them under `Follow-ups:`. `check-report --verifier` refuses an `ISSUES` \
+report whose `Issues:` lines do not all start with `blocking:`."""
 FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
 FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
 FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
@@ -1444,8 +1455,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             if base_sha:
                 setup += ("\n- " + f"Base commit: {base_sha} ({how}). Head commit: {ref}. The change under review is "
                           f"`git diff {base_sha} {ref}`; `git log --oneline {base_sha}..{ref}` lists its commits. To run "
-                          f'anything at the base commit, export it read only: `mkdir -p {SCRATCH_DIR}/base && '
-                          f'git archive {base_sha} | tar -x -C {SCRATCH_DIR}/base`, install what the run needs there (the '
+                          f'anything at the base commit, export it read only: run `mkdir -p {SCRATCH_DIR}/base` in one call, then '
+                          f'`git archive {base_sha} | tar -x -C {SCRATCH_DIR}/base` in the next (the pipe is fine), install what the run needs there (the '
                           "export holds tracked files only), and work in that folder. Delete the export before you run the "
                           "head's own test suites, and again before you report. Never check out, reset, or add a "
                           "worktree.")
@@ -1483,7 +1494,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
-            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + (
+            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + "\n\n" + VERIFIER_FINDINGS + (
                 f"\n\n### Adjacent changes\n\nThe project allows these changes outside SCOPE, nothing more: "
                 f"{adjacent_text(config)}. Check that each `adjacent: <kind>: <path>` line under the worker's "
                 "`Deviations:` is of an allowed kind and the change does only that. Any other change outside SCOPE "
