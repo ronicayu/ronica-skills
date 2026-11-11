@@ -1659,3 +1659,23 @@ def test_priority_badge_shows_in_the_panel(browser, priority_file):
     assert page.inner_text("#panel .badge.priority") == "P0"
     assert "Priority" not in page.text_content("#details")  # the badge shows it; the details do not repeat it
     page.close()
+
+
+def test_graph_edges_are_orthogonal_routes_and_respace_on_narrow(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=graph")
+    span = "Math.max(...tasks().map(n => n.position('y'))) - Math.min(...tasks().map(n => n.position('y')))"
+    wide = page.evaluate(span)
+    assert page.evaluate("links().map(e => e.style('curve-style'))") == ["segments"] * page.evaluate("links().length")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_function(f"{span} < {wide}")
+    page.set_viewport_size({"width": 1400, "height": 900})
+    page.wait_for_function(f"{span} === {wide}")
+    diagonal = page.evaluate(
+        """() => links().filter(e => {
+            const pts = [e.source().position(), ...e.segmentPoints(), e.target().position()];
+            return pts.some((p, i) => i && Math.abs(p.x - pts[i - 1].x) > 1 && Math.abs(p.y - pts[i - 1].y) > 1);
+        }).length"""
+    )
+    assert diagonal == 0
+    assert problems == []
+    page.close()

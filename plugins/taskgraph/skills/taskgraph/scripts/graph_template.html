@@ -455,6 +455,7 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
+const narrowScreen = matchMedia('(max-width: 640px)');
 const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
@@ -1251,24 +1252,60 @@ function layout(fit = true) {
 
 // Dagre's best ranking (network simplex) takes about 1.4 s at 800 nodes; tight-tree draws a
 // near-identical picture in half the time, so big plans use it. Layouts are remembered by shape
-// (nodes, their labels and classes, and links), so returning to a shape already seen, such as
-// clearing a filter or coming back to Graph, puts the nodes back without laying out again.
+// (nodes, their labels and classes, links, and spacing), so returning to a shape already seen, such as
+// clearing a filter or coming back to Graph, puts the nodes and edges back without laying out again.
 const BIG_GRAPH = 250, LAYOUTS_KEPT = 6;
 const layoutMemo = new Map();
 function layoutGraph() {
-  const nodes = tasks();
-  const key = nodes.map(n => n.id() + ':' + n.classes().join('.') + ':' + n.data('label')).join('|') + '#' + links().map(e => e.id() + ':' + e.data('kind')).join('|');
-  const seen = layoutMemo.get(key);
-  if (seen) {
-    layoutMemo.delete(key);
-    layoutMemo.set(key, seen);
-    return cy.batch(() => nodes.forEach(n => { n.position(seen[n.id()]); }));
+  const nodes = tasks(), edges = links();
+  const tight = narrowScreen.matches;
+  const key = (tight ? 'narrow#' : '') + nodes.map(n => n.id() + ':' + n.classes().join('.') + ':' + n.data('label')).join('|') + '#' + edges.map(e => e.id() + ':' + e.data('kind')).join('|');
+  let seen = layoutMemo.get(key);
+  if (seen) layoutMemo.delete(key);
+  else {
+    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 16 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
+    if (layoutMemo.size >= LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
   }
-  cy.layout({ name: 'dagre', ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit: false }).run();
-  const pos = {};
-  nodes.forEach(n => { pos[n.id()] = { ...n.position() }; });
-  layoutMemo.set(key, pos);
-  if (layoutMemo.size > LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
+  layoutMemo.set(key, seen);
+  cy.batch(() => {
+    nodes.forEach(n => { n.position(seen.pos[n.id()]); });
+    edges.forEach(e => { if (seen.routes[e.id()]) e.style({ 'curve-style': 'segments', 'edge-distances': 'node-position', ...elbow(e.source().position(), e.target().position(), seen.routes[e.id()]) }); });
+  });
+}
+
+// Runs dagre directly, not through cytoscape-dagre, which throws away the edge routes. Each edge
+// leaves its predecessor, shifts sideways midway between ranks (following dagre's bend points
+// past nodes on long edges) and joins the dependent along a bus just below it, so lines into
+// one item share a trunk and the picture stays a tidy layered diagram.
+function dagreLayout(nodes, edges, opts) {
+  const g = new dagre.graphlib.Graph({ multigraph: true });
+  g.setGraph({ rankdir: 'BT', ...opts });
+  g.setDefaultEdgeLabel(() => ({}));
+  nodes.forEach(n => { const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }); g.setNode(n.id(), { width: d.w, height: d.h }); });
+  edges.forEach(e => g.setEdge(e.source().id(), e.target().id(), { minlen: 1, weight: 1 }, e.id()));
+  dagre.layout(g);
+  const pos = {}, routes = {};
+  nodes.forEach(n => { const d = g.node(n.id()); pos[n.id()] = { x: d.x, y: d.y }; });
+  const bus = Math.min(14, opts.ranksep / 3);
+  // Dagre also places a bend halfway between every two ranks; only the ones on a rank steer round nodes.
+  const rankY = new Set(nodes.map(n => Math.round(pos[n.id()].y)));
+  edges.forEach(e => {
+    const s = g.node(e.source().id()), t = g.node(e.target().id());
+    const bends = (g.edge(e.source().id(), e.target().id(), e.id()).points || []).slice(1, -1).filter(p => rankY.has(Math.round(p.y)));
+    const pts = [s, ...bends, t];
+    const path = [];
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      let y = (a.y + b.y) / 2;
+      if (i + 2 === pts.length) {
+        const joined = t.y - Math.sign(t.y - a.y) * (t.height / 2 + bus);
+        if ((joined - a.y) * (joined - t.y) < 0) y = joined;
+      }
+      if (Math.abs(a.x - b.x) > 0.5) path.push([a.x, y], [b.x, y]);
+    }
+    routes[e.id()] = path.length ? path : [[s.x, (s.y + t.y) / 2]];
+  });
+  return { pos, routes };
 }
 
 // Fit like cy.fit, but leave the bottom strip under the legend free so it never covers a node.
@@ -1337,6 +1374,8 @@ function fitIfOutside() {
   if (target) cy.animate(target, { duration: 300 * MOTION });
 }
 
+// Crossing the narrow breakpoint (rotating a phone) changes the graph's spacing, so lay it out again.
+narrowScreen.addEventListener('change', () => { if (view === 'graph') layout(); });
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
