@@ -134,6 +134,10 @@ class ThisRepository(unittest.TestCase):
             result = json.load(handle)
         ids = [g["id"] for g in result["gaps"]]
         self.assertFalse([i for i in ids if i.startswith("tests:.:missing-suite:plugins/agentic-team")], ids[:5])
+        self.assertEqual(result["profile"]["authors"], "solo")
+        self.assertFalse([i for i in ids if ":single-author:" in i], ids[:5])
+        types = [r for r in result["dimensions"] if r["id"] == "types" and r["subproject"] == "."][0]
+        self.assertEqual((types["level"], types["rule"]), (2, "types.2"))
         agentic = [h for h in result["hotspots"] if h["path"].startswith("plugins/agentic-team/scripts/")]
         self.assertTrue(agentic)
         self.assertTrue(all(h["tests_in_ci"] is True for h in agentic))

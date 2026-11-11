@@ -167,6 +167,7 @@ ZH_WORDS = {"lockfile": "锁文件", "toolchain pin": "工具链版本固定", "
 # (regex over the English summary, Chinese template); \1 and the like are the captured parts.
 ZH_SUMMARIES = [
     (r"^No source files\.$", "没有源码文件。"),
+    (r"^JavaScript only; no TypeScript files\.$", "只有 JavaScript，没有 TypeScript 文件，不适用。"),
     (r"^No linter for (.*)\.$", "没有 \\1 的 linter。"),
     (r"^Linter configured, not blocking in CI\.$", "已配置 linter，CI 中不阻塞。"),
     (r"^Blocking linter and formatter check; zero errors\.$", "linter 与格式检查阻塞合并，错误为零。"),
@@ -242,7 +243,7 @@ def zh_summary(text):
     for pattern, template in ZH_SUMMARIES:
         found = re.match(pattern, text)
         if found:
-            out = found.expand(template)
+            out = found.expand(template).replace(", ", "、")
             if text.startswith(("Missing:", "README lacks")):
                 for word, zh in ZH_WORDS.items():
                     out = re.sub(r"\b%s\b" % word, zh, out)
@@ -684,6 +685,13 @@ class Scorer(object):
         langs = self.langs(sub)
         if not langs:
             return self.add("types", path, None, "types.na", "No source files.", [], status="not_applicable")
+        js_only = [l for l in langs if l == "typescript" and
+                   ((sub.get("stats") or {}).get(l) or {}).get("ts_files", 0) == 0]
+        notes = ["%s: JavaScript only, no TypeScript files: type rules do not apply" % l for l in js_only]
+        langs = [l for l in langs if l not in js_only]
+        if not langs:
+            return self.add("types", path, None, "types.na", "JavaScript only; no TypeScript files.", notes,
+                            status="not_applicable")
         per = {}
         for lang in langs:
             per[lang] = self.types_language(sub, lang)
@@ -701,7 +709,7 @@ class Scorer(object):
                    "types.3c": "CI builds with warnings as errors."}[rule]
         if "%s" in summary:
             summary = summary % first
-        self.add("types", path, level, rule, summary, facts, partial=partial, needs=needs)
+        self.add("types", path, level, rule, summary, notes + facts, partial=partial, needs=needs)
         multi = len(langs) > 1
         for lang in langs:
             lvl, lrule, lfacts, lneeds = per[lang]

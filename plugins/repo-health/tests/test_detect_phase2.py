@@ -59,6 +59,29 @@ class CiRunsScripts(Fixture):
         self.assertNotIn("dir", self.rows("tsc --noEmit")["tsc"])
 
 
+class TypeScriptFiles(Fixture):
+    def test_ts_files_are_counted_apart_from_javascript(self):
+        self.write("package.json", '{"name": "a"}')
+        for name in ("a.ts", "b.tsx", "c.mts", "d.cts", "e.js", "f.mjs"):
+            self.write("src/" + name, "export {}\n")
+        stats = self.sub(self.run_detect())["stats"]["typescript"]
+        self.assertEqual((stats["files"], stats["ts_files"]), (6, 4))
+
+    def test_nested_subprojects_keep_their_own_count(self):
+        self.write("a.mjs", "export {}\n")
+        self.write("web/package.json", '{"name": "w"}')
+        self.write("web/x.ts", "export {}\n")
+        result = self.run_detect()
+        self.assertEqual(self.sub(result, ".")["stats"]["typescript"].get("ts_files", 0), 0)
+        self.assertEqual(self.sub(result, "web")["stats"]["typescript"]["ts_files"], 1)
+
+    def test_workspace_root_counts_its_members(self):
+        self.write("package.json", '{"name": "r", "private": true, "workspaces": ["packages/*"]}')
+        self.write("packages/a/package.json", '{"name": "a"}')
+        self.write("packages/a/x.ts", "export {}\n")
+        self.assertEqual(self.sub(self.run_detect())["stats"]["typescript"]["ts_files"], 1)
+
+
 class UpdateBots(Fixture):
     def test_dependabot_ecosystems_are_normalised(self):
         self.write(".github/dependabot.yml", """

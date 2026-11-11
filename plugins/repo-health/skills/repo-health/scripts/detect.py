@@ -32,7 +32,11 @@ Top-level keys
     languages, other_languages     per language {files, loc, test_files, test_loc}
     subprojects[]                  {path, manifest, manifests, languages, stats,
                                    categories, dependencies, workspace, members,
-                                   test_suites, publishable}.
+                                   test_suites, publishable}. stats.typescript also has
+                                   ts_files: files ending .ts, .tsx, .mts or .cts (the
+                                   other "typescript" files are JavaScript); a workspace
+                                   root counts its members' files, a nested subproject
+                                   keeps its own.
                                    A workspace root (Cargo [workspace] members, Maven
                                    <modules>, Gradle include(), go.work use, npm and
                                    pnpm workspaces) is one subproject: workspace is
@@ -354,7 +358,7 @@ GENERATED_NAME = re.compile(
 EXT_LANG = {
     ".py": "python",
     ".ts": "typescript", ".tsx": "typescript", ".js": "typescript",
-    ".jsx": "typescript", ".mjs": "typescript", ".cjs": "typescript",
+    ".jsx": "typescript", ".mjs": "typescript", ".cjs": "typescript", ".mts": "typescript", ".cts": "typescript",
     ".rs": "rust",
     ".java": "java",
     ".go": "go",
@@ -3598,6 +3602,8 @@ class Detector(object):
                 else:
                     stats["files"] += 1
                     stats["loc"] += loc
+                if lang == "typescript" and ext in (".ts", ".tsx", ".mts", ".cts"):
+                    stats["ts_files"] = stats.get("ts_files", 0) + 1
             if test and sub is not None:
                 entry = suites[sub].setdefault((test_suite_path(rel, sub), lang), {"files": 0, "loc": 0})
                 entry["files"] += 1
@@ -4837,7 +4843,7 @@ class Detector(object):
                 for member in members:
                     for lang, stat in per_sub.get(member, {}).items():
                         for key, value in stat.items():
-                            stats[lang][key] += value
+                            stats[lang][key] = stats[lang].get(key, 0) + value
             langs = set(entry["languages"])
             for member in members:
                 langs |= workspaces[d]["entries"][member]["languages"]

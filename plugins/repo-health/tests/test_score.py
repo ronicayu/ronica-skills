@@ -45,7 +45,8 @@ def sub(path=".", langs=("python",), cats=None, suites=None, loc=5000, test_file
     categories = {c: [] for c in CATEGORIES}
     categories.update(cats or {})
     record = {"path": path, "manifest": None, "manifests": [], "languages": list(langs),
-              "stats": {l: {"files": 3, "loc": loc, "test_files": test_files, "test_loc": 10} for l in langs},
+              "stats": {l: dict({"files": 3, "loc": loc, "test_files": test_files, "test_loc": 10},
+                                **({"ts_files": 3} if l == "typescript" else {})) for l in langs},
               "categories": categories, "dependencies": {"direct": direct, "dev": 0, "files": []},
               "workspace": None, "members": [], "test_suites": suites if suites is not None else (
                   [{"path": path, "language": langs[0], "files": 1, "loc": 10}] if test_files else []),
@@ -271,6 +272,40 @@ class NoTestsAtAll(unittest.TestCase):
         gap = [g for g in result["gaps"] if g["id"] == "tests:.:tests.0"][0]
         self.assertEqual(gap["hotspot_files"], ["a/x.py"])
         self.assertEqual(gap["priority"], 20.0)
+
+
+class JavaScriptOnly(unittest.TestCase):
+    def js_only(self, record):
+        record["stats"]["typescript"]["ts_files"] = 0
+        return record
+
+    def test_javascript_files_do_not_demand_a_type_checker(self):
+        mixed = self.js_only(sub(langs=("python", "typescript")))
+        d = det([mixed], rows=[ci_row("mypy", "types", "python")])
+        row = dim(run(d), "types")
+        self.assertEqual((row["level"], row["rule"], row["partial"]), (2, "types.2", None))
+        self.assertTrue(any("JavaScript only" in f for f in row["facts"]))
+        self.assertFalse([g for g in gap_ids(run(d)) if g.startswith("types:") and "typescript" in g])
+
+    def test_typescript_files_bring_the_rules_back(self):
+        d = det([sub(langs=("python", "typescript"))], rows=[ci_row("mypy", "types", "python")])
+        row = dim(run(d), "types")
+        self.assertEqual((row["level"], row["rule"]), (0, "types.0"))
+
+    def test_a_javascript_only_subproject_is_not_applicable(self):
+        row = dim(run(det([self.js_only(sub(langs=("typescript",)))])), "types")
+        self.assertEqual((row["status"], row["level"], row["rule"]), ("not_applicable", None, "types.na"))
+        self.assertIn("JavaScript only", row["summary"])
+        self.assertTrue(any("JavaScript only" in f for f in row["facts"]))
+
+    def test_lint_still_applies_to_javascript(self):
+        self.assertEqual(dim(run(det([self.js_only(sub(langs=("typescript",)))])), "lint")["rule"], "lint.0")
+
+
+class ChineseLists(unittest.TestCase):
+    def test_list_items_are_joined_with_the_enumeration_comma(self):
+        self.assertEqual(score.zh_summary("Missing: lockfile, toolchain pin."), "缺少：锁文件、工具链版本固定。")
+        self.assertEqual(score.zh_summary("No linter for python, typescript."), "没有 python、typescript 的 linter。")
 
 
 class Static(unittest.TestCase):
