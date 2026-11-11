@@ -1659,3 +1659,209 @@ def test_priority_badge_shows_in_the_panel(browser, priority_file):
     assert page.inner_text("#panel .badge.priority") == "P0"
     assert "Priority" not in page.text_content("#details")  # the badge shows it; the details do not repeat it
     page.close()
+
+
+def open_phone(browser, path, query="?view=graph"):
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    problems = []
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(f"{path.as_uri()}{query}")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    return page, problems
+
+
+def test_phone_toolbar_is_two_short_rows_without_overflow(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert page.evaluate("document.getElementById('toolbar').scrollWidth") <= 390
+    seen = page.evaluate(
+        """() => [...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
+            .filter(e => e.offsetParent && e.closest('.menu') === null && getComputedStyle(e).visibility !== 'hidden')
+            .map(e => { const r = e.getBoundingClientRect(); return [e.id, r.left, r.right, r.height]; })"""
+    )
+    assert {"project", "goal", "optsBtn", "viewGraph", "filterBtn", "moreBtn", "searchBtn"} <= {row[0] for row in seen}
+    assert all(left >= -0.5 and right <= 390.5 for _, left, right, _ in seen)
+    assert all(height >= 32 for _, _, _, height in seen)
+    assert problems == []
+    page.close()
+
+
+def test_phone_toolbar_rows_are_two(browser, page_file):
+    page, _ = open_phone(browser, page_file)
+    rows = page.evaluate(
+        """() => new Set([...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
+            .filter(e => e.offsetParent && e.closest('.menu') === null)
+            .map(e => Math.round(e.getBoundingClientRect().top))).size"""
+    )
+    assert rows == 2
+    page.close()
+
+
+def test_phone_search_opens_types_and_closes(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    assert not page.is_visible("#search")
+    page.click("#searchBtn")
+    assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
+    page.keyboard.type("docs")
+    page.wait_for_function("document.querySelectorAll('#results .hit').length > 0")
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
+    page.keyboard.press("Escape")
+    page.keyboard.press("Escape")
+    assert not page.is_visible("#search")
+    page.click("#cy")
+    page.keyboard.press("/")
+    assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
+    page.evaluate("document.activeElement.blur()")
+    page.wait_for_function("!document.getElementById('toolbar').classList.contains('searching')")
+    assert problems == []
+    page.close()
+
+
+def test_phone_every_view_and_fit_are_reachable(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    for button, name in (("viewLanes", "lanes"), ("viewTimeline", "timeline"), ("viewLoad", "load"), ("viewGraph", "graph")):
+        page.click(f"#{button}")
+        assert page.evaluate("view") == name
+        assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    page.click("#moreBtn")
+    assert page.is_visible("#fitMore")
+    page.click("#fitMore")
+    assert not page.evaluate("document.getElementById('moreWrap').classList.contains('open')")
+    page.click("#optsBtn")
+    assert page.is_visible("#opts")
+    right = page.evaluate("document.getElementById('opts').getBoundingClientRect().right")
+    assert right <= 390
+    assert problems == []
+    page.close()
+
+
+def test_phone_legend_starts_collapsed_even_if_remembered_open(browser, page_file):
+    page = browser.new_page(viewport={"width": 390, "height": 844})
+    page.add_init_script("try { localStorage.setItem('taskgraph.legend', 'open'); } catch (e) {}")
+    page.goto(f"{page_file.as_uri()}?view=graph")
+    page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
+    assert page.evaluate("document.getElementById('legend').classList.contains('closed')")
+    page.close()
+
+
+def test_graph_edges_are_orthogonal_routes_and_respace_on_narrow(browser, page_file):
+    page, problems = open_page(browser, page_file, "?view=graph")
+    span = "Math.max(...tasks().map(n => n.position('y'))) - Math.min(...tasks().map(n => n.position('y')))"
+    wide = page.evaluate(span)
+    assert page.evaluate("links().map(e => e.style('curve-style'))") == ["segments"] * page.evaluate("links().length")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_function(f"{span} < {wide}")
+    page.set_viewport_size({"width": 1400, "height": 900})
+    page.wait_for_function(f"{span} === {wide}")
+    diagonal = page.evaluate(
+        """() => links().filter(e => {
+            const pts = [e.source().position(), ...e.segmentPoints(), e.target().position()];
+            return pts.some((p, i) => i && Math.abs(p.x - pts[i - 1].x) > 1 && Math.abs(p.y - pts[i - 1].y) > 1);
+        }).length"""
+    )
+    assert diagonal == 0
+    assert problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def fanin_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("fanin")
+    tg = runner(tmp / "t.db")
+    tg("add", "Observability launch", "--type", "milestone")  # 1
+    tg("add", "Observability", "--type", "objective")  # 2
+    tg("add", "Front-end errors and web vitals reported through the collector", "--parent", "2")  # 3
+    tg("add", "Alerting review with burn-rate rules on the critical paths", "--parent", "2")  # 4
+    tg("add", "Tracing with tail sampling", "--parent", "2")  # 5
+    tg("add", "Central container logs", "--parent", "2")  # 6
+    tg("add", "Trace context across the job queue and provider calls", "--parent", "2")  # 7
+    tg("add", "Product spec review", "--type", "objective")  # 8
+    tg("add", "Write the spec for editing a video by chat", "--parent", "8")  # 9
+    tg("add", "Spec for regenerating after a segment test", "--parent", "8")  # 10
+    tg("add", "Backend refactor done", "--type", "milestone")  # 11
+    for dep in ("3", "4", "7", "9", "10"):
+        tg("dep", "add", "11", dep)
+    tg("dep", "add", "4", "3")
+    tg("dep", "add", "6", "5")
+    tg("dep", "add", "7", "6")
+    tg("dep", "add", "10", "9")
+    tg("dep", "add", "1", "2")
+    tg("dep", "add", "1", "11")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+GRAPH_ROUTES = """() => {
+    cy.zoom(1);
+    return links().map(e => {
+        const pts = [e.sourceEndpoint(), ...e.segmentPoints(), e.targetEndpoint()];
+        return { target: e.target().id(), dotted: e.hasClass('partof'), pts: pts.map(p => [p.x, p.y]) };
+    });
+}"""
+
+
+def test_graph_edges_never_share_a_line_with_edges_to_another_item(browser, fanin_file):
+    page, problems = open_page(browser, fanin_file, "?view=graph")
+    edges = page.evaluate(GRAPH_ROUTES)
+    runs = [
+        (e, ax, ay, bx, by)
+        for e in edges
+        for (ax, ay), (bx, by) in zip(e["pts"], e["pts"][1:])
+    ]
+    overlaps = []
+    for i, (e, ax, ay, bx, by) in enumerate(runs):
+        for f, cx, cy_, dx, dy in runs[i + 1 :]:
+            if e is f or (e["target"] == f["target"] and e["dotted"] == f["dotted"]):
+                continue
+            both = lambda p, q, r, s: min(max(p, q), max(r, s)) - max(min(p, q), min(r, s)) > 2
+            if abs(ay - by) < 1 and abs(cy_ - dy) < 1 and abs(ay - cy_) < 5 and both(ax, bx, cx, dx):
+                overlaps.append(("horizontal", e["target"], f["target"]))
+            if abs(ax - bx) < 1 and abs(cx - dx) < 1 and abs(ax - cx) < 3 and both(ay, by, cy_, dy) and e["dotted"] != f["dotted"]:
+                overlaps.append(("dotted on solid", e["target"], f["target"]))
+    assert overlaps == []
+    assert problems == []
+    page.close()
+
+
+def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
+    page, _ = open_page(browser, fanin_file, "?view=graph")
+    widest = "Math.max(...tasks().filter(n => n.style('shape') !== 'diamond').map(n => n.width()))"
+    wide = page.evaluate(widest)
+    page.click("#fit")
+    wide_zoom = page.evaluate("cy.zoom()")
+    page.close()
+    page, _ = open_phone(browser, fanin_file)
+    page.evaluate("document.getElementById('fit').click()")
+    assert page.evaluate(widest) <= 130 < wide
+    assert page.evaluate("cy.zoom()") > 0.4
+    assert wide_zoom > 0
+    page.close()
+
+
+def test_graph_edges_do_not_cross_node_labels(browser, fanin_file):
+    page, problems = open_page(browser, fanin_file, "?view=graph")
+    crossings = page.evaluate(
+        """() => {
+            const boxes = tasks().map(n => {
+                const at = n.position(), bb = n.boundingBox({ includeNodes: true, includeEdges: false, includeLabels: true, includeOverlays: false });
+                return { id: n.id(), x1: bb.x1 + 1, x2: bb.x2 - 1, below: [at.y + n.outerHeight() / 2 + 1, bb.y2 - 1], above: [bb.y1 + 1, at.y - n.outerHeight() / 2 - 1] };
+            });
+            const hits = [];
+            links().forEach(e => {
+                const pts = [e.sourceEndpoint(), ...e.segmentPoints(), e.targetEndpoint()];
+                pts.slice(1).forEach((b, i) => {
+                    const a = pts[i], x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x), y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
+                    boxes.forEach(box => [box.below, box.above].forEach(([top, bottom]) => {
+                        if (bottom > top && x1 < box.x2 && x2 > box.x1 && y1 < bottom && y2 > top) hits.push([e.id(), box.id]);
+                    }));
+                });
+            });
+            return [hits, tasks().filter(n => n.boundingBox({ includeLabels: true, includeOverlays: false }).h > n.outerHeight() + 8).length];
+        }"""
+    )
+    assert crossings[1] >= 2  # the milestones have labels under their shape
+    assert crossings[0] == []
+    assert problems == []
+    page.close()
