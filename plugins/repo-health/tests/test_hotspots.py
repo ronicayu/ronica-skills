@@ -199,12 +199,157 @@ class NoUsableHistory(Fixture):
         self.assertIn("shallow clone", result["history"]["reason"])
         self.assertTrue(all(f["commits"] is None for f in result["files"]))
 
-    def test_subdirectory_of_a_repo_is_not_read_as_git(self):
+    def test_subdirectory_of_a_repo_without_commits_has_no_history(self):
         git(self.root, "init", "-q")
         self.write("sub/a.py", NESTED)
         result = hotspots.analyse(os.path.join(self.root, "sub"))
         self.assertFalse(result["history"]["available"])
         self.assertEqual([f["path"] for f in result["files"]], ["a.py"])
+
+
+class Subfolder(Fixture):
+    def test_history_of_a_folder_inside_a_repo(self):
+        git(self.root, "init", "-q")
+        self.commit({"svc/a.py": NESTED, "svc/b.py": FLAT, "other/c.py": NESTED}, 30)
+        self.commit({"svc/a.py": NESTED + "# 2\n", "other/c.py": NESTED + "# 2\n"}, 20)
+        self.commit({"svc/a.py": NESTED + "# 3\n"}, 10)
+        result = hotspots.analyse(os.path.join(self.root, "svc"))
+        self.assertTrue(result["history"]["available"])
+        self.assertEqual(result["history"]["subpath"], "svc")
+        self.assertEqual(result["history"]["commits_in_window"], 3)
+        self.assertEqual([(f["path"], f["commits"]) for f in result["files"]], [("a.py", 3), ("b.py", 1)])
+        self.assertEqual(result["active_authors_12m"], 1)
+
+
+def commit_as(fixture, files, days_ago, name, email, message="c"):
+    for rel, text in files.items():
+        fixture.write(rel, text)
+    when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
+    env = git_env(when.strftime("%Y-%m-%dT%H:%M:%S +0000"))
+    env.update({"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": name,
+                "GIT_COMMITTER_EMAIL": email})
+    cmd = ["git", "-c", "commit.gpgsign=false", "add", "--"] + sorted(files)
+    subprocess.run(cmd, cwd=fixture.root, env=env, check=True)
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message], cwd=fixture.root,
+                   env=env, check=True, stdout=subprocess.PIPE)
+
+
+class Authors(Fixture):
+    def test_authors_share_and_active_authors(self):
+        git(self.root, "init", "-q")
+        commit_as(self, {"a.py": NESTED, "b.py": FLAT}, 50, "Ann", "ann@example.com")
+        commit_as(self, {"a.py": NESTED + "# 2\n"}, 40, "Ann", "ann@example.com")
+        commit_as(self, {"a.py": NESTED + "# 3\n"}, 30, "Ann Q", "ANN@example.com")   # same person, other spelling
+        commit_as(self, {"a.py": NESTED + "# 4\n", "b.py": FLAT + "# 4\n"}, 20, "Bob", "bob@example.com")
+        commit_as(self, {"c.py": FLAT}, 10, "Cy", "cy@example.com")
+        result = hotspots.analyse(self.root)
+        files = {f["path"]: f for f in result["files"]}
+        self.assertEqual((files["a.py"]["commits"], files["a.py"]["authors"]), (4, 2))
+        self.assertEqual(files["a.py"]["top_author_share"], 0.75)
+        self.assertIn(files["a.py"]["top_author"], ("Ann", "Ann Q"))
+        self.assertEqual((files["b.py"]["authors"], files["b.py"]["top_author_share"]), (2, 0.5))
+        self.assertEqual((files["c.py"]["authors"], files["c.py"]["top_author"], files["c.py"]["top_author_share"]),
+                         (1, "Cy", 1.0))
+        self.assertEqual(result["active_authors_12m"], 3)
+
+    def test_authors_outside_the_window_are_not_active(self):
+        git(self.root, "init", "-q")
+        commit_as(self, {"a.py": NESTED}, 400, "Old", "old@example.com")
+        commit_as(self, {"a.py": NESTED + "# 2\n"}, 10, "New", "new@example.com")
+        result = hotspots.analyse(self.root)
+        self.assertEqual(result["active_authors_12m"], 1)
+        self.assertEqual(result["files"][0]["top_author"], "New")
+
+    def test_no_history_has_no_author_facts(self):
+        self.write("a.py", NESTED)
+        result = hotspots.analyse(self.root)
+        self.assertIsNone(result["active_authors_12m"])
+        self.assertEqual(result["files"][0]["authors"], None)
+
+
+class Renames(Fixture):
+    def test_a_moved_file_keeps_its_history(self):
+        git(self.root, "init", "-q")
+        body = "".join("line %d\n" % i for i in range(40)) + NESTED
+        self.commit({"old/mod.py": body}, 100)
+        self.commit({"old/mod.py": body + "# 2\n"}, 90)
+        git(self.root, "mv", "old", "pkg")                       # a directory rename
+        self.commit({"pkg/mod.py": body + "# 2\n"}, 80)
+        self.commit({"pkg/mod.py": body + "# 3\n"}, 70)
+        git(self.root, "mv", "pkg/mod.py", "pkg/renamed.py")
+        self.commit({"pkg/renamed.py": body + "# 3\n"}, 60)
+        self.commit({"pkg/renamed.py": body + "# 4\n"}, 50)
+        result = hotspots.analyse(self.root)
+        files = {f["path"]: f for f in result["files"]}
+        self.assertEqual(list(files), ["pkg/renamed.py"])
+        self.assertEqual(files["pkg/renamed.py"]["commits"], 6)
+
+    def test_a_new_file_at_an_old_name_is_not_the_moved_file(self):
+        git(self.root, "init", "-q")
+        body = "".join("line %d\n" % i for i in range(40))
+        self.commit({"a.py": body}, 100)
+        git(self.root, "mv", "a.py", "b.py")
+        self.commit({"b.py": body}, 90)
+        self.commit({"a.py": "other = 1\n"}, 80)                  # a.py is a different file now
+        result = hotspots.analyse(self.root)
+        files = {f["path"]: f["commits"] for f in result["files"]}
+        self.assertEqual(files, {"b.py": 2, "a.py": 1})
+
+    def test_cochange_follows_renames(self):
+        git(self.root, "init", "-q")
+        body = "".join("line %d\n" % i for i in range(40))
+        self.commit({"a.py": body, "x.py": body + "y\n"}, 100)
+        self.commit({"a.py": body + "1\n", "x.py": body + "y1\n"}, 90)
+        git(self.root, "mv", "a.py", "z.py")
+        self.commit({"z.py": body + "1\n"}, 80)
+        self.commit({"z.py": body + "2\n", "x.py": body + "y2\n"}, 70)
+        pairs = hotspots.analyse(self.root)["cochange"]
+        self.assertEqual(pairs, [{"a": "x.py", "b": "z.py", "commits": 3, "ratio": 1.0}])
+
+
+class GeneratedFiles(Fixture):
+    def test_generated_vendored_and_migration_files_are_not_hotspots(self):
+        git(self.root, "init", "-q")
+        files = {"app/core.py": NESTED,
+                 "app/api_pb2.py": NESTED,
+                 "gen/schema.go": "// Code generated by x. DO NOT EDIT.\n" + NESTED,
+                 "gen/types.ts": "// @generated\n" + NESTED,
+                 "gen/auto.ts": "/* auto-generated */\n" + NESTED,
+                 "app/migrations/0001_initial.py": NESTED,
+                 "third/lib.py": NESTED,
+                 ".gitattributes": "third/ linguist-vendored\ngen/forced.py linguist-generated\n",
+                 "gen/forced.py": NESTED}
+        self.commit(files, 30)
+        self.commit({"app/core.py": NESTED + "# 2\n", "app/api_pb2.py": NESTED + "# 2\n",
+                     "gen/schema.go": "// Code generated by x. DO NOT EDIT.\n" + NESTED + "// 2\n",
+                     "gen/types.ts": "// @generated\n" + NESTED + "// 2\n"}, 20)
+        result = hotspots.analyse(self.root)
+        self.assertEqual([f["path"] for f in result["files"]], ["app/core.py"])
+        self.assertEqual(result["source_files"], 1)
+        self.assertEqual(result["excluded"], {"generated": 5, "vendored": 1, "migrations": 1})
+        self.assertNotIn("app/api_pb2.py", [f["path"] for f in result["largest"]])
+
+
+class OneLogCall(Fixture):
+    def test_git_log_runs_once(self):
+        self.build_history()
+        calls = []
+        real = hotspots.detect.run_git
+
+        def counting(root, args):
+            calls.append(list(args))
+            return real(root, args)
+
+        hotspots.detect.run_git = counting
+        try:
+            hotspots.analyse(self.root)
+        finally:
+            hotspots.detect.run_git = real
+        self.assertEqual(len([c for c in calls if "log" in c]), 1)
+        log = [c for c in calls if "log" in c][0]
+        self.assertIn("--no-show-signature", log)
+        self.assertIn("-M", log)
+        self.assertNotIn("--no-renames", log)
 
 
 class Measure(unittest.TestCase):

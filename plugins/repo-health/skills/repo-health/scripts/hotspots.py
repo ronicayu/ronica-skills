@@ -3,19 +3,34 @@
 
     hotspots.py [REPO] [--months 12] [--top 15] [--pretty]
 
-Prints one JSON document on stdout. It runs `git log` once and reads each source
-file once; it never changes the repository. Standard library only; Python 3.9+.
+Prints one JSON document on stdout. It runs `git log` once (renames followed,
+signatures never checked, the repository's own git commands never run) and reads
+each source file once; it never changes the repository. Standard library only;
+Python 3.9+. REPO may be a folder inside a git repository: the log is limited to
+that folder, paths are relative to it, and history.git_root and history.subpath
+say where git was found.
 
-Source files are the six languages of detect.py, tests excluded. Output:
+Source files are the six languages of detect.py, tests excluded, and files that
+detect.py calls generated, vendored or migrations (one shared rule) are left out
+and counted in `excluded`. Output:
 
   files        top N by hotspot score: path, language, loc, commits (in the
-               window), indent_complexity, max_indent, score
+               window; a renamed file keeps the commits of its old names),
+               indent_complexity, max_indent, score, authors (distinct
+               authors of those commits, by e-mail address), top_author (the
+               name of the one with most commits) and top_author_share (0 to
+               1, their commits over all commits of the file). The three author
+               fields are null when a file has no commits or history is unusable
+  active_authors_12m
+               distinct authors of all non-merge commits in the window (the
+               window is --months, 12 by default); null without usable history
   largest      top N source files by LOC
   deepest_indent  top N by deepest indentation level
   cochange     top 10 pairs of source files changed in the same commits (a
                commit that touches more than 30 files is ignored; a pair needs
                at least 2 such commits)
   size_buckets source files by LOC: "<200", "200-499", "500-999", ">=1000"
+  excluded     {"generated": n, "vendored": n, "migrations": n} source files left out
   history      whether git history was usable, and why not
 
 Indent complexity is the Tornhill whitespace measure: the sum, over non-blank
@@ -118,36 +133,72 @@ def read_metrics(repo, path):
     return None, (loc, complexity, deepest)
 
 
+def follow_renames(entries):
+    """Paths touched by each commit, with old names mapped to the file's current path.
+
+    entries is newest first: [[(status, [paths])]] per commit. A rename `old -> new`
+    makes every older mention of `old` stand for the final name of `new`.
+    """
+    current = {}
+    result = []
+    for changes in entries:
+        touched = []
+        for status, paths in changes:
+            if status[0] in "RC" and len(paths) == 2:
+                old, new = paths
+                final = current.get(new, new)
+                if status[0] == "R":
+                    current[old] = final
+                touched.append(final)
+            elif paths:
+                touched.append(current.get(paths[0], paths[0]))
+        result.append(touched)
+    return result
+
+
 def history(repo, months):
-    """(commits, info): commits is [(sha, [paths])] or None when unusable."""
+    """(commits, info): commits is [(sha, [paths], author key, author name)] or None when unusable."""
     info = {"available": False, "reason": None, "window_months": months,
-            "commits_in_window": None, "total_commits": None, "shallow": False}
+            "commits_in_window": None, "total_commits": None, "shallow": False,
+            "git_root": repo.git_root, "subpath": repo.subpath if repo.is_git else None}
     if not repo.is_git:
-        info["reason"] = "not a git repository (or not its top directory)"
+        info["reason"] = "not a git repository"
         return None, info
-    total = detect.run_git(repo.root, ["rev-list", "--count", "HEAD"])
+    total = detect.run_git(repo.git_root, ["rev-list", "--count", "HEAD"])
     if total is None:
         info["reason"] = "git repository with no commits"
         return None, info
     info["total_commits"] = int(total.decode().strip() or 0)
-    shallow = detect.run_git(repo.root, ["rev-parse", "--is-shallow-repository"])
+    shallow = detect.run_git(repo.git_root, ["rev-parse", "--is-shallow-repository"])
     info["shallow"] = bool(shallow) and shallow.decode().strip() == "true"
     if info["shallow"] and info["total_commits"] < MIN_COMMITS_SHALLOW:
         info["reason"] = "shallow clone with %d commits (fewer than %d)" % (
             info["total_commits"], MIN_COMMITS_SHALLOW)
         return None, info
-    out = detect.run_git(repo.root, [
-        "-c", "core.quotepath=off", "log", "--since=%d months ago" % months,
-        "--no-renames", "--no-merges", "--name-only", "--format=@@@%H"])
+    args = ["-c", "core.quotepath=off", "log", "--since=%d months ago" % months, "--no-show-signature",
+            "-M", "--no-merges", "--name-status", "--format=@@@%H\x1f%an\x1f%ae"]
+    if repo.subpath != ".":
+        args += ["--", repo.subpath]
+    out = detect.run_git(repo.git_root, args)
     if out is None:
         info["reason"] = "git log failed"
         return None, info
-    commits = []
+    headers = []
+    entries = []
     for line in out.decode("utf-8", "replace").splitlines():
         if line.startswith("@@@"):
-            commits.append((line[3:], []))
-        elif line.strip() and commits:
-            commits[-1][1].append(line)
+            sha, _sep, rest = line[3:].partition("\x1f")
+            name, _sep, email = rest.partition("\x1f")
+            headers.append((sha, (email.strip().lower() or name.strip()), name.strip()))
+            entries.append([])
+        elif line.strip() and entries:
+            fields = line.split("\t")
+            if len(fields) >= 2:
+                entries[-1].append((fields[0], fields[1:]))
+    prefix = "" if repo.subpath == "." else repo.subpath + "/"
+    commits = []
+    for (sha, key, name), touched in zip(headers, follow_renames(entries)):
+        commits.append((sha, [p[len(prefix):] for p in touched if p.startswith(prefix)], key, name))
     info["available"] = True
     info["commits_in_window"] = len(commits)
     return commits, info
@@ -166,23 +217,35 @@ def analyse(root, months=12, top=15):
             continue
         loc, complexity, deepest = metrics
         rows[path] = {"path": path, "language": language, "loc": loc, "commits": None,
-                      "indent_complexity": complexity, "max_indent": round(deepest, 1), "score": None}
+                      "indent_complexity": complexity, "max_indent": round(deepest, 1), "score": None,
+                      "authors": None, "top_author": None, "top_author_share": None}
 
     pairs = defaultdict(int)
+    active_authors = None
     if commits is not None:
         counts = defaultdict(int)
-        for _sha, paths in commits:
+        by_author = defaultdict(lambda: defaultdict(int))
+        names = {}
+        for _sha, paths, key, name in commits:
+            names[key] = name
             for path in set(paths):
                 if path in rows:
                     counts[path] += 1
+                    by_author[path][key] += 1
             if len(set(paths)) <= MAX_COCHANGE_FILES:
                 touched = sorted(p for p in set(paths) if p in rows)
                 for a, b in combinations(touched, 2):
                     pairs[(a, b)] += 1
         most = max(counts.values()) if counts else 0
         highest = max((r["indent_complexity"] for r in rows.values()), default=0)
+        active_authors = len(names)
         for path, row in rows.items():
             row["commits"] = counts.get(path, 0)
+            if row["commits"]:
+                top_key, top_count = max(by_author[path].items(), key=lambda kv: (kv[1], kv[0]))
+                row["authors"] = len(by_author[path])
+                row["top_author"] = names[top_key]
+                row["top_author_share"] = round(top_count / float(row["commits"]), 3)
             if most and highest:
                 row["score"] = round((row["commits"] / float(most)) * (row["indent_complexity"] / float(highest)), 4)
             else:
@@ -208,6 +271,7 @@ def analyse(root, months=12, top=15):
     return {
         "repo": repo.root,
         "history": info,
+        "active_authors_12m": active_authors,
         "source_files": len(everything),
         "files": ranked[:top],
         "largest": [{k: r[k] for k in ("path", "language", "loc")} for r in largest],
