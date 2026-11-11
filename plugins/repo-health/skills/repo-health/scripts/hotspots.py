@@ -17,13 +17,19 @@ and counted in `excluded`. Output:
   files        top N by hotspot score: path, language, loc, commits (in the
                window; a renamed file keeps the commits of its old names),
                indent_complexity, max_indent, score, authors (distinct
-               authors of those commits, by e-mail address), top_author (the
-               name of the one with most commits) and top_author_share (0 to
-               1, their commits over all commits of the file). The three author
+               people among those commits), top_author (the name most used by
+               the one with most commits) and top_author_share (0 to 1, their
+               commits over all commits of the file by people). The three author
                fields are null when a file has no commits or history is unusable
+               (authors is 0 when every commit was a bot's)
   active_authors_12m
-               distinct authors of all non-merge commits in the window (the
-               window is --months, 12 by default); null without usable history
+               distinct people who made non-merge commits in the window (the
+               window is --months, 12 by default); null without usable history.
+               People: git applies .mailmap (%aN, %aE); then identities that share
+               an e-mail address (any case) or a name (any case, whitespace folded)
+               are one person. Bots are not people: names ending in [bot],
+               noreply@anthropic.com, noreply@github.com, and the names dependabot,
+               renovate, renovate-bot, github-actions.
   largest      top N source files by LOC
   deepest_indent  top N by deepest indentation level
   cochange     top 10 pairs of source files changed in the same commits (a
@@ -176,7 +182,7 @@ def history(repo, months):
             info["total_commits"], MIN_COMMITS_SHALLOW)
         return None, info
     args = ["-c", "core.quotepath=off", "log", "--since=%d months ago" % months, "--no-show-signature",
-            "-M", "--no-merges", "--name-status", "--format=@@@%H\x1f%an\x1f%ae"]
+            "-M", "--no-merges", "--name-status", "--format=@@@%H\x1f%aN\x1f%aE"]
     if repo.subpath != ".":
         args += ["--", repo.subpath]
     out = detect.run_git(repo.git_root, args)
@@ -189,7 +195,7 @@ def history(repo, months):
         if line.startswith("@@@"):
             sha, _sep, rest = line[3:].partition("\x1f")
             name, _sep, email = rest.partition("\x1f")
-            headers.append((sha, (email.strip().lower() or name.strip()), name.strip()))
+            headers.append((sha, email.strip().lower(), name.strip()))
             entries.append([])
         elif line.strip() and entries:
             fields = line.split("\t")
@@ -202,6 +208,57 @@ def history(repo, months):
     info["available"] = True
     info["commits_in_window"] = len(commits)
     return commits, info
+
+
+BOT_NAMES = {"dependabot", "renovate", "renovate-bot", "github-actions", "dependabot-preview"}
+BOT_EMAILS = {"noreply@anthropic.com", "noreply@github.com"}
+
+
+def is_bot(name, email):
+    """Bots do not count as people: *[bot] names, tool noreply addresses, well-known bot names."""
+    low = re.sub(r"\s+", " ", name.strip().lower())
+    mail = email.strip().lower()
+    if low.endswith("[bot]") or mail in BOT_EMAILS or low in BOT_NAMES:
+        return True
+    return mail.endswith("@users.noreply.github.com") and low.endswith("[bot]")
+
+
+def people(identities):
+    """{(email, name): person id or None for a bot} from the (email, name) pairs of the commits.
+
+    Union-find: two pairs with the same e-mail (case-insensitive) or the same name
+    (case-insensitive, whitespace folded) are one person. .mailmap is applied by git
+    itself (%aN and %aE). The id is the smallest e-mail or name of the group.
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    result = {}
+    for email, name in sorted(set(identities)):
+        if is_bot(name, email):
+            result[(email, name)] = None
+            continue
+        folded = re.sub(r"\s+", " ", name.strip().lower())
+        keys = []
+        if email:
+            keys.append("e:" + email.lower())
+        if folded:
+            keys.append("n:" + folded)
+        if not keys:
+            keys.append("x:unknown")
+        for key in keys[1:]:
+            union(keys[0], key)
+        result[(email, name)] = keys[0]
+    return {pair: (None if value is None else find(value)) for pair, value in result.items()}
 
 
 def analyse(root, months=12, top=15):
@@ -225,13 +282,19 @@ def analyse(root, months=12, top=15):
     if commits is not None:
         counts = defaultdict(int)
         by_author = defaultdict(lambda: defaultdict(int))
-        names = {}
+        who = people([(key, name) for _sha, _paths, key, name in commits])
+        name_votes = defaultdict(lambda: defaultdict(int))
+        for _sha, _paths, key, name in commits:
+            if who[(key, name)] is not None:
+                name_votes[who[(key, name)]][name] += 1
+        names = {pid: max(votes.items(), key=lambda kv: (kv[1], kv[0]))[0] for pid, votes in name_votes.items()}
         for _sha, paths, key, name in commits:
-            names[key] = name
+            person = who[(key, name)]
             for path in set(paths):
                 if path in rows:
                     counts[path] += 1
-                    by_author[path][key] += 1
+                    if person is not None:
+                        by_author[path][person] += 1
             if len(set(paths)) <= MAX_COCHANGE_FILES:
                 touched = sorted(p for p in set(paths) if p in rows)
                 for a, b in combinations(touched, 2):
@@ -241,11 +304,13 @@ def analyse(root, months=12, top=15):
         active_authors = len(names)
         for path, row in rows.items():
             row["commits"] = counts.get(path, 0)
-            if row["commits"]:
+            if row["commits"] and by_author[path]:
                 top_key, top_count = max(by_author[path].items(), key=lambda kv: (kv[1], kv[0]))
                 row["authors"] = len(by_author[path])
                 row["top_author"] = names[top_key]
-                row["top_author_share"] = round(top_count / float(row["commits"]), 3)
+                row["top_author_share"] = round(top_count / float(sum(by_author[path].values())), 3)
+            elif row["commits"]:
+                row["authors"] = 0
             if most and highest:
                 row["score"] = round((row["commits"] / float(most)) * (row["indent_complexity"] / float(highest)), 4)
             else:

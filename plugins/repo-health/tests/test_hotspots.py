@@ -267,6 +267,68 @@ class Authors(Fixture):
         self.assertEqual(result["files"][0]["authors"], None)
 
 
+class People(Fixture):
+    def active(self, *authors):
+        git(self.root, "init", "-q")
+        for index, (name, email) in enumerate(authors):
+            commit_as(self, {"a.py": NESTED + "# %d\n" % index}, 50 - index, name, email)
+        return hotspots.analyse(self.root)
+
+    def test_same_email_in_any_case_is_one_person(self):
+        result = self.active(("Ann", "ann@example.com"), ("Bea", "ANN@Example.com"))
+        self.assertEqual(result["active_authors_12m"], 1)
+        self.assertEqual((result["files"][0]["authors"], result["files"][0]["top_author_share"]), (1, 1.0))
+
+    def test_same_name_any_case_and_spacing_is_one_person(self):
+        result = self.active(("Yu  Rong", "a@x.com"), ("yu rong", "b@y.org"), ("Cy", "cy@x.com"))
+        self.assertEqual(result["active_authors_12m"], 2)
+        self.assertEqual(result["files"][0]["authors"], 2)
+
+    def test_identities_merge_through_a_chain(self):
+        result = self.active(("Ann", "one@x.com"), ("Ann", "two@x.com"), ("Bob", "two@x.com"), ("Bob", "three@x.com"))
+        self.assertEqual(result["active_authors_12m"], 1)
+
+    def test_different_people_stay_apart(self):
+        result = self.active(("Ann", "ann@x.com"), ("Bob", "bob@x.com"))
+        self.assertEqual(result["active_authors_12m"], 2)
+        self.assertEqual(result["files"][0]["top_author_share"], 0.5)
+
+    def test_mailmap_is_honoured(self):
+        git(self.root, "init", "-q")
+        commit_as(self, {"a.py": NESTED, ".mailmap": "Ann <ann@x.com> <ann.old@y.com>\n"}, 50, "Ann", "ann@x.com")
+        commit_as(self, {"a.py": NESTED + "# 2\n"}, 40, "A. Old", "ann.old@y.com")
+        commit_as(self, {"a.py": NESTED + "# 3\n"}, 30, "Bob", "bob@x.com")
+        result = hotspots.analyse(self.root)
+        self.assertEqual(result["active_authors_12m"], 2)
+        self.assertEqual(result["files"][0]["top_author"], "Ann")
+
+    def test_bots_are_not_people(self):
+        result = self.active(("Ann", "ann@x.com"), ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com"),
+                             ("Claude", "noreply@anthropic.com"), ("GitHub Actions", "noreply@github.com"),
+                             ("renovate", "r@example.com"))
+        self.assertEqual(result["active_authors_12m"], 1)
+        row = result["files"][0]
+        self.assertEqual((row["commits"], row["authors"], row["top_author"], row["top_author_share"]),
+                         (5, 1, "Ann", 1.0))
+
+    def test_a_file_changed_only_by_bots_has_no_author(self):
+        result = self.active(("github-actions", "x@example.com"))
+        self.assertEqual((result["active_authors_12m"], result["files"][0]["authors"],
+                          result["files"][0]["top_author"]), (0, 0, None))
+
+    def test_bot_rules(self):
+        bot = hotspots.is_bot
+        self.assertTrue(bot("dependabot[bot]", "x@y.z"))
+        self.assertTrue(bot("Some App [BOT]", "1+app@users.noreply.github.com"))
+        self.assertTrue(bot("Claude", "noreply@anthropic.com"))
+        self.assertTrue(bot("whoever", "NoReply@GitHub.com"))
+        for name in ("dependabot", "Renovate", "github-actions", "renovate-bot"):
+            self.assertTrue(bot(name, "x@y.z"), name)
+        self.assertFalse(bot("Ann", "123+ann@users.noreply.github.com"))
+        self.assertFalse(bot("Ann", "ann@example.com"))
+        self.assertFalse(bot("Botany", "b@example.com"))
+
+
 class Renames(Fixture):
     def test_a_moved_file_keeps_its_history(self):
         git(self.root, "init", "-q")
