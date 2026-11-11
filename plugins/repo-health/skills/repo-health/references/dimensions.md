@@ -1,111 +1,111 @@
 # Dimensions and level rules
 
-Levels: 0 absent, 1 present, 2 enforced, 3 effective. "In CI" means a CI file runs the tool in a job that triggers on pull requests (or merge requests), or on every push to the default branch. A pre-commit hook counts as enforced only together with CI; alone it is level 1 plus a note, because hooks can be skipped.
+`scripts/score.py` applies these rules to `detect.json`, `hotspots.json` and `ghfacts.json` (and tier 1 results when they exist) and writes `score.json`. The model does not set tier 0 levels by hand. It may override a level only with an `override_reason` that cites evidence the script cannot see; the report shows every override.
 
-When `detect.json` finds several subprojects, set levels per subproject. A tool configured at the repo root counts for every subproject it covers.
+Each rule has an id (`tests.2`, `ci.3a`). `score.json` names the rule that set each level, so two runs on the same repository give the same levels and a rerun's ↑ ↓ reflects the repository, not the model.
 
-## Guardrail dimensions
+## Terms
 
-### `lint`: lint and formatting (tier 0, tier 1)
+- **Blocking CI row**: a CI row for the tool, in a job that runs on pull requests (`pull_request` true, or `"push-default"` for CI systems that build every branch), and not `non_blocking`. A pre-commit hook alone is not blocking; `pre-commit run` in CI is.
+- **The subproject's languages**: rows count only when their `language` is one of the subproject's languages, or `shared`.
+- **Partial**: the guardrail covers some of what it should (some test suites, some languages, some ecosystems). A partial guardrail gets the lower level and a `partial: {covered, total, missing}` field; the report says "CI runs 2 of 4 test suites".
+- **Unknown**: the fact that decides the level is not visible (a GitHub setting without admin access, a tier 1 count that did not run). Status `unknown`, level null, `needs`: what would decide it. Unknown is never scored as 0.
+- **Profile** (from detect, hotspots, ghfacts): `solo` (one active author in 12 months), `team`; `public`, `private`, `unknown`; `application` or `library` (a library publishes a package and has no deploy target; a repo of standard-library scripts is `scripts`).
 
-- 0: no linter config and no linter in CI, hooks or package scripts.
-- 1: a linter is configured (config file or `package.json` script), but CI does not run it.
-- 2: CI runs it.
-- 3: CI runs it, the tier 1 run shows zero errors (warnings under ~1 per 1,000 lines), and suppressions are under ~1 per 500 lines. A formatter check (`--check`) in CI is part of level 3.
-- Evidence: `detect.json` `subprojects[].lint`, `.format`, `ci`, `precommit`, `suppressions`; tier 1 counts.
+## Guardrails (levels 0–3)
 
-### `types`: type checking (tier 0, tier 1)
+### lint (lint and format)
+- `lint.0`: no linter config, script or CI row for any of the subproject's languages.
+- `lint.1`: configured (config, package script, hook), but no blocking CI row. Partial when some languages have a linter and others none.
+- `lint.2`: a blocking CI row runs the linter for every language of the subproject.
+- `lint.3`: `lint.2`, a formatter check runs in blocking CI, suppressions are under 2 per 1,000 lines, and the tier 1 count is zero errors. Without the tier 1 count: level 2, `needs: tier 1 lint count`.
 
-Python and TypeScript have optional checkers; the compiled languages always type-check, so their levels measure strictness.
-- Python, TypeScript
-  - 0: no mypy/pyright config; TypeScript files with no `tsconfig.json`.
-  - 1: config present but not in CI. For TypeScript, `tsc` runs only as part of a bundler build that ignores type errors (Vite, esbuild and SWC strip types without checking).
-  - 2: CI runs mypy, pyright or `tsc --noEmit` (or a build that runs `tsc`).
-  - 3: enforced, with strict settings (mypy `strict = true` or `disallow_untyped_defs`; pyright `strict`; tsconfig `"strict": true`), and the tier 1 run shows zero errors.
-- Rust, Go, Java, Kotlin
-  - 2: the default. CI builds the code.
-  - 3: warnings fail the build: Rust `-D warnings` (in clippy or `RUSTFLAGS`) or `[lints]` set to deny; Java `-Werror`; Kotlin `allWarningsAsErrors`; Go `go vet` in CI.
-  - 1: no CI builds the code.
+### types
+- Python and TypeScript:
+  - `types.0`: no mypy/pyright config; TypeScript files and no `tsconfig.json`.
+  - `types.1`: configured, no blocking CI row (a bundler build does not check types).
+  - `types.2`: blocking CI runs mypy, pyright or `tsc --noEmit` (or a build script that runs `tsc`).
+  - `types.3`: `types.2` with a strictness fact (mypy strict or `disallow_untyped_defs`, pyright strict, tsconfig `strict`) and a tier 1 count of zero; without the count, level 2 with `needs`.
+- Rust, Go, Java, Kotlin:
+  - `types.1c`: no CI job builds the code.
+  - `types.2c`: CI builds it (any blocking build or test row).
+  - `types.3c`: warnings fail the build in CI: clippy `-D warnings` or `RUSTFLAGS=-Dwarnings`, `-Werror`, `allWarningsAsErrors`, `go vet` as a blocking row.
 
-### `static`: static analysis and security (tier 0, tier 1)
+### static (security analysis)
+- `static.0`: none of semgrep, CodeQL, SonarQube, bandit, gosec, SpotBugs, Error Prone, cargo-deny.
+- `static.1`: configured, not blocking in CI.
+- `static.2`: blocking in CI (a CodeQL workflow on pull requests, or GitHub default setup reported by ghfacts).
+- `static.3`: `static.2` and ghfacts shows no open high or critical code-scanning alert; alerts not visible → level 2, `needs`.
 
-Security-focused analysis beyond the linter: semgrep, CodeQL, SonarQube, bandit, gosec, SpotBugs, Error Prone, cargo-deny.
-- 0: none.
-- 1: configured, not in CI.
-- 2: CI runs it (CodeQL counts as level 2 when its workflow exists and triggers on pull requests).
-- 3: enforced, and the tier 1 run (or the tool's last CI result, if visible) shows no high-severity finding.
+### secrets
+- `secrets.2g`: ghfacts shows secret scanning and push protection on.
+- `secrets.2`: gitleaks or trufflehog is a blocking CI row (or `pre-commit run` in CI runs it).
+- `secrets.1`: configured locally only.
+- `secrets.3`: push protection on, and a scanner in blocking CI.
+- No local scanner and the GitHub setting not visible → unknown. No local scanner and the setting visibly off → `secrets.0`.
 
-### `secrets`: secret scanning (tier 0, tier 1)
+### tests
+- `tests.0`: no test files.
+- `tests.1`: test files, no blocking CI row that runs them.
+- `tests.1p` (partial): CI runs some test suites and not others. A suite is a folder of test files under one subproject or workspace member; a CI command covers a suite when it runs the whole subproject (`pytest`, `npm test`, `cargo test --workspace`, `go test ./...`, `mvn test`) or names the suite's path or member. List the suites CI misses, hottest first.
+- `tests.2`: blocking CI runs every suite.
+- `tests.3`: `tests.2`, and on the default branch ghfacts shows a pass rate of 90% or more over the last 50 completed runs and a re-run rate of 10% or less; or a tier 1 run passed in under 10 minutes. Neither available → level 2, `needs`.
 
-- 0: no gitleaks/trufflehog config or CI step.
-- 1: configured, not in CI.
-- 2: CI or a pre-commit hook runs it.
-- 3: enforced, and a redacted tier 1 scan of the working tree finds nothing.
-- GitHub's own secret scanning and push protection are repository settings that `detect.py` cannot see. If `gh` is signed in, `gh api repos/<o>/<r>` shows `security_and_analysis` only to admins; otherwise say "not visible".
+### coverage
+- `coverage.0`: no coverage config, flag or CI step.
+- `coverage.1`: configured, not measured in blocking CI.
+- `coverage.2`: blocking CI measures it.
+- `coverage.3`: a threshold fails the build (`fail_under`, `--cov-fail-under`, jacoco rules, kover `minBound`, vitest `thresholds`, jest `coverageThreshold`) or a Codecov patch target.
 
-### `tests`: tests (tier 0, tier 1)
+### ci
+- `ci.0`: no CI config.
+- `ci.1`: CI exists, nothing runs on pull requests.
+- `ci.2`: pull requests run the tests (`tests` at 1p or above).
+- `ci.3`: `ci.2`, lint also runs, and ghfacts shows required status checks on the default branch (`ci.3a`). Protection not visible → level 2, `needs`. A `solo` repository reaches 3 without required checks when the default branch pass rate is 90% or more (`ci.3s`).
 
-- 0: no test files.
-- 1: test files exist, CI does not run them, or CI runs only some of the test suites. The summary names the suites CI skips (compare the folders in `ci.files[].tools[].commands` with the test folders on disk).
-- 2: CI runs all of them.
-- 3: enforced, and the tier 1 run passes, finishes in under ~10 minutes, and no test was skipped without a reason. Report the test-to-source file ratio and the 5 slowest tests if the runner shows them.
-- A suite that fails on a clean checkout is level 2 with a high-impact recommendation: a red suite trains people to ignore it.
+### setup
+- Lockfile rule by profile: `application` needs a lockfile per ecosystem; `library` and `scripts` do not, and the summary says so.
+- `setup.0`: none of: lockfile (when needed), toolchain pin, task entry (Makefile, justfile, package scripts, Taskfile, tox/nox, a script CI or the README runs).
+- `setup.1`: one or two of the three.
+- `setup.2`: all three.
+- `setup.3`: `setup.2`, and CI installs from the lockfile (a locked-install fact), or a devcontainer exists.
 
-### `coverage`: coverage (tier 1, presence at tier 0)
+### deps
+- `deps.0`: no lockfile and no update bot.
+- `deps.1`: lockfile, no bot and no audit in CI.
+- `deps.1p` (partial): a bot that misses an ecosystem present in the repo (GitHub Actions counts when workflows exist).
+- `deps.2`: a bot covering every ecosystem, or an audit as a blocking CI row.
+- `deps.3`: `deps.2`, and every lockfile changed in the last 90 days (lockfile age), or a tier 1 audit with no high or critical advisory.
 
-- 0: no coverage config or step.
-- 1: configured (coverage.py config, `--cov`, jacoco, kover, c8, vitest coverage), not in CI.
-- 2: CI measures it.
-- 3: CI fails below a threshold (`fail_under`, `--cov-fail-under`, jacoco `violationRules`, kover `minBound`, vitest `thresholds`), or a coverage service checks patch coverage on pull requests (Codecov or Coveralls config with a patch target).
-- Tier 1 reports the total line coverage and the coverage of the top 5 hotspot files. Low coverage on a hotspot matters more than the total.
+### docs
+- `docs.0`: no README.
+- `docs.1`: a README with no development command a reader can run, or one or more README commands that do not exist (`docs.commands[].check == "missing"`). A wrong command ranks above a missing one: list each.
+- `docs.2`: the README gives commands to install, run and test, and every checkable command exists.
+- `docs.3`: `docs.2` and a CONTRIBUTING file or a development section that also gives the lint command.
 
-### `ci`: CI (tier 0)
+## Signals (no level)
 
-- 0: no CI config.
-- 1: CI exists but does not run on pull requests (push to the default branch only, or manual).
-- 2: CI runs on pull requests and runs at least the tests (all suites, or the summary says which it skips).
-- 3: CI runs on pull requests, runs tests and lint, and the default branch requires the checks to pass (branch protection or a ruleset, if visible). When protection is not visible, the most that can be proven is level 2; say so.
-- List which of lint, format, types, static, tests, coverage each CI file runs.
+### hotspots
+From `hotspots.json`: the top files by commits × indent complexity, their size, authors and top-author share; co-change pairs; size buckets; files over 1,000 lines. `score.py` joins each hotspot with its guardrails: is it under a test suite CI runs, its suppressions, whether its language has a blocking linter. A hotspot with no CI-run tests, or with a top-author share of 0.9 or more in a `team` repository, becomes a gap.
 
-### `setup`: setup and reproducibility (tier 0)
+### ci_health
+From ghfacts: default-branch pass rate, median duration, re-run rate, last failure, per workflow; median time to merge and the share of PRs merged with no review (`team` only). These feed `tests.3`, `ci.3s` and gaps (a pass rate under 80% is a gap of its own: a red main teaches people to ignore CI).
 
-- 0: no lockfile for an ecosystem that has one (applications; libraries may skip lockfiles by choice, so say so instead of scoring 0), no toolchain pin, no documented setup.
-- A repo of scripts with no third-party dependencies (standard library only) needs no lockfile: judge it on the toolchain pin and the one-command tasks, and say so in the summary.
-- One-command tasks include shell scripts that CI or the README runs (`scripts/test.sh`, `scripts/validate.sh`), not only Makefile, justfile or `package.json` scripts.
-- 1: a lockfile exists.
-- 2: a lockfile, a toolchain pin (`.python-version`, `requires-python`, `.nvmrc`/`engines`/`packageManager`, `rust-toolchain.toml`, Maven/Gradle wrapper, the `go` directive, `.tool-versions`, `mise.toml`), and one-command tasks (Makefile, justfile, Taskfile, `package.json` scripts, `tox`/`nox`).
-- 3: level 2, and CI installs from the lockfile (`npm ci`, `pnpm install --frozen-lockfile`, `uv sync --locked`, `poetry install` with `poetry check --lock`, `cargo build --locked`, `go mod verify`), or a devcontainer exists.
+## Tier 2 reviews (no level)
 
-### `docs`: docs (tier 0)
+- `review`: one reader with two lenses, structure (boundaries, layering, cycles, god modules) and error handling (swallowed errors, broad catches, missing context, unbounded retries, secrets in logs).
+- `testquality`: do the tests of the top hotspots check behaviour; mocks, missing edge cases, flaky patterns.
 
-- 0: no README.
-- 1: a README without install, run or test instructions.
-- 2: the README tells a developer how to set up, run and check the code. Commands count wherever they are; heading names do not matter (a "Validation" section that runs `./scripts/validate.sh` is the test instruction). For a library or plugin, "install" can be installing it for use, but the developer must still find how to run its checks.
-- 3: level 2, and a CONTRIBUTING file or a developer guide, and architecture notes or ADRs for a codebase over ~20k lines.
+Each finding cites `path:line`. See `tier2-prompts.md`.
 
-### `deps`: dependencies (tier 0, tier 1)
+## Gaps and ranking
 
-- 0: no lockfile and no update bot.
-- 1: a lockfile, no update bot and no audit.
-- 2: Dependabot or Renovate config, or an audit step in CI.
-- 3: level 2, and the tier 1 audit shows no known vulnerability of high or critical severity.
-- Tier 1 also counts outdated direct dependencies where it is cheap (`npm outdated --json`, `uv pip list --outdated` in an existing env, `go list -m -u all`, `cargo outdated` if installed).
+`score.py` turns every level under 3, every partial and every hotspot gap into a gap with a stable `id` (`<dimension>:<subproject>:<rule or slug>`), the facts that caused it, and a `priority`:
 
-### `deadcode`: dead code (tier 1)
+1. Weight by dimension: tests 10, ci 9, lint 7, types 6, secrets 6 (public) or 3 (private), coverage 4, setup 4, deps 4, static 3, docs 3.
+2. Times the hotspot factor: 2 when the gap covers one of the top 5 hotspots (a missing suite that holds a hotspot, a hotspot's language without a linter), 1.5 for the top 15, 1 otherwise.
+3. Times the effort factor: 1.5 when an existing tool only needs to move into CI or block (enforce, not add), 1 otherwise, 0.7 for a large change.
+4. Times 0 when the profile makes the advice moot (required reviews in a `solo` repo, a lockfile for a `library`), and the gap is listed under "Not applicable" instead.
+5. A gap whose id is `dismissed` in `.repo-health/decisions.json` drops out of the ranking and appears once, collapsed, with its reason.
 
-- Level null when tier 1 did not run; when it ran: 1 if the count is high (over ~1 per 1,000 lines at the tool's high-confidence setting), 2 if a tool runs in CI, 3 if it runs in CI and finds little.
-- Report the count and 5 samples with `path:line`. Dead-code tools have false positives (reflection, dependency injection, public APIs, framework entry points); say so and do not recommend deleting by count alone.
-
-## Metric dimensions (level null)
-
-### `size`: size and structure metrics (tier 0)
-
-From `detect.json` and `hotspots.json`: LOC per language, `size_buckets`, the largest files, the number of files over 500 and 1,000 lines. The summary says whether size is concentrated in a few files. Recommend splitting only files that are also hotspots.
-
-### `hotspots`: change hotspots (tier 0)
-
-From `hotspots.json`: the top files by commits × indent complexity, and the top co-change pairs. A hotspot with low coverage, no tests or many suppressions is where the first structure or test recommendation goes. A co-change pair across two modules suggests a hidden dependency. A shallow clone or no git history gives no hotspots; say so.
-
-## Review dimensions (tier 2, level null)
-
-`structure`, `errors`, `testquality`, `docsaccuracy`: see `tier2-prompts.md`. The summary gives the main finding. Every finding cites `path:line`.
+The model writes recommendations for the top gaps in this order. It may reorder only with a reason in the recommendation.
