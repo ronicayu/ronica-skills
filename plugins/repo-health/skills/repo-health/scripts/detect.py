@@ -22,6 +22,7 @@ manifest is well formed ("parse_errors").
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import posixpath
@@ -101,6 +102,9 @@ TOOLS = [
     ("typescript", "vitest",             "tests",      ["vitest.config.*", "vitest.workspace.*"],                                                                       ["vitest"]),
     ("typescript", "mocha",              "tests",      [".mocharc", ".mocharc.*"],                                                                                      ["mocha"]),
     ("typescript", "playwright",         "tests",      ["playwright.config.*"],                                                                                         ["playwright"]),
+    ("typescript", "vitest-coverage",    "coverage",   ["vitest.config.{ts,mts,cts,js,mjs,cjs}::~coverage:", "vite.config.{ts,mts,cts,js,mjs,cjs}::~coverage:"],      []),
+    ("typescript", "jest-coverage",      "coverage",   ["jest.config.{ts,js,mjs,cjs}::~collectCoverage: true", "jest.config.json::~\"collectCoverage\": true", "package.json::~\"collectCoverage\": true"], []),
+    ("typescript", "biome-format",       "format",     ["biome.json::formatter", "biome.jsonc::formatter"],                                                             []),
     ("typescript", "c8",                 "coverage",   [".c8rc", ".c8rc.json"],                                                                                         ["c8"]),
     ("typescript", "nyc",                "coverage",   [".nycrc", ".nycrc.*"],                                                                                          ["nyc"]),
     ("typescript", "npm-audit",          "deps_audit", [],                                                                                                              ["npm audit", "pnpm audit", "yarn audit", "yarn npm audit"]),
@@ -819,6 +823,2002 @@ def make_recipes(text, is_just=False):
 
 
 # --------------------------------------------------------------------------
+# A small YAML reader (CI files only)
+# --------------------------------------------------------------------------
+
+class YStr(str):
+    """A scalar; .line is the line of its first character (of the first content line for | and >)."""
+    line = 0
+
+
+class YMap(dict):
+    """A mapping; .lines[key] is the line of the key."""
+    lines = {}  # type: dict
+
+
+class YSeq(list):
+    """A sequence; .lines[i] is the line of item i."""
+    lines = []  # type: list
+
+
+BLOCK_HEADER = re.compile(r"^[|>][+\-0-9]*\s*(#.*)?$")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def split_key(content):
+    """(key, rest) of a `key: rest` line, or None when the line is not a mapping entry."""
+    if content[0] in "\"'":
+        quote = content[0]
+        i = 1
+        while i < len(content):
+            if content[i] == "\\" and quote == '"':
+                i += 2
+                continue
+            if content[i] == quote:
+                if quote == "'" and content[i + 1:i + 2] == "'":
+                    i += 2
+                    continue
+                break
+            i += 1
+        else:
+            return None
+        m = re.match(r"^\s*:(?:\s+(.*))?$", content[i + 1:])
+        return (content[1:i], m.group(1) or "") if m else None
+    if content[0] in "[{&*!%@`|>#?-":
+        return None
+    m = re.search(r":(?:\s|$)", content)
+    if not m:
+        return None
+    key = content[:m.start()].strip()
+    if not key or " #" in key:
+        return None
+    return key, content[m.end():].strip()
+
+
+def _unquote(text):
+    """(value, rest after the closing quote) of text that starts with a quote, or None."""
+    quote = text[0]
+    out = []
+    i = 1
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            out.append({"n": "\n", "t": "\t"}.get(nxt, nxt))
+            i += 2
+            continue
+        if ch == quote:
+            if quote == "'" and text[i + 1:i + 2] == "'":
+                out.append("'")
+                i += 2
+                continue
+            return "".join(out), text[i + 1:]
+        out.append(ch)
+        i += 1
+    return None
+
+
+class _YamlReader(object):
+    def __init__(self, text):
+        self.raw = text.replace("\r", "").split("\n")
+        self.n = len(self.raw)
+        self.i = 0
+
+    def _skip(self):
+        while self.i < self.n:
+            stripped = self.raw[self.i].strip()
+            if stripped == "" or stripped.startswith("#") or stripped in ("---", "...") or stripped.startswith("%"):
+                self.i += 1
+            else:
+                return True
+        return False
+
+    def _scalar(self, text, line):
+        node = YStr(text)
+        node.line = line
+        return node
+
+    def parse(self):
+        if not self._skip():
+            return YMap()
+        return self.block(_indent(self.raw[self.i]), -1)
+
+    def block(self, ind, parent):
+        line = self.raw[self.i]
+        content = line.strip()
+        if content.startswith("- ") or content == "-":
+            return self.seq(ind)
+        if split_key(content):
+            return self.mapping(ind)
+        lineno = self.i + 1
+        self.i += 1
+        return self.value(content, parent, lineno)
+
+    def mapping(self, ind):
+        node = YMap()
+        node.lines = {}
+        while self._skip():
+            line = self.raw[self.i]
+            current = _indent(line)
+            if current < ind:
+                break
+            content = line.strip()
+            if current > ind:
+                self.i += 1
+                continue
+            if content.startswith("- ") or content == "-":
+                break
+            pair = split_key(content)
+            if pair is None:
+                self.i += 1
+                continue
+            lineno = self.i + 1
+            self.i += 1
+            node[pair[0]] = self.value(pair[1], ind, lineno)
+            node.lines[pair[0]] = lineno
+        return node
+
+    def seq(self, ind):
+        node = YSeq()
+        node.lines = []
+        while self._skip():
+            line = self.raw[self.i]
+            content = line.strip()
+            if _indent(line) != ind or not (content.startswith("- ") or content == "-"):
+                break
+            lineno = self.i + 1
+            body = content[1:]
+            text = body.lstrip(" ")
+            if text == "" or text.startswith("#"):
+                self.i += 1
+                if self._skip() and _indent(self.raw[self.i]) > ind:
+                    item = self.block(_indent(self.raw[self.i]), ind)
+                else:
+                    item = self._scalar("", lineno)
+            else:
+                column = ind + 1 + len(body) - len(text)
+                self.raw[self.i] = " " * column + text
+                item = self.block(column, ind)
+            node.append(item)
+            node.lines.append(lineno)
+        return node
+
+    def value(self, rest, ind, lineno):
+        """The value after `key:` (or a bare sequence item); the line has been consumed."""
+        rest = re.sub(r"^(?:[&!]\S+\s*)+", "", rest)
+        if rest == "" or rest.startswith("#"):
+            if self._skip():
+                following = self.raw[self.i]
+                content = following.strip()
+                if _indent(following) > ind:
+                    return self.block(_indent(following), ind)
+                if _indent(following) == ind and (content.startswith("- ") or content == "-"):
+                    return self.seq(ind)
+            return self._scalar("", lineno)
+        if BLOCK_HEADER.match(rest):
+            return self.block_scalar(rest[0], ind)
+        if rest[0] in "[{":
+            text = rest
+            while self._unbalanced(text) and self.i < self.n:
+                text += " " + self.raw[self.i].strip()
+                self.i += 1
+            return self._flow(text, 0, lineno)[0]
+        if rest[0] in "\"'":
+            text = rest
+            parsed = _unquote(text)
+            while parsed is None and self.i < self.n:
+                text += " " + self.raw[self.i].strip()
+                self.i += 1
+                parsed = _unquote(text)
+            return self._scalar(parsed[0] if parsed else text, lineno)
+        text = re.sub(r"\s+#.*$", "", rest)
+        while self.i < self.n and self.raw[self.i].strip() and _indent(self.raw[self.i]) > ind \
+                and not self.raw[self.i].strip().startswith("#"):
+            text += " " + re.sub(r"\s+#.*$", "", self.raw[self.i].strip())
+            self.i += 1
+        return self._scalar(text, lineno)
+
+    @staticmethod
+    def _unbalanced(text):
+        depth = 0
+        quote = None
+        for ch in text:
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+        return depth > 0
+
+    def _flow(self, text, i, lineno):
+        while i < len(text) and text[i] == " ":
+            i += 1
+        if i >= len(text):
+            return self._scalar("", lineno), i
+        if text[i] == "[":
+            node = YSeq()
+            node.lines = []
+            i += 1
+            while i < len(text):
+                while i < len(text) and text[i] in " ,":
+                    i += 1
+                if i >= len(text) or text[i] == "]":
+                    i += 1
+                    break
+                item, i = self._flow(text, i, lineno)
+                node.append(item)
+                node.lines.append(lineno)
+            return node, i
+        if text[i] == "{":
+            node = YMap()
+            node.lines = {}
+            i += 1
+            while i < len(text):
+                while i < len(text) and text[i] in " ,":
+                    i += 1
+                if i >= len(text) or text[i] == "}":
+                    i += 1
+                    break
+                key, i = self._flow_scalar(text, i, ":,}")
+                while i < len(text) and text[i] == " ":
+                    i += 1
+                if i < len(text) and text[i] == ":":
+                    item, i = self._flow(text, i + 1, lineno)
+                else:
+                    item = self._scalar("", lineno)
+                node[key] = item
+                node.lines[key] = lineno
+            return node, i
+        value, i = self._flow_scalar(text, i, ",]}")
+        return self._scalar(value, lineno), i
+
+    @staticmethod
+    def _flow_scalar(text, i, stops):
+        if text[i] in "\"'":
+            parsed = _unquote(text[i:])
+            if parsed:
+                return parsed[0], len(text) - len(parsed[1])
+        start = i
+        while i < len(text) and text[i] not in stops:
+            i += 1
+        return text[start:i].strip(), i
+
+    def block_scalar(self, style, parent):
+        start = self.i
+        lines = []
+        content_indent = None
+        while self.i < self.n:
+            line = self.raw[self.i]
+            if line.strip() == "":
+                lines.append("")
+                self.i += 1
+                continue
+            current = _indent(line)
+            if content_indent is None:
+                if current <= parent:
+                    break
+                content_indent = current
+            if current < content_indent:
+                break
+            lines.append(line[content_indent:])
+            self.i += 1
+        while lines and lines[-1] == "":
+            lines.pop()
+        if style == ">":
+            parts = []
+            words = []
+            for item in lines:
+                if item == "":
+                    parts.append(" ".join(words))
+                    words = []
+                else:
+                    words.append(item.strip())
+            parts.append(" ".join(words))
+            text = "\n".join(parts)
+        else:
+            text = "\n".join(lines)
+        return self._scalar(text, start + 1)
+
+
+def parse_yaml(text):
+    """A tolerant reading of the YAML subset CI files use: nested maps and lists, scalars,
+    block scalars and one-line flow lists. Never raises; anchors and tags are ignored."""
+    try:
+        return _YamlReader(text).parse()
+    except (IndexError, RecursionError, ValueError):
+        return YMap()
+
+
+# --------------------------------------------------------------------------
+# Shell text: simple commands
+# --------------------------------------------------------------------------
+
+SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac",
+                  "{", "}", "(", ")", "!", "select", "function"}
+REDIRECT_RE = re.compile(r"^\d*(?:>>?|<|&>>?|>&)(?:&?\d+|-)?$|^\d*(?:>>?|<|&>>?)&?\S+$")
+REDIRECT_TAKES_NEXT = re.compile(r"^\d*(?:>>?|<|&>>?|>&)$")
+
+
+class Unit(object):
+    """One simple command: its words, its line offset in the text, whether its failure is swallowed."""
+
+    def __init__(self, argv, line, swallowed):
+        self.argv = argv
+        self.line = line
+        self.swallowed = swallowed
+
+
+def _balanced_end(text, i):
+    """Index after the ")" that closes the "(" at text[i], or len(text)."""
+    depth = 0
+    quote = None
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+def shell_tokens(text):
+    """[(kind, text, line)] with kind "w" (a word) or "op" (&&, ||, |, ; or a newline)."""
+    tokens = []
+    word = []
+    word_line = 0
+    line = 0
+    i = 0
+    n = len(text)
+    heredocs = []
+    state = {"delimiter": False}
+
+    def flush():
+        if not word:
+            return
+        value = "".join(word)
+        del word[:]
+        if state["delimiter"]:
+            heredocs.append(value.strip("'\""))
+            state["delimiter"] = False
+            return
+        m = re.match(r"^\d*<<-?(?!<)(.*)$", value)
+        if m:
+            if m.group(1):
+                heredocs.append(m.group(1).strip("'\""))
+            else:
+                state["delimiter"] = True
+            return
+        tokens.append(("w", value, word_line))
+
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            if text[i + 1] == "\n":
+                i += 2
+                line += 1
+                continue
+            if not word:
+                word_line = line
+            word.append(text[i + 1])
+            i += 2
+            continue
+        if ch in " \t":
+            flush()
+            i += 1
+            continue
+        if ch == "#" and not word:
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "\n":
+            flush()
+            tokens.append(("op", "\n", line))
+            line += 1
+            i += 1
+            for delimiter in heredocs:
+                while i < n:
+                    end = text.find("\n", i)
+                    end = n if end < 0 else end
+                    current = text[i:end]
+                    i = end + 1
+                    line += 1
+                    if current.strip() == delimiter:
+                        break
+            del heredocs[:]
+            continue
+        if ch in ";&|":
+            previous = text[i - 1] if i else ""
+            if ch == "&" and ((previous and previous in "<>") or text[i + 1:i + 2] == ">"):
+                if not word:
+                    word_line = line
+                word.append(ch)
+                i += 1
+                continue
+            flush()
+            pair = text[i:i + 2]
+            if pair in ("&&", "||"):
+                tokens.append(("op", pair, line))
+                i += 2
+            elif pair in ("|&", ";;"):
+                tokens.append(("op", pair[0], line))
+                i += 2
+            else:
+                tokens.append(("op", "|" if ch == "|" else ";", line))
+                i += 1
+            continue
+        if not word:
+            word_line = line
+        if ch == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end
+            word.append(text[i + 1:end])
+            line += text.count("\n", i, end)
+            i = end + 1
+        elif ch == '"':
+            j = i + 1
+            chunk = []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    chunk.append(text[j:j + 2] if text[j + 1] in "$`" else text[j + 1])
+                    j += 2
+                elif text[j] == "$" and text[j + 1:j + 2] == "(":
+                    end = _balanced_end(text, j + 1)
+                    chunk.append(text[j:end])
+                    j = end
+                else:
+                    chunk.append(text[j])
+                    j += 1
+            word.append("".join(chunk))
+            line += text.count("\n", i, j)
+            i = j + 1
+        elif ch == "$" and text[i + 1:i + 2] == "(":
+            end = _balanced_end(text, i + 1)
+            word.append(text[i:end])
+            line += text.count("\n", i, end)
+            i = end
+        elif ch == "`":
+            end = text.find("`", i + 1)
+            end = n if end < 0 else end + 1
+            word.append(text[i:end])
+            i = end
+        else:
+            word.append(ch)
+            i += 1
+    flush()
+    return tokens
+
+
+def _clean_words(words):
+    """Drop redirections, shell keywords and grouping parentheses from the words of one command."""
+    out = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+            continue
+        if REDIRECT_RE.match(word):
+            skip = bool(REDIRECT_TAKES_NEXT.match(word))
+            continue
+        out.append(word)
+    while out and out[0] in SHELL_KEYWORDS:
+        out.pop(0)
+    if out and out[0].startswith("(") and not out[0].startswith("$("):
+        out[0] = out[0].lstrip("(")
+        if not out[0]:
+            out.pop(0)
+    if out and out[-1].endswith(")") and "(" not in out[-1]:
+        out[-1] = out[-1].rstrip(")")
+        if not out[-1]:
+            out.pop()
+    while out and out[-1] in ("}", "fi", "done"):
+        out.pop()
+    return out
+
+
+def _is_benign(argv, after_or):
+    head = argv[0]
+    if head in ("true", ":"):
+        return True
+    if head == "exit":
+        return len(argv) > 1 and argv[1] == "0"
+    return after_or and head in ("echo", "printf")
+
+
+def split_commands(text):
+    """The simple commands of a shell text, as Unit objects.
+
+    A command is swallowed when `|| true`, `|| :`, `|| echo ...` or `|| exit 0`
+    follows it in its list, or when `; true`, `; :` or `; exit 0` follows the list.
+    """
+    lists = []  # [(separator before the list, [[argv, line, operator before]])]
+    state = {"current": [], "segment": [], "line": 0, "op": "", "separator": ""}
+
+    def end_segment():
+        argv = _clean_words(state["segment"])
+        if argv:
+            state["current"].append([argv, state["line"], state["op"]])
+        state["segment"] = []
+
+    for kind, value, line in shell_tokens(text):
+        if kind == "w":
+            if not state["segment"]:
+                state["line"] = line
+            state["segment"].append(value)
+            continue
+        end_segment()
+        if value in ("&&", "||", "|"):
+            state["op"] = value
+        else:
+            if state["current"]:
+                lists.append((state["separator"], state["current"]))
+            state["current"] = []
+            state["separator"] = value
+            state["op"] = ""
+    end_segment()
+    if state["current"]:
+        lists.append((state["separator"], state["current"]))
+    units = []
+    for index, (_separator, entries) in enumerate(lists):
+        after = lists[index + 1] if index + 1 < len(lists) else None
+        swallowed_list = bool(after and after[0] == ";" and len(after[1]) == 1
+                              and _is_benign(after[1][0][0], False))
+        for position, (argv, line, _before) in enumerate(entries):
+            swallowed = swallowed_list or any(
+                later[2] == "||" and _is_benign(later[0], True) for later in entries[position + 1:])
+            units.append(Unit(argv, line, swallowed))
+    return units
+
+
+def substitutions(word):
+    """The texts inside $( ... ) and backticks of one word."""
+    out = []
+    i = 0
+    while i < len(word):
+        if word.startswith("$(", i):
+            end = _balanced_end(word, i + 1)
+            out.append(word[i + 2:end - 1])
+            i = end
+        elif word[i] == "`":
+            end = word.find("`", i + 1)
+            if end < 0:
+                break
+            out.append(word[i + 1:end])
+            i = end + 1
+        else:
+            i += 1
+    return out
+
+
+# --------------------------------------------------------------------------
+# Reading commands: which tool does a command run?
+# --------------------------------------------------------------------------
+
+JVM_TEST_TOOLS = ("junit", "testng", "kotest")
+MAX_FOLLOW_DEPTH = 4
+
+# Flags after which a tool does not fail the build.
+NEVER_FAIL_FLAGS = {"--exit-zero", "--no-fail", "--exit-code=0", "--issues-exit-code=0"}
+
+# Formatters: the flags that turn a run into a check. Without one the command
+# rewrites files (or only prints), so it enforces nothing.
+FORMAT_CHECK_FLAGS = {
+    "black": {"--check", "--diff"}, "isort": {"--check", "--check-only", "-c", "--diff"},
+    "ruff-format": {"--check", "--diff"}, "prettier": {"--check", "-c", "--list-different", "-l"},
+    "gofmt": {"-l", "-d"}, "goimports": {"-l", "-d"}, "gofumpt": {"-l", "-d"},
+    "rustfmt": {"--check"}, "ktfmt": {"--dry-run", "--set-exit-if-changed"},
+    "google-java-format": {"--dry-run", "-n", "--set-exit-if-changed"},
+}
+
+INSTALL_SUBS = {"install", "i", "ci", "add", "isntall", "it", "install-test", "install-ci-test", "cit"}
+NPM_VALUE_FLAGS = {"--prefix", "--userconfig", "--registry", "--cache", "--tag", "--otp", "--loglevel", "-C"}
+PNPM_VALUE_FLAGS = {"--dir", "-C", "--workspace-concurrency", "--reporter", "--loglevel", "--filter-prod",
+                    "--changed-files-ignore-pattern", "--test-pattern"}
+YARN_VALUE_FLAGS = {"--cwd", "--mutex", "--registry", "--use-yarnrc"}
+BUN_VALUE_FLAGS = {"--cwd", "--filter", "-c", "--config"}
+YARN_FOREACH_VALUE_FLAGS = {"--include", "--exclude", "-j", "--jobs", "--since", "--worktree"}
+PNPM_BUILTINS = {
+    "add", "install", "i", "update", "up", "upgrade", "remove", "rm", "link", "unlink", "import", "rebuild",
+    "prune", "fetch", "install-test", "it", "audit", "outdated", "list", "ls", "why", "licenses", "publish", "pack",
+    "env", "setup", "store", "root", "bin", "config", "c", "doctor", "init", "create", "dlx", "exec", "run", "test",
+    "t", "start", "deploy", "patch", "patch-commit", "self-update", "cache", "help", "version", "recursive", "m",
+    "multi", "server",
+}
+YARN_BUILTINS = {
+    "add", "install", "remove", "up", "upgrade", "link", "unlink", "set", "config", "info", "init", "pack",
+    "publish", "cache", "constraints", "dedupe", "explain", "node", "plugin", "rebuild", "version", "why", "dlx",
+    "exec", "run", "workspace", "workspaces", "npm", "audit", "help", "list", "outdated", "global", "bin",
+}
+BUN_BUILTINS = {"install", "i", "add", "remove", "rm", "update", "link", "unlink", "pm", "init", "create", "x", "run",
+                "test", "build", "upgrade", "repl", "dev", "help", "publish", "outdated", "audit"}
+MVN_VALUE_FLAGS = {"-pl", "--projects", "-f", "--file", "-P", "--activate-profiles", "-T", "--threads", "-s",
+                   "--settings", "-gs", "--global-settings", "-rf", "--resume-from", "-l", "--log-file", "-t",
+                   "--toolchains", "-b", "--builder", "-e"}
+MVN_TEST_PHASES = {"test", "verify", "install", "package", "deploy", "integration-test", "post-integration-test"}
+MVN_PHASES = MVN_TEST_PHASES | {
+    "validate", "initialize", "generate-sources", "process-sources", "generate-resources", "process-resources",
+    "compile", "process-classes", "generate-test-sources", "process-test-sources", "generate-test-resources",
+    "process-test-resources", "test-compile", "process-test-classes", "prepare-package", "pre-integration-test",
+    "clean", "site", "pre-site", "post-site", "site-deploy", "pre-clean", "post-clean",
+}
+MVN_PLUGIN_TOOLS = {"checkstyle": "checkstyle", "spotbugs": "spotbugs", "pmd": "pmd", "spotless": "spotless",
+                    "jacoco": "jacoco", "dependency-check": "dependency-check", "sonar": "sonarqube"}
+GRADLE_VALUE_FLAGS = {"-p", "--project-dir", "-b", "--build-file", "-c", "--settings-file", "-g", "--gradle-user-home",
+                      "-I", "--init-script", "--include-build", "--max-workers", "--tests", "--console",
+                      "--project-cache-dir", "--warning-mode", "--configuration-cache-problems"}
+GRADLE_TASK_TOOLS = [
+    (re.compile(r"^checkstyle"), "checkstyle"), (re.compile(r"^pmd"), "pmd"), (re.compile(r"^spotbugs"), "spotbugs"),
+    (re.compile(r"^detekt"), "detekt"), (re.compile(r"^ktlint"), "ktlint"), (re.compile(r"^spotless"), "spotless"),
+    (re.compile(r"^jacoco"), "jacoco"), (re.compile(r"^kover"), "kover"),
+    (re.compile(r"^dependencyCheck"), "dependency-check"), (re.compile(r"^sonar"), "sonarqube"),
+]
+GRADLE_VERIFICATION_WORDS = ("checkstyle", "pmd", "spotbugs", "detekt", "ktlint", "spotless")
+RUFF_OTHER_SUBS = {"clean", "server", "rule", "config", "linter", "version", "help", "analyze", "completion",
+                   "generate-shell-completion"}
+PIP_VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable", "-i", "--index-url",
+                   "--extra-index-url", "-f", "--find-links", "-t", "--target", "--prefix", "--root", "--python",
+                   "--platform", "--python-version", "--implementation", "--abi", "--src", "--upgrade-strategy"}
+UV_RUN_VALUE_FLAGS = {"--with", "--with-requirements", "--with-editable", "-p", "--python", "--group", "--extra",
+                      "--package", "--project", "--directory", "--env-file", "--index", "--default-index",
+                      "--index-url", "--no-install-package", "--only-group", "--no-group", "--isolated-from"}
+UVX_VALUE_FLAGS = UV_RUN_VALUE_FLAGS | {"--from"}
+NPX_VALUE_FLAGS = {"-p", "--package", "-c", "--call", "--registry", "--cache"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+
+
+class Hit(object):
+    """A tool that a command runs."""
+
+    def __init__(self, tool, line, writes, non_blocking, command, via=None, via_file=None, via_line=None):
+        self.tool = tool
+        self.line = line
+        self.writes = writes
+        self.non_blocking = non_blocking
+        self.command = command
+        self.via = via
+        self.via_file = via_file
+        self.via_line = via_line
+
+
+class Outcome(object):
+    def __init__(self):
+        self.hits = []
+        self.installs = []   # {"line", "command", "manager", "packages"}
+        self.facts = []      # {"kind", "line", "command", ...} strictness and threshold facts seen in commands
+        self.locks = []      # {"kind", "line", "command"}
+
+
+class Ctx(object):
+    """Where a command is read: following depth, the script it came from, and the caller's line."""
+
+    def __init__(self, follow=True, depth=0, stack=(), via=None, nb=False, command="", base_line=None, env=None):
+        self.follow = follow
+        self.depth = depth
+        self.stack = stack
+        self.via = via            # (name, file, line)
+        self.nb = nb
+        self.command = command
+        self.base_line = base_line
+        self.env = env or {}
+
+    def but(self, **changes):
+        copy = Ctx(self.follow, self.depth, self.stack, self.via, self.nb, self.command, self.base_line, self.env)
+        for key, value in changes.items():
+            setattr(copy, key, value)
+        return copy
+
+
+def first_positional(args, value_flags=()):
+    """The first argument that is not a flag (or the value of a flag that takes one)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("-"):
+            if a in value_flags:
+                i += 1
+        else:
+            return a
+        i += 1
+    return None
+
+
+def drop_flags(args, value_flags=()):
+    """args from the first non-flag argument on (the program a runner starts)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1:]
+        if a.startswith("-"):
+            name = a.split("=", 1)[0]
+            if name in value_flags and "=" not in a:
+                i += 1
+        else:
+            return args[i:]
+        i += 1
+    return []
+
+
+def has_flag(args, *names):
+    return any(a.split("=", 1)[0] in names for a in args)
+
+
+def flag_value(args, *names):
+    for i, a in enumerate(args):
+        name, eq, value = a.partition("=")
+        if name in names:
+            if eq:
+                return value
+            if i + 1 < len(args):
+                return args[i + 1]
+    return None
+
+
+def flag_on(args, *names):
+    """True when a boolean flag is given and not set to false."""
+    for a in args:
+        name, eq, value = a.partition("=")
+        if name in names and (not eq or value.lower() not in ("false", "0")):
+            return True
+    return False
+
+
+def format_writes(name, args):
+    """True when a formatter run rewrites files, or only prints, instead of checking."""
+    if name == "dprint":
+        return "check" not in args
+    flags = FORMAT_CHECK_FLAGS.get(name)
+    if flags is None:
+        return False
+    if name in ("gofmt", "goimports", "gofumpt") and "-w" in args:
+        return True
+    return not any(a.split("=", 1)[0] in flags for a in args)
+
+
+def never_fails(args):
+    if any(a in NEVER_FAIL_FLAGS for a in args):
+        return True
+    return any(a == "--exit-code" and i + 1 < len(args) and args[i + 1] == "0" for i, a in enumerate(args))
+
+
+def maven_plugin(goal):
+    """(plugin, goal) of a Maven goal such as checkstyle:check or org.x:maven-pmd-plugin:check."""
+    parts = goal.split(":")
+    if len(parts) < 2:
+        return None, None
+    plugin = parts[-2]
+    plugin = re.sub(r"^maven-|-maven-plugin$|-maven$|-plugin$", "", plugin)
+    return plugin, parts[-1]
+
+
+class CommandReader(object):
+    """Reads a shell text and says which of the TOOLS rows its commands run.
+
+    A tool counts only when the command runs it: install commands do not, and
+    `ruff format` is not `ruff`. Runners (npx, uv run, poetry run, python -m, ...)
+    are looked through; npm scripts, make targets, workspace runners, pre-commit,
+    tox, nox and repository shell scripts are followed with a depth limit.
+    """
+
+    HANDLERS = {}  # type: dict
+
+    def __init__(self, detector):
+        self.detector = detector
+        self.repo = detector.repo
+        self.tools = {tool.name: tool for tool in ALL_TOOLS}
+
+    # -- entry points ----------------------------------------------------
+
+    def read(self, text, line=1, follow=True, nb=False):
+        out = Outcome()
+        self.read_into(out, text, line, Ctx(follow=follow, nb=nb))
+        return out
+
+    def read_uses(self, text, line, nb=False):
+        """A GitHub `uses:` value: an action, matched by name."""
+        out = Outcome()
+        ctx = Ctx(nb=nb, command=text[:200])
+        if re.search(r"(^|/)pre-commit/action", text):
+            self.precommit(out, ["run", "--all-files"], line, ctx)
+        else:
+            self.by_words(out, text, line, ctx)
+        return out
+
+    def read_into(self, out, text, line, ctx):
+        for unit in split_commands(text):
+            where = line + unit.line
+            here = ctx.but(nb=ctx.nb or unit.swallowed, command=" ".join(unit.argv)[:200])
+            self.command(out, unit.argv, where, here)
+            for word in unit.argv:
+                if "$(" in word or "`" in word:
+                    for inner in substitutions(word):
+                        self.read_into(out, inner, where, here)
+
+    # -- recording --------------------------------------------------------
+
+    def hit(self, out, name, line, ctx, args=(), writes=None, via=None):
+        tool = self.tools.get(name)
+        if tool is None:
+            return
+        if writes is None:
+            writes = format_writes(name, args)
+        via_name, via_file, via_line = via or ctx.via or (None, None, None)
+        if ctx.base_line is not None:
+            via_line = via_line or line
+            line = ctx.base_line
+        out.hits.append(Hit(tool, line, writes, ctx.nb or never_fails(args), ctx.command,
+                            via_name, via_file, via_line))
+
+    def where(self, line, ctx):
+        return ctx.base_line if ctx.base_line is not None else line
+
+    def install(self, out, manager, packages, line, ctx):
+        out.installs.append({"line": self.where(line, ctx), "command": ctx.command, "manager": manager,
+                             "packages": packages})
+
+    def lock(self, out, kind, line, ctx):
+        out.locks.append({"kind": kind, "line": self.where(line, ctx), "command": ctx.command})
+
+    def fact(self, out, kind, line, ctx, **extra):
+        item = {"kind": kind, "line": self.where(line, ctx), "command": ctx.command}
+        item.update(extra)
+        out.facts.append(item)
+
+    # -- one command ------------------------------------------------------
+
+    def command(self, out, argv, line, ctx):
+        env = {}
+        argv = self.strip_wrappers(argv, env)
+        if not argv:
+            return
+        if env:
+            merged = dict(ctx.env)
+            merged.update(env)
+            ctx = ctx.but(env=merged)
+        if re.search(r"-D\s?warnings|--deny[ =]warnings", env.get("RUSTFLAGS", "")):
+            self.fact(out, "rustflags-deny-warnings", line, ctx)
+        if "-mod=readonly" in env.get("GOFLAGS", ""):
+            self.lock(out, "go -mod=readonly", line, ctx)
+        prog = re.sub(r"@[^@/]*$", "", posixpath.basename(argv[0]))
+        args = argv[1:]
+        handler = self.HANDLERS.get(prog)
+        if handler is None and re.match(r"^python[0-9.]*$", prog):
+            handler = CommandReader.python
+        if handler is None and re.match(r"^pip[0-9.]*$", prog):
+            handler = CommandReader.pip
+        if handler is not None:
+            handler(self, out, args, line, ctx)
+            return
+        if "/" in argv[0] and self.follow_script(out, argv[0], args, line, ctx):
+            return
+        self.tool_command(out, prog, args, line, ctx)
+
+    @staticmethod
+    def strip_wrappers(argv, env):
+        argv = list(argv)
+        while argv:
+            m = re.match(r"^([A-Za-z_]\w*)=(.*)$", argv[0])
+            if m:
+                env[m.group(1)] = m.group(2)
+                argv.pop(0)
+            elif argv[0] == "env":
+                argv.pop(0)
+                while argv and (argv[0].startswith("-") or re.match(r"^[A-Za-z_]\w*=", argv[0])):
+                    m = re.match(r"^([A-Za-z_]\w*)=(.*)$", argv[0])
+                    if m:
+                        env[m.group(1)] = m.group(2)
+                    argv.pop(0)
+            elif argv[0] == "sudo":
+                argv.pop(0)
+                while argv and argv[0].startswith("-"):
+                    flag = argv.pop(0)
+                    if flag in ("-u", "-g", "-h", "-p", "-C") and argv:
+                        argv.pop(0)
+            elif argv[0] in ("time", "exec", "command", "nohup"):
+                argv.pop(0)
+            else:
+                break
+        return argv
+
+    # -- tools with no special reading -------------------------------------
+
+    def tool_command(self, out, prog, args, line, ctx):
+        heads = [prog]
+        if args and re.match(r"^[A-Za-z][\w\-]*$", args[0]):
+            heads.append(prog + " " + args[0])
+        names = []
+        for tool in ALL_TOOLS:
+            if any(tool.ci_match(head.lower()) for head in heads):
+                names.append(tool.name)
+        for name in names:
+            self.hit(out, name, line, ctx, args)
+
+    def by_words(self, out, text, line, ctx, via=None):
+        low = text.lower()
+        for tool in ALL_TOOLS:
+            if tool.ci_match(low):
+                self.hit(out, tool.name, line, ctx, via=via)
+
+    # -- tools whose flags or sub-commands decide what they do ------------------
+
+    def ruff(self, out, args, line, ctx):
+        sub = first_positional(args)
+        if has_flag(args, "--version", "--help", "-h") or sub in RUFF_OTHER_SUBS:
+            return
+        self.hit(out, "ruff-format" if sub == "format" else "ruff", line, ctx, args)
+
+    def biome(self, out, args, line, ctx):
+        sub = first_positional(args)
+        writes = has_flag(args, "--write", "--fix", "--apply")
+        if sub == "format":
+            self.hit(out, "biome-format", line, ctx, args, writes=writes)
+        elif sub == "lint":
+            self.hit(out, "biome", line, ctx, args)
+        elif sub == "check":
+            self.hit(out, "biome", line, ctx, args)
+            self.hit(out, "biome-format", line, ctx, args, writes=writes)
+        elif sub == "ci":
+            self.hit(out, "biome", line, ctx, args)
+            self.hit(out, "biome-format", line, ctx, args, writes=False)
+
+    def pytest(self, out, args, line, ctx):
+        self.hit(out, "pytest", line, ctx, args)
+        if any(re.match(r"^--cov($|=|-)", a) for a in args):
+            self.hit(out, "coverage.py", line, ctx, args)
+        threshold = flag_value(args, "--cov-fail-under")
+        if threshold:
+            self.fact(out, "cov-fail-under", line, ctx, value=threshold)
+
+    def coverage(self, out, args, line, ctx):
+        self.hit(out, "coverage.py", line, ctx, args)
+        sub = first_positional(args)
+        if sub == "run":
+            rest = args[args.index("run") + 1:]
+            if "-m" in rest:
+                self.command(out, rest[rest.index("-m") + 1:], line, ctx)
+        elif sub in ("report", "xml", "html", "json", "lcov"):
+            threshold = flag_value(args, "--fail-under")
+            if threshold:
+                self.fact(out, "fail_under", line, ctx, value=threshold)
+
+    def jest(self, out, args, line, ctx):
+        self.hit(out, "jest", line, ctx, args)
+        if flag_on(args, "--coverage", "--collectCoverage", "--collect-coverage"):
+            self.hit(out, "jest-coverage", line, ctx, args)
+        if has_flag(args, "--coverageThreshold"):
+            self.fact(out, "jest-coverage-threshold", line, ctx)
+
+    def vitest(self, out, args, line, ctx):
+        self.hit(out, "vitest", line, ctx, args)
+        if flag_on(args, "--coverage") or any(a.startswith("--coverage.") for a in args):
+            self.hit(out, "vitest-coverage", line, ctx, args)
+        if any(a.startswith("--coverage.thresholds") for a in args):
+            self.fact(out, "vitest-thresholds", line, ctx)
+
+    def coverage_wrapper(self, out, prog, args, line, ctx):
+        self.hit(out, prog, line, ctx, args)
+        self.command(out, drop_flags(args, {"-r", "--reporter", "--reports-dir", "-n", "--include", "-x", "--exclude",
+                                            "--temp-directory", "-t", "--lines", "--functions", "--branches",
+                                            "--statements"}), line, ctx)
+
+    def c8(self, out, args, line, ctx):
+        self.coverage_wrapper(out, "c8", args, line, ctx)
+
+    def nyc(self, out, args, line, ctx):
+        self.coverage_wrapper(out, "nyc", args, line, ctx)
+
+    def java(self, out, args, line, ctx):
+        if "-jar" in args and args.index("-jar") + 1 < len(args):
+            jar = posixpath.basename(args[args.index("-jar") + 1])
+            self.tool_command(out, jar, args[args.index("-jar") + 2:], line, ctx)
+
+    def system_install(self, out, manager, args, line, ctx):
+        if "install" in args:
+            packages = [a for a in args[args.index("install") + 1:] if not a.startswith("-")]
+            self.install(out, manager, packages, line, ctx)
+
+    # -- python ------------------------------------------------------------
+
+    def python(self, out, args, line, ctx):
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-m" and i + 1 < len(args):
+                self.command(out, args[i + 1:], line, ctx)
+                return
+            if a in ("-W", "-X"):
+                i += 1
+            elif a == "-c":
+                return
+            elif not a.startswith("-"):
+                return
+            i += 1
+
+    def pip(self, out, args, line, ctx):
+        if first_positional(args, PIP_VALUE_FLAGS) != "install":
+            return
+        self.record_pip_install(out, "pip", args[args.index("install") + 1:], line, ctx)
+
+    def record_pip_install(self, out, manager, args, line, ctx):
+        packages = []
+        requirements = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-r", "--requirement") and i + 1 < len(args):
+                requirements.append(args[i + 1])
+                i += 1
+            elif a.startswith("--requirement="):
+                requirements.append(a.split("=", 1)[1])
+            elif a.startswith("-r") and len(a) > 2 and not a.startswith("--"):
+                requirements.append(a[2:])
+            elif a.startswith("-"):
+                if a in PIP_VALUE_FLAGS:
+                    i += 1
+            else:
+                packages.append(a)
+            i += 1
+        self.install(out, manager, packages, line, ctx)
+        if requirements and not packages and (has_flag(args, "--require-hashes")
+                                              or all(self.detector.pinned_requirements(r) for r in requirements)):
+            self.lock(out, "pip install -r pinned", line, ctx)
+
+    # -- uv, poetry, pipx and the other runners ------------------------------
+
+    def uv(self, out, args, line, ctx):
+        sub = first_positional(args, UV_RUN_VALUE_FLAGS)
+        rest = args[args.index(sub) + 1:] if sub in args else []
+        if sub == "run":
+            self.command(out, drop_flags(rest, UV_RUN_VALUE_FLAGS), line, ctx)
+        elif sub == "pip":
+            if first_positional(rest) == "install":
+                self.record_pip_install(out, "uv pip", rest[rest.index("install") + 1:], line, ctx)
+        elif sub == "sync":
+            self.install(out, "uv", [], line, ctx)
+            if has_flag(args, "--locked", "--frozen"):
+                self.lock(out, "uv sync --locked", line, ctx)
+        elif sub == "add":
+            self.install(out, "uv", [a for a in rest if not a.startswith("-")], line, ctx)
+        elif sub == "tool":
+            action = first_positional(rest, UV_RUN_VALUE_FLAGS)
+            if action == "run":
+                self.command(out, drop_flags(rest[rest.index("run") + 1:], UVX_VALUE_FLAGS), line, ctx)
+            elif action == "install":
+                self.install(out, "uv tool", [a for a in rest[rest.index("install") + 1:] if not a.startswith("-")],
+                             line, ctx)
+
+    def uvx(self, out, args, line, ctx):
+        self.command(out, drop_flags(args, UVX_VALUE_FLAGS), line, ctx)
+
+    def npx(self, out, args, line, ctx):
+        self.command(out, drop_flags(args, NPX_VALUE_FLAGS), line, ctx)
+
+    def poetry(self, out, args, line, ctx):
+        sub = first_positional(args)
+        rest = args[args.index(sub) + 1:] if sub in args else []
+        if sub == "run":
+            self.command(out, rest, line, ctx)
+        elif sub == "install":
+            self.install(out, "poetry", [], line, ctx)
+            if has_flag(args, "--sync"):
+                self.lock(out, "poetry install --sync", line, ctx)
+        elif sub == "check" and has_flag(rest, "--lock"):
+            self.fact(out, "poetry-check-lock", line, ctx)
+        elif sub == "lock" and has_flag(rest, "--check"):
+            self.fact(out, "poetry-check-lock", line, ctx)
+
+    def pdm(self, out, args, line, ctx):
+        sub = first_positional(args)
+        rest = args[args.index(sub) + 1:] if sub in args else []
+        if sub == "run":
+            self.command(out, rest, line, ctx)
+        elif sub in ("install", "sync"):
+            self.install(out, "pdm", [], line, ctx)
+
+    def pipx(self, out, args, line, ctx):
+        sub = first_positional(args, {"--spec", "--python"})
+        rest = args[args.index(sub) + 1:] if sub in args else []
+        if sub == "run":
+            self.command(out, drop_flags(rest, {"--spec", "--python", "--index-url", "--pip-args"}), line, ctx)
+        elif sub == "install":
+            self.install(out, "pipx", [a for a in rest if not a.startswith("-")], line, ctx)
+
+    def hatch(self, out, args, line, ctx):
+        if first_positional(args) == "run":
+            rest = args[args.index("run") + 1:]
+            self.command(out, drop_flags(rest, {"-e", "--env"}), line, ctx)
+
+    # -- go ----------------------------------------------------------------
+
+    def go(self, out, args, line, ctx):
+        sub = first_positional(args, {"-C"})
+        rest = args[args.index(sub) + 1:] if sub in args else []
+        readonly = has_flag(args, "-mod") and flag_value(args, "-mod") == "readonly"
+        if sub == "run":
+            target = drop_flags(rest, {"-exec", "-tags", "-ldflags", "-gcflags", "-p"})
+            if target and not target[0].startswith((".", "/")):
+                program = re.sub(r"@.*$", "", target[0]).rstrip("/").split("/")[-1]
+                self.command(out, [program] + target[1:], line, ctx)
+        elif sub == "vet":
+            self.hit(out, "go-vet", line, ctx, args)
+            self.fact(out, "go-vet", line, ctx)
+        elif sub == "test":
+            self.hit(out, "go-test", line, ctx, args)
+            if any(re.match(r"^-{1,2}cover(profile|mode|pkg)?(=|$)", a) for a in args):
+                self.hit(out, "go-cover", line, ctx, args)
+        elif sub == "mod":
+            action = first_positional(rest)
+            if action == "verify":
+                self.lock(out, "go mod verify", line, ctx)
+        elif sub in ("install", "get"):
+            self.install(out, "go", [a for a in rest if not a.startswith("-")], line, ctx)
+            return
+        if readonly and sub in ("build", "test", "vet", "run", "list"):
+            self.lock(out, "go -mod=readonly", line, ctx)
+
+    # -- cargo -------------------------------------------------------------
+
+    def cargo(self, out, args, line, ctx):
+        i = 0
+        while i < len(args) and args[i].startswith(("+", "-")):
+            if args[i] in ("--manifest-path", "-C", "--config", "-Z"):
+                i += 1
+            i += 1
+        sub = args[i] if i < len(args) else None
+        rest = args[i + 1:] if sub else []
+        locked = has_flag(args, "--locked", "--frozen")
+        if sub == "clippy":
+            self.hit(out, "clippy", line, ctx, args)
+            after = rest[rest.index("--") + 1:] if "--" in rest else []
+            denied = any(a in ("-Dwarnings", "--deny=warnings") for a in after) or any(
+                a in ("-D", "--deny") and j + 1 < len(after) and after[j + 1] == "warnings"
+                for j, a in enumerate(after))
+            if denied:
+                self.fact(out, "clippy-deny-warnings", line, ctx)
+        elif sub == "fmt":
+            self.hit(out, "rustfmt", line, ctx, rest)
+        elif sub in ("test", "t"):
+            self.hit(out, "cargo-test", line, ctx, rest)
+        elif sub == "nextest":
+            self.hit(out, "nextest", line, ctx, rest)
+        elif sub == "llvm-cov":
+            self.hit(out, "cargo-llvm-cov", line, ctx, rest)
+            if first_positional(rest) == "nextest":
+                self.hit(out, "nextest", line, ctx, rest)
+        elif sub == "tarpaulin":
+            self.hit(out, "tarpaulin", line, ctx, rest)
+        elif sub == "deny":
+            self.hit(out, "cargo-deny", line, ctx, rest)
+        elif sub == "audit":
+            self.hit(out, "cargo-audit", line, ctx, rest)
+        elif sub == "machete":
+            self.hit(out, "cargo-machete", line, ctx, rest)
+        elif sub == "udeps":
+            self.hit(out, "cargo-udeps", line, ctx, rest)
+        elif sub == "install":
+            self.install(out, "cargo", [a for a in rest if not a.startswith("-")], line, ctx)
+            return
+        if locked and sub in ("build", "b", "test", "t", "check", "c", "clippy", "nextest", "run", "r"):
+            self.lock(out, "cargo --locked", line, ctx)
+
+    # -- maven and gradle ----------------------------------------------------
+
+    def maven(self, out, args, line, ctx):
+        goals = []
+        skip_tests = False
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a.startswith("-D"):
+                key, _eq, value = a[2:].partition("=")
+                if key in ("skipTests", "maven.test.skip"):
+                    skip_tests = value.lower() != "false"
+            elif a in MVN_VALUE_FLAGS:
+                i += 1
+            elif not a.startswith("-"):
+                goals.append(a)
+            i += 1
+        runs_tests = False
+        for goal in goals:
+            if goal in MVN_TEST_PHASES:
+                runs_tests = True
+            elif ":" in goal:
+                plugin, action = maven_plugin(goal)
+                if plugin in ("surefire", "failsafe") and action in ("test", "integration-test"):
+                    runs_tests = True
+                elif plugin in MVN_PLUGIN_TOOLS:
+                    name = MVN_PLUGIN_TOOLS[plugin]
+                    if plugin == "spotless":
+                        self.hit(out, name, line, ctx, writes=(action == "apply"))
+                    elif action in ("check", "report", "sonar", "cpd-check"):
+                        self.hit(out, name, line, ctx, writes=False)
+        if runs_tests and not skip_tests:
+            for name in JVM_TEST_TOOLS:
+                self.hit(out, name, line, ctx, writes=False)
+
+    def gradle(self, out, args, line, ctx):
+        tasks = []
+        excluded = set()
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-x", "--exclude-task") and i + 1 < len(args):
+                excluded.add(args[i + 1].split(":")[-1])
+                i += 1
+            elif a in GRADLE_VALUE_FLAGS:
+                i += 1
+            elif not a.startswith("-"):
+                tasks.append(a.split(":")[-1])
+            i += 1
+        tasks = [t for t in tasks if t not in excluded]
+        runs_tests = False
+        verifies = False
+        for task in tasks:
+            if task in ("test", "check", "build"):
+                if "test" not in excluded:
+                    runs_tests = True
+                if task in ("check", "build"):
+                    verifies = True
+            else:
+                for regex, name in GRADLE_TASK_TOOLS:
+                    if regex.match(task):
+                        self.hit(out, name, line, ctx, writes=bool(re.search(r"(Format|Apply)$", task)))
+                        break
+        if runs_tests:
+            for name in JVM_TEST_TOOLS:
+                self.hit(out, name, line, ctx, writes=False)
+        if verifies:
+            for name, build_file, build_line in self.detector.gradle_verification():
+                self.hit(out, name, line, ctx, writes=False, via=("gradle check", build_file, build_line))
+
+    # -- package managers and workspace runners ------------------------------
+
+    def package_manager(self, out, prog, args, line, ctx):
+        value_flags = {"npm": NPM_VALUE_FLAGS, "pnpm": PNPM_VALUE_FLAGS, "yarn": YARN_VALUE_FLAGS,
+                       "bun": BUN_VALUE_FLAGS}[prog]
+        workspace = False
+        filters = []
+        positional = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                break
+            if a.startswith("-"):
+                name, eq, value = a.partition("=")
+                if prog in ("pnpm", "bun") and name in ("--filter", "-F"):
+                    filters.append(value if eq else (args[i + 1] if i + 1 < len(args) else ""))
+                    workspace = True
+                    i += 0 if eq else 1
+                elif name in ("-r", "--recursive", "--workspaces", "-ws") or (name in ("-w", "--workspace")
+                                                                              and prog == "npm"):
+                    workspace = True
+                    if name in ("-w", "--workspace") and prog == "npm":
+                        filters.append(value if eq else (args[i + 1] if i + 1 < len(args) else ""))
+                        i += 0 if eq else 1
+                elif name in value_flags and not eq:
+                    i += 1
+            else:
+                positional.append((a, i))
+            i += 1
+        scope = {"workspace": workspace, "filters": filters}
+        if not positional:
+            if prog in ("yarn",):
+                self.install(out, "yarn", [], line, ctx)
+            return
+        sub, sub_index = positional[0]
+        rest = args[sub_index + 1:]
+        names = [p[0] for p in positional]
+        if sub in INSTALL_SUBS and prog != "yarn" or (prog == "yarn" and sub in ("install", "add")):
+            self.package_install(out, prog, sub, args, line, ctx)
+            return
+        if prog == "npm":
+            if sub in ("run", "run-script", "rum", "urn") and len(names) > 1:
+                self.run_script(out, "npm", names[1], scope, line, ctx)
+            elif sub in ("test", "t", "tst"):
+                self.run_script(out, "npm", "test", scope, line, ctx)
+            elif sub in ("start", "stop", "restart"):
+                self.run_script(out, "npm", sub, scope, line, ctx)
+            elif sub == "audit":
+                self.hit(out, "npm-audit", line, ctx, args)
+            elif sub in ("exec", "x"):
+                self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
+            return
+        if prog == "pnpm":
+            if sub in ("run", "run-script") and len(names) > 1:
+                self.run_script(out, "npm", names[1], scope, line, ctx)
+            elif sub in ("test", "t"):
+                self.run_script(out, "npm", "test", scope, line, ctx)
+            elif sub == "start":
+                self.run_script(out, "npm", "start", scope, line, ctx)
+            elif sub == "audit":
+                self.hit(out, "npm-audit", line, ctx, args)
+            elif sub in ("exec", "dlx"):
+                self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
+            elif sub in ("recursive", "multi", "m") and len(names) > 1:
+                scope = {"workspace": True, "filters": filters}
+                self.run_script(out, "npm", names[2] if names[1] == "run" and len(names) > 2 else names[1],
+                                scope, line, ctx)
+            elif sub not in PNPM_BUILTINS:
+                self.run_script(out, "npm", sub, scope, line, ctx)
+            return
+        if prog == "yarn":
+            if sub == "run" and len(names) > 1:
+                self.run_script(out, "npm", names[1], scope, line, ctx)
+            elif sub == "workspace" and len(names) > 2:
+                inner = names[3] if names[2] == "run" and len(names) > 3 else names[2]
+                self.run_script(out, "npm", inner, {"workspace": True, "filters": [names[1]]}, line, ctx)
+            elif sub == "workspaces":
+                self.yarn_workspaces(out, rest, line, ctx)
+            elif sub == "npm" and len(names) > 1 and names[1] == "audit" or sub == "audit":
+                self.hit(out, "npm-audit", line, ctx, args)
+            elif sub in ("dlx", "exec"):
+                self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
+            elif sub not in YARN_BUILTINS:
+                self.run_script(out, "npm", sub, scope, line, ctx)
+            return
+        if prog == "bun":
+            if sub == "run" and len(names) > 1:
+                self.run_script(out, "npm", names[1], scope, line, ctx)
+            elif sub == "x":
+                self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
+            elif sub not in BUN_BUILTINS:
+                self.run_script(out, "npm", sub, scope, line, ctx)
+
+    def yarn_workspaces(self, out, rest, line, ctx):
+        action = first_positional(rest)
+        filters = []
+        if action == "run":
+            tail = rest[rest.index("run") + 1:]
+            script = first_positional(tail)
+        elif action == "foreach":
+            tail = rest[rest.index("foreach") + 1:]
+            filters = [a.split("=", 1)[1] if "=" in a else tail[i + 1] for i, a in enumerate(tail)
+                       if a.split("=", 1)[0] == "--include" and ("=" in a or i + 1 < len(tail))]
+            tail = drop_flags(tail, YARN_FOREACH_VALUE_FLAGS)
+            if tail and tail[0] == "run":
+                tail = drop_flags(tail[1:], YARN_FOREACH_VALUE_FLAGS)
+            script = tail[0] if tail else None
+        else:
+            return
+        if script:
+            self.run_script(out, "npm", script, {"workspace": True, "filters": filters}, line, ctx)
+
+    def package_install(self, out, prog, sub, args, line, ctx):
+        packages = [a for a in args[args.index(sub) + 1:] if not a.startswith("-")]
+        self.install(out, prog, packages if sub in ("add",) else [], line, ctx)
+        if prog == "npm" and sub in ("ci", "cit", "install-ci-test"):
+            self.lock(out, "npm ci", line, ctx)
+        elif prog == "pnpm" and has_flag(args, "--frozen-lockfile"):
+            self.lock(out, "pnpm install --frozen-lockfile", line, ctx)
+        elif prog == "yarn" and has_flag(args, "--immutable", "--frozen-lockfile"):
+            self.lock(out, "yarn install --immutable", line, ctx)
+        elif prog == "bun" and has_flag(args, "--frozen-lockfile"):
+            self.lock(out, "bun install --frozen-lockfile", line, ctx)
+
+    def turbo(self, out, args, line, ctx):
+        tasks = []
+        sub = first_positional(args, {"--filter", "--cache-dir", "--concurrency", "--token", "--team"})
+        tail = args[args.index(sub) + 1:] if sub in args else []
+        if sub == "run":
+            candidates = tail
+        else:
+            candidates = [sub] + tail if sub else []
+        i = 0
+        while i < len(candidates):
+            a = candidates[i]
+            if a == "--":
+                break
+            if a.startswith("-"):
+                if a in ("--filter", "--cache-dir", "--concurrency", "--token", "--team"):
+                    i += 1
+            else:
+                tasks.append(a)
+            i += 1
+        for task in tasks:
+            self.run_script(out, "npm", task, {"workspace": True, "filters": []}, line, ctx)
+
+    def nx(self, out, args, line, ctx):
+        sub = first_positional(args)
+        targets = []
+        if sub == "run":
+            spec = args[args.index("run") + 1:]
+            if spec and ":" in spec[0]:
+                targets.append(spec[0].split(":")[1])
+        elif sub in ("run-many", "affected", "run-many"):
+            i = 0
+            while i < len(args):
+                a = args[i]
+                name, eq, value = a.partition("=")
+                if name in ("-t", "--target", "--targets"):
+                    values = [value] if eq else []
+                    j = i + 1
+                    while not eq and j < len(args) and not args[j].startswith("-"):
+                        values.append(args[j])
+                        j += 1
+                    for chunk in values:
+                        targets.extend(t for t in chunk.split(",") if t)
+                    i = j - 1 if not eq else i
+                i += 1
+        for target in targets:
+            self.run_script(out, "npm", target, {"workspace": True, "filters": []}, line, ctx)
+
+    def lerna(self, out, args, line, ctx):
+        if first_positional(args) == "run":
+            script = first_positional(args[args.index("run") + 1:], {"--scope", "--ignore", "--concurrency"})
+            if script:
+                self.run_script(out, "npm", script, {"workspace": True, "filters": []}, line, ctx)
+
+    def run_npm_all(self, out, args, line, ctx):
+        names = [a for a in args if not a.startswith("-")]
+        for pattern in names:
+            regex = glob_to_regex(pattern.replace(":*", ":*"))
+            matches = [n for n in self.detector.scripts.get("npm", {}) if regex.match(n)] or [pattern]
+            for name in matches:
+                self.run_script(out, "npm", name, {"workspace": False, "filters": []}, line, ctx)
+
+    # -- make, just --------------------------------------------------------
+
+    def make(self, out, args, line, ctx):
+        directory = flag_value(args, "-C", "--directory")
+        targets = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-C", "--directory", "-f", "--file", "--makefile", "-I", "-o", "-W", "-l"):
+                i += 1
+            elif not a.startswith("-") and "=" not in a:
+                targets.append(a)
+            i += 1
+        for target in targets:
+            self.run_script(out, "make", target, {"directory": directory}, line, ctx)
+
+    def just(self, out, args, line, ctx):
+        recipe = first_positional(args, {"--justfile", "-f", "--working-directory", "-d", "--set"})
+        if recipe and "=" not in recipe:
+            self.run_script(out, "just", recipe, {"directory": None}, line, ctx)
+
+    # -- following -----------------------------------------------------------
+
+    def run_script(self, out, kind, name, scope, line, ctx):
+        if not ctx.follow:
+            return
+        entries = self.detector.scripts_for(kind, name, scope)
+        if kind == "npm" and not name.startswith(("pre", "post")):
+            entries = (self.detector.scripts_for(kind, "pre" + name, scope) + entries
+                       + self.detector.scripts_for(kind, "post" + name, scope))
+        if not entries:
+            if kind == "npm":
+                self.by_words(out, name, line, ctx)
+            return
+        for entry in entries:
+            key = (kind, entry["file"], entry["name"])
+            if key in ctx.stack or ctx.depth >= MAX_FOLLOW_DEPTH:
+                continue
+            inner = ctx.but(depth=ctx.depth + 1, stack=ctx.stack + (key,),
+                            via=(entry["name"], entry["file"], entry["line"]),
+                            base_line=self.where(line, ctx))
+            self.read_into(out, entry["body"], 1, inner)
+
+    def follow_text(self, out, text, line, ctx, via):
+        """Read the commands of a followed file (tox env, nox session, shell script)."""
+        key = ("text", via[1], via[0])
+        if key in ctx.stack or ctx.depth >= MAX_FOLLOW_DEPTH:
+            return
+        inner = ctx.but(depth=ctx.depth + 1, stack=ctx.stack + (key,), via=via,
+                        base_line=self.where(line, ctx))
+        self.read_into(out, text, 1, inner)
+
+    def follow_argv(self, out, argv, line, ctx, via):
+        """Read one command of a followed file (a nox session.run call)."""
+        key = ("argv", via[1], via[0], via[2])
+        if key in ctx.stack or ctx.depth >= MAX_FOLLOW_DEPTH:
+            return
+        inner = ctx.but(depth=ctx.depth + 1, stack=ctx.stack + (key,), via=via, base_line=self.where(line, ctx),
+                        command=" ".join(argv)[:200])
+        self.command(out, argv, via[2] or 1, inner)
+
+    def follow_script(self, out, path, args, line, ctx):
+        if not ctx.follow:
+            return False
+        rel = self.detector.repo_path(path)
+        if rel is None or rel not in self.repo.file_set:
+            return False
+        text = self.repo.text(rel)
+        first = text.splitlines()[0] if text else ""
+        if not (rel.endswith((".sh", ".bash")) or re.match(r"^#!.*\b(ba|z|da|k)?sh\b", first)):
+            return False
+        self.follow_text(out, text, line, ctx, (rel, rel, None))
+        return True
+
+    def shell(self, out, args, line, ctx):
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-c" and i + 1 < len(args):
+                self.read_into(out, args[i + 1], line, ctx)
+                return
+            if a.startswith("-"):
+                i += 1
+                continue
+            self.follow_script(out, a, args[i + 1:], line, ctx)
+            return
+
+    def tox(self, out, args, line, ctx):
+        self.hit(out, "tox", line, ctx)
+        if ctx.follow:
+            self.detector.follow_tox(self, out, args, line, ctx)
+
+    def nox(self, out, args, line, ctx):
+        self.hit(out, "nox", line, ctx)
+        if ctx.follow:
+            self.detector.follow_nox(self, out, args, line, ctx)
+
+    def precommit(self, out, args, line, ctx):
+        self.hit(out, "pre-commit", line, ctx)
+        if not ctx.follow:
+            return
+        sub = first_positional(args, {"-c", "--config"})
+        if sub == "run":
+            rest = args[args.index("run") + 1:]
+            hook = first_positional(rest, {"--from-ref", "--to-ref", "--files", "--hook-stage", "-c", "--config",
+                                           "-s", "--source", "-o", "--origin", "--commit-msg-filename",
+                                           "--remote-name", "--remote-url", "--checkout-type", "--is-squash-merge",
+                                           "--rewrite-command", "--prepare-commit-message-source", "--color"})
+            self.detector.follow_precommit(self, out, hook, ctx.env.get("SKIP", ""), line, ctx)
+
+
+CommandReader.HANDLERS.update({
+    "npx": CommandReader.npx, "bunx": CommandReader.npx, "pnpx": CommandReader.npx,
+    "uvx": CommandReader.uvx, "uv": CommandReader.uv,
+    "poetry": CommandReader.poetry, "pdm": CommandReader.pdm, "pipx": CommandReader.pipx,
+    "hatch": CommandReader.hatch,
+    "go": CommandReader.go, "cargo": CommandReader.cargo,
+    "mvn": CommandReader.maven, "mvnw": CommandReader.maven, "mvnd": CommandReader.maven,
+    "gradle": CommandReader.gradle, "gradlew": CommandReader.gradle,
+    "turbo": CommandReader.turbo, "nx": CommandReader.nx, "lerna": CommandReader.lerna,
+    "run-s": CommandReader.run_npm_all, "run-p": CommandReader.run_npm_all,
+    "npm-run-all": CommandReader.run_npm_all, "npm-run-all2": CommandReader.run_npm_all,
+    "make": CommandReader.make, "gmake": CommandReader.make, "just": CommandReader.just,
+    "tox": CommandReader.tox, "nox": CommandReader.nox,
+    "ruff": CommandReader.ruff, "biome": CommandReader.biome,
+    "pytest": CommandReader.pytest, "py.test": CommandReader.pytest, "coverage": CommandReader.coverage,
+    "jest": CommandReader.jest, "vitest": CommandReader.vitest, "c8": CommandReader.c8, "nyc": CommandReader.nyc,
+    "java": CommandReader.java,
+    "pre-commit": CommandReader.precommit, "prek": CommandReader.precommit,
+})
+for _shell in SHELLS:
+    CommandReader.HANDLERS[_shell] = CommandReader.shell
+for _installer in ("apt-get", "apt", "brew", "gem"):
+    CommandReader.HANDLERS[_installer] = (lambda manager: lambda self, out, args, line, ctx:
+                                          self.system_install(out, manager, args, line, ctx))(_installer)
+for _manager in ("npm", "pnpm", "yarn", "bun"):
+    CommandReader.HANDLERS[_manager] = (lambda manager: lambda self, out, args, line, ctx:
+                                        self.package_manager(out, manager, args, line, ctx))(_manager)
+
+
+# --------------------------------------------------------------------------
+# CI files: jobs, steps, triggers
+# --------------------------------------------------------------------------
+
+CI_CMD_KEYS = {
+    "run", "uses", "script", "before_script", "after_script", "command", "commands", "cmd", "cmds", "bash",
+    "powershell", "pwsh", "entrypoint", "install", "before_install",
+}
+NON_BLOCKING_KEYS = ("continue-on-error", "allow_failure", "continueOnError", "soft_fail")
+PR_EVENTS = ("pull_request", "pull_request_target", "merge_group")
+PR_RANK = {False: 0, "push-default": 1, True: 2}
+PUSH_DEFAULT_NOTE = {
+    "circleci": "CircleCI runs on every branch push by default; a pull request is checked when its branch is pushed.",
+    "travis": "Travis CI builds every branch push by default and reports the build on the pull request.",
+    "buildkite": "Buildkite builds on branch pushes by default; pull request builds depend on the pipeline settings.",
+    "azure": "Azure Pipelines run on branch pushes by default; a `pr:` trigger is not read.",
+    "jenkins": "Jenkins multibranch pipelines build pushed branches; pull request builds depend on the job settings.",
+    "drone": "Drone builds branch pushes by default; pull request builds depend on the repository settings.",
+    "gitlab": "Branch pipelines run on push and show on the merge request; no job names merge requests.",
+    "bitbucket": "Only branch pipelines (default, branches) run; there is no pull-requests pipeline.",
+}
+GITLAB_RESERVED = {"stages", "variables", "default", "include", "workflow", "image", "services", "cache",
+                   "before_script", "after_script"}
+
+
+def better(a, b):
+    """The stronger of two pull_request values (True > "push-default" > False)."""
+    return a if PR_RANK[a] >= PR_RANK[b] else b
+
+
+def truthy(node):
+    return isinstance(node, str) and node.strip().lower() in ("true", "yes", "on")
+
+
+def flat_strings(node):
+    """Every scalar of a YAML node, as plain strings."""
+    if isinstance(node, str):
+        return [str(node)]
+    if isinstance(node, dict):
+        out = []
+        for key, value in node.items():
+            out.append(str(key))
+            out.extend(flat_strings(value))
+        return out
+    if isinstance(node, list):
+        return [s for item in node for s in flat_strings(item)]
+    return []
+
+
+def walk_yaml(node):
+    """(key, value) of every mapping entry, depth first."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key, value
+            for pair in walk_yaml(value):
+                yield pair
+    elif isinstance(node, list):
+        for item in node:
+            for pair in walk_yaml(item):
+                yield pair
+
+
+def excludes_pull_request(expr):
+    """True when a GitHub `if:` expression keeps a job or step from running on a pull request."""
+    low = " ".join(str(expr).lower().split())
+    if re.search(r"event_name\s*==\s*['\"](pull_request|pull_request_target|merge_group)", low):
+        return False
+    if re.search(r"event_name\s*!=\s*['\"]pull_request", low):
+        return True
+    if "pull_request" in low and "||" in low:
+        return False
+    if re.search(r"event_name\s*==\s*['\"](push|schedule|workflow_dispatch|release|workflow_run|create|delete)['\"]",
+                 low):
+        return True
+    return bool(re.search(r"github\.ref\s*==\s*['\"]refs/(heads|tags)/|startswith\(\s*github\.ref\s*,\s*"
+                          r"['\"]refs/(heads|tags)/|github\.ref_name\s*==", low))
+
+
+class CIStep(object):
+    def __init__(self, line, text, kind, pull_request, non_blocking):
+        self.line = line
+        self.text = text
+        self.kind = kind                # "run" or "uses"
+        self.pull_request = pull_request
+        self.non_blocking = non_blocking
+        self.outcome = None
+        self.job = None
+
+
+def collect_steps(node, pull_request, non_blocking, steps, github=False):
+    if isinstance(node, dict):
+        local_nb = non_blocking or any(truthy(node.get(key)) for key in NON_BLOCKING_KEYS)
+        local_pr = pull_request
+        condition = node.get("if")
+        if github and isinstance(condition, str) and excludes_pull_request(condition):
+            local_pr = False
+        for key, value in node.items():
+            if key in CI_CMD_KEYS:
+                emit_steps(key, value, local_pr, local_nb, steps)
+            elif isinstance(value, (dict, list)):
+                collect_steps(value, local_pr, local_nb, steps, github)
+    elif isinstance(node, list):
+        for item in node:
+            collect_steps(item, pull_request, non_blocking, steps, github)
+
+
+def emit_steps(key, value, pull_request, non_blocking, steps):
+    if isinstance(value, str):
+        if str(value).strip():
+            steps.append(CIStep(value.line, str(value), "uses" if key == "uses" else "run", pull_request,
+                                non_blocking))
+    elif isinstance(value, list):
+        for item in value:
+            emit_steps(key, item, pull_request, non_blocking, steps)
+    elif isinstance(value, dict):
+        collect_steps(value, pull_request, non_blocking, steps)
+
+
+def gitlab_pull_request(job, workflow_merge_requests):
+    rules = job.get("rules")
+    if isinstance(rules, list):
+        conditions = [str(r.get("if")) for r in rules if isinstance(r, dict) and r.get("if") is not None]
+        if any(re.search(r"merge_request_event|CI_MERGE_REQUEST", c) for c in conditions):
+            return True
+        pinned = re.compile(r"CI_COMMIT_TAG|CI_DEFAULT_BRANCH|CI_COMMIT_(BRANCH|REF_NAME)\s*==|"
+                            r"CI_PIPELINE_SOURCE\s*==\s*[\"']?(schedule|web|api|trigger)")
+        if conditions and all(pinned.search(c) for c in conditions):
+            return False
+        return "push-default"
+    if "only" in job or "except" in job:
+        only = flat_strings(job.get("only"))
+        if any("merge_request" in s for s in only):
+            return True
+        if any("merge_request" in s for s in flat_strings(job.get("except"))):
+            return "push-default"
+        if only and all(s in ("tags", "main", "master", "schedules", "web", "api", "triggers", "refs") for s in only):
+            return False
+        return "push-default"
+    return True if workflow_merge_requests else "push-default"
+
+
+def jenkins_steps(text):
+    """sh and bat steps of a Jenkinsfile, with the line of each."""
+    steps = []
+    pattern = re.compile(r"\b(?:sh|bat|powershell|pwsh)\s*\(?\s*(?:script\s*:\s*)?('''|\"\"\"|'|\")(.*?)\1", re.S)
+    for m in pattern.finditer(text):
+        body = m.group(2)
+        first = text.count("\n", 0, m.start(2)) + 1
+        steps.append(CIStep(first, body, "run", "push-default", False))
+    return steps
+
+
+def ci_structure(provider, text):
+    """What a CI file runs and when: {"events", "pull_request", "jobs": [(name, pull_request, steps)], "tree"}."""
+    if provider == "jenkins":
+        steps = jenkins_steps(text)
+        return {"events": [], "pull_request": "push-default", "jobs": [(None, "push-default", steps)], "tree": None}
+    tree = parse_yaml(text)
+    if not isinstance(tree, dict):
+        return {"events": [], "pull_request": False, "jobs": [], "tree": None}
+    jobs = []
+    events = []
+    if provider == "github":
+        on = tree.get("on")
+        if isinstance(on, str):
+            events = [str(on)]
+        elif isinstance(on, list):
+            events = [str(e) for e in on]
+        elif isinstance(on, dict):
+            events = [str(e) for e in on]
+        file_pr = any(e in PR_EVENTS for e in events)
+        section = tree.get("jobs")
+        for name, job in (section.items() if isinstance(section, dict) else []):
+            if not isinstance(job, dict):
+                continue
+            pr = file_pr and not (isinstance(job.get("if"), str) and excludes_pull_request(job.get("if")))
+            steps = []
+            collect_steps(job, pr, False, steps, github=True)
+            jobs.append((str(name), pr, steps))
+        if not jobs:
+            return {"events": events, "pull_request": file_pr, "jobs": [], "tree": tree}
+    elif provider == "gitlab":
+        workflow = tree.get("workflow")
+        wf_rules = workflow.get("rules") if isinstance(workflow, dict) else None
+        wf_mr = any(re.search(r"merge_request_event|CI_MERGE_REQUEST", s) for s in flat_strings(wf_rules))
+        for name, job in tree.items():
+            if name in GITLAB_RESERVED or str(name).startswith(".") or not isinstance(job, dict):
+                continue
+            if not any(k in job for k in ("script", "trigger", "extends")):
+                continue
+            pr = gitlab_pull_request(job, wf_mr)
+            steps = []
+            collect_steps(job, pr, False, steps)
+            extends = job.get("extends")
+            for template in ([str(extends)] if isinstance(extends, str) else [str(t) for t in extends or []]):
+                base = tree.get(template)
+                if isinstance(base, dict) and "script" not in job:
+                    collect_steps(base, pr, False, steps)
+            jobs.append((str(name), pr, steps))
+    elif provider == "bitbucket":
+        pipelines = tree.get("pipelines")
+        for section, body in (pipelines.items() if isinstance(pipelines, dict) else []):
+            pr = True if section == "pull-requests" else "push-default" if section in ("default", "branches") \
+                else False
+            groups = body.items() if isinstance(body, dict) else [(None, body)]
+            for pattern, items in groups:
+                steps = []
+                collect_steps(items, pr, False, steps)
+                jobs.append((str(section) + (":" + str(pattern) if pattern else ""), pr, steps))
+    elif provider == "circleci":
+        section = tree.get("jobs")
+        for name, job in (section.items() if isinstance(section, dict) else []):
+            steps = []
+            collect_steps(job, "push-default", False, steps)
+            jobs.append((str(name), "push-default", steps))
+    elif provider == "azure" and isinstance(tree.get("jobs"), list):
+        for index, job in enumerate(tree["jobs"]):
+            name = str(job.get("job") or job.get("deployment") or index) if isinstance(job, dict) else str(index)
+            steps = []
+            collect_steps(job, "push-default", False, steps)
+            jobs.append((name, "push-default", steps))
+    if not jobs:
+        steps = []
+        pr = "push-default"
+        collect_steps(tree, pr, False, steps)
+        jobs.append((None, pr, steps))
+    file_pr = False
+    for name, pr, steps in jobs:
+        file_pr = better(file_pr, pr)
+        for step in steps:
+            step.job = name
+    return {"events": events, "pull_request": file_pr, "jobs": jobs, "tree": tree}
+
+
+# --------------------------------------------------------------------------
+# Files a CI command points at: tox.ini, noxfile.py
+# --------------------------------------------------------------------------
+
+def parse_ini(text, base_line=1):
+    """{section: {key: [(line, text)]}} of an INI text; the first piece of a value may be empty."""
+    sections = {}
+    current = None
+    key = None
+    for number, raw in enumerate(text.splitlines(), base_line):
+        if not raw.strip() or raw.lstrip().startswith(("#", ";")):
+            continue
+        m = re.match(r"^\[(.+?)\]\s*$", raw)
+        if m and raw[0] not in " \t":
+            current = m.group(1).strip()
+            sections.setdefault(current, {})
+            key = None
+            continue
+        if current is None:
+            continue
+        if raw[0] in " \t" and key is not None:
+            sections[current][key].append((number, raw.strip()))
+            continue
+        m = re.match(r"^([^\s=:][^=:]*?)\s*[=:]\s*(.*)$", raw)
+        if m:
+            key = m.group(1)
+            sections[current][key] = [(number, m.group(2))]
+    return sections
+
+
+def expand_env_list(names):
+    out = []
+    for name in re.split(r",(?![^{]*\})|\n", names):
+        name = name.strip()
+        if name:
+            out.extend(expand_braces(name))
+    return out
+
+
+TOX_SUBSTITUTIONS = [
+    (re.compile(r"\{envpython\}"), "python"), (re.compile(r"\{envbindir\}/?"), ""),
+    (re.compile(r"\{toxinidir\}/?"), "./"), (re.compile(r"\{posargs[^}]*\}"), ""),
+    (re.compile(r"\{(?:envdir|envtmpdir|envsitepackagesdir|homedir)\}/?"), ""),
+]
+
+
+def tox_commands(sections, env):
+    """[(line, command)] of an environment: commands_pre, commands, commands_post."""
+    section = sections.get("testenv:" + env)
+    if section is None:
+        for name, body in sections.items():
+            if name.startswith("testenv:") and env in expand_braces(name[len("testenv:"):]):
+                section = body
+                break
+    base = sections.get("testenv", {})
+    section = section if section is not None else {}
+    factors = env.split("-")
+    out = []
+    for key in ("commands_pre", "commands", "commands_post"):
+        pieces = section.get(key) or base.get(key) or []
+        merged = []
+        for number, text in pieces:
+            m = re.match(r"^\{\[([^\]]+)\]([\w]+)\}$", text.strip())
+            if m:
+                merged.extend(sections.get(m.group(1), {}).get(m.group(2), []))
+            else:
+                merged.append((number, text))
+        pending = None
+        for number, text in merged:
+            for pattern, replacement in TOX_SUBSTITUTIONS:
+                text = pattern.sub(replacement, text)
+            text = text.strip()
+            if not text:
+                continue
+            if pending is not None:
+                number, text = pending[0], pending[1] + " " + text
+                pending = None
+            if text.endswith("\\"):
+                pending = (number, text[:-1].strip())
+                continue
+            m = re.match(r"^([!\w.,\-]+):\s+(.+)$", text)
+            if m:
+                tokens = m.group(1).split(",")
+                include = any((t[1:] not in factors) if t.startswith("!") else (t in factors) for t in tokens)
+                if not include:
+                    continue
+                text = m.group(2)
+            if text.startswith("-"):
+                text = text[1:].strip() + " || true"
+            elif text.startswith("!"):
+                text = text[1:].strip()
+            out.append((number, text))
+    return out
+
+
+def nox_arguments(text):
+    """Positional arguments of a session.run(...) call; a name or expression becomes "$VAR"."""
+    parts = []
+    depth = 0
+    quote = None
+    current = []
+    for ch in text:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    parts.append("".join(current).strip())
+    argv = []
+    for part in parts:
+        if not part:
+            continue
+        if re.match(r"^[A-Za-z_]\w*\s*=(?!=)", part):
+            break
+        m = re.match(r"""^[fFrRbB]*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")$""", part)
+        argv.append((m.group(1) if m.group(1) is not None else m.group(2)) if m else "$VAR")
+    return argv
+
+
+def parse_nox(text):
+    """[{"name", "line", "runs": [(line, argv)]}] of the sessions of a noxfile, read as text only."""
+    lines = text.splitlines()
+    sessions = []
+    decorator = None
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if re.match(r"^@(?:nox\.)?session\b", raw):
+            end = _balanced_end("\n".join(lines[i:]), raw.find("(")) if "(" in raw else 0
+            decorator = "\n".join(lines[i:])[:end] if end else raw
+            i += max(1, decorator.count("\n") + 1)
+            continue
+        m = re.match(r"^def\s+(\w+)\s*\(", raw)
+        if m and decorator is not None:
+            name = m.group(1)
+            named = re.search(r"""\bname\s*=\s*['"]([^'"]+)['"]""", decorator)
+            if named:
+                name = named.group(1)
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][0] in " \t" or lines[j].startswith("#")):
+                j += 1
+            body = "\n".join(lines[i + 1:j])
+            runs = []
+            for call in re.finditer(r"\bsession\.run(?:_always)?\(", body):
+                end = _balanced_end(body, call.end() - 1)
+                argv = nox_arguments(body[call.end():end - 1])
+                if argv:
+                    runs.append((i + 2 + body.count("\n", 0, call.start()), argv))
+            sessions.append({"name": name, "line": i + 1, "runs": runs})
+            decorator = None
+            i = j
+            continue
+        if raw.strip() and not raw.startswith(("@", " ", "\t", "#")):
+            decorator = None
+        i += 1
+    return sessions
+
+
+# --------------------------------------------------------------------------
 # Languages, test files, suppressions
 # --------------------------------------------------------------------------
 
@@ -910,6 +2910,26 @@ def workspace_glob_regex(glob):
             out.append(re.escape(glob[i]))
             i += 1
     return re.compile("^" + "".join(out) + "$")
+
+
+def npm_workspaces(repo):
+    """{root dir: [member dirs]} of the package.json and pnpm workspaces."""
+    package_dirs = [dir_of(rel) for rel in repo.by_name.get("package.json", []) if not rel.startswith("../")]
+    result = {}
+    for d in package_dirs:
+        members = set()
+        for glob in workspace_globs(repo, d):
+            if glob.startswith("!"):
+                continue
+            regex = workspace_glob_regex(glob)
+            for other in package_dirs:
+                if other == d or (d != "." and not other.startswith(d + "/")):
+                    continue
+                if regex.match(other if d == "." else other[len(d) + 1:]):
+                    members.add(other)
+        if members:
+            result[d] = sorted(members)
+    return result
 
 
 def find_subprojects(repo):
@@ -1120,8 +3140,15 @@ class Detector(object):
     def __init__(self, root, max_subprojects):
         self.repo = Repo(root)
         self.max_subprojects = max_subprojects
-        self.script_index = defaultdict(list)   # script or target name -> [text]
+        self.scripts = {}
         self.script_commands = []                # (file, line, text)
+        self.script_hits = []                    # (file, line, owner, [tool names])
+        self.package_names = {}
+        self.npm_workspaces = {}
+        self.hook_defs = []
+        self.ci_facts = []
+        self._gradle_verification = None
+        self.reader = CommandReader(self)
 
     # ---- languages, suppressions, per-subproject stats ----------------
 
@@ -1199,14 +3226,21 @@ class Detector(object):
         cache[d] = result
         return result
 
-    # ---- tool matching -------------------------------------------------
+    # ---- scripts, runners and followed files ---------------------------
 
     def collect_scripts(self):
-        """Command lines of package.json scripts, Makefiles, justfiles, Taskfiles."""
+        """package.json scripts, Makefile and justfile recipes, Taskfile commands."""
         repo = self.repo
+        self.scripts = {"npm": defaultdict(list), "make": defaultdict(list), "just": defaultdict(list)}
+        self.script_commands = []                # (file, line, text)
+        self.package_names = {}
         for rel in repo.by_name.get("package.json", []):
             obj, error = repo.json_file(rel)
-            if error is not None or not isinstance(obj, dict) or not isinstance(obj.get("scripts"), dict):
+            if error is not None or not isinstance(obj, dict):
+                continue
+            if isinstance(obj.get("name"), str):
+                self.package_names[dir_of(rel)] = obj["name"]
+            if not isinstance(obj.get("scripts"), dict):
                 continue
             text = repo.text(rel)
             start = text.find('"scripts"')
@@ -1215,54 +3249,186 @@ class Detector(object):
                     continue
                 m = re.compile(r'^\s*"' + re.escape(name) + r'"\s*:', re.M).search(text, max(start, 0))
                 line = text.count("\n", 0, m.start()) + 1 if m else 1
-                self.script_index[name].append(command)
+                self.scripts["npm"][name].append({"name": name, "file": rel, "line": line, "body": command,
+                                                  "dir": dir_of(rel)})
                 self.script_commands.append((rel, line, command))
-        for name in ("Makefile", "GNUmakefile", "makefile", "justfile", "Justfile"):
-            for rel in repo.by_name.get(name, []):
-                recipes = make_recipes(repo.text(rel))
-                for target, (line, commands, deps) in recipes.items():
-                    text = "\n".join(commands + ["make " + dep for dep in deps])
-                    self.script_index[target].append(text)
-                    for offset, command in enumerate(commands):
-                        self.script_commands.append((rel, line + offset + 1, command))
+        for names, kind in ((("Makefile", "GNUmakefile", "makefile"), "make"),
+                            (("justfile", "Justfile", ".justfile"), "just")):
+            for name in names:
+                for rel in repo.by_name.get(name, []):
+                    for target, (line, commands, deps) in make_recipes(repo.text(rel)).items():
+                        commands = [c.lstrip("@-+ ") for c in commands]
+                        body = "\n".join(commands + [kind + " " + dep for dep in deps])
+                        self.scripts[kind][target].append({"name": target, "file": rel, "line": line, "body": body,
+                                                           "dir": dir_of(rel)})
+                        for offset, command in enumerate(commands):
+                            self.script_commands.append((rel, line + offset + 1, command))
         for name in ("Taskfile.yml", "Taskfile.yaml"):
             for rel in repo.by_name.get(name, []):
                 for line, command in yaml_commands(repo.text(rel)):
                     self.script_commands.append((rel, line, command))
 
-    INVOKE_RE = re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run(?:-script)?\s+)?([A-Za-z0-9:_\-]+)"
-                           r"|\b(?:make|gmake|just|task)\b([^&;|]*)")
+    def scripts_for(self, kind, name, scope):
+        entries = list(self.scripts.get(kind, {}).get(name, []))
+        if kind == "npm" and scope.get("workspace"):
+            members = self.workspace_dirs_for(scope.get("filters") or [])
+            if members is not None:
+                entries = [e for e in entries if e["dir"] in members]
+        elif scope.get("directory"):
+            directory = posixpath.normpath(scope["directory"])
+            entries = [e for e in entries if e["dir"] == directory]
+        return entries
 
-    def invocations(self, command):
-        names = []
-        for m in self.INVOKE_RE.finditer(command):
-            if m.group(1):
-                names.append(m.group(1))
-            else:
-                names.extend(t for t in m.group(2).split()
-                             if not t.startswith("-") and "=" not in t)
-        return names
+    def workspace_dirs_for(self, filters):
+        """Directories a workspace runner reaches: every member, or the ones a filter names."""
+        everything = set()
+        for root, members in self.npm_workspaces.items():
+            everything.add(root)
+            everything.update(members)
+        if not everything:
+            return None
+        patterns = [re.sub(r"^\.\.\.|\.\.\.$", "", f.strip("{}'\"")).lstrip("!") for f in filters if f]
+        if not patterns:
+            return everything
+        matched = set()
+        for d in everything:
+            name = self.package_names.get(d, "")
+            for pattern in patterns:
+                path = pattern[2:] if pattern.startswith("./") else pattern
+                if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(d, path):
+                    matched.add(d)
+        return matched or everything
 
-    def match_tools(self, text, tools):
-        low = text.lower()
-        return [t for t in tools if t.ci_match(low)]
+    def repo_path(self, path):
+        """A path named in a CI command, as a path of the scanned folder; None when it leaves the repository."""
+        if not path or "$" in path or path.startswith(("/", "~")):
+            return None
+        norm = posixpath.normpath(path)
+        if norm.startswith(".."):
+            return None
+        repo = self.repo
+        if repo.subpath == ".":
+            return norm
+        if norm.startswith(repo.subpath + "/"):
+            return norm[len(repo.subpath) + 1:]
+        return repo._relative_above(norm)
 
-    def resolve(self, command, tools, depth=3, seen=None):
-        """Tools run through npm scripts or make targets that a command calls."""
-        seen = seen if seen is not None else set()
-        found = []
-        if depth <= 0:
-            return found
-        for name in self.invocations(command):
-            if name in seen:
+    def pinned_requirements(self, path):
+        """True when every requirement of a requirements file is pinned with == or a hash."""
+        rel = self.repo_path(path)
+        if rel is None or rel not in self.repo.file_set:
+            return False
+        for line in self.repo.text(rel).replace("\\\n", " ").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
                 continue
-            seen.add(name)
-            for body in self.script_index.get(name, []):
-                for tool in self.match_tools(body, tools):
-                    found.append((tool, "%s" % name))
-                for line in body.splitlines():
-                    found.extend(self.resolve(line, tools, depth - 1, seen))
-        return found
+            if line.startswith(("-e", "--editable")):
+                return False
+            if line.startswith("-"):
+                continue
+            if "==" not in line and "--hash" not in line:
+                return False
+        return True
+
+    def gradle_verification(self):
+        """[(tool, build file, line)] of the verification plugins a Gradle `check` or `build` runs."""
+        if self._gradle_verification is None:
+            repo = self.repo
+            files = [f for f in repo.files if f.endswith((".gradle", ".gradle.kts", "libs.versions.toml"))][:200]
+            texts = [(f, repo.text(f)) for f in files]
+            found = []
+            for name in GRADLE_VERIFICATION_WORDS:
+                regex = re.compile(word_regex(name, name == "pmd"), re.I)
+                for f, text in texts:
+                    hit = next((n for n, line in enumerate(text.splitlines(), 1) if regex.search(line)), None)
+                    if hit:
+                        found.append((name, f, hit))
+                        break
+            for name, marker in (("jacoco", "violationRules"), ("kover", "minBound")):
+                for f, text in texts:
+                    if name in text.lower() and marker in text:
+                        found.append((name, f, text.count("\n", 0, text.index(marker)) + 1))
+                        break
+            self._gradle_verification = found
+        return self._gradle_verification
+
+    def follow_precommit(self, reader, out, hook, skip, line, ctx):
+        skipped = set(skip.split(","))
+        for definition in self.hook_defs:
+            if (hook and definition["id"] != hook) or definition["id"] in skipped:
+                continue
+            for name in definition["tools"]:
+                reader.hit(out, name, line, ctx, writes=False,
+                           via=("pre-commit", definition["file"], definition["line"]))
+
+    def follow_tox(self, reader, out, args, line, ctx):
+        environments = []
+        config = "tox.ini"
+        i = 0
+        while i < len(args):
+            a = args[i]
+            name, eq, value = a.partition("=")
+            if name in ("-e", "--env"):
+                environments.extend(expand_env_list(value if eq else (args[i + 1] if i + 1 < len(args) else "")))
+                i += 0 if eq else 1
+            elif name in ("-c", "--conf"):
+                config = value if eq else (args[i + 1] if i + 1 < len(args) else config)
+                i += 0 if eq else 1
+            elif name in ("-f", "--factor", "--skip-env", "-x", "--override", "--workdir", "--root"):
+                i += 0 if eq else 1
+            i += 1
+        rel = self.repo_path(config)
+        sections = None
+        if rel and rel in self.repo.file_set:
+            sections = parse_ini(self.repo.text(rel))
+        elif "pyproject.toml" in self.repo.file_set:
+            text = self.repo.text("pyproject.toml")
+            m = re.search(r'legacy_tox_ini\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', text, re.S)
+            if m:
+                rel = "pyproject.toml"
+                sections = parse_ini(m.group(1), text.count("\n", 0, m.start(1)) + 1)
+        if not sections:
+            return
+        if not environments:
+            environments = expand_env_list(",".join(p[1] for p in sections.get("tox", {}).get("envlist", []))) or [""]
+        for env in environments:
+            for number, command in tox_commands(sections, env):
+                reader.follow_text(out, command, line, ctx, ("tox:" + (env or "testenv"), rel, number))
+
+    def follow_nox(self, reader, out, args, line, ctx):
+        path = "noxfile.py"
+        selected = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            name, eq, value = a.partition("=")
+            if name in ("-s", "-e", "--session", "--sessions", "--session-name"):
+                if eq:
+                    selected.append(value)
+                while not eq and i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    selected.append(args[i + 1])
+                    i += 1
+            elif name in ("-f", "--noxfile"):
+                path = value if eq else (args[i + 1] if i + 1 < len(args) else path)
+                i += 0 if eq else 1
+            elif name in ("-p", "--python", "-t", "--tags", "-k", "--keywords", "--force-python", "--extra-python"):
+                i += 0 if eq else 1
+            i += 1
+        rel = self.repo_path(path)
+        if rel is None or rel not in self.repo.file_set:
+            return
+        text = self.repo.text(rel)
+        sessions = parse_nox(text)
+        if not selected:
+            m = re.search(r"nox\.options\.sessions\s*=\s*\[([^\]]*)\]", text)
+            if m:
+                selected = re.findall(r"""['"]([^'"]+)['"]""", m.group(1))
+        for session in sessions:
+            if selected and not any(session["name"] == s or session["name"].startswith(s + "-")
+                                    or s.startswith(session["name"] + "-") for s in selected):
+                continue
+            for run_line, argv in session["runs"]:
+                reader.follow_argv(out, argv, line, ctx, ("nox:" + session["name"], rel, run_line))
 
     # ---- CI -------------------------------------------------------------
 
@@ -1278,47 +3444,99 @@ class Detector(object):
         ("drone", re.compile(r"^\.drone\.yml$")),
     ]
 
+    def ci_rows(self, rel, steps):
+        """Tool rows of a list of CI steps, merged by (tool, via, writes)."""
+        merged = {}
+        for step in steps:
+            for hit in step.outcome.hits:
+                key = (hit.tool.name, hit.via, hit.writes)
+                row = merged.get(key)
+                if row is None:
+                    row = merged[key] = {
+                        "tool": hit.tool.name, "category": hit.tool.category, "language": hit.tool.language,
+                        "file": rel, "line": hit.line, "how": "ci", "lines": [], "commands": [],
+                        "non_blocking": True, "pull_request": False, "jobs": [], "_seen": set()}
+                    if hit.via:
+                        row["via"] = hit.via
+                        row["via_file"] = hit.via_file
+                        row["via_line"] = hit.via_line
+                    if hit.writes:
+                        row["writes"] = True
+                if (hit.line, hit.command) not in row["_seen"]:
+                    row["_seen"].add((hit.line, hit.command))
+                    row["lines"].append(hit.line)
+                    row["commands"].append(hit.command.strip()[:200])
+                row["non_blocking"] = row["non_blocking"] and hit.non_blocking
+                row["pull_request"] = better(row["pull_request"], step.pull_request)
+                if step.job is not None and step.job not in row["jobs"]:
+                    row["jobs"].append(step.job)
+        rows = []
+        for row in merged.values():
+            del row["_seen"]
+            rows.append(row)
+        rows.sort(key=lambda r: (r["line"], r["tool"]))
+        return rows
+
     def detect_ci(self):
         repo = self.repo
+        reader = self.reader
         files = []
         by_tool = defaultdict(list)
+        locked = []
+        facts = []
         for rel in repo.files + repo.above:
             provider = None
+            top = re.sub(r"^(\.\./)+", "", rel)
             for name, regex in self.CI_FILE_RES:
-                if regex.search(re.sub(r"^(\.\./)+", "", rel)):
+                if regex.search(top):
                     provider = name
                     break
             if provider is None:
                 continue
-            text = repo.text(rel)
-            commands = shell_commands(text) if provider == "jenkins" else yaml_commands(text)
-            matches = {}  # (tool, via) -> (tool, [(line, command), ...]); every step that runs it, not only the first
-            for line, command in commands:
-                for tool in self.match_tools(command, ALL_TOOLS):
-                    matches.setdefault((tool.name, None), (tool, []))[1].append((line, command))
-                for tool, via in self.resolve(command, ALL_TOOLS):
-                    matches.setdefault((tool.name, via), (tool, []))[1].append((line, command))
-            tool_rows = []
-            for (name, via_name), (tool, steps) in matches.items():
-                row = {"tool": tool.name, "category": tool.category, "language": tool.language,
-                       "file": rel, "line": steps[0][0], "how": "ci",
-                       "lines": [line for line, _command in steps],
-                       "commands": [command.strip()[:200] for _line, command in steps]}
-                if via_name:
-                    row["via"] = via_name
-                tool_rows.append(row)
-            tool_rows.sort(key=lambda r: (r["line"], r["tool"]))
-            pull_request = any(
-                re.search(r"\b(pull_request(_target)?|merge_requests?(_event)?)\b", line)
-                for line in text.splitlines() if not line.lstrip().startswith("#"))
-            entry = {"file": rel, "provider": provider, "pull_request": pull_request, "tools": tool_rows}
+            structure = ci_structure(provider, repo.text(rel))
+            all_steps = [step for _name, _pr, steps in structure["jobs"] for step in steps]
+            installs = []
+            file_locks = []
+            for step in all_steps:
+                if step.kind == "uses":
+                    step.outcome = reader.read_uses(step.text, step.line, step.non_blocking)
+                else:
+                    step.outcome = reader.read(step.text, step.line, nb=step.non_blocking)
+                installs.extend(step.outcome.installs)
+                file_locks.extend(step.outcome.locks)
+                for fact in step.outcome.facts:
+                    if not fact["kind"].startswith("poetry-"):
+                        facts.append(dict(fact, how="ci", file=rel))
+            if any(f["kind"] == "poetry-check-lock" for step in all_steps for f in step.outcome.facts):
+                file_locks.extend({"kind": "poetry install + poetry check --lock", "line": i["line"],
+                                   "command": i["command"]} for i in installs if i["manager"] == "poetry")
+            if structure["tree"] is not None:
+                for key, value in walk_yaml(structure["tree"]):
+                    if key == "RUSTFLAGS" and isinstance(value, str) and re.search(r"-D\s?warnings|--deny[ =]warnings",
+                                                                                   value):
+                        facts.append({"kind": "rustflags-deny-warnings", "how": "ci", "file": rel,
+                                      "line": value.line, "command": str(value)[:200]})
+            locked.extend(dict(lock, file=rel) for lock in file_locks)
+            rows = self.ci_rows(rel, all_steps)
+            pull_request = structure["pull_request"]
+            entry = {"file": rel, "provider": provider, "pull_request": pull_request,
+                     "trigger_note": PUSH_DEFAULT_NOTE.get(provider) if pull_request == "push-default" else None,
+                     "events": structure["events"], "tools": rows,
+                     "jobs": [{"name": name, "pull_request": pr, "rows": self.ci_rows(rel, steps)}
+                              for name, pr, steps in structure["jobs"]],
+                     "installs": installs}
             if rel.startswith("../"):
                 entry["inherited_from"] = dir_of(rel)
             files.append(entry)
-            for row in tool_rows:
+            for row in rows:
                 if rel not in by_tool[row["tool"]]:
                     by_tool[row["tool"]].append(rel)
-        return {"files": files, "tools": {k: v for k, v in sorted(by_tool.items())}}
+        self.ci_facts = facts
+        return {"files": files, "tools": {k: v for k, v in sorted(by_tool.items())}, "locked_installs": locked}
+
+    def match_tools(self, text, tools):
+        low = text.lower()
+        return [t for t in tools if t.ci_match(low)]
 
     # ---- pre-commit, husky, lefthook ------------------------------------
 
@@ -1327,10 +3545,12 @@ class Detector(object):
         hooks = []
         rows = {}
         config = None
+        self.hook_defs = []
         for rel in repo.by_name.get(".pre-commit-config.yaml", []):
             config = config or rel
             repo_url = None
             rev = None
+            current = None
             text = repo.text(rel)
             for number, line in enumerate(text.splitlines(), 1):
                 if line.lstrip().startswith("#"):
@@ -1346,25 +3566,32 @@ class Detector(object):
                 m = re.match(r"^\s*-?\s*id\s*:\s*(\S+)", line)
                 if m:
                     hooks.append({"id": m.group(1), "repo": repo_url, "rev": rev, "line": number})
-                    for tool in self.match_tools(m.group(1), ALL_TOOLS):
+                    current = {"id": m.group(1), "file": rel, "line": number, "tools": []}
+                    self.hook_defs.append(current)
+                    matched = self.match_tools(m.group(1), ALL_TOOLS)
+                    for tool in matched:
                         rows.setdefault((tool.name, rel), self.precommit_row(tool, rel, number))
+                        if not (tool.name == "ruff" and any(t.name == "ruff-format" for t in matched)):
+                            current["tools"].append(tool.name)
                     continue
                 m = re.match(r"^\s*entry\s*:\s*(.+)$", line)
                 if m:
-                    for tool in self.match_tools(m.group(1), ALL_TOOLS):
-                        rows.setdefault((tool.name, rel), self.precommit_row(tool, rel, number))
+                    for hit in self.reader.read(m.group(1), follow=False).hits:
+                        rows.setdefault((hit.tool.name, rel), self.precommit_row(hit.tool, rel, number))
+                        if current is not None and hit.tool.name not in current["tools"]:
+                            current["tools"].append(hit.tool.name)
         husky = sorted(f for f in repo.files if f.startswith(".husky/") and "/_/" not in f
                        and not f.startswith(".husky/_"))
         lefthook = [f for name in ("lefthook.yml", "lefthook.yaml", ".lefthook.yml")
                     for f in repo.by_name.get(name, [])]
         for rel in husky:
             for number, command in shell_commands(repo.text(rel)):
-                for tool in self.match_tools(command, ALL_TOOLS):
-                    rows.setdefault((tool.name, rel), self.precommit_row(tool, rel, number))
+                for hit in self.reader.read(command, follow=False).hits:
+                    rows.setdefault((hit.tool.name, rel), self.precommit_row(hit.tool, rel, number))
         for rel in lefthook:
             for number, command in yaml_commands(repo.text(rel)):
-                for tool in self.match_tools(command, ALL_TOOLS):
-                    rows.setdefault((tool.name, rel), self.precommit_row(tool, rel, number))
+                for hit in self.reader.read(command, follow=False).hits:
+                    rows.setdefault((hit.tool.name, rel), self.precommit_row(hit.tool, rel, number))
         return {"config": config, "hooks": hooks[:200], "husky": husky, "lefthook": lefthook,
                 "tools": sorted(rows.values(), key=lambda r: (r["file"], r["line"], r["tool"]))}
 
@@ -1548,11 +3775,13 @@ class Detector(object):
         subproject_dirs = set(subs)
         languages, other, suppressions, per_sub, excluded = self.scan_sources(subproject_dirs)
         self.collect_scripts()
+        self.npm_workspaces = npm_workspaces(repo)
         owner_cache = {}
-        self.script_commands = [(rel, line, command, self.owner(dir_of(rel), subproject_dirs, owner_cache))
-                                for rel, line, command in self.script_commands]
-        ci = self.detect_ci()
+        self.script_hits = [(rel, line, self.owner(dir_of(rel), subproject_dirs, owner_cache),
+                             {hit.tool.name for hit in self.reader.read(command, follow=False).hits})
+                            for rel, line, command in self.script_commands]
         precommit = self.detect_precommit()
+        ci = self.detect_ci()
 
         # shared tools, relative to the repo root
         shared = []
@@ -1674,11 +3903,11 @@ class Detector(object):
                 categories[tool.category].append(found)
         # package.json scripts and Makefile or justfile recipes that belong to this subproject
         owned = {}
-        for rel, line, command, owner in self.script_commands:
+        for rel, line, owner, names in self.script_hits:
             if owner != d:
                 continue
             for tool in tool_rows:
-                if tool.ci_match(command.lower()) and (tool.name, rel) not in owned:
+                if tool.name in names and (tool.name, rel) not in owned:
                     owned[(tool.name, rel)] = self.row(tool, (rel, line), "script")
         for row in owned.values():
             categories[row["category"]].append(row)

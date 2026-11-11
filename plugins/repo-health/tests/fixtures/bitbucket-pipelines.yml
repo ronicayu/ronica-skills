@@ -1,0 +1,24 @@
+image: python:3.12
+
+pipelines:
+  default:
+    - step:
+        name: Lint
+        caches:
+          - pip
+        script:
+          - pip install ruff
+          - ruff check .
+  pull-requests:
+    '**':
+      - step:
+          name: Test
+          script:
+            - pip install -r requirements.txt
+            - pytest
+  custom:
+    nightly:
+      - step:
+          name: Audit
+          script:
+            - pip-audit
