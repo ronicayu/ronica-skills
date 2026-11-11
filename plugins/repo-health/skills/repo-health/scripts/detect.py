@@ -216,7 +216,7 @@ LANGUAGES = ("python", "typescript", "rust", "java", "go", "kotlin")
 MANIFESTS = {
     "pyproject.toml": "python", "setup.py": "python", "package.json": "typescript",
     "Cargo.toml": "rust", "pom.xml": "java", "build.gradle": "java",
-    "build.gradle.kts": "java", "go.mod": "go",
+    "build.gradle.kts": "java", "go.mod": "go", "go.work": "go",
 }
 
 BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
@@ -2942,8 +2942,113 @@ def npm_workspaces(repo):
     return result
 
 
+def toml_array_strings(text, section, key):
+    """The quoted items of `key = [...]` inside [section]; None when the key is absent."""
+    in_section = False
+    collecting = False
+    items = []
+    found = False
+    for line in text.splitlines():
+        line = re.sub(r"\s#.*$", "", line)
+        if not collecting:
+            m = SECTION_RE.match(line)
+            if m:
+                in_section = m.group(1).strip() == section
+                continue
+            if not in_section:
+                continue
+            m = re.match(r"^\s*" + re.escape(key) + r"\s*=\s*\[(.*)$", line)
+            if not m:
+                continue
+            found = True
+            collecting = True
+            line = m.group(1)
+        items.extend(a or b for a, b in re.findall(r"\"([^\"]+)\"|'([^']+)'", line))
+        bare = re.sub(r"\"[^\"]*\"|'[^']*'", "", line)
+        if "]" in bare:
+            collecting = False
+    return items if found else None
+
+
+def declared_members(repo, d, found):
+    """(kind, manifest, [member dirs]) of the workspace rooted at d, or None.
+
+    Cargo [workspace] members, Maven <modules>, Gradle include() in settings,
+    Go go.work use, and package.json or pnpm workspaces.
+    """
+    def under(path):
+        return path if d == "." else d + "/" + path
+
+    cargo = join(d, "Cargo.toml")
+    if cargo in repo.file_set:
+        text = repo.text(cargo)
+        members = toml_array_strings(text, "workspace", "members")
+        if members is not None:
+            excluded = [workspace_glob_regex(g) for g in toml_array_strings(text, "workspace", "exclude") or []]
+            result = []
+            for glob in members:
+                regex = workspace_glob_regex(glob)
+                for other, entry in found.items():
+                    relative = other if d == "." else other[len(d) + 1:]
+                    if other != d and (d == "." or other.startswith(d + "/")) and regex.match(relative) \
+                            and join(other, "Cargo.toml") in entry["manifests"] \
+                            and not any(e.match(relative) for e in excluded):
+                        result.append(other)
+            return "cargo", cargo, result
+    pom = join(d, "pom.xml")
+    if pom in repo.file_set:
+        modules = re.findall(r"<module>\s*([^<\s]+)\s*</module>", repo.text(pom))
+        if modules:
+            result = []
+            for module in modules:
+                module = posixpath.normpath(under(posixpath.dirname(module) if module.endswith(".xml") else module))
+                if module in repo.dirs and module != d:
+                    result.append(module)
+            return "maven", pom, result
+    for name in ("settings.gradle", "settings.gradle.kts"):
+        settings = join(d, name)
+        if settings in repo.file_set:
+            result = []
+            for call in re.finditer(r"\binclude\s*\(?\s*((?:['\"][^'\"]+['\"]\s*,?\s*)+)", repo.text(settings)):
+                for name_ in re.findall(r"['\"]([^'\"]+)['\"]", call.group(1)):
+                    member = posixpath.normpath(under(name_.strip(":").replace(":", "/")))
+                    if member in repo.dirs and member != d:
+                        result.append(member)
+            if result:
+                return "gradle", settings, result
+    work = join(d, "go.work")
+    if work in repo.file_set:
+        text = repo.text(work)
+        used = re.findall(r"^\s*use\s+(\S+)\s*$", text, re.M)
+        for block in re.findall(r"^\s*use\s*\(([^)]*)\)", text, re.M | re.S):
+            used.extend(re.sub(r"\s*//.*$", "", l).strip() for l in block.splitlines()
+                        if re.sub(r"\s*//.*$", "", l).strip())
+        result = [posixpath.normpath(under(u.strip("\"'"))) for u in used]
+        result = [m for m in result if m in repo.dirs and m != d]
+        if result:
+            return "go", work, result
+    members = set()
+    for glob in workspace_globs(repo, d):
+        if glob.startswith("!"):
+            continue
+        regex = workspace_glob_regex(glob)
+        for other in found:
+            relative = other if d == "." else other[len(d) + 1:]
+            if other != d and (d == "." or other.startswith(d + "/")) and regex.match(relative):
+                members.add(other)
+    if members:
+        kind = "pnpm" if join(d, "pnpm-workspace.yaml") in repo.file_set else "npm"
+        return kind, join(d, "package.json"), sorted(members)
+    return None
+
+
 def find_subprojects(repo):
-    """{dir: {"manifests": [rel...], "languages": set}} from the manifest files."""
+    """({dir: {"manifests": [rel...], "languages": set}}, {root: workspace}) from the manifest files.
+
+    A workspace root is one subproject; its members are listed in the workspace
+    ({"kind", "manifest", "members": [dirs], "entries": {dir: entry}}) and are not
+    subprojects of their own.
+    """
     found = {}
     for name, language in MANIFESTS.items():
         for rel in repo.by_name.get(name, []):
@@ -2957,20 +3062,35 @@ def find_subprojects(repo):
                 entry["languages"].discard("java")
                 text = repo.text(rel)
                 entry["languages"].add("kotlin" if re.search(r"kotlin", text, re.I) else "java")
-    # package.json projects that a parent workspace lists are members, not subprojects
-    members = set()
-    for d in found:
-        for glob in workspace_globs(repo, d):
-            regex = workspace_glob_regex(glob)
-            for other, other_entry in found.items():
-                if other == d or (d != "." and not other.startswith(d + "/")):
-                    continue
-                relative = other if d == "." else other[len(d) + 1:]
-                if other_entry["manifests"] == [join(other, "package.json")] and regex.match(relative):
-                    members.add(other)
-    for d in members:
-        del found[d]
-    return found
+    workspaces = {}
+    for d in sorted(found, key=lambda x: (x.count("/"), x)) + sorted(
+            {dir_of(r) for n in ("settings.gradle", "settings.gradle.kts") for r in repo.by_name.get(n, [])
+             if not r.startswith("../") and dir_of(r) not in found}):
+        declared = declared_members(repo, d, found)
+        if declared is None:
+            continue
+        kind, manifest, members = declared
+        workspaces[d] = {"kind": kind, "manifest": manifest, "members": sorted(set(members))}
+        if d not in found:
+            found[d] = {"manifests": [manifest], "languages": set()}
+    claimed = {}
+    for root in sorted(workspaces, key=lambda x: (x.count("/"), x)):
+        if root in claimed:
+            outer = claimed[root]
+            workspaces[outer]["members"] = sorted(set(workspaces[outer]["members"]) | set(workspaces[root]["members"]))
+            for member in workspaces[root]["members"]:
+                claimed[member] = outer
+            continue
+        for member in workspaces[root]["members"]:
+            claimed.setdefault(member, root)
+    for root in [r for r in workspaces if r in claimed]:
+        del workspaces[root]
+    for root, workspace in workspaces.items():
+        workspace["members"] = [m for m in workspace["members"] if claimed.get(m) == root and m != root]
+        workspace["entries"] = {m: found.get(m, {"manifests": [], "languages": set()}) for m in workspace["members"]}
+    for member in claimed:
+        found.pop(member, None)
+    return found, workspaces
 
 
 # --------------------------------------------------------------------------
@@ -3969,17 +4089,18 @@ class Detector(object):
 
     def run(self):
         repo = self.repo
-        subs = find_subprojects(repo)
+        subs, workspaces = find_subprojects(repo)
+        member_dirs = {m for w in workspaces.values() for m in w["members"]}
         for rel in repo.files:
             if posixpath.basename(rel) in ("pyproject.toml", "Cargo.toml"):
                 repo.check_toml(rel)
         # Source files outside every manifest directory belong to an implicit root project.
         cache = {}
-        orphans = any(language_of(rel) and self.owner(dir_of(rel), set(subs), cache) is None
+        orphans = any(language_of(rel) and self.owner(dir_of(rel), set(subs) | member_dirs, cache) is None
                       for rel in repo.files)
         if "." not in subs and (orphans or not subs):
             subs["."] = {"manifests": [], "languages": set()}
-        subproject_dirs = set(subs)
+        subproject_dirs = set(subs) | member_dirs
         languages, other, suppressions, per_sub, excluded = self.scan_sources(subproject_dirs)
         self.collect_scripts()
         self.npm_workspaces = npm_workspaces(repo)
@@ -4016,7 +4137,16 @@ class Detector(object):
         records = []
         for d, entry in subs.items():
             stats = per_sub.get(d, {lang: new_stats() for lang in LANGUAGES})
+            members = workspaces.get(d, {}).get("members", [])
+            if members:
+                stats = {lang: dict(stat) for lang, stat in stats.items()}
+                for member in members:
+                    for lang, stat in per_sub.get(member, {}).items():
+                        for key, value in stat.items():
+                            stats[lang][key] += value
             langs = set(entry["languages"])
+            for member in members:
+                langs |= workspaces[d]["entries"][member]["languages"]
             for lang, s in stats.items():
                 if s["files"] or s["test_files"]:
                     langs.add(lang)
@@ -4029,7 +4159,9 @@ class Detector(object):
 
         subprojects = []
         for d, entry, langs, stats, loc in kept:
-            subprojects.append(self.subproject_record(d, entry, langs, stats, shared))
+            subprojects.append(self.subproject_record(d, entry, langs, stats, shared,
+                                                      self.member_records(workspaces.get(d), per_sub),
+                                                      workspaces.get(d)))
         more_subprojects = [{"path": d, "manifest": (entry["manifests"] or [None])[0],
                              "languages": langs, "loc": loc} for d, entry, langs, stats, loc in more]
 
@@ -4088,7 +4220,23 @@ class Detector(object):
         row.update(extra)
         return row
 
-    def subproject_record(self, d, entry, langs, stats, shared):
+    def member_records(self, workspace, per_sub):
+        """Records of the members of a workspace: their own languages, tool rows and dependencies."""
+        if not workspace:
+            return []
+        records = []
+        for member in workspace["members"]:
+            entry = workspace["entries"][member]
+            stats = per_sub.get(member, {lang: new_stats() for lang in LANGUAGES})
+            langs = set(entry["languages"])
+            for lang, stat in stats.items():
+                if stat["files"] or stat["test_files"]:
+                    langs.add(lang)
+            ordered = [lang for lang in LANGUAGES if lang in langs]
+            records.append(self.subproject_record(member, entry, ordered, stats, []))
+        return records
+
+    def subproject_record(self, d, entry, langs, stats, shared, members=(), workspace=None):
         repo = self.repo
         categories = {c: [] for c in CATEGORIES if c != "hooks"}
         tool_rows = []
@@ -4129,6 +4277,16 @@ class Detector(object):
         for row in shared:
             if row["category"] in categories:
                 categories[row["category"]].append(row)
+        dependencies = count_dependencies(repo, d, entry["manifests"])
+        for member in members:
+            for category, rows in member["categories"].items():
+                have = {(r["tool"], r["file"], r["line"], r["how"]) for r in categories[category]}
+                for row in rows:
+                    if (row["tool"], row["file"], row["line"], row["how"]) not in have:
+                        categories[category].append(dict(row, member=member["path"]))
+            for key in ("direct", "dev"):
+                dependencies[key] += member["dependencies"][key]
+            dependencies["files"].extend(member["dependencies"]["files"])
         record = {
             "path": d,
             "manifest": (entry["manifests"] or [None])[0],
@@ -4136,7 +4294,9 @@ class Detector(object):
             "languages": langs,
             "stats": {lang: stats[lang] for lang in langs},
             "categories": categories,
-            "dependencies": count_dependencies(repo, d, entry["manifests"]),
+            "dependencies": dependencies,
+            "workspace": {"kind": workspace["kind"], "manifest": workspace["manifest"]} if workspace else None,
+            "members": list(members),
         }
         return record
 
