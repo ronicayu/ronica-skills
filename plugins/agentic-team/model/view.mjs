@@ -86,10 +86,9 @@ export const step = (action, from, to) => {
       ? "you launch an attempt (it stops the idle session)" : "you launch an attempt";
     case "LaunchStopsIdleThenRefuses": return (to.worker === "ghostStopped" || to.verifier === "ghostStopped")
       ? "launch stops the idle session; the row turns into a ghost, and launch refuses on it"
-      : (from.fault === "exclude" ? "launch stops the idle session, commits the WIP, then refuses (info/exclude read-only)" : "launch stops the idle session, then refuses");
+      : "launch stops the idle session, then refuses";
     case "VerifyPlain": return "you start a verifier";
     case "VerifyAgain": return "you start a verifier (--again)";
-    case "VerifyStopsThenRefuses": return "verify stops the old verifier, then refuses (info/exclude read-only)";
     case "VerifierFilesUnchecked": return "the verifier files ISSUES with no blocking: line (fails)";
     case "RoleBreaks": return "the role file goes missing or breaks";
     case "ExcludeBreaks": return "info/exclude turns read-only";

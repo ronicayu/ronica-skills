@@ -159,3 +159,22 @@ Every prediction held, with two notes. Lifecycle (distinct states): check.cfg 13
 Note 1: regress-65.cfg breaks NoDeadlock only. NOTES.md's sensitivity table also named NoSessionLeftAtEnd; the pre-edit model (HEAD before this change) gives the same result (10,420 states), so the table was stale since part 3 of #65, where a close's stop ends a ghost row. The part-3 results above already said so. Corrected in NOTES.md.
 
 Note 2: mailbox/check.cfg (the ADR as written, every FIX_* off) breaks the seven rules its round-1 table lists (NoDoorbellAfterAttemptEnds, AskerNeverFiledDead, SteersSettledOnceAttemptOver, AnswersSettledOnceAttemptOver, ClosedTaskHasNoUnreadSteer, InboxShowsEveryUnreadMessage, DoorbellOnlyToOwnAttempt) and stops at the 100,000-state bound on the reruns, as it did on 2026-11-09. The mailbox model was not changed: 0.18.0's one messaging change (`resume_with` catching the `ignore_scratch` refusal, a pending settle before the try counts) maps onto a branch the model has.
+
+# agentic-team 0.18.0, round 2 (8006a3c and ff2c8b0: the two fixes)
+
+Written from the model before any run. 8006a3c: `unlabelled_failure` makes `record` hint `verify --again` for a verifier's verify-failed row with no `blocking:` line, and `close` refuse it; the old reading is `REGRESS_89`. ff2c8b0: the exclude check runs before launch, verify and a resume stop or commit anything; the exclude side effects (`VerifyStopsThenRefuses`, the exclude branch of `LaunchStopsIdleThenRefuses`) are gone from the model, and `StoppedIdleNeverRefuses` has no exemption for it.
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg, pause.cfg, pause-pr.cfg (ALLOW_UNCHECKED_REPORT on) | every rule holds, no dead end. The unlabelled row's path: launch, PASS, verifier, files ISSUES with no `blocking:` line, the verifier ends, record says verified with `verify --again`, a new verifier files (labelled or not); close is refused on the unlabelled row and never hinted for it. States a little above round 1 (the --again loop adds a few). |
+| peel-1.cfg, faults.cfg, faults-pr.cfg | every rule holds; faults* a little below round 1 (no side-effect steps). |
+| regress-89.cfg | `FixRoundNeedsBlocking` breaks by the round-1 path (6 steps). Nothing else. |
+| regress-42 .. regress-65b | as in round 1. |
+| overview.cfg, overview-pr.cfg | 110 and 134, unchanged. |
+| mailbox/impl-r3.cfg | 181,886, holds, unchanged (the mailbox model did not change). |
+
+Revised before the second run: the first run of check.cfg broke `FixRoundNeedsBlocking` in 9 steps (an unlabelled row, `verify --again`, the new verifier hits a prompt, record files BLOCKED, close). A model artifact: `VerifyAgain` reset `vIssues` while `vv` still held the unlabelled row, so the model hinted close where the code keeps the old row as the newest with a verdict (`with_verdict`, 3462) and `choose_verdict` refuses it. `vIssues` now changes only with `vv`. Expected: check.cfg holds.
+
+## Results (round 2, 2026-11-11, code at ff2c8b0)
+
+Every prediction of the revised round held. check.cfg 15,566, check-pr.cfg 16,718, pause.cfg 60,892, pause-pr.cfg 64,780 (ALLOW_UNCHECKED_REPORT on), peel-1.cfg 10,958, faults.cfg 43,832 and faults-pr.cfg 48,440 (the same counts as round 1: the removed side-effect steps led to states the repair path reached anyway), overview.cfg 110 and overview-pr.cfg 134 hold every rule with no dead end. regress-89.cfg breaks FixRoundNeedsBlocking in 6 steps (13,998 states, the round-1 check.cfg path); regress-42 .. regress-65b break as in round 1. mailbox/impl-r3.cfg holds, 181,886.
