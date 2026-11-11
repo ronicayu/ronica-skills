@@ -134,6 +134,44 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: var(--tip); border: 1px solid var(--line-2); border-radius: 6px; color: var(--text); font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px var(--shadow); }
 #tip[hidden] { display: none; }
 #cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
+#toolbar #searchBtn, #toolbar #fitMore { display: none; }
+#toolbar .seg [data-short]::after { content: attr(data-short); display: none; }
+/* Narrow screens: two rows. Row 1 is project, goal, options; row 2 is view, Filter, More and a search button
+   that opens the search box over the row. The rows dissolve so every control can be ordered on one wrapping line. */
+@media (max-width: 640px) {
+  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 10px; }
+  #toolbar .row { display: contents; }
+  #toolbar .row > .spacer { display: none; }
+  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 32px; padding: 3px 8px; }
+  #toolbar #project { order: 1; flex: 0 1 112px; min-width: 64px; max-width: 140px; text-overflow: ellipsis; }
+  #toolbar #goalWrap { order: 2; flex: 1 1 0; min-width: 72px; }
+  #toolbar #optsWrap { order: 3; }
+  #toolbar #stamp { order: 4; margin-left: -2px; }
+  #toolbar #stamp .t, #toolbar #goalInfo { display: none; }
+  #toolbar #stamp .dot { margin-right: 0; }
+  #toolbar #row1::after { content: ''; order: 5; flex: 0 0 100%; height: 0; }
+  #toolbar .seg { order: 6; }
+  #toolbar .seg button { padding: 3px 7px; }
+  #toolbar .seg [data-short] { font-size: 0; }
+  #toolbar .seg [data-short]::after { display: inline; font-size: 13px; }
+  #toolbar #filterWrap { order: 7; }
+  #toolbar #moreWrap { order: 8; }
+  #toolbar #searchWrap { order: 9; margin-left: auto; }
+  #toolbar #fit { display: none; }
+  #toolbar #fitMore, #toolbar #searchBtn { display: block; }
+  #toolbar #searchBtn { min-width: 36px; font-size: 18px; line-height: 1; }
+  #toolbar #chips, #toolbar #clearAll { order: 10; }
+  #toolbar #chips { flex: 1 1 0; overflow-x: auto; scrollbar-width: none; }
+  #toolbar #chips:empty { display: none; }
+  #toolbar #chips .chip[data-key="goal"] { display: none; }
+  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; top: calc(var(--bar) + 4px); left: 8px; right: 8px; width: auto; min-width: 0; max-height: calc(100vh - var(--bar) - 16px); }
+  #toolbar .box { display: none; position: fixed; left: 0; right: 0; top: var(--search-top, 0); z-index: 6; box-sizing: border-box; padding: 4px 10px; background: var(--surface); }
+  #toolbar.searching .box { display: flex; }
+  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 32px; }
+  #toolbar #searchClear { right: 12px; min-width: 32px; }
+  #toolbar #searchCount { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 20px); margin: 0 -10px -4px; box-sizing: border-box; padding: 3px 10px; }
+}
 #legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: var(--surface-a); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
 #legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
 #legend .col { display: contents; }
@@ -324,7 +362,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
       <div class="menu" id="goalList" role="listbox" aria-label="Goals"></div>
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
-    <span class="seg" role="group" aria-label="View"><button id="viewGraph">Graph</button><button id="viewLanes">Swimlane</button><button id="viewTimeline">Timeline</button><button id="viewLoad" title="Hours per person per week, from estimates">Load</button></span>
+    <span class="seg" role="group" aria-label="View"><button id="viewGraph" aria-label="Graph"><span aria-hidden="true">Graph</span></button><button id="viewLanes" aria-label="Swimlane"><span aria-hidden="true" data-short="Lanes">Swimlane</span></button><button id="viewTimeline" aria-label="Timeline"><span aria-hidden="true" data-short="Time">Timeline</span></button><button id="viewLoad" aria-label="Load" title="Hours per person per week, from estimates"><span aria-hidden="true">Load</span></button></span>
     <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-expanded="false" aria-controls="opts" aria-label="View options" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
         <div class="grp" id="lanesBy" role="radiogroup" aria-labelledby="lanesHead"><div class="h" id="lanesHead">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
@@ -337,6 +375,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     </span>
     <span class="spacer"></span>
     <span class="menuWrap" id="searchWrap">
+      <button id="searchBtn" aria-expanded="false" aria-controls="search" aria-label="Search the plan" title="Search (/)">⌕</button>
       <span class="box"><input type="text" id="search" placeholder="Search (press /)" size="9" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="results" aria-autocomplete="list" aria-label="Search the plan" title="Title, #id, owner, lane, team, tags or notes · Enter steps · Esc clears"><button id="searchClear" title="Clear search (Esc)" aria-label="Clear search" hidden>×</button></span>
       <div class="menu right" id="results" role="listbox" aria-label="Search results"></div>
     </span>
@@ -355,8 +394,10 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
       <div class="menu right" id="more">
         <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
+        <button class="item" id="fitMore" title="Show the whole plan (F)">Fit <kbd>F</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
         <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
+        <button class="item" id="exportSvg" title="Save the whole current view as an SVG file, text kept as text">Export SVG</button>
         <button class="item" id="printPage" title="Print the whole current view, or save it as a PDF">Print…</button>
         <button class="item" id="refresh" hidden title="Check for changes now">Refresh now</button>
         <button class="item" id="copyView" title="Copy a link to exactly this view">Copy link to view</button>
@@ -455,9 +496,10 @@ let byId = new Map(DATA.nodes.map(n => [n.id, n]));
 const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
+const narrowScreen = matchMedia('(max-width: 640px)');
 const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
-const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, NARROW_LABEL_W = 96, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
   lane: n => inheritedMeta(n, 'lane'),
   owner: n => n.meta.owner ?? n.meta.decider ?? n.meta.party,
@@ -626,7 +668,7 @@ function cyStyle(p) {
   return [
     { selector: 'node', style: {
       'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
-      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': LABEL_W + 8,
+      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': () => graphLabelW() + 8,
       'text-valign': 'center', 'text-halign': 'center', 'font-size': 13,
       'font-family': FONT, 'color': ele => c(ele).fg,
       'background-color': ele => c(ele).bg, 'border-width': 2, 'border-color': ele => c(ele).bd,
@@ -897,6 +939,9 @@ const troubleText = n => {
 // Who to chase is the point of a chase-due external, so name the party rather than "chase due".
 const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
 
+// Graph nodes are narrower on a phone so a whole plan fits at a larger zoom.
+const graphLabelW = () => view === 'graph' && narrowScreen.matches ? NARROW_LABEL_W : LABEL_W;
+
 function labelOf(n, open) {
   const m = n.meta;
   const parts = isSummary(n)
@@ -909,8 +954,8 @@ function labelOf(n, open) {
   if (atRisk(n)) parts.unshift('at risk');
   if (n.late_days != null) parts.unshift(n.late_days + 'd late');
   const sub = parts.filter(Boolean).join(' · ');
-  const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
-  const [titleLines, subLines] = view === 'lanes' ? [2, 1] : [3, 2];
+  const width = view !== 'lanes' ? graphLabelW() : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
+  const [titleLines, subLines] = view === 'lanes' ? [2, 1] : view === 'graph' && narrowScreen.matches ? [4, 2] : [3, 2];
   const title = clampLabel(nodeMark(n) + priorityMark(n) + '#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
@@ -1251,28 +1296,129 @@ function layout(fit = true) {
 
 // Dagre's best ranking (network simplex) takes about 1.4 s at 800 nodes; tight-tree draws a
 // near-identical picture in half the time, so big plans use it. Layouts are remembered by shape
-// (nodes, their labels and classes, and links), so returning to a shape already seen, such as
-// clearing a filter or coming back to Graph, puts the nodes back without laying out again.
+// (nodes, their labels and classes, links, and spacing), so returning to a shape already seen, such as
+// clearing a filter or coming back to Graph, puts the nodes and edges back without laying out again.
 const BIG_GRAPH = 250, LAYOUTS_KEPT = 6;
 const layoutMemo = new Map();
 function layoutGraph() {
-  const nodes = tasks();
-  const key = nodes.map(n => n.id() + ':' + n.classes().join('.') + ':' + n.data('label')).join('|') + '#' + links().map(e => e.id() + ':' + e.data('kind')).join('|');
-  const seen = layoutMemo.get(key);
-  if (seen) {
-    layoutMemo.delete(key);
-    layoutMemo.set(key, seen);
-    return cy.batch(() => nodes.forEach(n => { n.position(seen[n.id()]); }));
+  const nodes = tasks(), edges = links();
+  const tight = narrowScreen.matches;
+  const key = (tight ? 'narrow#' : '') + nodes.map(n => n.id() + ':' + n.classes().join('.') + ':' + n.data('label')).join('|') + '#' + edges.map(e => e.id() + ':' + e.data('kind')).join('|');
+  let seen = layoutMemo.get(key);
+  if (seen) layoutMemo.delete(key);
+  else {
+    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
+    if (layoutMemo.size >= LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
   }
-  cy.layout({ name: 'dagre', ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', rankDir: 'BT', nodeSep: 40, rankSep: 80, edgeSep: 20, nodeDimensionsIncludeLabels: true, animate: false, fit: false }).run();
-  const pos = {};
-  nodes.forEach(n => { pos[n.id()] = { ...n.position() }; });
-  layoutMemo.set(key, pos);
-  if (layoutMemo.size > LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
+  layoutMemo.set(key, seen);
+  cy.batch(() => {
+    nodes.forEach(n => { n.position(seen.pos[n.id()]); });
+    edges.forEach(e => {
+      const r = seen.routes[e.id()];
+      if (!r) return;
+      e.style({
+        'curve-style': 'segments', 'edge-distances': 'node-position',
+        'source-endpoint': `${r.from.x}px ${r.from.y}px`, 'target-endpoint': `${r.to.x}px ${r.to.y}px`,
+        ...elbow(e.source().position(), e.target().position(), r.path)
+      });
+    });
+  });
+}
+
+// Runs dagre directly, not through cytoscape-dagre, which throws away the edge routes. Each edge
+// leaves its predecessor on its own port, follows dagre's bend points round nodes on long edges,
+// and shifts sideways in the gap between ranks. The shifts into one item share a bus; the shifts
+// of different items that would overlap in x get separate tracks, so every line traces to one target.
+const PORT_STEP = 9, TRACK_STEP = 12, TRACK_PAD = 7;
+function dagreLayout(nodes, edges, opts) {
+  const g = new dagre.graphlib.Graph({ multigraph: true });
+  g.setGraph({ rankdir: 'BT', ...opts });
+  g.setDefaultEdgeLabel(() => ({}));
+  nodes.forEach(n => { const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }); g.setNode(n.id(), { width: d.w, height: d.h }); });
+  edges.forEach(e => g.setEdge(e.source().id(), e.target().id(), { minlen: 1, weight: 1 }, e.id()));
+  dagre.layout(g);
+  const pos = {}, routes = {};
+  nodes.forEach(n => { const d = g.node(n.id()); pos[n.id()] = { x: d.x, y: d.y }; });
+  // Each rank's vertical extent, top of the picture first, so the gaps between ranks are known.
+  const tiers = new Map();
+  nodes.forEach(n => {
+    const d = g.node(n.id()), y = Math.round(d.y), t = tiers.get(y) || { y, top: Infinity, bottom: -Infinity };
+    t.top = Math.min(t.top, d.y - d.height / 2);
+    t.bottom = Math.max(t.bottom, d.y + d.height / 2);
+    tiers.set(y, t);
+  });
+  const ranks = [...tiers.values()].sort((p, q) => p.y - q.y);
+  const gapBelow = y => {
+    const i = ranks.findIndex(t => t.y === Math.round(y));
+    const t = ranks[i];
+    return { top: t.bottom, bottom: i + 1 < ranks.length ? ranks[i + 1].top : t.bottom + opts.ranksep };
+  };
+  const rankY = new Set(ranks.map(t => t.y));
+  const info = edges.map(e => {
+    const sid = e.source().id(), tid = e.target().id();
+    const bends = (g.edge(sid, tid, e.id()).points || []).slice(1, -1).filter(p => rankY.has(Math.round(p.y)));
+    return { e, sid, tid, partof: e.hasClass('partof'), pts: [g.node(sid), ...bends, g.node(tid)].map(p => ({ x: p.x, y: p.y })) };
+  });
+  // Ports: edges leaving one item spread across its top, ordered by where they head; a diamond has one point.
+  const spread = (list, node, key) => {
+    const w = node.style('shape') === 'diamond' ? 0 : Math.min(node.width() * 0.7, (list.length - 1) * PORT_STEP);
+    list.sort(key).forEach((it, i) => { it.dx = list.length > 1 ? (i / (list.length - 1) - 0.5) * w : 0; });
+  };
+  groupBy(info, it => it.sid).forEach(list => spread(list, list[0].e.source(), (p, q) => p.pts[1].x - q.pts[1].x || p.e.id().localeCompare(q.e.id())));
+  groupBy(info, it => it.tid).forEach(list => {
+    const kinds = new Set(list.map(it => it.partof));
+    list.forEach(it => { it.tx = kinds.size > 1 ? (it.partof ? 8 : -8) : 0; });
+  });
+  info.forEach(it => { it.pts[0].x += it.dx; it.pts[it.pts.length - 1].x += it.tx; });
+  // Every sideways shift, grouped so shifts into one item share a track; groups whose x ranges
+  // overlap within a gap get different tracks.
+  const groups = new Map();
+  info.forEach(it => {
+    it.shifts = [];
+    for (let i = 0; i + 1 < it.pts.length; i++) {
+      const a = it.pts[i], b = it.pts[i + 1];
+      if (Math.abs(a.x - b.x) <= 0.5) continue;
+      const key = Math.round(Math.min(a.y, b.y)) + (i + 2 === it.pts.length ? '|to ' + it.tid : '|' + it.e.id() + ':' + i);
+      const grp = groups.get(key) || { upper: Math.min(a.y, b.y), x1: Infinity, x2: -Infinity };
+      grp.x1 = Math.min(grp.x1, a.x, b.x);
+      grp.x2 = Math.max(grp.x2, a.x, b.x);
+      groups.set(key, grp);
+      it.shifts.push({ i, grp });
+    }
+  });
+  groupBy([...groups.values()], grp => Math.round(grp.upper)).forEach(list => {
+    const tracks = [];
+    list.sort((p, q) => p.x1 - q.x1).forEach(grp => {
+      let k = tracks.findIndex(end => end + 6 < grp.x1);
+      if (k < 0) k = tracks.push(-Infinity) - 1;
+      tracks[k] = grp.x2;
+      grp.track = k;
+    });
+    const gap = gapBelow(list[0].upper), step = Math.min(TRACK_STEP, (gap.bottom - gap.top - 2 * TRACK_PAD) / Math.max(tracks.length - 1, 1));
+    const mid = (gap.top + gap.bottom) / 2;
+    list.forEach(grp => { grp.y = mid + (grp.track - (tracks.length - 1) / 2) * Math.max(step, 3); });
+  });
+  info.forEach(it => {
+    const path = [];
+    it.shifts.forEach(({ i, grp }) => path.push([it.pts[i].x, grp.y], [it.pts[i + 1].x, grp.y]));
+    const s = it.pts[0], t = it.pts[it.pts.length - 1];
+    const up = t.y < s.y ? -1 : 1;
+    // A label under its shape (a milestone's) belongs to the node: lines start and stop beyond it.
+    const reach = (n, dir) => {
+      const at = n.position(), bb = n.boundingBox({ includeNodes: true, includeEdges: false, includeLabels: true, includeOverlays: false });
+      return dir < 0 ? Math.min(-n.outerHeight() / 2, bb.y1 - at.y) : Math.max(n.outerHeight() / 2, bb.y2 - at.y);
+    };
+    routes[it.e.id()] = {
+      path: path.length ? path : [[s.x, (s.y + t.y) / 2]],
+      from: { x: it.dx, y: reach(it.e.source(), up) },
+      to: { x: it.tx, y: reach(it.e.target(), -up) }
+    };
+  });
+  return { pos, routes };
 }
 
 // Fit like cy.fit, but leave the bottom strip under the legend free so it never covers a node.
-function fitTarget(eles = cy.elements(), pad = 40) {
+function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   if (eles.empty()) return null;
   const bb = eles.boundingBox();
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
@@ -1337,6 +1483,8 @@ function fitIfOutside() {
   if (target) cy.animate(target, { duration: 300 * MOTION });
 }
 
+// Crossing the narrow breakpoint (rotating a phone) changes the graph's spacing, so lay it out again.
+narrowScreen.addEventListener('change', () => { if (view === 'graph') rebuild(); });
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
@@ -1716,6 +1864,7 @@ function applySearch() {
   const hits = searchHits(q), ids = new Set(hits.map(n => String(n.id)));
   tasks().forEach(n => n.toggleClass('dim', ids.size > 0 && !ids.has(n.id())));
   $('searchClear').hidden = !$('search').value;
+  $('searchBtn').classList.toggle('on', !!$('search').value);
   const count = $('searchCount');
   const added = Date.now() < fresh.until ? hits.filter(n => fresh.ids.has(n.id)).length : 0;
   if (!q) count.replaceChildren();
@@ -2730,6 +2879,8 @@ const syncControls = () => {
   $('weekHours').value = String(weekHours);
   $('loadBy').classList.toggle('off', view !== 'load');
   $('exportPng').disabled = view === 'load';
+  $('exportSvg').disabled = view === 'load';
+  $('exportSvg').title = view === 'load' ? 'The Load view prints (More, Print…) rather than exporting an image' : 'Save the whole current view as an SVG file, text kept as text';
   $('exportPng').title = view === 'load' ? 'The Load view prints (More, Print…) rather than exporting an image' : 'Save the whole current view as a PNG image';
   radio('depsMode', depsMode).checked = true;
   $('lanesBy').classList.toggle('off', view === 'graph' || view === 'load');
@@ -2876,12 +3027,31 @@ $('search').onkeydown = e => {
   }
 };
 $('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
-$('search').onblur = () => setTimeout(() => { if (document.activeElement !== $('search')) setMenu('searchWrap', false); }, 0);
+$('search').onblur = () => setTimeout(() => {
+  if (document.activeElement === $('search')) return;
+  setMenu('searchWrap', false);
+  openSearchBox(false);
+}, 0);
+// On a narrow screen the box is hidden behind a button and opens over the second toolbar row.
+function openSearchBox(open) {
+  if (toolbar.classList.contains('searching') === open) return;
+  if (open) toolbar.style.setProperty('--search-top', ($('searchBtn').getBoundingClientRect().top - 4) + 'px');
+  toolbar.classList.toggle('searching', open);
+  $('searchBtn').setAttribute('aria-expanded', String(open));
+}
+function focusSearch() {
+  openSearchBox(true);
+  $('search').focus();
+  $('search').select();
+}
+$('searchBtn').onclick = focusSearch;
+$('fitMore').onclick = () => $('fit').click();
 $('searchClear').onclick = () => {
   clearSearch();
   $('search').focus();
 };
 $('results').addEventListener('mousedown', e => e.preventDefault());
+$('searchClear').addEventListener('mousedown', e => e.preventDefault());
 $('results').addEventListener('click', e => {
   const r = e.target.closest('.hit');
   if (r) openHit(Number(r.dataset.i));
@@ -2893,7 +3063,10 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (!$('tip').hidden) return hideTip();
     if (document.activeElement === $('search') && $('search').value) clearSearch();
-    else if (closeMenus()) return;
+    else if (document.activeElement === $('search') && toolbar.classList.contains('searching')) {
+      openSearchBox(false);
+      $('searchBtn').focus();
+    } else if (closeMenus()) return;
     else if ($('panel').style.display === 'block') closePanel();
     return;
   }
@@ -2906,8 +3079,7 @@ document.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
   if (e.key === '/') {
     e.preventDefault();
-    $('search').focus();
-    $('search').select();
+    focusSearch();
   } else if (key === 'f') $('fit').click();
   else if (key === 'e') $('expandAll').click();
   else if (key === 'c') $('collapseAll').click();
@@ -3030,6 +3202,121 @@ async function exportPng() {
 }
 $('exportPng').onclick = () => exportPng();
 
+// SVG export, drawn from the same styled elements the canvas draws (so no extra library): lane bands,
+// timeline axis, edges along their routes, and every label as text. Always the light paper colours.
+function svgOfView() {
+  const faded = cy.elements('.faded'), lit = cy.elements('.hl');
+  const paper = readPalette($('print')), restyle = paper.bg !== P.bg;
+  faded.union(lit).removeClass('faded hl');
+  mirrorNames();
+  let styled = false;
+  try {
+    if (restyle) styled = !!cy.style(cyStyle(paper));
+    return drawSvg(paper);
+  } finally {
+    if (styled) cy.style(cyStyle(P));
+    faded.addClass('faded');
+    lit.addClass('hl');
+    mirrorNames();
+  }
+}
+
+function drawSvg(paper) {
+  const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const n2 = v => Math.round(v * 100) / 100;
+  const px = (ele, key) => parseFloat(ele.style(key)) || 0;
+  const dash = (ele, width) => ({ dashed: ` stroke-dasharray="${n2(width * 4)} ${n2(width * 3)}"`, dotted: ` stroke-dasharray="${n2(width)} ${n2(width * 2)}"` })[ele.style('line-style')] || '';
+  const shown = cy.elements().filter(e => e.visible() && px(e, 'opacity') > 0);
+  const box = shown.boundingBox({ includeLabels: true, includeOverlays: false });
+  const pad = 24, head = 56;
+  const body = [];
+
+  const outline = node => {
+    const w = px(node, 'outline-width'), at = node.position();
+    if (w <= 0 || node.style('outline-style') === 'none') return '';
+    const off = px(node, 'outline-offset') + w / 2 + (px(node, 'border-width') / 2);
+    return `<rect x="${n2(at.x - node.outerWidth() / 2 - off)}" y="${n2(at.y - node.outerHeight() / 2 - off)}" width="${n2(node.outerWidth() + 2 * off)}" height="${n2(node.outerHeight() + 2 * off)}" rx="6" fill="none" stroke="${node.style('outline-color')}" stroke-opacity="${node.style('outline-opacity')}" stroke-width="${w}"/>`;
+  };
+  const shapeOf = node => {
+    const at = node.position(), w = node.outerWidth(), h = node.outerHeight();
+    const x1 = at.x - w / 2, y1 = at.y - h / 2, x2 = at.x + w / 2, y2 = at.y + h / 2;
+    const bw = px(node, 'border-width'), bd = node.style('border-style');
+    const fill = node.style('background-color'), fo = node.style('background-opacity');
+    const attrs = `fill="${fill}" fill-opacity="${fo}" stroke="${bw ? node.style('border-color') : 'none'}" stroke-width="${bw}"` + (bd === 'dashed' ? ` stroke-dasharray="${bw * 4} ${bw * 3}"` : bd === 'dotted' ? ` stroke-dasharray="${bw} ${bw * 2}"` : '');
+    const poly = pts => `<polygon points="${pts.map(p => p.map(n2).join(',')).join(' ')}" ${attrs}/>`;
+    switch (node.style('shape')) {
+      case 'diamond': return poly([[at.x, y1], [x2, at.y], [at.x, y2], [x1, at.y]]);
+      case 'hexagon': return poly([[x1 + h / 4, y1], [x2 - h / 4, y1], [x2, at.y], [x2 - h / 4, y2], [x1 + h / 4, y2], [x1, at.y]]);
+      case 'tag': return poly([[x1, y1], [x2 - h / 3, y1], [x2, at.y], [x2 - h / 3, y2], [x1, y2]]);
+      case 'ellipse': return `<ellipse cx="${n2(at.x)}" cy="${n2(at.y)}" rx="${n2(w / 2)}" ry="${n2(h / 2)}" ${attrs}/>`;
+      case 'round-rectangle': return `<rect x="${n2(x1)}" y="${n2(y1)}" width="${n2(w)}" height="${n2(h)}" rx="${n2(Math.min(15, Math.min(w, h) / 4))}" ${attrs}/>`;
+      default: return `<rect x="${n2(x1)}" y="${n2(y1)}" width="${n2(w)}" height="${n2(h)}" ${attrs}/>`;
+    }
+  };
+  const labelOfNode = node => {
+    const text = node.style('label');
+    if (!text) return '';
+    const at = node.position(), w = node.outerWidth(), h = node.outerHeight();
+    const size = px(node, 'font-size') || 13, line = size * 1.2, lines = text.split('\n');
+    const mx = px(node, 'text-margin-x'), my = px(node, 'text-margin-y');
+    const halign = node.style('text-halign'), valign = node.style('text-valign');
+    const x = halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
+    const anchor = halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
+    const top = valign === 'top' ? at.y - h / 2 + my - lines.length * line : valign === 'bottom' ? at.y + h / 2 + my : at.y + my - lines.length * line / 2;
+    return lines.map((t, i) => `<text x="${n2(x)}" y="${n2(top + (i + 0.5) * line)}" text-anchor="${anchor}" dominant-baseline="central" font-family="${esc(node.style('font-family'))}" font-size="${size}" font-weight="${node.style('font-weight')}" fill="${node.style('color')}" fill-opacity="${node.style('text-opacity')}">${esc(t)}</text>`).join('');
+  };
+  const edgeOf = edge => {
+    const pts = [edge.sourceEndpoint(), ...(edge.style('curve-style') === 'segments' ? edge.segmentPoints() : []), edge.targetEndpoint()];
+    const width = px(edge, 'width'), color = edge.style('line-color');
+    let out = `<path class="edge ${esc(edge.data('kind') || '')}" d="${pts.map((p, i) => (i ? 'L' : 'M') + n2(p.x) + ' ' + n2(p.y)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width}"${dash(edge, width)}/>`;
+    if (edge.style('target-arrow-shape') !== 'none') {
+      const a = pts[pts.length - 1], b = pts[pts.length - 2], len = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const ux = (a.x - b.x) / len, uy = (a.y - b.y) / len, size = 9 * px(edge, 'arrow-scale');
+      const base = { x: a.x - ux * size, y: a.y - uy * size };
+      out += `<polygon class="arrow" points="${n2(a.x)},${n2(a.y)} ${n2(base.x - uy * size * 0.45)},${n2(base.y + ux * size * 0.45)} ${n2(base.x + uy * size * 0.45)},${n2(base.y - ux * size * 0.45)}" fill="${edge.style('target-arrow-color')}"/>`;
+    }
+    return out;
+  };
+  const group = (ele, inner) => `<g opacity="${n2(px(ele, 'opacity'))}">${inner}</g>`;
+  const nodes = shown.nodes(), isBand = n => n.hasClass('bg');
+  nodes.filter(isBand).forEach(n => body.push(group(n, shapeOf(n) + labelOfNode(n))));
+  shown.edges().forEach(e => body.push(group(e, edgeOf(e))));
+  nodes.filter(n => !isBand(n)).forEach(n => {
+    const title = n.data('id') && byId.has(Number(n.id())) ? `<title>${esc('#' + n.id() + ' ' + byId.get(Number(n.id())).title)}</title>` : '';
+    body.push(`<g class="node" data-id="${esc(n.id())}" opacity="${n2(px(n, 'opacity'))}">${title}${outline(n)}${shapeOf(n)}${labelOfNode(n)}</g>`);
+  });
+
+  const x0 = box.x1 - pad, y0 = box.y1 - pad - head, w = Math.max(box.w + 2 * pad, 420), h = box.h + 2 * pad + head;
+  const sub = 'As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + exportFilters();
+  const font = esc(FONT);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${n2(w)}" height="${n2(h)}" viewBox="${n2(x0)} ${n2(y0)} ${n2(w)} ${n2(h)}">`
+    + `<title>${esc(exportTitle())}</title><rect x="${n2(x0)}" y="${n2(y0)}" width="${n2(w)}" height="${n2(h)}" fill="${paper.bg}"/>`
+    + `<text x="${n2(x0 + pad)}" y="${n2(y0 + pad + 8)}" font-family="${font}" font-size="18" font-weight="bold" fill="${paper.text}">${esc(exportTitle())}</text>`
+    + `<text x="${n2(x0 + pad)}" y="${n2(y0 + pad + 30)}" font-family="${font}" font-size="12" fill="${paper.muted}">${esc(sub)}</text>`
+    + body.join('') + '</svg>';
+}
+
+function exportSvg() {
+  const blob = new Blob([svgOfView()], { type: 'image/svg+xml' });
+  const link = el('a', { href: URL.createObjectURL(blob), download: exportName().replace(/\.png$/, '.svg') });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+$('exportSvg').onclick = () => exportSvg();
+// `tg.py export --svg` opens the page with #export=svg: the page swaps itself for the SVG text, or the reason it cannot.
+function exportFromHash() {
+  let out;
+  try {
+    if (view === 'load') throw new Error('The Load view has no SVG export');
+    out = el('pre', { id: 'tg-svg-out', textContent: svgOfView() });
+  } catch (e) {
+    out = el('pre', { id: 'tg-svg-err', textContent: String(e.message || e) });
+  }
+  document.body.replaceChildren(out);
+}
+
 // Print builds its sheet just before the browser lays the page out: the plan as one image (drawn
 // synchronously, without hover or selection fading), the legend as text, and the open panel.
 // Paper is always light, whatever the screen shows: #print carries the light tokens.
@@ -3079,7 +3366,7 @@ const setLegend = (open, save = true) => {
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
 // Closed by default so it never sits on the plan; the PNG export carries it either way.
-setLegend(store.get('taskgraph.legend') === 'open', false);
+setLegend(store.get('taskgraph.legend') === 'open' && !narrowScreen.matches, false);
 $('legendToggle').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
   fitIfOutside();
@@ -3107,7 +3394,7 @@ if (DATA.live) {
     connected = ok;
     const when = new Date().toLocaleTimeString([], HM);
     if (ok) lastOk = when;
-    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), lastOk || when);
+    $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), el('span', { className: 't', textContent: lastOk || when }));
     $('stamp').title = ok ? 'Live · checked ' + when : `Disconnected · tried ${when} · last good ${lastOk || 'never'}`;
     $('banner').hidden = ok;
     if (!ok) $('banner').replaceChildren(`Not live since ${lastOk || 'the page opened'} · the server is not answering, so this may be out of date.`,
@@ -3141,13 +3428,15 @@ if (DATA.live) {
   $('refresh').hidden = false;
   $('refresh').onclick = () => poll(true);
 } else {
-  $('stamp').textContent = 'Generated ' + fmt(DATA.generated_at);
+  $('stamp').replaceChildren(el('span', { className: 't', textContent: 'Generated ' + fmt(DATA.generated_at) }));
+  $('stamp').title = 'Generated ' + fmt(DATA.generated_at);
 }
 
 if (goal != null && !byId.has(goal)) goal = null;
 autoOpen();
 fillGoals();
 rebuild();
+if (location.hash === '#export=svg') setTimeout(exportFromHash, 50);
 // ?task=ID opens that item, loosening whatever filter would hide it: the link asked for it.
 const linked = byId.get(Number(query.get('task')));
 if (linked) {

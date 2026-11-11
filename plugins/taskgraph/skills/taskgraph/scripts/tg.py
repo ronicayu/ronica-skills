@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 import argparse
+import glob
+import html
 import json
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import webbrowser
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
 from tgstore import open_store as open_tgstore
 from tgstore.base import ResultInput, StoreError, now
@@ -1627,7 +1631,107 @@ def load_text(d):
     return "\n".join(out)
 
 
+CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "microsoft-edge", "microsoft-edge-stable")
+CHROME_PATHS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome",
+    "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+)
+
+
+def find_chrome():
+    override = os.environ.get("CHROME")
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    for name in CHROME_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    for pattern in CHROME_PATHS:
+        expanded = str(Path(pattern).expanduser())
+        for path in sorted(glob.glob(expanded), reverse=True):
+            if os.access(path, os.X_OK):
+                return path
+    return None
+
+
+def svg_from_playwright(url, width, height):
+    try:
+        from playwright.sync_api import Error as PlaywrightError, sync_playwright
+    except ImportError:
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": width, "height": height})
+                page.goto(url)
+                page.wait_for_selector("#tg-svg-out, #tg-svg-err", state="attached", timeout=60000)
+                ok = page.query_selector("#tg-svg-out")
+                return ("svg" if ok else "error", (ok or page.query_selector("#tg-svg-err")).text_content())
+            finally:
+                browser.close()
+    except PlaywrightError:
+        return None
+
+
+def svg_from_chrome(url, width, height):
+    chrome = find_chrome()
+    if not chrome:
+        return None
+    with tempfile.TemporaryDirectory() as profile:
+        run = subprocess.run(
+            [chrome, "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", f"--user-data-dir={profile}", f"--window-size={width},{height}",
+             "--virtual-time-budget=15000", "--dump-dom", url],
+            capture_output=True, text=True, timeout=120,
+        )
+    found = re.search(r'<pre id="(tg-svg-out|tg-svg-err)">(.*?)</pre>', run.stdout, re.S)
+    if not found:
+        raise Fail(f"{chrome} did not produce the SVG: {run.stderr.strip()[-300:] or 'the page did not finish'}")
+    return ("svg" if found[1] == "tg-svg-out" else "error", html.unescape(found[2]))
+
+
+def export_svg(conn, args):
+    if args.view == "load":
+        raise Fail("the Load view has no SVG export; use --view graph, lanes or timeline")
+    query = urlsplit(args.state).query if args.state and "?" in args.state else (args.state or "").lstrip("?#")
+    pairs = [(k, v) for k, v in parse_qsl(query) if k not in ("view", "goal", "task")]
+    if args.view:
+        pairs.append(("view", args.view))
+    if args.goal is not None:
+        pairs.append(("goal", str(args.goal)))
+    elif parse_qs(query).get("goal"):
+        pairs.append(("goal", parse_qs(query)["goal"][0]))
+    if not args.view and parse_qs(query).get("view"):
+        pairs.append(("view", parse_qs(query)["view"][0]))
+    if dict(pairs).get("view") == "load":
+        raise Fail("the Load view has no SVG export; use --view graph, lanes or timeline")
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp) / "graph.html"
+        page.write_text(render_page(graph_payload(conn, args)), encoding="utf-8")
+        url = page.as_uri() + ("?" + urlencode(pairs) if pairs else "") + "#export=svg"
+        engines = {"playwright": svg_from_playwright, "chrome": svg_from_chrome}
+        order = [os.environ["TG_SVG_ENGINE"]] if os.environ.get("TG_SVG_ENGINE") in engines else list(engines)
+        done = next((r for r in (engines[name](url, args.width, 900) for name in order) if r), None)
+    if done is None:
+        raise Fail("no headless browser found: install Playwright (pip install playwright && playwright install chromium) "
+                   "or Chrome, Chromium or Edge (set CHROME to its path if it is not on PATH)")
+    kind, text = done
+    if kind == "error":
+        raise Fail(text)
+    out = Path(args.svg).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text + "\n", encoding="utf-8")
+    emit(args, {"path": str(out), "bytes": len(text)}, str(out))
+
+
 def cmd_export(store, conn, args):
+    if args.svg:
+        return export_svg(conn, args)
     keys = ("id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at")
     tasks = [{k: t[k] for k in keys} for t in scoped(load(conn), args)]
     ids = {t["id"] for t in tasks}
@@ -1967,6 +2071,11 @@ def build_parser():
 
     p = command("export")
     p.add_argument("--out")
+    p.add_argument("--svg", help="write the Graph, Swimlane or Timeline view as an SVG file instead of the JSON export")
+    p.add_argument("--view", choices=("graph", "lanes", "timeline", "load"), help="view for --svg (default graph)")
+    p.add_argument("--goal", type=int, help="show only what this milestone or objective needs (--svg)")
+    p.add_argument("--width", type=int, default=1400, help="browser width in pixels for --svg; 640 or less lays the page out for a phone")
+    p.add_argument("--state", help="a link from More, Copy link to view, or its query string (--svg)")
     p.add_argument("--all-projects", action="store_true")
 
     p = command("tree")
