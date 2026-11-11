@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -297,7 +298,9 @@ def test_two_tg_processes_race_for_one_task(fake, tmp_path):
     assert sorted(code for code, _, _ in results) == [0, 1]
     loser = next(r for r in results if r[0] == 1)
     winner = scripts[[r[0] for r in results].index(0)][0]
-    assert loser[2] == f"error: #{n} is claimed by {winner}\n"
+    # The loser either posted too and lost at the decision ("is claimed by m1"), or started late enough to read the
+    # winner's claim first and never posted ("is claimed by m1 since <time>"). Both are right; a slow machine gives the second.
+    assert re.fullmatch(rf"error: #{n} is claimed by {winner}( since \S+)?\n", loser[2]), loser[2]
     assert len(fake.comments(n)) == 1
 
 

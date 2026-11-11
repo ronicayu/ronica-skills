@@ -1,4 +1,5 @@
-"""Tests for scripts/run.py. Run: "$PY" -m unittest discover plugins/agentic-team/tests
+"""Tests for scripts/run.py. Run: "$PY" plugins/agentic-team/tests/run_parallel.py (in parallel, the normal gate)
+or: "$PY" -m unittest discover -s plugins/agentic-team/tests (serial, the reference)
 
 Each test builds a temporary git repository as the root with a bare origin.git
 beside it, a temporary Taskgraph database, a temporary HOME, the real tg.py from
@@ -309,12 +310,22 @@ class Doorbell:
             time.sleep(0.02)
         return self.lines
 
-    def refuse(self):
-        """Stop listening but leave the socket file: a connect now gets ECONNREFUSED."""
+    def stop_listening(self):
+        """Close the listening socket for good. On Linux, close() alone does not stop a socket while the serve thread
+        is blocked in accept(): the kernel keeps it listening and a connect still succeeds. shutdown() first wakes
+        accept() with an error (on macOS it fails with ENOTCONN, which does no harm)."""
+        try:
+            self.server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.server.close()
 
+    def refuse(self):
+        """Stop listening but leave the socket file: a connect now gets ECONNREFUSED."""
+        self.stop_listening()
+
     def close(self):
-        self.server.close()
+        self.stop_listening()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -3231,7 +3242,9 @@ class RunTest(Base):
         os.makedirs(bare)
         os.symlink(os.path.join(self.bin, "claude"), os.path.join(bare, "claude"))
         os.symlink(os.path.join(self.bin, "docker"), os.path.join(bare, "docker"))
-        env = dict(self.env, PATH=bare + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
+        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        os.symlink(sys.executable, os.path.join(bare, "python3"))
+        env = dict(self.env, PATH=bare)  # no system folder: a gh or glab that the machine has must not be found
         self.assertIsNone(shutil.which("gh", path=env["PATH"]))
         self.assertIsNone(shutil.which("glab", path=env["PATH"]))
         self.orders("MERGE: verified branches into main\n")
@@ -3980,6 +3993,8 @@ class RunTest(Base):
         sub = os.path.join(self.dir, "sub")
         os.makedirs(sub)
         self.git("init", "-q", "-b", "main", cwd=sub)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=sub)
         self.git("commit", "-q", "--allow-empty", "-m", "s", cwd=sub)
         self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "libs")
         self.git("commit", "-q", "-m", "add libs")

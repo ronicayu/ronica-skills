@@ -1,4 +1,4 @@
-"""Tests for scripts/mailbox.py, the worker's side of the mailbox. Run: "$PY" -m unittest discover plugins/agentic-team/tests
+"""Tests for scripts/mailbox.py, the worker's side of the mailbox. Run: "$PY" plugins/agentic-team/tests/run_parallel.py (all tests, in parallel)
 
 Each test builds a temporary Taskgraph database with the real tg.py and a context file as run.py writes it. Nothing
 here reaches a real session or socket.

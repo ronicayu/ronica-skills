@@ -1,4 +1,4 @@
-"""Tests for scripts/config.py. Run: "$PY" -m unittest discover plugins/agentic-team/tests"""
+"""Tests for scripts/config.py. Run: "$PY" plugins/agentic-team/tests/run_parallel.py (all tests, in parallel)"""
 
 import contextlib
 import io

@@ -32,6 +32,62 @@ jobs:
           python -m pip install --quiet -r plugins/evidence-search/scripts/requirements.txt
           python -m unittest discover -s plugins/evidence-search/tests
 
+  agentic-team:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests, in parallel
+        run: python plugins/agentic-team/tests/run_parallel.py
+
+  taskgraph:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, github-fake]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests, ${{ matrix.backend }} store
+        run: |
+          python -m pip install --quiet pytest==9.2.0
+          python -m pytest -q -p no:cacheprovider plugins/taskgraph/skills/taskgraph/tests --backend=${{ matrix.backend }}
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: mypy (default settings) on each plugin's scripts
+        run: |
+          python -m pip install --quiet mypy==2.4.1
+          for dir in plugins/agentic-team/scripts plugins/taskgraph/skills/taskgraph/scripts plugins/evidence-search/scripts plugins/repo-health/skills/repo-health/scripts; do
+            python -m mypy --ignore-missing-imports "$dir"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: tsc on the statechart scripts
+        working-directory: plugins/statechart/skills/statechart/scripts
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+
   repo-health:
     runs-on: ubuntu-latest
     steps:

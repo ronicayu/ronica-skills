@@ -79,7 +79,7 @@ def _collapse(text, limit=120):
 
 # ------------------------------------------------------------- tree-sitter
 
-_PARSERS = {}
+_PARSERS: dict[str, object] = {}  # language -> tree_sitter.Parser
 _TS_STATE = {"checked": False, "ok": False, "error": ""}
 
 
