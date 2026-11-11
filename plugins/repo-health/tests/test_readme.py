@@ -56,7 +56,7 @@ class ReadmeCommands(unittest.TestCase):
         self.assertEqual((commands[command]["kind"], commands[command]["check"]), (kind, check), commands[command])
 
     def test_record_shape_and_lines(self):
-        found = self.commands(self.block("npm ci\n# comment\nnpm run dev\n")) 
+        found = self.commands(self.block("npm ci\n# comment\nnpm run dev\n"))
         records = list(found.values())
         self.assertEqual([r["line"] for r in records], [4, 6])
         self.assertEqual(set(records[0]), {"line", "command", "kind", "check", "why"})
