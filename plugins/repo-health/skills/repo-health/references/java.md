@@ -19,12 +19,12 @@ A tool that is not in the build cannot run ephemerally in a useful way: report i
 | `spotless` | format | the plugin in the build | Maven: `./mvnw -B -q spotless:check`; Gradle: `./gradlew spotlessCheck` | Usually wraps google-java-format or palantir-java-format. |
 | `google-java-format` | format | in the build or CI | through spotless or the CI step that runs it | |
 | `javac-strict` | types | `-Werror`, `-Xlint` in compiler args | the build's compile step: `./mvnw -B -q compile` / `./gradlew compileJava` and count `warning:` lines | |
-| `spotbugs` | static | `spotbugs-exclude.xml`, the plugin in the build | not run (config only) |  |
+| `spotbugs` | static | `spotbugs-exclude.xml`, the plugin in the build | only with consent when the data is stale: Maven: `./mvnw -B -q compile spotbugs:check`; Gradle: `./gradlew spotbugsMain` | |
 | `error-prone` | static | `errorprone` in the build | runs inside the compile step | Reports as compiler warnings and errors. |
 | `junit` | tests | JUnit in build dependencies | Maven: `./mvnw -B test`; Gradle: `./gradlew test` | Results in `target/surefire-reports/` or `build/test-results/`: count tests, failures, skipped from the XML. |
 | `testng` | tests | TestNG in build dependencies | as junit | |
 | `jacoco` | coverage | the plugin in the build | Maven: `./mvnw -B test jacoco:report`; Gradle: `./gradlew test jacocoTestReport` | Total from `jacoco.csv` or the HTML index. Gate: Maven `jacoco:check` rules, Gradle `jacocoTestCoverageVerification`. |
-| `dependency-check` | deps_audit | the OWASP plugin in the build | not run (config only) | Dependabot or Renovate plus GitHub's dependency graph is the light alternative. |
+| `dependency-check` | deps_audit | the OWASP plugin in the build | only with consent when the data is stale: recommend only unless configured; it downloads the NVD database (slow; an NVD API key is advised) | Dependabot or Renovate plus GitHub's dependency graph is the light alternative. |
 | `archunit` | arch | `archunit` in build dependencies | runs inside the tests | Counts when CI runs the suite that holds the ArchUnit tests. Freeze existing violations with `FreezingArchRule`. |
 | `spring-modulith` | arch | `spring-modulith` in build dependencies | runs inside the tests (`ApplicationModules.of(App.class).verify()`) | Module boundaries for Spring Boot apps. |
 

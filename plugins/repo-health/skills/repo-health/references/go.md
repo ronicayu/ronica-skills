@@ -16,8 +16,8 @@ Markers: `go.mod`. Lockfile: `go.sum`. Toolchain pin: the `go` and `toolchain` d
 | `gofmt` | format | (none) | `gofmt -l .` | Lists files that are not formatted; an empty list is clean. |
 | `goimports` | format | (none) | `go run golang.org/x/tools/cmd/goimports@latest -l .` | |
 | `gofumpt` | format | (none) | `go run mvdan.cc/gofumpt@latest -l .` | Stricter gofmt. |
-| `gosec` | static | (none) | not run (config only) | Also available inside golangci-lint. |
-| `govulncheck` | deps_audit | (none) | not run (config only) |  |
+| `gosec` | static | (none) | only with consent when the data is stale: `go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet -fmt json ./...` | Count by severity. Also available inside golangci-lint. |
+| `govulncheck` | deps_audit | (none) | only with consent when the data is stale: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` | Reports only vulnerabilities in code the module calls; needs the network. |
 | `go-test` | tests | (none) | `go test ./...` | Add `-count=1` to skip the test cache. `-race` is a recommendation for concurrent code, not a tier 1 default (slower). |
 | `go-cover` | coverage | (none) | `go test -count=1 -coverprofile=<scratch>/cover.out ./... && go tool cover -func=<scratch>/cover.out` | The last line is the total. |
 | `deadcode` | deadcode | (none) | `go run golang.org/x/tools/cmd/deadcode@latest ./...` | Unreachable functions from `main`; libraries without `main` need `-test`. |

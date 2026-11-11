@@ -10,11 +10,11 @@ Pull request triggers: GitHub `pull_request`, `pull_request_target`, `merge_grou
 
 | tool | category | config | tier 1 command | notes |
 |---|---|---|---|---|
-| `semgrep` | static | `.semgrep.yml`, `.semgrep.yaml`, `.semgrep/` | not run (config only) |  |
-| `codeql` | static | a workflow with `github/codeql-action` | not run (config only); `gh api repos/<o>/<r>/code-scanning/alerts?state=open --paginate` is a ghfacts read of open alerts (needs security read access) | GitHub's default setup has no workflow file: then `gh api repos/<o>/<r>/code-scanning/default-setup` shows it. |
-| `sonarqube` | static | `sonar-project.properties`, `sonarqube` in the build | not run (config only) |  |
-| `gitleaks` | secrets | `.gitleaks.toml`, `.gitleaksignore` | not run (config only) |  |
-| `trufflehog` | secrets | (none) | not run (config only) |  |
+| `semgrep` | static | `.semgrep.yml`, `.semgrep.yaml`, `.semgrep/` | only with consent when the data is stale: `uvx semgrep scan --config p/default --metrics off --json -o <scratch>/semgrep.json` | Downloads rules from the Semgrep registry (network). With a project config, use `--config <that file>`. `--config auto` needs metrics on; do not use it. |
+| `codeql` | static | a workflow with `github/codeql-action` | not run locally (needs the CodeQL CLI and a build); with `gh` signed in, `gh api repos/<o>/<r>/code-scanning/alerts?state=open --paginate` counts open alerts (needs security read access) | GitHub's default setup has no workflow file: then `gh api repos/<o>/<r>/code-scanning/default-setup` shows it. |
+| `sonarqube` | static | `sonar-project.properties`, `sonarqube` in the build | not run locally (needs the server); report the config | |
+| `gitleaks` | secrets | `.gitleaks.toml`, `.gitleaksignore` | only with consent when the data is stale: `gitleaks dir . --redact --no-banner --report-format json --report-path <scratch>/gitleaks.json` if installed (v8.19+; older versions: `gitleaks detect --no-git --redact ...`) | Scan the working tree only in tier 1. A history scan (`gitleaks git`) is slower; offer it as its own option for repos that were ever public. Never print secret values. |
+| `trufflehog` | secrets | (none) | only with consent when the data is stale: `trufflehog filesystem . --no-update --json` if installed | Prints secret values unless filtered: write to a scratch file and report only detector, file and line. |
 | `dependabot` | deps_bot | `.github/dependabot.yml`, `.github/dependabot.yaml` | (none) | List which ecosystems it covers; an ecosystem in the repo that it does not list is a gap. |
 | `renovate` | deps_bot | `renovate.json`, `renovate.json5`, `.github/renovate.json*`, `.renovaterc*`, `renovate` in `package.json` | (none) | |
 | `pre-commit` | hooks | `.pre-commit-config.yaml` | (none: running it changes files) | List hook ids and their `rev`s. Also a source of declared tool versions. |

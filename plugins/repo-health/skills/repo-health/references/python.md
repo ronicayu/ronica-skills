@@ -4,7 +4,7 @@ Markers: `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements*.txt`, `Pipfil
 
 ## Environment
 
-Most tier 1 tools run without the project's dependencies (ruff, vulture). Type checkers and tests need them.
+Most tier 1 tools run without the project's dependencies (ruff, bandit, vulture, pip-audit on a requirements file). Type checkers and tests need them.
 - An existing environment: `.venv/` or `venv/` in the repo, or the active `VIRTUAL_ENV`. Use it: `.venv/bin/python -m pytest`.
 - `uv.lock`: `uv run --frozen <cmd>` creates `.venv/` in the repo if missing. That writes into the repo; ask about it in step 4.
 - `poetry.lock`: `poetry run <cmd>` (needs `poetry install` first: ask).
@@ -22,13 +22,13 @@ Most tier 1 tools run without the project's dependencies (ruff, vulture). Type c
 | `isort` | format | `.isort.cfg`, `[tool.isort]` | `uvx isort --check-only .` | |
 | `mypy` | types | `mypy.ini`, `.mypy.ini`, `[mypy]`, `[tool.mypy]` | in the project env: `python -m mypy .` (or the paths in config) | Error count from the last line `Found N errors`. Gradual: per-module `[[tool.mypy.overrides]]`. |
 | `pyright` | types | `pyrightconfig.json`, `[tool.pyright]` | `npx --yes pyright --outputjson` (point `--pythonpath` at the env's python) | `basedpyright` is a fork; treat it as pyright. Baseline: basedpyright `--writebaseline`. |
-| `bandit` | static | `.bandit`, `[tool.bandit]` | not run (config only) |  |
+| `bandit` | static | `.bandit`, `[tool.bandit]` | only with consent when the data is stale: `uvx bandit -r <src> -q -f json` | Count by severity; skip test folders (`-x tests`). |
 | `pytest` | tests | `pytest.ini`, `conftest.py`, `[tool.pytest.ini_options]`, `[tool:pytest]` | in the project env: `python -m pytest -q --durations=5` | Add `-p no:cacheprovider` so it writes no `.pytest_cache` into the repo. |
 | `unittest` | tests | (none) | in the project env: `python -m unittest discover -s <tests dir>` | |
 | `tox` | tests | `tox.ini` | prefer running pytest in an existing env; `tox` builds its own envs under `.tox/` | Ask before running tox: it installs. |
 | `nox` | tests | `noxfile.py` | as tox | |
 | `coverage.py` | coverage | `.coveragerc`, `[tool.coverage.*]`, `[coverage:*]` | in the project env: `python -m coverage run -m pytest -q -p no:cacheprovider && python -m coverage report --format=total` | Writes `.coverage` into the repo: set `COVERAGE_FILE=<scratch>/.coverage`. Gate: `fail_under` in `[tool.coverage.report]`. |
-| `pip-audit` | deps_audit | (none) | not run (config only) |  |
+| `pip-audit` | deps_audit | (none) | only with consent when the data is stale: `uvx pip-audit -r <requirements file>`; with `uv.lock`: `uv export --frozen --format requirements-txt --no-hashes -o <scratch>/req.txt` then `uvx pip-audit -r <scratch>/req.txt`; in an env: `uvx pip-audit` with that env active | Needs the network (PyPI advisory data). |
 | `vulture` | deadcode | `[tool.vulture]` | `uvx vulture <src> --min-confidence 80` | False positives: framework entry points, `__all__`, plugins. A whitelist file is the baseline. |
 | `import-linter` | arch | `.importlinter`, `[importlinter]` in `setup.cfg`, `[tool.importlinter]` in `pyproject.toml` | `uvx --from import-linter lint-imports` (needs the package importable) | Contracts: layers, forbidden, independence. CI word: `lint-imports`. |
 | `tach` | arch | `tach.toml` | `uvx tach check` | Module boundaries and declared interfaces; fast (Rust). |
