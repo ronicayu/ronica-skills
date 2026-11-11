@@ -498,7 +498,7 @@ const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
 const narrowScreen = matchMedia('(max-width: 640px)');
 const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
-const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
+const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, NARROW_LABEL_W = 96, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
   lane: n => inheritedMeta(n, 'lane'),
   owner: n => n.meta.owner ?? n.meta.decider ?? n.meta.party,
@@ -667,7 +667,7 @@ function cyStyle(p) {
   return [
     { selector: 'node', style: {
       'shape': 'round-rectangle', 'width': 'label', 'height': 'label', 'padding': '12px',
-      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': LABEL_W + 8,
+      'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': () => graphLabelW() + 8,
       'text-valign': 'center', 'text-halign': 'center', 'font-size': 13,
       'font-family': FONT, 'color': ele => c(ele).fg,
       'background-color': ele => c(ele).bg, 'border-width': 2, 'border-color': ele => c(ele).bd,
@@ -938,6 +938,9 @@ const troubleText = n => {
 // Who to chase is the point of a chase-due external, so name the party rather than "chase due".
 const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
 
+// Graph nodes are narrower on a phone so a whole plan fits at a larger zoom.
+const graphLabelW = () => view === 'graph' && narrowScreen.matches ? NARROW_LABEL_W : LABEL_W;
+
 function labelOf(n, open) {
   const m = n.meta;
   const parts = isSummary(n)
@@ -950,8 +953,8 @@ function labelOf(n, open) {
   if (atRisk(n)) parts.unshift('at risk');
   if (n.late_days != null) parts.unshift(n.late_days + 'd late');
   const sub = parts.filter(Boolean).join(' · ');
-  const width = view !== 'lanes' ? LABEL_W : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
-  const [titleLines, subLines] = view === 'lanes' ? [2, 1] : [3, 2];
+  const width = view !== 'lanes' ? graphLabelW() : n.type === 'milestone' ? MILESTONE_LANE_W : n.type === 'decision' ? DECISION_LANE_W : LABEL_W;
+  const [titleLines, subLines] = view === 'lanes' ? [2, 1] : view === 'graph' && narrowScreen.matches ? [4, 2] : [3, 2];
   const title = clampLabel(nodeMark(n) + priorityMark(n) + '#' + n.id + ' ' + n.title, width, sub ? titleLines : titleLines + subLines);
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
@@ -1303,20 +1306,29 @@ function layoutGraph() {
   let seen = layoutMemo.get(key);
   if (seen) layoutMemo.delete(key);
   else {
-    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 16 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
+    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
     if (layoutMemo.size >= LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
   }
   layoutMemo.set(key, seen);
   cy.batch(() => {
     nodes.forEach(n => { n.position(seen.pos[n.id()]); });
-    edges.forEach(e => { if (seen.routes[e.id()]) e.style({ 'curve-style': 'segments', 'edge-distances': 'node-position', ...elbow(e.source().position(), e.target().position(), seen.routes[e.id()]) }); });
+    edges.forEach(e => {
+      const r = seen.routes[e.id()];
+      if (!r) return;
+      e.style({
+        'curve-style': 'segments', 'edge-distances': 'node-position',
+        'source-endpoint': `${r.from.x}px ${r.from.y}px`, ...(r.to ? { 'target-endpoint': `${r.to.x}px ${r.to.y}px` } : {}),
+        ...elbow(e.source().position(), e.target().position(), r.path)
+      });
+    });
   });
 }
 
 // Runs dagre directly, not through cytoscape-dagre, which throws away the edge routes. Each edge
-// leaves its predecessor, shifts sideways midway between ranks (following dagre's bend points
-// past nodes on long edges) and joins the dependent along a bus just below it, so lines into
-// one item share a trunk and the picture stays a tidy layered diagram.
+// leaves its predecessor on its own port, follows dagre's bend points round nodes on long edges,
+// and shifts sideways in the gap between ranks. The shifts into one item share a bus; the shifts
+// of different items that would overlap in x get separate tracks, so every line traces to one target.
+const PORT_STEP = 9, TRACK_STEP = 12, TRACK_PAD = 7;
 function dagreLayout(nodes, edges, opts) {
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: 'BT', ...opts });
@@ -1326,30 +1338,81 @@ function dagreLayout(nodes, edges, opts) {
   dagre.layout(g);
   const pos = {}, routes = {};
   nodes.forEach(n => { const d = g.node(n.id()); pos[n.id()] = { x: d.x, y: d.y }; });
-  const bus = Math.min(14, opts.ranksep / 3);
-  // Dagre also places a bend halfway between every two ranks; only the ones on a rank steer round nodes.
-  const rankY = new Set(nodes.map(n => Math.round(pos[n.id()].y)));
-  edges.forEach(e => {
-    const s = g.node(e.source().id()), t = g.node(e.target().id());
-    const bends = (g.edge(e.source().id(), e.target().id(), e.id()).points || []).slice(1, -1).filter(p => rankY.has(Math.round(p.y)));
-    const pts = [s, ...bends, t];
-    const path = [];
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const a = pts[i], b = pts[i + 1];
-      let y = (a.y + b.y) / 2;
-      if (i + 2 === pts.length) {
-        const joined = t.y - Math.sign(t.y - a.y) * (t.height / 2 + bus);
-        if ((joined - a.y) * (joined - t.y) < 0) y = joined;
-      }
-      if (Math.abs(a.x - b.x) > 0.5) path.push([a.x, y], [b.x, y]);
+  // Each rank's vertical extent, top of the picture first, so the gaps between ranks are known.
+  const tiers = new Map();
+  nodes.forEach(n => {
+    const d = g.node(n.id()), y = Math.round(d.y), t = tiers.get(y) || { y, top: Infinity, bottom: -Infinity };
+    t.top = Math.min(t.top, d.y - d.height / 2);
+    t.bottom = Math.max(t.bottom, d.y + d.height / 2);
+    tiers.set(y, t);
+  });
+  const ranks = [...tiers.values()].sort((p, q) => p.y - q.y);
+  const gapBelow = y => {
+    const i = ranks.findIndex(t => t.y === Math.round(y));
+    const t = ranks[i];
+    return { top: t.bottom, bottom: i + 1 < ranks.length ? ranks[i + 1].top : t.bottom + opts.ranksep };
+  };
+  const rankY = new Set(ranks.map(t => t.y));
+  const info = edges.map(e => {
+    const sid = e.source().id(), tid = e.target().id();
+    const bends = (g.edge(sid, tid, e.id()).points || []).slice(1, -1).filter(p => rankY.has(Math.round(p.y)));
+    return { e, sid, tid, partof: e.hasClass('partof'), pts: [g.node(sid), ...bends, g.node(tid)].map(p => ({ x: p.x, y: p.y })) };
+  });
+  // Ports: edges leaving one item spread across its top, ordered by where they head; a diamond has one point.
+  const spread = (list, node, key) => {
+    const w = node.style('shape') === 'diamond' ? 0 : Math.min(node.width() * 0.7, (list.length - 1) * PORT_STEP);
+    list.sort(key).forEach((it, i) => { it.dx = list.length > 1 ? (i / (list.length - 1) - 0.5) * w : 0; });
+  };
+  groupBy(info, it => it.sid).forEach(list => spread(list, list[0].e.source(), (p, q) => p.pts[1].x - q.pts[1].x || p.e.id().localeCompare(q.e.id())));
+  groupBy(info, it => it.tid).forEach(list => {
+    const kinds = new Set(list.map(it => it.partof));
+    list.forEach(it => { it.tx = kinds.size > 1 ? (it.partof ? 8 : -8) : 0; });
+  });
+  info.forEach(it => { it.pts[0].x += it.dx; it.pts[it.pts.length - 1].x += it.tx; });
+  // Every sideways shift, grouped so shifts into one item share a track; groups whose x ranges
+  // overlap within a gap get different tracks.
+  const groups = new Map();
+  info.forEach(it => {
+    it.shifts = [];
+    for (let i = 0; i + 1 < it.pts.length; i++) {
+      const a = it.pts[i], b = it.pts[i + 1];
+      if (Math.abs(a.x - b.x) <= 0.5) continue;
+      const key = Math.round(Math.min(a.y, b.y)) + (i + 2 === it.pts.length ? '|to ' + it.tid : '|' + it.e.id() + ':' + i);
+      const grp = groups.get(key) || { upper: Math.min(a.y, b.y), x1: Infinity, x2: -Infinity };
+      grp.x1 = Math.min(grp.x1, a.x, b.x);
+      grp.x2 = Math.max(grp.x2, a.x, b.x);
+      groups.set(key, grp);
+      it.shifts.push({ i, grp });
     }
-    routes[e.id()] = path.length ? path : [[s.x, (s.y + t.y) / 2]];
+  });
+  groupBy([...groups.values()], grp => Math.round(grp.upper)).forEach(list => {
+    const tracks = [];
+    list.sort((p, q) => p.x1 - q.x1).forEach(grp => {
+      let k = tracks.findIndex(end => end + 6 < grp.x1);
+      if (k < 0) k = tracks.push(-Infinity) - 1;
+      tracks[k] = grp.x2;
+      grp.track = k;
+    });
+    const gap = gapBelow(list[0].upper), step = Math.min(TRACK_STEP, (gap.bottom - gap.top - 2 * TRACK_PAD) / Math.max(tracks.length - 1, 1));
+    const mid = (gap.top + gap.bottom) / 2;
+    list.forEach(grp => { grp.y = mid + (grp.track - (tracks.length - 1) / 2) * Math.max(step, 3); });
+  });
+  info.forEach(it => {
+    const path = [];
+    it.shifts.forEach(({ i, grp }) => path.push([it.pts[i].x, grp.y], [it.pts[i + 1].x, grp.y]));
+    const s = it.pts[0], t = it.pts[it.pts.length - 1];
+    const up = t.y < s.y ? -1 : 1;
+    routes[it.e.id()] = {
+      path: path.length ? path : [[s.x, (s.y + t.y) / 2]],
+      from: { x: it.dx, y: up * it.e.source().height() / 2 },
+      to: it.tx ? { x: it.tx, y: -up * it.e.target().height() / 2 } : null
+    };
   });
   return { pos, routes };
 }
 
 // Fit like cy.fit, but leave the bottom strip under the legend free so it never covers a node.
-function fitTarget(eles = cy.elements(), pad = 40) {
+function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   if (eles.empty()) return null;
   const bb = eles.boundingBox();
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
@@ -1415,7 +1478,7 @@ function fitIfOutside() {
 }
 
 // Crossing the narrow breakpoint (rotating a phone) changes the graph's spacing, so lay it out again.
-narrowScreen.addEventListener('change', () => { if (view === 'graph') layout(); });
+narrowScreen.addEventListener('change', () => { if (view === 'graph') rebuild(); });
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);

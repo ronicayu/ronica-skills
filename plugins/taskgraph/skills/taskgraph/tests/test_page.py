@@ -1763,3 +1763,78 @@ def test_graph_edges_are_orthogonal_routes_and_respace_on_narrow(browser, page_f
     assert diagonal == 0
     assert problems == []
     page.close()
+
+
+@pytest.fixture(scope="module")
+def fanin_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("fanin")
+    tg = runner(tmp / "t.db")
+    tg("add", "Observability launch", "--type", "milestone")  # 1
+    tg("add", "Observability", "--type", "objective")  # 2
+    tg("add", "Front-end errors and web vitals reported through the collector", "--parent", "2")  # 3
+    tg("add", "Alerting review with burn-rate rules on the critical paths", "--parent", "2")  # 4
+    tg("add", "Tracing with tail sampling", "--parent", "2")  # 5
+    tg("add", "Central container logs", "--parent", "2")  # 6
+    tg("add", "Trace context across the job queue and provider calls", "--parent", "2")  # 7
+    tg("add", "Product spec review", "--type", "objective")  # 8
+    tg("add", "Write the spec for editing a video by chat", "--parent", "8")  # 9
+    tg("add", "Spec for regenerating after a segment test", "--parent", "8")  # 10
+    tg("add", "Backend refactor done", "--type", "milestone")  # 11
+    for dep in ("3", "4", "7", "9", "10"):
+        tg("dep", "add", "11", dep)
+    tg("dep", "add", "4", "3")
+    tg("dep", "add", "6", "5")
+    tg("dep", "add", "7", "6")
+    tg("dep", "add", "10", "9")
+    tg("dep", "add", "1", "2")
+    tg("dep", "add", "1", "11")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+GRAPH_ROUTES = """() => {
+    cy.zoom(1);
+    return links().map(e => {
+        const pts = [e.sourceEndpoint(), ...e.segmentPoints(), e.targetEndpoint()];
+        return { target: e.target().id(), dotted: e.hasClass('partof'), pts: pts.map(p => [p.x, p.y]) };
+    });
+}"""
+
+
+def test_graph_edges_never_share_a_line_with_edges_to_another_item(browser, fanin_file):
+    page, problems = open_page(browser, fanin_file, "?view=graph")
+    edges = page.evaluate(GRAPH_ROUTES)
+    runs = [
+        (e, ax, ay, bx, by)
+        for e in edges
+        for (ax, ay), (bx, by) in zip(e["pts"], e["pts"][1:])
+    ]
+    overlaps = []
+    for i, (e, ax, ay, bx, by) in enumerate(runs):
+        for f, cx, cy_, dx, dy in runs[i + 1 :]:
+            if e is f or (e["target"] == f["target"] and e["dotted"] == f["dotted"]):
+                continue
+            both = lambda p, q, r, s: min(max(p, q), max(r, s)) - max(min(p, q), min(r, s)) > 2
+            if abs(ay - by) < 1 and abs(cy_ - dy) < 1 and abs(ay - cy_) < 5 and both(ax, bx, cx, dx):
+                overlaps.append(("horizontal", e["target"], f["target"]))
+            if abs(ax - bx) < 1 and abs(cx - dx) < 1 and abs(ax - cx) < 3 and both(ay, by, cy_, dy) and e["dotted"] != f["dotted"]:
+                overlaps.append(("dotted on solid", e["target"], f["target"]))
+    assert overlaps == []
+    assert problems == []
+    page.close()
+
+
+def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
+    page, _ = open_page(browser, fanin_file, "?view=graph")
+    widest = "Math.max(...tasks().filter(n => n.style('shape') !== 'diamond').map(n => n.width()))"
+    wide = page.evaluate(widest)
+    page.click("#fit")
+    wide_zoom = page.evaluate("cy.zoom()")
+    page.close()
+    page, _ = open_phone(browser, fanin_file)
+    page.evaluate("document.getElementById('fit').click()")
+    assert page.evaluate(widest) <= 130 < wide
+    assert page.evaluate("cy.zoom()") > 0.4
+    assert wide_zoom > 0
+    page.close()
