@@ -6,7 +6,8 @@ when the non-blocking test in your brief holds.
 ### Method: design-doc
 
 1. Sources: each factual claim (a requirement, the current state, a number)
-   points to a source. Open each source and confirm the claim.
+   points to a source. Open each source and confirm the claim. An unsourced
+   or wrong claim is a miss.
 2. Completeness: the document has a problem statement with measurable
    outcomes and ranked goals; options with their trade-offs, including "do
    nothing", and why each rejected option lost; for each decision, the
@@ -20,7 +21,7 @@ when the non-blocking test in your brief holds.
    shows what changed. Flag every file or decision that changed outside SCOPE.
 5. Boundary: you do not judge whether a decision is right. That belongs to
    the operator or the design review. A finding about a decision itself is
-   is not a finding and does not lower the verdict. Write it under `Follow-ups:`
+   not a miss and does not lower the verdict. Write it under `Follow-ups:`
    as `decision: <the question, one line>`; the Manager turns it into a
    Taskgraph decision.
 
