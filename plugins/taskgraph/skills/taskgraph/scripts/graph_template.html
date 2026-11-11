@@ -397,6 +397,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
         <button class="item" id="fitMore" title="Show the whole plan (F)">Fit <kbd>F</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
         <button class="item" id="exportPng" title="Save the whole current view as a PNG image">Export PNG</button>
+        <button class="item" id="exportSvg" title="Save the whole current view as an SVG file, text kept as text">Export SVG</button>
         <button class="item" id="printPage" title="Print the whole current view, or save it as a PDF">Print…</button>
         <button class="item" id="refresh" hidden title="Check for changes now">Refresh now</button>
         <button class="item" id="copyView" title="Copy a link to exactly this view">Copy link to view</button>
@@ -1404,8 +1405,8 @@ function dagreLayout(nodes, edges, opts) {
     const up = t.y < s.y ? -1 : 1;
     routes[it.e.id()] = {
       path: path.length ? path : [[s.x, (s.y + t.y) / 2]],
-      from: { x: it.dx, y: up * it.e.source().height() / 2 },
-      to: it.tx ? { x: it.tx, y: -up * it.e.target().height() / 2 } : null
+      from: { x: it.dx, y: up * it.e.source().outerHeight() / 2 },
+      to: it.tx ? { x: it.tx, y: -up * it.e.target().outerHeight() / 2 } : null
     };
   });
   return { pos, routes };
@@ -2873,6 +2874,8 @@ const syncControls = () => {
   $('weekHours').value = String(weekHours);
   $('loadBy').classList.toggle('off', view !== 'load');
   $('exportPng').disabled = view === 'load';
+  $('exportSvg').disabled = view === 'load';
+  $('exportSvg').title = view === 'load' ? 'The Load view prints (More, Print…) rather than exporting an image' : 'Save the whole current view as an SVG file, text kept as text';
   $('exportPng').title = view === 'load' ? 'The Load view prints (More, Print…) rather than exporting an image' : 'Save the whole current view as a PNG image';
   radio('depsMode', depsMode).checked = true;
   $('lanesBy').classList.toggle('off', view === 'graph' || view === 'load');
@@ -3194,6 +3197,121 @@ async function exportPng() {
 }
 $('exportPng').onclick = () => exportPng();
 
+// SVG export, drawn from the same styled elements the canvas draws (so no extra library): lane bands,
+// timeline axis, edges along their routes, and every label as text. Always the light paper colours.
+function svgOfView() {
+  const faded = cy.elements('.faded'), lit = cy.elements('.hl');
+  const paper = readPalette($('print')), restyle = paper.bg !== P.bg;
+  faded.union(lit).removeClass('faded hl');
+  mirrorNames();
+  let styled = false;
+  try {
+    if (restyle) styled = !!cy.style(cyStyle(paper));
+    return drawSvg(paper);
+  } finally {
+    if (styled) cy.style(cyStyle(P));
+    faded.addClass('faded');
+    lit.addClass('hl');
+    mirrorNames();
+  }
+}
+
+function drawSvg(paper) {
+  const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const n2 = v => Math.round(v * 100) / 100;
+  const px = (ele, key) => parseFloat(ele.style(key)) || 0;
+  const dash = (ele, width) => ({ dashed: ` stroke-dasharray="${n2(width * 4)} ${n2(width * 3)}"`, dotted: ` stroke-dasharray="${n2(width)} ${n2(width * 2)}"` })[ele.style('line-style')] || '';
+  const shown = cy.elements().filter(e => e.visible() && px(e, 'opacity') > 0);
+  const box = shown.boundingBox({ includeLabels: true, includeOverlays: false });
+  const pad = 24, head = 56;
+  const body = [];
+
+  const outline = node => {
+    const w = px(node, 'outline-width'), at = node.position();
+    if (w <= 0 || node.style('outline-style') === 'none') return '';
+    const off = px(node, 'outline-offset') + w / 2 + (px(node, 'border-width') / 2);
+    return `<rect x="${n2(at.x - node.outerWidth() / 2 - off)}" y="${n2(at.y - node.outerHeight() / 2 - off)}" width="${n2(node.outerWidth() + 2 * off)}" height="${n2(node.outerHeight() + 2 * off)}" rx="6" fill="none" stroke="${node.style('outline-color')}" stroke-opacity="${node.style('outline-opacity')}" stroke-width="${w}"/>`;
+  };
+  const shapeOf = node => {
+    const at = node.position(), w = node.outerWidth(), h = node.outerHeight();
+    const x1 = at.x - w / 2, y1 = at.y - h / 2, x2 = at.x + w / 2, y2 = at.y + h / 2;
+    const bw = px(node, 'border-width'), bd = node.style('border-style');
+    const fill = node.style('background-color'), fo = node.style('background-opacity');
+    const attrs = `fill="${fill}" fill-opacity="${fo}" stroke="${bw ? node.style('border-color') : 'none'}" stroke-width="${bw}"` + (bd === 'dashed' ? ` stroke-dasharray="${bw * 4} ${bw * 3}"` : bd === 'dotted' ? ` stroke-dasharray="${bw} ${bw * 2}"` : '');
+    const poly = pts => `<polygon points="${pts.map(p => p.map(n2).join(',')).join(' ')}" ${attrs}/>`;
+    switch (node.style('shape')) {
+      case 'diamond': return poly([[at.x, y1], [x2, at.y], [at.x, y2], [x1, at.y]]);
+      case 'hexagon': return poly([[x1 + h / 4, y1], [x2 - h / 4, y1], [x2, at.y], [x2 - h / 4, y2], [x1 + h / 4, y2], [x1, at.y]]);
+      case 'tag': return poly([[x1, y1], [x2 - h / 3, y1], [x2, at.y], [x2 - h / 3, y2], [x1, y2]]);
+      case 'ellipse': return `<ellipse cx="${n2(at.x)}" cy="${n2(at.y)}" rx="${n2(w / 2)}" ry="${n2(h / 2)}" ${attrs}/>`;
+      case 'round-rectangle': return `<rect x="${n2(x1)}" y="${n2(y1)}" width="${n2(w)}" height="${n2(h)}" rx="${n2(Math.min(15, Math.min(w, h) / 4))}" ${attrs}/>`;
+      default: return `<rect x="${n2(x1)}" y="${n2(y1)}" width="${n2(w)}" height="${n2(h)}" ${attrs}/>`;
+    }
+  };
+  const labelOfNode = node => {
+    const text = node.style('label');
+    if (!text) return '';
+    const at = node.position(), w = node.outerWidth(), h = node.outerHeight();
+    const size = px(node, 'font-size') || 13, line = size * 1.2, lines = text.split('\n');
+    const mx = px(node, 'text-margin-x'), my = px(node, 'text-margin-y');
+    const halign = node.style('text-halign'), valign = node.style('text-valign');
+    const x = halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
+    const anchor = halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
+    const top = valign === 'top' ? at.y - h / 2 + my - lines.length * line : valign === 'bottom' ? at.y + h / 2 + my : at.y + my - lines.length * line / 2;
+    return lines.map((t, i) => `<text x="${n2(x)}" y="${n2(top + (i + 0.5) * line)}" text-anchor="${anchor}" dominant-baseline="central" font-family="${esc(node.style('font-family'))}" font-size="${size}" font-weight="${node.style('font-weight')}" fill="${node.style('color')}" fill-opacity="${node.style('text-opacity')}">${esc(t)}</text>`).join('');
+  };
+  const edgeOf = edge => {
+    const pts = [edge.sourceEndpoint(), ...(edge.style('curve-style') === 'segments' ? edge.segmentPoints() : []), edge.targetEndpoint()];
+    const width = px(edge, 'width'), color = edge.style('line-color');
+    let out = `<path class="edge ${esc(edge.data('kind') || '')}" d="${pts.map((p, i) => (i ? 'L' : 'M') + n2(p.x) + ' ' + n2(p.y)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width}"${dash(edge, width)}/>`;
+    if (edge.style('target-arrow-shape') !== 'none') {
+      const a = pts[pts.length - 1], b = pts[pts.length - 2], len = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const ux = (a.x - b.x) / len, uy = (a.y - b.y) / len, size = 9 * px(edge, 'arrow-scale');
+      const base = { x: a.x - ux * size, y: a.y - uy * size };
+      out += `<polygon class="arrow" points="${n2(a.x)},${n2(a.y)} ${n2(base.x - uy * size * 0.45)},${n2(base.y + ux * size * 0.45)} ${n2(base.x + uy * size * 0.45)},${n2(base.y - ux * size * 0.45)}" fill="${edge.style('target-arrow-color')}"/>`;
+    }
+    return out;
+  };
+  const group = (ele, inner) => `<g opacity="${n2(px(ele, 'opacity'))}">${inner}</g>`;
+  const nodes = shown.nodes(), isBand = n => n.hasClass('bg');
+  nodes.filter(isBand).forEach(n => body.push(group(n, shapeOf(n) + labelOfNode(n))));
+  shown.edges().forEach(e => body.push(group(e, edgeOf(e))));
+  nodes.filter(n => !isBand(n)).forEach(n => {
+    const title = n.data('id') && byId.has(Number(n.id())) ? `<title>${esc('#' + n.id() + ' ' + byId.get(Number(n.id())).title)}</title>` : '';
+    body.push(`<g class="node" data-id="${esc(n.id())}" opacity="${n2(px(n, 'opacity'))}">${title}${outline(n)}${shapeOf(n)}${labelOfNode(n)}</g>`);
+  });
+
+  const x0 = box.x1 - pad, y0 = box.y1 - pad - head, w = Math.max(box.w + 2 * pad, 420), h = box.h + 2 * pad + head;
+  const sub = 'As of ' + day(DATA.today || new Date().toLocaleDateString('sv')) + ' ' + todayYear + exportFilters();
+  const font = esc(FONT);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${n2(w)}" height="${n2(h)}" viewBox="${n2(x0)} ${n2(y0)} ${n2(w)} ${n2(h)}">`
+    + `<title>${esc(exportTitle())}</title><rect x="${n2(x0)}" y="${n2(y0)}" width="${n2(w)}" height="${n2(h)}" fill="${paper.bg}"/>`
+    + `<text x="${n2(x0 + pad)}" y="${n2(y0 + pad + 8)}" font-family="${font}" font-size="18" font-weight="bold" fill="${paper.text}">${esc(exportTitle())}</text>`
+    + `<text x="${n2(x0 + pad)}" y="${n2(y0 + pad + 30)}" font-family="${font}" font-size="12" fill="${paper.muted}">${esc(sub)}</text>`
+    + body.join('') + '</svg>';
+}
+
+function exportSvg() {
+  const blob = new Blob([svgOfView()], { type: 'image/svg+xml' });
+  const link = el('a', { href: URL.createObjectURL(blob), download: exportName().replace(/\.png$/, '.svg') });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+$('exportSvg').onclick = () => exportSvg();
+// `tg.py export --svg` opens the page with #export=svg: the page swaps itself for the SVG text, or the reason it cannot.
+function exportFromHash() {
+  let out;
+  try {
+    if (view === 'load') throw new Error('The Load view has no SVG export');
+    out = el('pre', { id: 'tg-svg-out', textContent: svgOfView() });
+  } catch (e) {
+    out = el('pre', { id: 'tg-svg-err', textContent: String(e.message || e) });
+  }
+  document.body.replaceChildren(out);
+}
+
 // Print builds its sheet just before the browser lays the page out: the plan as one image (drawn
 // synchronously, without hover or selection fading), the legend as text, and the open panel.
 // Paper is always light, whatever the screen shows: #print carries the light tokens.
@@ -3313,6 +3431,7 @@ if (goal != null && !byId.has(goal)) goal = null;
 autoOpen();
 fillGoals();
 rebuild();
+if (location.hash === '#export=svg') setTimeout(exportFromHash, 50);
 // ?task=ID opens that item, loosening whatever filter would hide it: the link asked for it.
 const linked = byId.get(Number(query.get('task')));
 if (linked) {

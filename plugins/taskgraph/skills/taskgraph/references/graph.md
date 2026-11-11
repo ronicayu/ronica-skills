@@ -4,7 +4,7 @@ Run `graph` to write and open the interactive plan. Run `serve` to serve all pro
 
 ## Views and navigation
 
-The page has Graph, Swimlane, Timeline, and Load views. The first toolbar row contains the project, goal, view, view options, search, and live status. The second row contains filters, removable filter chips, Fit, and More actions: Expand all, Collapse all, Re-layout, Export PNG, Print, Refresh now, and Copy link to view.
+The page has Graph, Swimlane, Timeline, and Load views. The first toolbar row contains the project, goal, view, view options, search, and live status. The second row contains filters, removable filter chips, Fit, and More actions: Expand all, Collapse all, Re-layout, Export PNG, Export SVG, Print, Refresh now, and Copy link to view.
 
 Use View options to set lane grouping, show or hide the legend, choose which dependencies appear in the Timeline, and set the theme. The Timeline shows conflicts only by default. You can also show the critical path or all dependencies. Add `?deps=critical` to the URL to show the critical path. Set the theme to Auto, Light, or Dark. Add `?theme=light` to open the page in light theme. Taskgraph remembers each browser's theme setting.
 
@@ -34,4 +34,4 @@ The page opens at a readable zoom and scrolls large plans. Fit shows the whole p
 
 ## Export and print
 
-Select **Export PNG** to save the full filtered view, not just the visible area. The image uses 2× resolution and includes a title bar with the project, goal, view, date, active filters, and legend. Select **Print**, or use the browser's Print / Save as PDF, to create a landscape page in light theme. The printout includes the title, filters, whole plan, legend, and the open item's panel on a second page. Dates appear as `14 Oct`; Taskgraph shows the year only when it is not the current year.
+Select **Export PNG** to save the full filtered view, not just the visible area. The image uses 2× resolution and includes a title bar with the project, goal, view, date, active filters, and legend. **Export SVG** saves the same view as a vector file in the light theme, with every label as text, lane bands, the timeline axis and the edge routes. From the command line, `tg.py export --svg OUT.svg [--view graph|lanes|timeline] [--goal ID] [--width PX] [--state LINK]` builds the page, opens it headless (Playwright when importable, otherwise Chrome, Chromium or Edge; set `CHROME` to a binary, or `TG_SVG_ENGINE=playwright|chrome` to pick one) and writes the SVG. `--state` takes a link from **Copy link to view** or its query string. `--width` 640 or less lays the page out for a phone. The Load view has no SVG. Select **Print**, or use the browser's Print / Save as PDF, to create a landscape page in light theme. The printout includes the title, filters, whole plan, legend, and the open item's panel on a second page. Dates appear as `14 Oct`; Taskgraph shows the year only when it is not the current year.

@@ -37,6 +37,7 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 | `result add ID --status S [--kind K] [--attempt N] [--by NAME] [--body TEXT \| --body-file PATH]` | Add one entry to a task's result log. `S` and `K` are one word of letters, digits, `_`, or `-`. `K` defaults to `task`. Use `--body-file -` to read the body from stdin. |
 | `result ls [ID] [--kind K] [--attempt N] [--status S] [--latest] [--all-projects]` | List result entries, oldest first. Without `ID`, list the project's entries with each task's project and title. `--latest` keeps the newest match for each task. `--brief` leaves out the bodies. |
 | `export [--all-projects] [--out PATH]` | Export tasks, metadata, links, and results as JSON. Taskgraph has no import command. |
+| `export --svg OUT.svg [--view graph\|lanes\|timeline] [--goal ID] [--width PX] [--state LINK]` | Write a view as an SVG file using a headless browser (Playwright, else Chrome, Chromium or Edge). `--view load` is an error. |
 | `sync [--full]` | GitHub projects only: send deferred meta, then refresh the cache. `--full` also re-reads every task's dependencies and every comment, and drops tasks that left GitHub. The local store answers `error: tg sync: this project uses the local store; nothing to sync`. |
 | `projects` | Show each project's RAG status, totals, done, ready, blocked, late, conflicts, at-risk milestones, and next milestone. |
 
