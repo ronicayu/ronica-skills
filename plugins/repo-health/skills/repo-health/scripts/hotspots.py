@@ -44,7 +44,6 @@ import detect  # noqa: E402  (shares the file listing, skip list and language ta
 READ_LIMIT = 1024 * 1024
 MAX_COCHANGE_FILES = 30
 MIN_COMMITS_SHALLOW = 10
-GENERATED = re.compile(r"(\.min\.js|\.d\.ts|\.pb\.go|_pb2\.py|_pb2_grpc\.py|\.generated\.[a-z]+|_generated\.[a-z]+)$")
 BUCKETS = ("<200", "200-499", "500-999", ">=1000")
 
 
@@ -93,26 +92,30 @@ def source_files(repo):
     out = []
     for rel in repo.files:
         language = detect.language_of(rel)
-        if language is None or detect.is_test_path(language, rel) or GENERATED.search(rel):
+        if language is None or detect.is_test_path(language, rel):
             continue
         out.append((rel, language))
     return out
 
 
 def read_metrics(repo, path):
+    """(excluded kind, None) for a generated, vendored or migration file, else (None, (loc, complexity, deepest))."""
     full = os.path.join(repo.root, path)
     try:
         size = os.path.getsize(full)
         with open(full, "rb") as handle:
             data = handle.read(READ_LIMIT)
     except OSError:
-        return None
+        return None, None
+    kind = repo.exclusion_kind(path, data[:2048])
+    if kind:
+        return kind, None
     loc, complexity, deepest = measure(data.decode("utf-8", "replace"))
     if size > len(data) and data:
         factor = size / float(len(data))
         loc = int(loc * factor)
         complexity = int(complexity * factor)
-    return loc, complexity, deepest
+    return None, (loc, complexity, deepest)
 
 
 def history(repo, months):
@@ -154,8 +157,11 @@ def analyse(root, months=12, top=15):
     repo = detect.Repo(root)
     commits, info = history(repo, months)
     rows = {}
+    excluded = {"generated": 0, "vendored": 0, "migrations": 0}
     for path, language in source_files(repo):
-        metrics = read_metrics(repo, path)
+        kind, metrics = read_metrics(repo, path)
+        if kind:
+            excluded[kind] += 1
         if metrics is None:
             continue
         loc, complexity, deepest = metrics
@@ -208,6 +214,7 @@ def analyse(root, months=12, top=15):
         "deepest_indent": [{k: r[k] for k in ("path", "language", "max_indent")} for r in deepest],
         "cochange": cochange,
         "size_buckets": buckets,
+        "excluded": excluded,
     }
 
 

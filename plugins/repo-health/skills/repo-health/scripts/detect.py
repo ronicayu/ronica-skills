@@ -174,12 +174,21 @@ SUPPRESSIONS = {
 # Constants for files and languages
 # --------------------------------------------------------------------------
 
+# Match at any depth.
 SKIP_DIRS = {
-    "node_modules", "vendor", "target", "build", "dist", ".venv", "venv", ".git",
+    "node_modules", "vendor", ".venv", "venv", ".git",
     "third_party", "__pycache__", ".tox", ".nox", ".eggs", ".mypy_cache",
     ".ruff_cache", ".pytest_cache", ".gradle", ".idea", "site-packages",
     "generated", "__generated__", ".next", ".nuxt", ".repo-health",
 }
+
+# Build output folders: skipped only at the repo root or at a subproject root
+# (a folder with a manifest), so "internal/build/" of a Go module stays.
+ROOT_ONLY_SKIP_DIRS = {"build", "dist", "target", "out", "bin", "obj"}
+
+# Source files that are generated, by name.
+GENERATED_NAME = re.compile(
+    r"(\.min\.js|\.d\.ts|\.pb\.go|_pb2\.py|_pb2_grpc\.py|\.generated\.[a-z]+|_generated\.[a-z]+)$")
 
 EXT_LANG = {
     ".py": "python",
@@ -240,6 +249,33 @@ def glob_to_regex(pattern):
         else:
             out.append(re.escape(ch))
     return re.compile("^" + "".join(out) + "$")
+
+
+def attr_pattern_regex(pattern):
+    """Regex for a .gitattributes pattern, matched against a path relative to that file's folder."""
+    anchored = "/" in pattern.rstrip("/")
+    directory = pattern.endswith("/")
+    pattern = pattern.strip("/")
+    out = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    body = "".join(out) + ("/.*" if directory else "")
+    return re.compile(("^" if anchored else "^(?:.*/)?") + body + "$")
 
 
 def word_regex(word, whole):
@@ -303,12 +339,21 @@ def tool_names_by_language():
 # Repository access
 # --------------------------------------------------------------------------
 
+# A repository's own config can name commands (core.fsmonitor, gpg.program with
+# log.showSignature, diff.external, hooks). Never let a repository under review run one.
+GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.pager=cat",
+            "-c", "diff.external=", "-c", "core.hooksPath=/dev/null"]
+
+
 def run_git(root, args):
     env = dict(os.environ)
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_PAGER"] = "cat"
+    env.pop("GIT_EXTERNAL_DIFF", None)
     try:
-        # A repository's own config can name a command for core.fsmonitor; never run it.
-        proc = subprocess.run(["git", "-c", "core.fsmonitor=false"] + args, cwd=root, env=env, timeout=120,
+        proc = subprocess.run(["git"] + GIT_SAFE + args, cwd=root, env=env, timeout=120,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -317,44 +362,17 @@ def run_git(root, args):
     return proc.stdout
 
 
-def is_git_root(root):
+def git_toplevel(root):
+    """Real path of the work tree that contains root, or None."""
     out = run_git(root, ["rev-parse", "--show-toplevel"])
     if not out:
-        return False
+        return None
     top = out.decode("utf-8", "replace").strip()
-    return os.path.realpath(top) == os.path.realpath(root)
+    return os.path.realpath(top) if top else None
 
 
-def skipped(rel):
-    for part in rel.split("/")[:-1]:
-        if part in SKIP_DIRS or part.endswith(".egg-info"):
-            return True
-    return False
-
-
-def list_files(root, use_git):
-    """Relative posix paths of the files to look at, skip list applied."""
-    names = None
-    if use_git:
-        out = run_git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        if out is not None:
-            names = [n for n in out.decode("utf-8", "replace").split("\0") if n]
-    if names is None:
-        names = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".egg-info")]
-            rel_dir = os.path.relpath(dirpath, root)
-            for name in filenames:
-                names.append(name if rel_dir == "." else posixpath.join(rel_dir.replace(os.sep, "/"), name))
-    seen = set()
-    files = []
-    for rel in names:
-        if rel in seen or skipped(rel):
-            continue
-        seen.add(rel)
-        if os.path.isfile(os.path.join(root, rel)):
-            files.append(rel)
-    return files
+def inside(path, fence):
+    return path == fence or path.startswith(fence.rstrip(os.sep) + os.sep)
 
 
 def dir_of(rel):
@@ -363,6 +381,20 @@ def dir_of(rel):
 
 def join(d, name):
     return name if d == "." else d + "/" + name
+
+
+def count_files(path, cap=200000):
+    total = 0
+    for _dirpath, _dirnames, filenames in os.walk(path):
+        total += len(filenames)
+        if total >= cap:
+            return cap
+    return total
+
+
+# Folders above a scanned subfolder that still govern it: their CI files and configs.
+ABOVE_CI_DIRS = (".github/workflows", ".gitlab", ".circleci", ".buildkite", "azure-pipelines",
+                 ".azure-pipelines")
 
 
 def ancestors(d):
@@ -375,18 +407,38 @@ def ancestors(d):
 
 
 class Repo(object):
+    """The files of a repository or of a folder inside one.
+
+    Paths are relative to the scanned folder. When the folder is inside a larger
+    git repository, git still lists the files (git_root, subpath), and the CI files
+    and the files directly in the folders above it are reachable as "../x" paths
+    (self.above); they govern the folder but are not part of its sources.
+    """
+
     def __init__(self, root):
         self.root = os.path.abspath(root)
-        self.is_git = is_git_root(self.root)
-        self.files = list_files(self.root, self.is_git)
-        self.file_set = set(self.files)
+        self.git_root = git_toplevel(self.root)
+        self.is_git = self.git_root is not None
+        real = os.path.realpath(self.root)
+        self.subpath = "."
+        if self.is_git:
+            relative = os.path.relpath(real, self.git_root)
+            self.subpath = "." if relative == "." else relative.replace(os.sep, "/")
+        self.fence = self.git_root or real
+        self.skipped = defaultdict(int)
+        self.symlinks_outside = []
+        self.above = []
+        self.files = self._list_files()
+        self.file_set = set(self.files) | set(self.above)
         self.by_dir = defaultdict(set)
         self.by_name = defaultdict(list)
         self.dirs = set()
-        for rel in self.files:
+        for rel in self.files + self.above:
             d = dir_of(rel)
             self.by_dir[d].add(posixpath.basename(rel))
             self.by_name[posixpath.basename(rel)].append(rel)
+        for rel in self.files:
+            d = dir_of(rel)
             while d not in self.dirs:
                 self.dirs.add(d)
                 if d == ".":
@@ -396,6 +448,186 @@ class Repo(object):
         self._text = {}
         self._json = {}
         self._sections = {}
+        self._attr_rules = None
+
+    # -- listing --------------------------------------------------------
+
+    def top_rel(self, rel):
+        """The path of a file relative to the git root (or to the folder without git)."""
+        return posixpath.normpath(posixpath.join(self.subpath, rel))
+
+    def up_dirs(self):
+        """['..', '../..', ...] up to the git root."""
+        count = 0 if self.subpath == "." else len(self.subpath.split("/"))
+        return ["/".join([".."] * (i + 1)) for i in range(count)]
+
+    def ancestor_dirs(self, d):
+        """Like ancestors(d), continuing above the folder up to the git root."""
+        chain = ancestors(d)
+        if chain[-1] == ".":
+            chain.extend(self.up_dirs())
+        return chain
+
+    def _list_files(self):
+        names = None
+        if self.is_git:
+            names = self._git_names()
+        if names is None:
+            names = self._walk_names()
+        manifest_dirs = {"."} | {dir_of(n) for n in names
+                                 if posixpath.basename(n) in MANIFESTS and self._skip_dir(n, {"."}) is None}
+        seen = set()
+        files = []
+        for rel in names:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            hit = self._skip_dir(rel, manifest_dirs)
+            if hit is not None:
+                self.skipped[hit] += 1
+                continue
+            if self._usable(rel):
+                files.append(rel)
+        return files
+
+    @staticmethod
+    def _skip_dir(rel, manifest_dirs):
+        """The skipped folder that holds rel, or None."""
+        parts = rel.split("/")[:-1]
+        for i, part in enumerate(parts):
+            if part in SKIP_DIRS or part.endswith(".egg-info"):
+                return "/".join(parts[:i + 1])
+            if part in ROOT_ONLY_SKIP_DIRS and ("/".join(parts[:i]) or ".") in manifest_dirs:
+                return "/".join(parts[:i + 1])
+        return None
+
+    def _usable(self, rel):
+        """True for a regular file; a symlink that leaves the repository is recorded and refused."""
+        full = os.path.join(self.root, rel)
+        if os.path.islink(full):
+            if not inside(os.path.realpath(full), self.fence):
+                self.symlinks_outside.append(rel)
+                return False
+        return os.path.isfile(full)
+
+    def _git_names(self):
+        sub = self.subpath
+        spec = []
+        if sub != ".":
+            spec = ["--", sub]
+            parent = sub
+            while parent != ".":
+                parent = dir_of(parent)
+                spec.append(":(glob)*" if parent == "." else ":(glob)%s/*" % parent)
+            spec.extend(":(glob)%s/**" % d for d in ABOVE_CI_DIRS)
+        out = run_git(self.git_root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"] + spec)
+        if out is None:
+            return None
+        names = []
+        for name in out.decode("utf-8", "replace").split("\0"):
+            if not name:
+                continue
+            if sub == ".":
+                names.append(name)
+            elif name.startswith(sub + "/"):
+                names.append(name[len(sub) + 1:])
+            else:
+                self.above.append(self._relative_above(name))
+        if sub != "." and not names:
+            return None
+        return names
+
+    def _relative_above(self, top_name):
+        """'../..' style path from the folder to a git-root-relative path."""
+        up = len(self.subpath.split("/"))
+        common = 0
+        parts = top_name.split("/")
+        sub_parts = self.subpath.split("/")
+        while common < min(len(parts) - 1, len(sub_parts)) and parts[common] == sub_parts[common]:
+            common += 1
+        return "/".join([".."] * (up - common) + parts[common:])
+
+    def _walk_names(self):
+        names = []
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            relative = os.path.relpath(dirpath, self.root)
+            rel_dir = "." if relative == "." else relative.replace(os.sep, "/")
+            is_project = rel_dir == "." or any(f in MANIFESTS for f in filenames)
+            keep = []
+            for d in dirnames:
+                child = join(rel_dir, d)
+                full = os.path.join(dirpath, d)
+                if os.path.islink(full):
+                    if not inside(os.path.realpath(full), self.fence):
+                        self.symlinks_outside.append(child)
+                elif d in SKIP_DIRS or d.endswith(".egg-info") or (d in ROOT_ONLY_SKIP_DIRS and is_project):
+                    count = count_files(full)
+                    if count:
+                        self.skipped[child] += count
+                else:
+                    keep.append(d)
+            dirnames[:] = keep
+            for name in filenames:
+                names.append(join(rel_dir, name))
+        return names
+
+    # -- excluded files --------------------------------------------------
+
+    def attr_rules(self):
+        """[(directory, regex, attribute, value)] from every .gitattributes, outer folders first."""
+        if self._attr_rules is None:
+            rules = []
+            found = sorted(self.by_name.get(".gitattributes", []), key=lambda r: (-r.count("../"), r))
+            for rel in found:
+                base = dir_of(self.top_rel(rel))
+                base = "" if base == "." else base
+                for line in self.text(rel).splitlines():
+                    parts = line.split()
+                    if len(parts) < 2 or parts[0].startswith("#"):
+                        continue
+                    for token in parts[1:]:
+                        m = re.match(r"^([-!]?)(linguist-(?:generated|vendored))(?:=(\w+))?$", token)
+                        if not m:
+                            continue
+                        value = not m.group(1) and (m.group(3) is None or m.group(3).lower() in ("true", "1"))
+                        rules.append((base, attr_pattern_regex(parts[0]), m.group(2), value))
+            self._attr_rules = rules
+        return self._attr_rules
+
+    def attribute(self, rel, name):
+        top = self.top_rel(rel)
+        value = False
+        for base, regex, attr, flag in self.attr_rules():
+            if attr != name:
+                continue
+            if base:
+                if not top.startswith(base + "/"):
+                    continue
+                relative = top[len(base) + 1:]
+            else:
+                relative = top
+            if regex.match(relative):
+                value = flag
+        return value
+
+    def exclusion_kind(self, rel, head=b""):
+        """'vendored', 'generated', 'migrations' or None for a source file.
+
+        head is the start of the file; the generated markers are looked for in
+        its first 5 lines. One rule for LOC, suppressions and hotspots.
+        """
+        if self.attribute(rel, "linguist-vendored"):
+            return "vendored"
+        if GENERATED_NAME.search(rel) or self.attribute(rel, "linguist-generated"):
+            return "generated"
+        text = "\n".join(head.decode("utf-8", "replace").splitlines()[:5])
+        low = text.lower()
+        if ("Code generated" in text and "DO NOT EDIT" in text) or "@generated" in low or "auto-generated" in low:
+            return "generated"
+        dirs = rel.split("/")[:-1]
+        if "migrations" in dirs or dirs[-2:] == ["db", "migrate"] or dirs[-2:] == ["alembic", "versions"]:
+            return "migrations"
+        return None
 
     # -- file contents --------------------------------------------------
 
@@ -685,6 +917,8 @@ def find_subprojects(repo):
     found = {}
     for name, language in MANIFESTS.items():
         for rel in repo.by_name.get(name, []):
+            if rel.startswith("../"):
+                continue
             d = dir_of(rel)
             entry = found.setdefault(d, {"manifests": [], "languages": set()})
             entry["manifests"].append(rel)
@@ -898,6 +1132,7 @@ class Detector(object):
             if lang == "rust":
                 languages[lang]["inline_test_files"] = 0
         other = defaultdict(int)
+        excluded = defaultdict(list)
         supp = {lang: {"total": 0, "markers": defaultdict(int), "files": defaultdict(int)}
                 for lang in SUPPRESSIONS}
         per_sub = defaultdict(lambda: {lang: new_stats() for lang in LANGUAGES})
@@ -915,6 +1150,10 @@ class Detector(object):
                 with open(path, "rb") as handle:
                     data = handle.read(READ_LIMIT)
             except OSError:
+                continue
+            kind = repo.exclusion_kind(rel, data[:2048])
+            if kind:
+                excluded[kind].append(rel)
                 continue
             loc = count_loc(data, size)
             test = is_test_path(lang, rel)
@@ -946,14 +1185,14 @@ class Detector(object):
                 "markers": dict(sorted(info["markers"].items())),
                 "top_files": [{"file": f, "count": c} for f, c in top],
             }
-        return languages, dict(other), suppressions, per_sub
+        return languages, dict(other), suppressions, per_sub, excluded
 
     @staticmethod
     def owner(d, subproject_dirs, cache):
         if d in cache:
             return cache[d]
         result = None
-        for candidate in ancestors(d):
+        for candidate in ([] if d.startswith("..") else ancestors(d)):
             if candidate in subproject_dirs:
                 result = candidate
                 break
@@ -1043,10 +1282,10 @@ class Detector(object):
         repo = self.repo
         files = []
         by_tool = defaultdict(list)
-        for rel in repo.files:
+        for rel in repo.files + repo.above:
             provider = None
             for name, regex in self.CI_FILE_RES:
-                if regex.search(rel):
+                if regex.search(re.sub(r"^(\.\./)+", "", rel)):
                     provider = name
                     break
             if provider is None:
@@ -1072,8 +1311,10 @@ class Detector(object):
             pull_request = any(
                 re.search(r"\b(pull_request(_target)?|merge_requests?(_event)?)\b", line)
                 for line in text.splitlines() if not line.lstrip().startswith("#"))
-            files.append({"file": rel, "provider": provider, "pull_request": pull_request,
-                          "tools": tool_rows})
+            entry = {"file": rel, "provider": provider, "pull_request": pull_request, "tools": tool_rows}
+            if rel.startswith("../"):
+                entry["inherited_from"] = dir_of(rel)
+            files.append(entry)
             for row in tool_rows:
                 if rel not in by_tool[row["tool"]]:
                     by_tool[row["tool"]].append(rel)
@@ -1305,7 +1546,7 @@ class Detector(object):
         if "." not in subs and (orphans or not subs):
             subs["."] = {"manifests": [], "languages": set()}
         subproject_dirs = set(subs)
-        languages, other, suppressions, per_sub = self.scan_sources(subproject_dirs)
+        languages, other, suppressions, per_sub, excluded = self.scan_sources(subproject_dirs)
         self.collect_scripts()
         owner_cache = {}
         self.script_commands = [(rel, line, command, self.owner(dir_of(rel), subproject_dirs, owner_cache))
@@ -1318,11 +1559,18 @@ class Detector(object):
         for tool in ALL_TOOLS:
             if tool.language != "shared":
                 continue
+            found = None
             for spec in tool.specs:
-                hit = repo.match_spec(spec, ".")
-                if hit:
-                    shared.append(self.row(tool, hit, "config"))
+                for candidate in repo.ancestor_dirs("."):
+                    hit = repo.match_spec(spec, candidate)
+                    if hit:
+                        extra = {"inherited_from": candidate} if candidate != "." else {}
+                        found = self.row(tool, hit, "config", **extra)
+                        break
+                if found:
                     break
+            if found:
+                shared.append(found)
 
         records = []
         for d, entry in subs.items():
@@ -1348,7 +1596,7 @@ class Detector(object):
         commit = None
         branch = None
         if has_git:
-            out = run_git(repo.root, ["rev-parse", "HEAD"])
+            out = run_git(repo.git_root, ["rev-parse", "HEAD"])
             commit = out.decode().strip() if out else None
             out = run_git(repo.root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
             if out:
@@ -1361,6 +1609,8 @@ class Detector(object):
         return {
             "repo": repo.root,
             "git": has_git,
+            "git_root": repo.git_root,
+            "subpath": repo.subpath if has_git else None,
             "commit": commit,
             "default_branch": branch,
             "languages": languages,
@@ -1373,8 +1623,20 @@ class Detector(object):
             "setup": self.detect_setup(subproject_dirs),
             "docs": self.detect_docs(),
             "suppressions": suppressions,
+            "excluded": self.excluded_summary(excluded),
             "parse_errors": [{"file": f, "parse_error": e} for f, e in sorted(repo.parse_errors.items())],
         }
+
+    def excluded_summary(self, excluded):
+        repo = self.repo
+        skipped = sorted(({"path": path, "files": files} for path, files in repo.skipped.items()),
+                         key=lambda r: (-r["files"], r["path"]))[:30]
+        summary = {"skipped_dirs": skipped}
+        for kind in ("generated", "vendored", "migrations"):
+            files = sorted(excluded.get(kind, []))
+            summary[kind] = {"count": len(files), "examples": files[:5]}
+        summary["symlinks_outside"] = sorted(repo.symlinks_outside)
+        return summary
 
     @staticmethod
     def row(tool, hit, how, **extra):
@@ -1396,7 +1658,7 @@ class Detector(object):
         for tool in tool_rows:
             found = None
             for spec in tool.specs:
-                for candidate in ancestors(d):
+                for candidate in repo.ancestor_dirs(d):
                     hit = repo.match_spec(spec, candidate)
                     if hit:
                         extra = {}
