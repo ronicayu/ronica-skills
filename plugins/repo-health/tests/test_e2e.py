@@ -29,7 +29,7 @@ jobs:
 """
 
 
-class EndToEnd(unittest.TestCase):
+class TempRepo(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="rh-e2e-")
         self.out = tempfile.mkdtemp(prefix="rh-e2e-out-")
@@ -52,6 +52,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 
+
+class EndToEnd(TempRepo):
     def test_whole_pipeline(self):
         self.write("app/main.py", "def f(x):\n    if x:\n        return 1\n    return 2\n")
         self.write("app/tests/test_main.py", "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n")
@@ -108,39 +110,60 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.out, "share-%s.md" % stamp)))
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+SHAPE_WORKFLOW = """name: ci
+on:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m mypy pkg
+      - run: python pkg/tests/run_parallel.py
+"""
+
+PEOPLE = (("Yu Rong", "yu@home.example"), ("Ronica", "yu@home.example"), ("Yu Rong", "yu@work.example"),
+          ("ronica", "yu@home.example"), ("Claude", "noreply@anthropic.com"))
 
 
-@unittest.skipUnless(os.path.exists(os.path.join(REPO_ROOT, ".git")) and
-                     os.path.exists(os.path.join(REPO_ROOT, ".github", "workflows", "validate.yml")),
-                     "not a git checkout of ronica-skills")
-class ThisRepository(unittest.TestCase):
-    def test_a_suite_that_ci_runs_through_a_script_is_not_a_missing_suite(self):
-        out = tempfile.mkdtemp(prefix="rh-self-")
-        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+class OnePersonScriptRunner(TempRepo):
+    """A repository shaped like the one this plugin was first tried on: one person under several names and
+    e-mails plus an agent, a suite CI runs through a script, Python type-checked in CI, and a few .mjs files."""
 
-        def call(name, *args):
-            done = subprocess.run([sys.executable, os.path.join(SCRIPTS, name)] + list(args), stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, universal_newlines=True, cwd=out, env=ENV)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            return done.stdout
+    def commit_as(self, name, email, message):
+        env = dict(ENV, GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email)
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", message],
+                       cwd=self.root, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    def test_no_false_gaps(self):
+        self.write("pkg/scripts/run.py", "def run(x):\n    if x:\n        return 1\n    return 2\n")
+        self.write("pkg/tests/test_run.py", "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n")
+        self.write("pkg/tests/run_parallel.py", "import unittest\nunittest.main(module=None, argv=['x', 'discover'])\n")
+        for n in range(5):
+            self.write("tools/t%d.mjs" % n, "export const a = %d;\n" % n)
+        self.write(".github/workflows/ci.yml", SHAPE_WORKFLOW)
+        self.git("init", "-q")
+        self.git("add", ".")
+        for n, (name, email) in enumerate(PEOPLE):
+            with open(os.path.join(self.root, "pkg", "scripts", "run.py"), "a") as handle:
+                handle.write("# %d\n" % n)
+            self.git("add", ".")
+            self.commit_as(name, email, "change %d" % n)
+        paths = {key: os.path.join(self.out, key + ".json") for key in ("d", "h", "s")}
         for key, script in (("d", "detect.py"), ("h", "hotspots.py")):
-            with open(os.path.join(out, key + ".json"), "w") as handle:
-                handle.write(call(script, REPO_ROOT))
-        call("score.py", "--detect", os.path.join(out, "d.json"), "--hotspots", os.path.join(out, "h.json"),
-             "-o", os.path.join(out, "s.json"))
-        with open(os.path.join(out, "s.json")) as handle:
+            with open(paths[key], "w") as handle:
+                handle.write(self.script(script, self.root))
+        self.script("score.py", "--detect", paths["d"], "--hotspots", paths["h"], "-o", paths["s"], "--now", "2026-11-10")
+        with open(paths["s"]) as handle:
             result = json.load(handle)
         ids = [g["id"] for g in result["gaps"]]
-        self.assertFalse([i for i in ids if i.startswith("tests:.:missing-suite:plugins/agentic-team")], ids[:5])
+        self.assertFalse([i for i in ids if ":missing-suite:" in i], ids[:5])
         self.assertEqual(result["profile"]["authors"], "solo")
         self.assertFalse([i for i in ids if ":single-author:" in i], ids[:5])
         types = [r for r in result["dimensions"] if r["id"] == "types" and r["subproject"] == "."][0]
         self.assertEqual((types["level"], types["rule"]), (2, "types.2"))
-        agentic = [h for h in result["hotspots"] if h["path"].startswith("plugins/agentic-team/scripts/")]
-        self.assertTrue(agentic)
-        self.assertTrue(all(h["tests_in_ci"] is True for h in agentic))
+        run = [h for h in result["hotspots"] if h["path"] == "pkg/scripts/run.py"]
+        self.assertEqual([h["tests_in_ci"] for h in run], [True])
 
 
 if __name__ == "__main__":
