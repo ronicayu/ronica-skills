@@ -25,8 +25,10 @@ Usage:
                    a role file is broken
     check-report <file>
                    check a report file before a session files it: Status,
-                   Checkpoint, a label on each Follow-ups line; needs no
-                   config, Taskgraph or repository
+                   Checkpoint, a label on each Follow-ups line, the paths
+                   quoted in a worker report (--verifier: the blocking
+                   labels of a verifier report); needs no config, Taskgraph
+                   or repository
     wait           poll until something in flight changes, or a time limit
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
@@ -111,7 +113,7 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
-from config import (DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
+from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
                     profile_path, resolve_model, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
@@ -160,9 +162,16 @@ EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
 REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
-FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision")  # decision: a verifier's line
+FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
 FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
 FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
+PATH_FIELDS = ("Files", "Evidence", "Ran")  # the fields whose backticked paths check-report looks up in a worker report
+BACKTICKED = re.compile(r"`([^`\n]+)`")
+PATH_LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
+PATH_CHARS = re.compile(r"[\w./@+~-]+")
+PATH_EXTENSIONS = frozenset("py md toml json yaml yml txt sh js ts tsx jsx css html cfg ini lock sql rs go java c h cpp "
+                            "csv xml rb php kt swift".split())
+DELETED_WORD = re.compile(r"\b(deleted|removed)\b", re.I)
 COMMENT_LIMIT = 8000  # characters of evidence in the request comment
 DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
 COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
@@ -1361,6 +1370,11 @@ def result_command(py, tg, db, project, task_id, kind, attempt, session, report)
             f"--status <STATUS> --body-file {quote(report)}")
 
 
+def adjacent_text(config):
+    """The kinds of change outside SCOPE that the project allows, one line each; "" when [scope] adjacent is empty."""
+    return "; ".join(f"`{kind}`: {ADJACENT_KINDS[kind]}" for kind in config["scope"]["adjacent"])
+
+
 def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None):
     """The brief text. Taskgraph is the only source of task content. `role` is the task's role: its Method goes into a worker
     brief and its Review into a verifier brief."""
@@ -1390,6 +1404,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     report = report_path(run, session if kind == "verify" else f"task-{tid}", session)
     worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
                    if kind != "verify" else "")
+    verifier_arg = " --verifier" if kind == "verify" else ""
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -1404,9 +1419,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
-                          f"check-report {quote(report)}{worker_args}"),
-        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked, and a `PASS` report with fewer "
-                       "`Evidence:` lines than ACCEPTANCE lines." if kind != "verify" else ""),
+                          f"check-report {quote(report)}{worker_args}{verifier_arg}"),
+        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked, a `PASS` report with fewer "
+                       "`Evidence:` lines than ACCEPTANCE lines, and a path in backticks under `Files:`, `Evidence:` or "
+                       "`Ran:` that does not exist in your worktree." if kind != "verify" else
+                       " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                           report) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
@@ -1466,7 +1483,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
-            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method,
+            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + (
+                f"\n\n### Adjacent changes\n\nThe project allows these changes outside SCOPE, nothing more: "
+                f"{adjacent_text(config)}. Check that each `adjacent: <kind>: <path>` line under the worker's "
+                "`Deviations:` is of an allowed kind and the change does only that. Any other change outside SCOPE "
+                "is a blocking issue." if adjacent_text(config) else ""),
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
                             "verify-blocked, or verify-failed."),
@@ -1497,7 +1518,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         autonomy = config["autonomy"]
         values.update({
             "GOAL": f"{task['title']}. {why}",
-            "SCOPE": str(meta["scope"]).strip(),
+            "SCOPE": (str(meta["scope"]).strip() + (
+                f"\n\nAlso allowed outside SCOPE, nothing more: {adjacent_text(config)}. List each such change under "
+                "`Deviations:` as `adjacent: <kind>: <path>`." if adjacent_text(config) else "")),
             "SETUP": (f"Attempt {attempt}. Your worktree is at `{base}` on branch `{task_branch(tid)}`. It holds the "
                       "commits of the earlier attempts of this task. Read the previous report under UPSTREAM and build "
                       "on it; do not redo what passed. Do not reset the worktree or check out another commit. If "
@@ -4182,6 +4205,47 @@ def follow_ups(body):
     return found
 
 
+def issue_lines(body):
+    """The non-empty lines of a report's Issues field, a list marker dropped. A line that says None does not count."""
+    found = []
+    for raw in report_field(strip_comments(body or ""), "Issues").splitlines():
+        text = FOLLOW_UP_BULLET.sub("", raw.strip())
+        if text and text.rstrip(".").lower() != "none":
+            found.append(text)
+    return found
+
+
+def repository_path(token, cwd):
+    """The path a backticked token names, when it looks like a path of this repository, else None. Conservative: a
+    command, a flag, a pattern, a URL, a placeholder, an absolute path outside `cwd` and a bare word are not paths."""
+    token = PATH_LINE_SUFFIX.sub("", token)
+    if (not PATH_CHARS.fullmatch(token) or token.startswith(("-", "~")) or "://" in token
+            or any(c in token for c in "<*${")):
+        return None
+    if "/" not in token and token.rsplit(".", 1)[-1] not in PATH_EXTENSIONS:
+        return None
+    if os.path.isabs(token):
+        root = os.path.join(os.path.realpath(cwd), "")
+        return token if os.path.realpath(token).startswith(root) or os.path.realpath(token) == root[:-1] else None
+    return token
+
+
+def missing_paths(body, cwd):
+    """(field, token, line) for each backticked repository path under Files, Evidence and Ran of a worker report
+    that does not exist in `cwd`. A line that says deleted or removed is exempt."""
+    found = []
+    text = strip_comments(body or "")
+    for field in PATH_FIELDS:
+        for line in report_field(text, field).splitlines():
+            if DELETED_WORD.search(line):
+                continue
+            for token in BACKTICKED.findall(line):
+                path = repository_path(token, cwd)
+                if path is not None and not os.path.lexists(os.path.join(cwd, path)):
+                    found.append((field, token, line.strip()))
+    return found
+
+
 def evidence_lines(body):
     """The non-empty lines of a report's Evidence field, stripped. A line that says None does not count."""
     lines = (line.strip() for line in report_field(strip_comments(body or ""), "Evidence").splitlines())
@@ -4912,6 +4976,12 @@ def cmd_check_report(args):
         if label == "unlabelled":
             problems.append(f"Follow-ups line with no label: `{line}`; start it with one of "
                             f"{', '.join(FOLLOW_UP_LABELS)}, as `<label>: <path or question>: <why>`")
+    if args.verifier:
+        problems += verifier_problems(body, status.group(1) if status else None)
+    elif status and status.group(1) != "BLOCKED":
+        for field, token, line in missing_paths(body, os.getcwd()):
+            problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
+                            "path, or say on that line that it was deleted or removed")
     for row in unacked_steers_of(args.mailbox):
         problems.append(f"steer #{row['id']} has no ack: run the inbox command in MAILBOX, act on it and ack it, "
                         "then list it under Deviations")
@@ -4919,6 +4989,25 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+def verifier_problems(body, status):
+    """The findings rule of a verifier report: ISSUES needs a blocking finding, and every Issues line is one."""
+    issues = issue_lines(body)
+    found = []
+    if status == "ISSUES" and not issues:
+        found.append("Status ISSUES needs at least one `blocking:` line under `Issues:`; with only non-blocking "
+                     "findings, report PASS and list them under `Follow-ups:` as `nonblocking: <finding>: <why it "
+                     "does not block>`")
+    if status in ("ISSUES", "PASS"):
+        for line in issues:
+            if status == "PASS" or not line.startswith("blocking:"):
+                fix = ("a PASS report has no blocking finding; report ISSUES, or move a non-blocking finding to "
+                       "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`" if status == "PASS" else
+                       "start it with `blocking:` and say why it blocks, or move a non-blocking finding to "
+                       "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`")
+                found.append(f"Issues line `{line}` {'is not allowed' if status == 'PASS' else 'has no `blocking:` label'}; {fix}")
+    return found
 
 
 def unacked_steers_of(ctx_path):
@@ -5158,6 +5247,8 @@ def build_parser():
     p.add_argument("file", help="the report file that the brief's REPORT section names")
     p.add_argument("--mailbox", metavar="CTX", help="a worker's context file: also name a steer of its attempt that "
                    "has no ack (reads Taskgraph through the file's tg.py)")
+    p.add_argument("--verifier", action="store_true", help="the report is a verifier's: an ISSUES report needs a "
+                   "`blocking:` label on every Issues line, and a report with only non-blocking findings is a PASS")
     p.add_argument("--acceptance", type=int, metavar="N", help="a PASS report needs at least N non-empty lines "
                    "under Evidence:, one for each ACCEPTANCE line of the task")
 

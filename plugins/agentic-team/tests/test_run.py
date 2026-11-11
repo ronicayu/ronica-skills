@@ -5426,6 +5426,7 @@ class RunTest(Base):
             "none": "None",
             "leftover": "\nleftover process: pid 4242 port 8080\n- leftover container: demo-db\nleftover file: /tmp/x",
             "decision": "decision: should the flag keep its old name?",
+            "nonblocking": "nonblocking: docs/a.md: a typo: the conclusion does not change",
         }
         for name, text in cases.items():
             with self.subTest(name):
@@ -5435,7 +5436,7 @@ class RunTest(Base):
     def test_107_check_report_refuses_an_unlabelled_line(self):
         out = self.check_report("\ncaller: src/b.py: calls the old name\n- fix the README too\nBug: src/c.py: wrong")
         self.assertEqual((out.returncode, out.stdout), (2, ""))
-        hint = ("start it with one of caller, doc, test, other, found, split, decision, "
+        hint = ("start it with one of caller, doc, test, other, found, split, decision, nonblocking, "
                 "as `<label>: <path or question>: <why>`")
         self.assertEqual(out.stderr.splitlines(), [
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
@@ -5488,7 +5489,7 @@ class RunTest(Base):
         self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
         report = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
-        self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}"`\n', report)
+        self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}" --verifier`\n', report)
 
     def evidence_report(self, status, evidence, after=""):
         path = os.path.join(self.dir, "report.md")
@@ -5908,6 +5909,140 @@ class RoleTest(Base):
         self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "mechanical"), 0)
         self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "judgement"), 3)
         self.assertEqual(runner.asks_cap(fake, {"meta": {"asks": 1}}, "mechanical"), 1)
+
+
+class Issue89Test(Base):
+    """agentic-team 0.18.0: blocking findings, the path check, [scope] adjacent."""
+
+    def report(self, status="PASS", **fields):
+        path = os.path.join(self.dir, "report.md")
+        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+                "Issues": "None", "Deviations": "None", "Follow-ups": "None", "Checkpoint": CHECKPOINT, **fields}
+        with open(path, "w") as fh:
+            fh.write("".join(f"{k}: {v}\n" for k, v in text.items() if v is not None))
+        return path
+
+    def verify_text(self, task):
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\nFiles: out.txt\n")
+        return self.ok("verify", str(task), "--dry-run").stdout
+
+    def check(self, path, *flags):
+        out = self.run_cmd("check-report", path, *flags)
+        return out.returncode, out.stdout, out.stderr
+
+    # --- verifier reports
+
+    def test_verifier_issues_need_a_blocking_label_on_every_line(self):
+        ok = "\nblocking: src/a.py:3: red test, the change fails ACCEPTANCE 1\n- blocking: a scope breach: README.md"
+        self.assertEqual(self.check(self.report("ISSUES", Issues=ok), "--verifier"), (0, "ok\n", ""))
+        code, out, err = self.check(self.report("ISSUES", Issues="\nblocking: a real defect\nthe wording is off"),
+                                    "--verifier")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Issues line `the wording is off` has no `blocking:` label; start it with `blocking:`", err)
+        self.assertIn("`nonblocking: <finding>: <why it does not block>`", err)
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_verifier_issues_status_needs_a_blocking_line(self):
+        code, out, err = self.check(self.report("ISSUES", Issues="None"), "--verifier")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Status ISSUES needs at least one `blocking:` line under `Issues:`", err)
+        self.assertEqual(self.check(self.report("ISSUES", Issues=None), "--verifier")[0], 2)
+
+    def test_verifier_with_only_nonblocking_findings_reports_pass(self):
+        follow = "nonblocking: docs/a.md: wrong count: the corrected number changes no conclusion"
+        self.assertEqual(self.check(self.report("PASS", **{"Follow-ups": follow}), "--verifier"), (0, "ok\n", ""))
+        code, _, err = self.check(self.report("PASS", Issues="blocking: a defect"), "--verifier")
+        self.assertEqual(code, 2)
+        self.assertIn("a PASS report has no blocking finding", err)
+
+    def test_a_worker_report_keeps_free_issue_lines(self):
+        self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails")), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Issues="None")), (0, "ok\n", ""))
+
+    def test_the_brief_passes_verifier_only_to_a_verifier(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
+        self.assertIn("--verifier`", verify)
+        self.assertIn("does not start with `blocking:`", verify)
+        self.assertNotIn("--verifier", self.section(self.brief(self.add_task()), "REPORT"))
+
+    # --- the path check
+
+    def test_the_path_check_refuses_a_missing_path_and_names_token_and_line(self):
+        os.makedirs(os.path.join(self.dir, "src"))
+        for name in ("a.py", "README.md"):
+            with open(os.path.join(self.dir, name), "w") as fh:
+                fh.write("x\n")
+        with open(os.path.join(self.dir, "src", "b.py"), "w") as fh:
+            fh.write("x\n")
+        good = self.report(Files="`README.md`, `src/`", Evidence="\nfirst -> `a.py:3`\nsecond -> `src/b.py:2-9`",
+                           Ran="`make test`: ok\n`python3 a.py`: ok")
+        self.assertEqual(self.check(good), (0, "ok\n", ""))
+        bad = self.report(Files="`src/missing.py`", Evidence="first -> `docs/gone.md:4`", Ran="`tests/test_x.py`: ok")
+        code, out, err = self.check(bad)
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(err.splitlines(), [
+            "run.py: `src/missing.py` under Files is not a path in this worktree (line: `src/missing.py`); correct "
+            "the path, or say on that line that it was deleted or removed",
+            "run.py: `docs/gone.md:4` under Evidence is not a path in this worktree (line: first -> `docs/gone.md:4`); "
+            "correct the path, or say on that line that it was deleted or removed",
+            "run.py: `tests/test_x.py` under Ran is not a path in this worktree (line: `tests/test_x.py`: ok); "
+            "correct the path, or say on that line that it was deleted or removed"])
+
+    def test_the_path_check_skips_what_is_not_a_repository_path(self):
+        tokens = ["make test", "src/<name>.py", "tests/*.py", "$HOME/x.py", "{a,b}/c.py", "https://x.io/a/b.html",
+                  "--flag=a/b", "/etc/hosts", "~/notes.md", "os.path", "True", "v1.2", "node_modules/.bin/x y",
+                  "yes/no|maybe"]
+        report = self.report(Ran="\n".join(f"`{t}`: ok" for t in tokens))
+        self.assertEqual(self.check(report), (0, "ok\n", ""))
+
+    def test_the_path_check_exempts_a_deleted_line_and_a_blocked_report(self):
+        report = self.report(Files="`old/gone.py` (deleted)\n`old/other.py` removed in this task")
+        self.assertEqual(self.check(report), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("BLOCKED", Files="`no/such.py`")), (0, "ok\n", ""))
+
+    def test_the_path_check_looks_up_an_absolute_path_inside_the_worktree(self):
+        inside = os.path.join(self.dir, "missing", "x.py")
+        code, _, err = self.check(self.report(Files=f"`{inside}`"))
+        self.assertEqual(code, 2)
+        self.assertIn(f"`{inside}` under Files", err)
+
+    def test_the_path_check_does_not_apply_to_a_verifier(self):
+        self.assertEqual(self.check(self.report(Ran="`base/gone.py`: ok"), "--verifier"), (0, "ok\n", ""))
+
+    def test_the_worker_brief_names_the_path_check(self):
+        self.assertIn("does not exist in your worktree", self.section(self.brief(self.add_task()), "REPORT"))
+
+    # --- [scope] adjacent
+
+    def test_no_adjacent_line_by_default(self):
+        task = self.add_task()
+        self.assertNotIn("Also allowed outside SCOPE", self.brief(task))
+        self.write_config("[scope]\nadjacent = []\n")
+        self.assertNotIn("Also allowed outside SCOPE", self.brief(task))
+        self.assertNotIn("Adjacent changes", self.verify_text(self.running_task()))
+
+    def test_adjacent_kinds_go_into_the_worker_and_verifier_briefs(self):
+        self.write_config('[scope]\nadjacent = ["lower-ratchet", "own-lint"]\n')
+        scope = self.section(self.brief(self.add_task()), "SCOPE")
+        self.assertTrue(scope.startswith("src/\n\nAlso allowed outside SCOPE, nothing more: `lower-ratchet`: only lower "
+                                         "a baseline, ratchet or allow-list count; never raise it and never add an entry; "
+                                         "`own-lint`: fix lint or format errors"), scope)
+        self.assertNotIn("stale-exemption", scope)
+        self.assertIn("`adjacent: <kind>: <path>`", scope)
+        text = self.verify_text(self.running_task())
+        self.assertIn("### Adjacent changes", text)
+        self.assertIn("`lower-ratchet`: only lower", text)
+        self.assertIn("Check that each `adjacent: <kind>: <path>` line", text)
+        self.assertNotIn("stale-exemption", text)
+
+    def test_an_unknown_adjacent_kind_is_refused_naming_the_kinds(self):
+        self.write_config('[scope]\nadjacent = ["lower-ratchet", "lower-ratchett"]\n')
+        out = self.run_cmd("status")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('scope.adjacent: "lower-ratchett" is not an adjacent-change kind; the kinds are lower-ratchet, '
+                      "stale-exemption, own-lint (did you mean lower-ratchet?)", out.stderr)
 
 
 class PrTest(Base):

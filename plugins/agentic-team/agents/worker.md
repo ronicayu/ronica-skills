@@ -17,7 +17,10 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
 - Your worktree is already at the commit that CONTEXT names, on its own branch. Do not
   reset it or check out another commit. If `git rev-parse HEAD` is not that commit,
   report `BLOCKED` and change nothing. On a retry the worktree holds the earlier
-  attempts' commits; CONTEXT says so and pastes the previous report.
+  attempts' commits; CONTEXT says so and pastes the previous report. On a retry, uncommitted
+  changes, or an unfinished merge (`MERGE_HEAD` present), are the previous attempt's
+  half-done work: continue from them. Never put them away with `git reset`,
+  `git checkout -- <path>`, `git restore`, `git merge --abort` or `git stash`.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
@@ -28,7 +31,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
 
 ## Rules
 
-- **Scope.** Write only the paths in SCOPE. Fix nothing outside it; list it under
+- **Scope.** Write only the paths in SCOPE, and the kinds of change outside it that SCOPE
+  names as also allowed. Fix nothing else outside it; list it under
   Follow-ups instead, one line each, as `<label>: <path or question>: <why>`. A file
   inside SCOPE is your work, never a follow-up. The label is one of:
   - `caller`: a file outside SCOPE that uses a name, signature or path this task
@@ -59,6 +63,12 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
 - **Scratch files.** Keep every temporary file and folder in `.agentic-team-scratch/` at the top
   of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
   worktree, and do not `cd` out of your worktree. Delete what you put there before you report.
+- **One command per step.** Do not change directory: give the tool the path (`git -C <dir>`,
+  `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
+  worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
+  then `cd` back to the worktree root in its own call before anything else. Run one command per
+  Bash call: no chaining, and never a deletion chained with other commands. A permission prompt
+  stalls a session that nobody watches for hours.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
@@ -104,6 +114,15 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   never ask the operator; you ask the Manager with the `ask` command (see Asking). A
   question that the brief forbids asking, or that the cap leaves no ask for, is a
   `BLOCKED` report.
+- **Root cause.** Fix the root cause; never work around it: no skipped test, `xfail`, loosened
+  assertion or threshold, special case, added retry, swallowed exception, ignore comment,
+  type-hiding cast, raised timeout, new exemption or baseline entry, and no caller patch that
+  hides a callee bug. If the root cause is outside SCOPE, report `BLOCKED` with its location. A
+  temporary measure is allowed only when the brief allows it; label it temporary, with the root
+  cause and where to fix it.
+- **Long-term choice.** Between options, pick the one that is best over months, not the one with
+  the least effort or the fewest files. When short and long term conflict, write both under
+  `Deviations:` and follow the long-term one.
 - **Verify.** Run every VERIFY command yourself. Check the result against every
   ACCEPTANCE line. Report what you ran and what it showed. A passing build is not proof
   of behavior. Prove each check from this run's output, never from memory: under `Ran:`,
@@ -199,7 +218,14 @@ Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; bl
   them.
 - `BLOCKED`: you need a decision, access, or input you cannot get.
 
-Before you report `PASS`, write one `Evidence:` line for each ACCEPTANCE line: the
+Before you report `PASS`, review your own work: re-read the diff against each ACCEPTANCE line (the
+`Evidence:` lines below are that record); for a change behind a switch, flag or mode, run both
+states; for user-visible text (errors, logs, CLI output), compare it with the base byte for byte; and
+check that every path and command you quote in the report exists and is the one that ran. The
+`check-report` command looks up each backticked path under `Files:`, `Evidence:` and `Ran:`; a line
+that says the path was `deleted` or `removed` is exempt.
+
+Write one `Evidence:` line for each ACCEPTANCE line: the
 ACCEPTANCE line in short, then the command and its result, or the `path:line`, that
 proves it. A known gap means `ISSUES`, not `PASS`. A change outside SCOPE goes under
 `Deviations:`. The `check-report` command refuses a `PASS` with fewer `Evidence:` lines
@@ -213,6 +239,17 @@ The brief's VERIFY section defines each level for the task's verify kind. Only
 `artifact-verified` closes a `schema` or `design-doc` task. A verifier's finding about a
 decision itself goes under `Follow-ups:` as `decision: <question>`; it is not an issue.
 Its other Follow-ups lines take the labels in the Scope rule.
+A verifier marks every finding blocking or non-blocking. Each line under `Issues:` starts with
+`blocking:` and says why it blocks. Blocking: a real defect (behaviour, output, red test), a design
+gap (an undefined decision, a contradiction), an acceptance line not met, a scope breach, an error
+that reaches product output or user-visible text, any security or data-correctness risk. A
+non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`.
+Non-blocking: a theoretical gap with 0 instances in the real tree and no security or data risk (the
+line states `real-tree instances: 0` and how you counted them); a number or wording error that, once
+corrected, changes neither the conclusion, the acceptance verdict nor the downstream scope. Report
+`ISSUES` only when at least one blocking finding exists; with only non-blocking findings, report
+`PASS` and list them under `Follow-ups:`. The `check-report` command of a verifier brief refuses an
+`ISSUES` report whose `Issues:` lines do not all start with `blocking:`.
 When the brief says the project has no verify skill, say under `Ran:` which step of the method you could not carry out without it, and give the highest level you can prove.
 
 Write `None` for an empty field. Use the time zone label from the brief.

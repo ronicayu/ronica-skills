@@ -63,5 +63,11 @@ always_pause = []           # decisions that always need the operator
 [verify]
 # kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta
 
+[scope]
+# adjacent = []             # changes a worker may make outside a task's SCOPE without BLOCKED; off by default. Kinds:
+#   "lower-ratchet"         #   only lower a baseline, ratchet or allow-list count (never raise it, never add an entry)
+#   "stale-exemption"       #   delete an exemption or baseline row that a scanner run in this attempt proves stale
+#   "own-lint"              #   fix lint or format errors that this attempt's change caused in files outside SCOPE
+
 [roles]
 # default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (README: Roles)
