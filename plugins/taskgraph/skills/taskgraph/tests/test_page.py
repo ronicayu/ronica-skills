@@ -1838,3 +1838,30 @@ def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
     assert page.evaluate("cy.zoom()") > 0.4
     assert wide_zoom > 0
     page.close()
+
+
+def test_graph_edges_do_not_cross_node_labels(browser, fanin_file):
+    page, problems = open_page(browser, fanin_file, "?view=graph")
+    crossings = page.evaluate(
+        """() => {
+            const boxes = tasks().map(n => {
+                const at = n.position(), bb = n.boundingBox({ includeNodes: true, includeEdges: false, includeLabels: true, includeOverlays: false });
+                return { id: n.id(), x1: bb.x1 + 1, x2: bb.x2 - 1, below: [at.y + n.outerHeight() / 2 + 1, bb.y2 - 1], above: [bb.y1 + 1, at.y - n.outerHeight() / 2 - 1] };
+            });
+            const hits = [];
+            links().forEach(e => {
+                const pts = [e.sourceEndpoint(), ...e.segmentPoints(), e.targetEndpoint()];
+                pts.slice(1).forEach((b, i) => {
+                    const a = pts[i], x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x), y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
+                    boxes.forEach(box => [box.below, box.above].forEach(([top, bottom]) => {
+                        if (bottom > top && x1 < box.x2 && x2 > box.x1 && y1 < bottom && y2 > top) hits.push([e.id(), box.id]);
+                    }));
+                });
+            });
+            return [hits, tasks().filter(n => n.boundingBox({ includeLabels: true, includeOverlays: false }).h > n.outerHeight() + 8).length];
+        }"""
+    )
+    assert crossings[1] >= 2  # the milestones have labels under their shape
+    assert crossings[0] == []
+    assert problems == []
+    page.close()

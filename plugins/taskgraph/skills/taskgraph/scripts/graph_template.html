@@ -1318,7 +1318,7 @@ function layoutGraph() {
       if (!r) return;
       e.style({
         'curve-style': 'segments', 'edge-distances': 'node-position',
-        'source-endpoint': `${r.from.x}px ${r.from.y}px`, ...(r.to ? { 'target-endpoint': `${r.to.x}px ${r.to.y}px` } : {}),
+        'source-endpoint': `${r.from.x}px ${r.from.y}px`, 'target-endpoint': `${r.to.x}px ${r.to.y}px`,
         ...elbow(e.source().position(), e.target().position(), r.path)
       });
     });
@@ -1403,10 +1403,15 @@ function dagreLayout(nodes, edges, opts) {
     it.shifts.forEach(({ i, grp }) => path.push([it.pts[i].x, grp.y], [it.pts[i + 1].x, grp.y]));
     const s = it.pts[0], t = it.pts[it.pts.length - 1];
     const up = t.y < s.y ? -1 : 1;
+    // A label under its shape (a milestone's) belongs to the node: lines start and stop beyond it.
+    const reach = (n, dir) => {
+      const at = n.position(), bb = n.boundingBox({ includeNodes: true, includeEdges: false, includeLabels: true, includeOverlays: false });
+      return dir < 0 ? Math.min(-n.outerHeight() / 2, bb.y1 - at.y) : Math.max(n.outerHeight() / 2, bb.y2 - at.y);
+    };
     routes[it.e.id()] = {
       path: path.length ? path : [[s.x, (s.y + t.y) / 2]],
-      from: { x: it.dx, y: up * it.e.source().outerHeight() / 2 },
-      to: it.tx ? { x: it.tx, y: -up * it.e.target().outerHeight() / 2 } : null
+      from: { x: it.dx, y: reach(it.e.source(), up) },
+      to: { x: it.tx, y: reach(it.e.target(), -up) }
     };
   });
   return { pos, routes };
