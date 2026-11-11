@@ -1411,6 +1411,9 @@ def substitutions(word):
 # --------------------------------------------------------------------------
 
 JVM_TEST_TOOLS = ("junit", "testng", "kotest")
+
+# Facts a command can show that are coverage thresholds, not strictness.
+COVERAGE_FACT_KINDS = {"fail_under", "cov-fail-under", "jest-coverage-threshold", "vitest-thresholds"}
 MAX_FOLLOW_DEPTH = 4
 
 # Flags after which a tool does not fail the build.
@@ -1693,10 +1696,7 @@ class CommandReader(object):
             merged = dict(ctx.env)
             merged.update(env)
             ctx = ctx.but(env=merged)
-        if re.search(r"-D\s?warnings|--deny[ =]warnings", env.get("RUSTFLAGS", "")):
-            self.fact(out, "rustflags-deny-warnings", line, ctx)
-        if "-mod=readonly" in env.get("GOFLAGS", ""):
-            self.lock(out, "go -mod=readonly", line, ctx)
+            self.env_facts(out, env, line, ctx)
         prog = re.sub(r"@[^@/]*$", "", posixpath.basename(argv[0]))
         args = argv[1:]
         handler = self.HANDLERS.get(prog)
@@ -1710,6 +1710,16 @@ class CommandReader(object):
         if "/" in argv[0] and self.follow_script(out, argv[0], args, line, ctx):
             return
         self.tool_command(out, prog, args, line, ctx)
+
+    def env_facts(self, out, env, line, ctx):
+        if re.search(r"-D\s?warnings|--deny[ =]warnings", env.get("RUSTFLAGS", "")):
+            self.fact(out, "rustflags-deny-warnings", line, ctx)
+        if "-mod=readonly" in env.get("GOFLAGS", ""):
+            self.lock(out, "go -mod=readonly", line, ctx)
+
+    def export(self, out, args, line, ctx):
+        env = dict(a.split("=", 1) for a in args if re.match(r"^[A-Za-z_]\w*=", a))
+        self.env_facts(out, env, line, ctx)
 
     @staticmethod
     def strip_wrappers(argv, env):
@@ -2402,7 +2412,7 @@ CommandReader.HANDLERS.update({
     "ruff": CommandReader.ruff, "biome": CommandReader.biome,
     "pytest": CommandReader.pytest, "py.test": CommandReader.pytest, "coverage": CommandReader.coverage,
     "jest": CommandReader.jest, "vitest": CommandReader.vitest, "c8": CommandReader.c8, "nyc": CommandReader.nyc,
-    "java": CommandReader.java,
+    "java": CommandReader.java, "export": CommandReader.export,
     "pre-commit": CommandReader.precommit, "prek": CommandReader.precommit,
 })
 for _shell in SHELLS:
@@ -3147,6 +3157,7 @@ class Detector(object):
         self.npm_workspaces = {}
         self.hook_defs = []
         self.ci_facts = []
+        self.script_facts = []
         self._gradle_verification = None
         self.reader = CommandReader(self)
 
@@ -3615,6 +3626,31 @@ class Detector(object):
                "Justfile": "just", "Taskfile.yml": "task", "Taskfile.yaml": "task",
                "noxfile.py": "nox", "tox.ini": "tox"}
 
+    @staticmethod
+    def pin_value(name, text):
+        """The version a one-value pin file names."""
+        if name in (".python-version", ".nvmrc", ".node-version", ".java-version", "rust-toolchain", "runtime.txt"):
+            for line in text.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+        if name == "rust-toolchain.toml":
+            m = re.search(r"^channel\s*=\s*[\"']([^\"']+)", text, re.M)
+            return m.group(1) if m else None
+        return None
+
+    def lockfile_age(self, lockfiles):
+        """Add last_commit (the committer date of the file's last commit) to up to 20 lockfiles."""
+        repo = self.repo
+        for index, lock in enumerate(lockfiles):
+            lock["last_commit"] = None
+            if not repo.is_git or index >= 20:
+                continue
+            out = run_git(repo.git_root, ["log", "-1", "--no-show-signature", "--format=%cI", "--",
+                                          repo.top_rel(lock["file"])])
+            if out:
+                lock["last_commit"] = out.decode("utf-8", "replace").strip() or None
+
     def detect_setup(self, subproject_dirs):
         repo = self.repo
         cache = {}
@@ -3630,7 +3666,11 @@ class Detector(object):
         pins = []
         for name in self.PINS:
             for rel in repo.by_name.get(name, []):
-                pins.append({"kind": name, "file": rel, "line": 1, "subproject": sub_of(rel)})
+                pin = {"kind": name, "file": rel, "line": 1, "subproject": sub_of(rel)}
+                value = self.pin_value(name, repo.text(rel))
+                if value:
+                    pin["value"] = value
+                pins.append(pin)
         for rel in ("gradle/wrapper/gradle-wrapper.properties", ".mvn/wrapper/maven-wrapper.properties"):
             for f in repo.files:
                 if f == rel or f.endswith("/" + rel):
@@ -3641,10 +3681,49 @@ class Detector(object):
                 line = repo.text(rel).count("\n", 0, m.start()) + 1
                 pins.append({"kind": "go directive", "file": rel, "line": line, "value": m.group(1),
                              "subproject": sub_of(rel)})
+        for rel in repo.by_name.get("go.mod", []):
+            m = re.search(r"^toolchain\s+(\S+)", repo.text(rel), re.M)
+            if m:
+                line = repo.text(rel).count("\n", 0, m.start()) + 1
+                pins.append({"kind": "go toolchain", "file": rel, "line": line, "value": m.group(1),
+                             "subproject": sub_of(rel)})
         for rel in repo.by_name.get("package.json", []):
-            hit = repo.match_spec("package.json::engines", dir_of(rel))
-            if hit:
-                pins.append({"kind": "package.json engines", "file": rel, "line": hit[1], "subproject": sub_of(rel)})
+            obj, error = repo.json_file(rel)
+            if error is not None or not isinstance(obj, dict) or rel.startswith("../"):
+                continue
+            engines = obj.get("engines")
+            if isinstance(engines, dict):
+                hit = repo.match_spec("package.json::engines", dir_of(rel))
+                pin = {"kind": "package.json engines", "file": rel, "line": hit[1] if hit else 1,
+                       "subproject": sub_of(rel)}
+                if isinstance(engines.get("node"), str):
+                    pin["value"] = engines["node"]
+                pins.append(pin)
+            for key in ("packageManager", "volta"):
+                hit = repo.match_spec("package.json::" + key, dir_of(rel))
+                if hit:
+                    value = obj[key] if isinstance(obj[key], str) else (obj[key].get("node")
+                                                                       if isinstance(obj[key], dict) else None)
+                    pin = {"kind": "package.json " + key, "file": rel, "line": hit[1], "subproject": sub_of(rel)}
+                    if isinstance(value, str):
+                        pin["value"] = value
+                    pins.append(pin)
+        for rel in repo.by_name.get("Cargo.toml", []):
+            m = re.search(r"^rust-version\s*=\s*[\"']([^\"']+)", repo.text(rel), re.M)
+            if m:
+                line = repo.text(rel).count("\n", 0, m.start()) + 1
+                pins.append({"kind": "rust-version", "file": rel, "line": line, "value": m.group(1),
+                             "subproject": sub_of(rel)})
+        for rel in repo.files:
+            if rel.endswith((".gradle", ".gradle.kts")):
+                m = re.search(r"jvmToolchain\s*\(\s*(\d+)|JavaLanguageVersion\.of\(\s*(\d+)|\btoolchain\s*\{", repo.text(rel))
+                if m:
+                    line = repo.text(rel).count("\n", 0, m.start()) + 1
+                    pin = {"kind": "java.toolchain", "file": rel, "line": line, "subproject": sub_of(rel)}
+                    version = re.search(r"jvmToolchain\s*\(\s*(\d+)|JavaLanguageVersion\.of\(\s*(\d+)", repo.text(rel))
+                    if version:
+                        pin["value"] = version.group(1) or version.group(2)
+                    pins.append(pin)
         for rel in repo.by_name.get("pyproject.toml", []):
             m = re.search(r"^requires-python\s*=\s*(.+)$", repo.text(rel), re.M)
             if m:
@@ -3668,11 +3747,139 @@ class Detector(object):
         dockerfiles = sorted(f for f in repo.files if re.match(r"^(Dockerfile(\..+)?|.+\.Dockerfile)$", posixpath.basename(f)))
         compose = sorted(f for f in repo.files
                          if re.match(r"^(docker-compose.*|compose)\.ya?ml$", posixpath.basename(f)))
-        return {"lockfiles": sorted(lockfiles, key=lambda r: r["file"]),
+        lockfiles.sort(key=lambda r: r["file"])
+        self.lockfile_age(lockfiles)
+        return {"lockfiles": lockfiles,
                 "requirements_files": requirements,
                 "toolchain_pins": sorted(pins, key=lambda r: (r["file"], r["kind"])),
                 "task_runners": sorted(runners, key=lambda r: r["file"]),
                 "devcontainer": devcontainer, "dockerfiles": dockerfiles[:20], "compose": compose[:20]}
+
+    # ---- strictness and coverage thresholds --------------------------------
+
+    def section_lines(self, rel, headers):
+        """(line number, text) of the lines under the section headers of a TOML or INI file."""
+        current = None
+        for number, raw in enumerate(self.repo.text(rel).splitlines(), 1):
+            m = SECTION_RE.match(raw)
+            if m:
+                current = re.sub(r"\s+", "", m.group(1))
+            elif current in headers:
+                yield number, raw
+
+    def line_of(self, rel, regex, flags=0):
+        """(line, match) of the first match of regex in a file, or None."""
+        text = self.repo.text(rel)
+        m = re.search(regex, text, flags)
+        return (text.count("\n", 0, m.start()) + 1, m) if m else None
+
+    def detect_facts(self, subproject_dirs):
+        """(strictness, coverage_thresholds) read from configuration files, CI and scripts."""
+        repo = self.repo
+        cache = {}
+        strictness = []
+        thresholds = []
+
+        def add(target, kind, rel, line, **extra):
+            item = {"kind": kind, "how": "config", "file": rel, "line": line,
+                    "subproject": self.owner(dir_of(rel), subproject_dirs, cache)}
+            item.update(extra)
+            target.append(item)
+
+        def on(value):
+            return bool(re.match(r"^\s*(true|yes|on|1)\b", value, re.I))
+
+        for name, headers in (("mypy.ini", {"mypy"}), (".mypy.ini", {"mypy"}), ("setup.cfg", {"mypy"}),
+                              ("pyproject.toml", {"tool.mypy"})):
+            for rel in repo.by_name.get(name, []):
+                for number, raw in self.section_lines(rel, headers):
+                    m = re.match(r"^\s*(strict|disallow_untyped_defs)\s*[=:]\s*(.*)$", raw)
+                    if m and on(m.group(2)):
+                        add(strictness, "mypy-" + m.group(1).replace("_", "-"), rel, number, value=True)
+        for rel in repo.by_name.get("pyrightconfig.json", []):
+            try:
+                obj = json.loads(strip_jsonc(repo.text(rel)))
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict):
+                if obj.get("typeCheckingMode") == "strict":
+                    hit = self.line_of(rel, r'"typeCheckingMode"')
+                    add(strictness, "pyright-strict", rel, hit[0] if hit else 1, value="strict")
+                if isinstance(obj.get("strict"), list) and obj["strict"]:
+                    hit = self.line_of(rel, r'"strict"\s*:')
+                    add(strictness, "pyright-strict-paths", rel, hit[0] if hit else 1, value=obj["strict"])
+        for rel in repo.by_name.get("pyproject.toml", []):
+            for number, raw in self.section_lines(rel, {"tool.pyright"}):
+                if re.match(r"^\s*typeCheckingMode\s*=\s*[\"']strict[\"']", raw):
+                    add(strictness, "pyright-strict", rel, number, value="strict")
+                elif re.match(r"^\s*strict\s*=\s*\[\s*[\"']", raw):
+                    add(strictness, "pyright-strict-paths", rel, number)
+        for rel in repo.files + repo.above:
+            base = posixpath.basename(rel)
+            if re.match(r"^tsconfig[\w.\-]*\.json$", base):
+                info = tsconfig_info(repo, rel)
+                if info["strict"] is not None:
+                    hit = self.line_of(rel, r'"strict"\s*:')
+                    add(strictness, "tsconfig-strict", rel, hit[0] if hit else 1, value=info["strict"])
+        for rel in repo.by_name.get("Cargo.toml", []):
+            for number, raw in self.section_lines(rel, {"lints.rust", "workspace.lints.rust"}):
+                if re.match(r"^\s*warnings\s*=\s*[\"']deny[\"']", raw):
+                    add(strictness, "cargo-lints-deny-warnings", rel, number, value="deny")
+        for rel in repo.files:
+            if posixpath.basename(rel) in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                hit = self.line_of(rel, r"-Werror\b|<failOnWarning>\s*true")
+                if hit:
+                    add(strictness, "javac-werror", rel, hit[0])
+                hit = self.line_of(rel, r"allWarningsAsErrors\s*(=\s*true|\.set\(\s*true\s*\))")
+                if hit:
+                    add(strictness, "kotlin-all-warnings-as-errors", rel, hit[0])
+        for fact in self.ci_facts + self.script_facts:
+            strictness.append(dict(fact, subproject=self.owner(dir_of(fact["file"]), subproject_dirs, cache)))
+        strictness = [f for f in strictness if f["kind"] not in COVERAGE_FACT_KINDS]
+
+        for name in (".coveragerc", "setup.cfg", "tox.ini", "pyproject.toml"):
+            for rel in repo.by_name.get(name, []):
+                hit = self.line_of(rel, r"^\s*fail_under\s*[=:]\s*([\d.]+)", re.M)
+                if hit:
+                    add(thresholds, "fail_under", rel, hit[0], value=hit[1].group(1))
+        for name in ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"):
+            for rel in repo.by_name.get(name, []):
+                hit = self.line_of(rel, r"--cov-fail-under[= ]\s*([\d.]+)")
+                if hit:
+                    add(thresholds, "cov-fail-under", rel, hit[0], value=hit[1].group(1))
+        for rel in repo.files:
+            base = posixpath.basename(rel)
+            if base in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                text = repo.text(rel)
+                if "jacoco" in text.lower():
+                    hit = self.line_of(rel, r"<minimum>\s*([\d.]+)|violationRules")
+                    if hit:
+                        add(thresholds, "jacoco-violation-rules", rel, hit[0], value=hit[1].group(1))
+                hit = self.line_of(rel, r"minBound\s*\(?\s*(\d+)?")
+                if hit:
+                    add(thresholds, "kover-min-bound", rel, hit[0], value=hit[1].group(1))
+            elif re.match(r"^(vitest|vite)\.config\.[mc]?[jt]s$", base):
+                hit = self.line_of(rel, r"\bthresholds\b")
+                if hit:
+                    add(thresholds, "vitest-thresholds", rel, hit[0])
+            elif re.match(r"^jest\.config\.(json|[mc]?[jt]s)$", base) or base == "package.json":
+                hit = self.line_of(rel, r"\bcoverageThreshold\b")
+                if hit:
+                    add(thresholds, "jest-coverage-threshold", rel, hit[0])
+            elif base in ("codecov.yml", ".codecov.yml", "codecov.yaml", ".codecov.yaml"):
+                tree = parse_yaml(repo.text(rel))
+                for key, value in walk_yaml(tree):
+                    if key == "patch":
+                        for inner_key, inner in walk_yaml(value):
+                            if inner_key == "target":
+                                add(thresholds, "codecov-patch-target", rel, getattr(inner, "line", 1),
+                                    value=str(inner))
+                                break
+        for fact in self.ci_facts + self.script_facts:
+            if fact["kind"] in COVERAGE_FACT_KINDS:
+                thresholds.append(dict(fact, subproject=self.owner(dir_of(fact["file"]), subproject_dirs, cache)))
+        key = lambda r: (r["file"], r["line"], r["kind"])
+        return sorted(strictness, key=key), sorted(thresholds, key=key)
 
     # ---- docs -----------------------------------------------------------
 
@@ -3777,9 +3984,14 @@ class Detector(object):
         self.collect_scripts()
         self.npm_workspaces = npm_workspaces(repo)
         owner_cache = {}
-        self.script_hits = [(rel, line, self.owner(dir_of(rel), subproject_dirs, owner_cache),
-                             {hit.tool.name for hit in self.reader.read(command, follow=False).hits})
-                            for rel, line, command in self.script_commands]
+        self.script_hits = []
+        self.script_facts = []
+        for rel, line, command in self.script_commands:
+            outcome = self.reader.read(command, follow=False)
+            self.script_hits.append((rel, line, self.owner(dir_of(rel), subproject_dirs, owner_cache),
+                                     {hit.tool.name for hit in outcome.hits}))
+            self.script_facts.extend(dict(fact, how="script", file=rel, line=line) for fact in outcome.facts
+                                     if not fact["kind"].startswith("poetry-"))
         precommit = self.detect_precommit()
         ci = self.detect_ci()
 
@@ -3835,6 +4047,7 @@ class Detector(object):
                     if run_git(repo.root, ["rev-parse", "--verify", "--quiet", "refs/heads/" + name]):
                         branch = name
                         break
+        strictness, thresholds = self.detect_facts(subproject_dirs)
         return {
             "repo": repo.root,
             "git": has_git,
@@ -3852,6 +4065,8 @@ class Detector(object):
             "setup": self.detect_setup(subproject_dirs),
             "docs": self.detect_docs(),
             "suppressions": suppressions,
+            "strictness": strictness,
+            "coverage_thresholds": thresholds,
             "excluded": self.excluded_summary(excluded),
             "parse_errors": [{"file": f, "parse_error": e} for f, e in sorted(repo.parse_errors.items())],
         }
