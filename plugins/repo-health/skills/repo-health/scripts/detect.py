@@ -3,12 +3,15 @@
 
     detect.py [REPO] [--max-subprojects 10] [--pretty]
 
-Prints one JSON document on stdout: languages and LOC, subprojects with the
-lint/format/type/static/test/coverage configuration found, CI files and the
-tools they run, pre-commit hooks, setup files, docs and suppression markers.
-It reads manifests, configs, CI files and the first 200 KB of each source file.
-It never writes, never runs project code, and never needs the network.
-Standard library only; runs on Python 3.9 and newer.
+Prints one JSON document on stdout: languages and LOC, subprojects (workspace
+members under their root) with the lint/format/type/static/test/coverage
+configuration found, CI files with the tools their commands run, pre-commit
+hooks, strictness and coverage threshold facts, setup files, README commands, docs
+and suppression markers. It reads manifests, configs, CI files and the first
+200 KB of each source file. It never writes, never runs project code (git runs
+with the repository's own fsmonitor, signature, pager, diff and hook commands
+switched off; noxfile.py is read as text) and never needs the network. Standard
+library only; runs on Python 3.9 and newer.
 
 The TOOLS table below is the single list of tools. The reference files of the
 skill name the same tools; tests/test_consistency.py keeps the two in step.
@@ -19,6 +22,125 @@ with extra keys where useful ("language", "inherited_from", "via", "strict").
 TOML section headers are found with a line scanner on every Python version, so
 that matches carry line numbers. tomllib (Python 3.11+) only decides whether a
 manifest is well formed ("parse_errors").
+
+Top-level keys
+    repo, git, git_root, subpath   a folder inside a git repository keeps git: files
+                                   come from `git ls-files` of the folder, paths are
+                                   relative to it, and CI files and configs above it
+                                   are read too ("../x" paths, "inherited_from")
+    commit, default_branch
+    languages, other_languages     per language {files, loc, test_files, test_loc}
+    subprojects[]                  {path, manifest, manifests, languages, stats,
+                                   categories, dependencies, workspace, members}.
+                                   A workspace root (Cargo [workspace] members, Maven
+                                   <modules>, Gradle include(), go.work use, npm and
+                                   pnpm workspaces) is one subproject: workspace is
+                                   {kind, manifest} and members[] are records of the
+                                   same shape (own languages, categories, dependencies;
+                                   members[].members is empty). The root's categories
+                                   also list the rows of its members ("member": path).
+                                   --max-subprojects counts roots only.
+    more_subprojects[]             {path, manifest, languages, loc} beyond the cap
+    shared[]                       tool rows found at the repo root
+    ci                             see below
+    precommit                      {config, hooks[], husky[], lefthook[], tools[]}
+    strictness[]                   {kind, how: config|ci|script, file, line, subproject,
+                                   value?, command?}; kinds: mypy-strict,
+                                   mypy-disallow-untyped-defs, pyright-strict,
+                                   pyright-strict-paths, tsconfig-strict (value is
+                                   true or false), cargo-lints-deny-warnings,
+                                   javac-werror, kotlin-all-warnings-as-errors,
+                                   clippy-deny-warnings and rustflags-deny-warnings
+                                   (CI), go-vet (CI)
+    coverage_thresholds[]          same shape; kinds: fail_under, cov-fail-under,
+                                   jacoco-violation-rules, kover-min-bound,
+                                   vitest-thresholds, jest-coverage-threshold,
+                                   codecov-patch-target
+    setup                          lockfiles[] ({file, ecosystem, subproject,
+                                   last_commit}: committer date of the file's last
+                                   commit, ISO 8601, null when not committed, no git
+                                   or beyond the first 20), requirements_files,
+                                   toolchain_pins[] ({kind, file, line, value?,
+                                   subproject}: .python-version, .nvmrc, .node-version,
+                                   package.json engines, packageManager and volta,
+                                   requires-python, rust-toolchain(.toml), rust-version,
+                                   go directive, go toolchain, java.toolchain, wrappers,
+                                   .tool-versions, mise.toml, .sdkmanrc, .java-version),
+                                   task_runners, devcontainer, dockerfiles, compose
+    docs                           readme, headings[], install/run/test ({found, via,
+                                   line}), contributing, adr_dirs, architecture_docs,
+                                   docs_dir, and commands[] (below)
+    suppressions                   per language {total, markers, top_files[]}
+    excluded                       {skipped_dirs: [{path, files}], generated, vendored,
+                                   migrations (each {count, examples[5]}), symlinks_outside[]}
+    parse_errors[]
+
+Exclusions: node_modules, vendor, .venv, venv, __pycache__, .git and similar match at
+any depth; build, dist, target, out, bin and obj only at the repo root or at a folder
+with a manifest. Source files are left out of LOC, suppression counts and hotspots
+(one rule, shared with hotspots.py) when their path says generated (_pb2.py, .min.js,
+.d.ts, ...), their first 5 lines say `Code generated ... DO NOT EDIT`, `@generated` or
+`auto-generated`, .gitattributes marks them linguist-generated or linguist-vendored, or
+they sit in a migrations folder (db/migrate, alembic/versions). A symlink whose target
+is outside the repository is never read; it is listed in excluded.symlinks_outside.
+
+ci.files[]
+    {file, provider, pull_request, trigger_note, events, tools[], jobs[], installs[],
+     inherited_from?}
+    pull_request is true, false or "push-default" (CircleCI, Travis, Buildkite, Azure
+    Pipelines, Jenkins and Drone build branch pushes by default, as does GitLab with no
+    merge request rule: trigger_note says so). For GitHub it comes from on: (pull_request,
+    pull_request_target, merge_group) and each job's if: (`github.event_name !=
+    'pull_request'`, `github.event_name == 'push'`, `github.ref == 'refs/heads/...'` and
+    similar exclude pull requests); for GitLab from rules:, only: and workflow:rules;
+    for Bitbucket from the pipelines section (pull-requests: true, default and branches:
+    "push-default", custom and tags: false). The file value is the best of its jobs.
+    events lists the GitHub triggers. jobs[] is {name, pull_request, rows[]}.
+    installs[] is {line, command, manager, packages}: install commands are evidence of
+    setup and never count as a run.
+    tools[] rows (merged over jobs by tool, via and writes):
+        {tool, category, language, file, line, how: "ci", lines[], commands[],
+         non_blocking, pull_request, jobs[], via?, via_file?, via_line?, writes?}
+    A tool counts only when a command runs it. Commands are split on && || ; | newlines
+    and line continuations; env assignments, env, sudo, time, exec, command and nohup
+    are stripped; `$(...)` and `bash -c` texts are read. Runners are looked through
+    (npx, pnpm exec|dlx, yarn, bunx, uvx, uv run, poetry run, pdm run, pipx run, hatch
+    run, python -m, go run module@version, java -jar). cargo, mvn, gradle, ruff, biome and
+    go sub-commands decide the row (`ruff format` is ruff-format, `mvn -B verify` runs
+    tests unless -DskipTests or -Dmaven.test.skip, `gradle check` also runs the
+    verification plugins of the build). npm, pnpm, yarn, bun, make and just names are
+    resolved in package.json, Makefile and justfile (pre<name> and post<name> too);
+    pnpm --filter, -r, yarn workspaces foreach, npm --workspaces, turbo, nx and lerna
+    resolve in every workspace member. Followed files give rows a `via` (the script,
+    target, "pre-commit", "tox:<env>", "nox:<session>", "gradle check" or a shell
+    script path), `via_file` and `via_line`: pre-commit run reads the hooks of
+    .pre-commit-config.yaml (all, or the named one, minus SKIP), tox the commands of its
+    envs in tox.ini or pyproject legacy_tox_ini, nox the session.run calls of noxfile.py
+    (read as text), shell scripts up to depth 3.
+    writes is true for a formatter run that rewrites files or only prints (prettier
+    --write, black without --check, gofmt -w, cargo fmt without --check): not a check.
+    non_blocking is true when every run of the tool is swallowed: continue-on-error
+    (GitHub step or job), allow_failure (GitLab), continueOnError (Azure), soft_fail
+    (Buildkite), `|| true`, `|| :`, `|| exit 0`, `|| echo ...`, `; true`, `; exit 0`, or a
+    never-fail flag (--exit-zero, --no-fail, --exit-code 0, --issues-exit-code=0).
+ci.tools                           {tool: [files]}
+ci.locked_installs[]               {kind, file, line, command}: npm ci, pnpm install
+                                   --frozen-lockfile, yarn install --immutable or
+                                   --frozen-lockfile, bun install --frozen-lockfile, uv
+                                   sync --locked or --frozen, poetry install --sync (or
+                                   with poetry check --lock), pip install -r of a file
+                                   that pins every requirement (== or --hash), cargo
+                                   build|test --locked, go mod verify, -mod=readonly
+
+docs.commands[]
+    {line, command, kind: install|run|test|lint|build|other, check: ok|missing|unknown,
+     why}: commands from README fenced blocks (sh, bash, shell, zsh, console and
+     untagged blocks with `$ ` lines or known programs) and inline code that starts with a
+     known program, checked without running them: the npm, pnpm, yarn or bun script exists
+     in the right package.json (after `cd`), the make target or just recipe exists, the
+     repository paths a command names exist, python -m names a module of the repository,
+     and the cargo, go, mvn or gradle sub-command is real. unknown means the check needs a
+     run or a download.
 """
 
 import argparse
@@ -55,9 +177,11 @@ else:  # pragma: no cover - depends on the interpreter
 #   ".editorconfig::~ktlint_"     file that contains the text
 #   "build::checkstyle"           word in pom.xml, build.gradle(.kts),
 #                                 settings.gradle(.kts), gradle/libs.versions.toml
-# CI words are matched, case-insensitively, in CI run and uses lines, pre-commit
-# hook ids, package.json scripts and Makefile or justfile recipes. Words in
-# WHOLE_WORD match as whole words only, so "toxic" is not "tox".
+# CI words name the program of a command ("ruff", "cargo fmt"), an action in a
+# `uses:` line or a pre-commit hook id. They are matched case-insensitively and
+# never against the arguments of a command. Some programs (ruff, biome, cargo,
+# go, mvn, gradle, pytest, jest, vitest, coverage) are read by CommandReader.
+# Words in WHOLE_WORD match as whole words only, so "toxic" is not "tox".
 
 # Commands that run the tests of a Java or Kotlin build.
 JVM_TEST_CI = [
@@ -1053,7 +1177,11 @@ class _YamlReader(object):
                 if i >= len(text) or text[i] == "]":
                     i += 1
                     break
+                before = i
                 item, i = self._flow(text, i, lineno)
+                if i == before:
+                    i += 1
+                    continue
                 node.append(item)
                 node.lines.append(lineno)
             return node, i
@@ -1067,9 +1195,13 @@ class _YamlReader(object):
                 if i >= len(text) or text[i] == "}":
                     i += 1
                     break
+                before = i
                 key, i = self._flow_scalar(text, i, ":,}")
                 while i < len(text) and text[i] == " ":
                     i += 1
+                if i == before:
+                    i += 1
+                    continue
                 if i < len(text) and text[i] == ":":
                     item, i = self._flow(text, i + 1, lineno)
                 else:
@@ -1415,7 +1547,7 @@ JVM_TEST_TOOLS = ("junit", "testng", "kotest")
 
 # Facts a command can show that are coverage thresholds, not strictness.
 COVERAGE_FACT_KINDS = {"fail_under", "cov-fail-under", "jest-coverage-threshold", "vitest-thresholds"}
-MAX_FOLLOW_DEPTH = 4
+MAX_FOLLOW_DEPTH = 3
 
 # Flags after which a tool does not fail the build.
 NEVER_FAIL_FLAGS = {"--exit-zero", "--no-fail", "--exit-code=0", "--issues-exit-code=0"}
@@ -1647,6 +1779,7 @@ class CommandReader(object):
             self.precommit(out, ["run", "--all-files"], line, ctx)
         else:
             self.by_words(out, text, line, ctx)
+            out.hits = [h for h in out.hits if h.tool.name not in JVM_TEST_TOOLS]   # "gradle-build-action" runs nothing
         return out
 
     def read_into(self, out, text, line, ctx):

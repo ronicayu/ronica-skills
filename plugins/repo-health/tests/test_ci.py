@@ -233,6 +233,22 @@ class WorkspaceRunners(CiFixture):
         self.assertEqual(self.tools("lerna run lint --scope web"), ["eslint", "oxlint"])
 
 
+class Actions(CiFixture):
+    def test_actions_are_matched_by_name_but_a_build_action_is_not_a_test_run(self):
+        self.write(WORKFLOW, """
+            on: pull_request
+            jobs:
+              a:
+                steps:
+                  - uses: github/codeql-action/init@v3
+                  - uses: gradle/gradle-build-action@v3
+                  - uses: gitleaks/gitleaks-action@v2
+                  - uses: actions/checkout@v4
+        """)
+        rows = {r["tool"] for r in self.detect()["ci"]["files"][0]["tools"]}
+        self.assertEqual(rows, {"codeql", "gitleaks"})
+
+
 class Gradle(CiFixture):
     BUILD = """
         plugins {
@@ -624,7 +640,7 @@ class Followed(CiFixture):
         self.write("scripts/deeper.sh", "bandit -r src\nsh scripts/deepest.sh\n")
         self.write("scripts/deepest.sh", "pylint src\n")
         rows = self.rows("./scripts/ci.sh")
-        self.assertEqual({t for t, _ in rows}, {"ruff", "pytest", "mypy", "bandit"})
+        self.assertEqual({t for t, _ in rows}, {"ruff", "pytest", "mypy"})   # deeper.sh is the fourth file
         self.assertEqual(rows[("ruff", "scripts/ci.sh")]["via_line"], 3)
         self.assertEqual(rows[("pytest", "scripts/test.sh")]["via_line"], 2)
         self.assertEqual(rows[("pytest", "scripts/test.sh")]["lines"], [6])
@@ -689,7 +705,8 @@ class MiniYaml(unittest.TestCase):
         self.assertEqual(tree["quoted key"], "yes")
 
     def test_garbage_does_not_raise(self):
-        for text in ["", "{{{", "- - -\n  : :\n\t\t", "a:\n  b:\n c: d\n", "key: [unclosed\n"]:
+        for text in ["", "{{{", "- - -\n  : :\n\t\t", "a:\n  b:\n c: d\n", "key: [unclosed\n", "- uses: [a\n }  - b",
+                     "{a: [b}, c]}", "[}]", "{]: x}"]:
             detect.parse_yaml(text)
 
 
