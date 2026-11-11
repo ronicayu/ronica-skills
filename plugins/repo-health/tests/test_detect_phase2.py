@@ -34,6 +34,31 @@ class TestSuites(Fixture):
         self.assertEqual(self.sub(self.run_detect())["test_suites"], [])
 
 
+class CiRunsScripts(Fixture):
+    WF = "on: pull_request\njobs:\n  a:\n    runs-on: x\n%s    steps:\n      - run: %s\n"
+
+    def rows(self, run, header=""):
+        self.write("tests/run_all.py", "print(1)\n")
+        self.write("web/package.json", '{"name": "w", "private": true}')
+        self.write("web/a.ts", "export {}\n")
+        self.write(".github/workflows/a.yml", self.WF % (header, run))
+        result = self.run_detect()
+        return {r["tool"]: r for f in result["ci"]["files"] for r in f["tools"]}
+
+    def test_a_script_in_a_test_folder_is_a_test_row(self):
+        for command in ("python tests/run_all.py", "python3 -u tests/run_all.py", "./tests/run_all.py"):
+            row = self.rows(command)["test-script"]
+            self.assertEqual((row["category"], row["language"], row["via_file"]), ("tests", "shared", "tests/run_all.py"))
+        self.assertNotIn("test-script", self.rows("python tools/other.py"))
+        self.assertNotIn("test-script", self.rows("python tests/missing.py"))
+
+    def test_working_directory_and_cd_set_the_row_folder(self):
+        row = self.rows("tsc --noEmit", "    defaults:\n      run:\n        working-directory: web\n")["tsc"]
+        self.assertEqual(row["dir"], "web")
+        self.assertEqual(self.rows("cd web && tsc --noEmit")["tsc"]["dir"], "web")
+        self.assertNotIn("dir", self.rows("tsc --noEmit")["tsc"])
+
+
 class UpdateBots(Fixture):
     def test_dependabot_ecosystems_are_normalised(self):
         self.write(".github/dependabot.yml", """

@@ -116,7 +116,12 @@ ci.files[]
     setup and never count as a run.
     tools[] rows (merged over jobs by tool, via and writes):
         {tool, category, language, file, line, how: "ci", lines[], commands[],
-         non_blocking, pull_request, jobs[], via?, via_file?, via_line?, writes?}
+         non_blocking, pull_request, jobs[], via?, via_file?, via_line?, writes?, dir?}
+    dir is the folder the first run of the row happened in, relative to the repository:
+    a step's or job's working-directory, or a `cd <dir> &&` before the command; absent for
+    the repository root. A script file inside a test folder that a command runs
+    (`python tests/run_all.py`) is a row of the tool "test-script" (category tests,
+    language shared, via the script).
     A tool counts only when a command runs it. Commands are split on && || ; | newlines
     and line continuations; env assignments, env, sudo, time, exec, command and nohup
     are stripped; `$(...)` and `bash -c` texts are read. Runners are looked through
@@ -471,6 +476,10 @@ class Tool(object):
 
 
 ALL_TOOLS = [Tool(row) for row in TOOLS]
+
+# Not in TOOLS (no config evidence, no CI words): a script file inside a test folder that a CI
+# command runs (`python tests/run_all.py`, `bash tests/run.sh`, `./tests/run`) is a test run.
+TEST_SCRIPT_TOOL = Tool(("shared", "test-script", "tests", [], []))
 
 # Architecture tools that run inside another tool; rows carry rides_on so score.py can
 # ask whether the host runs in blocking CI.
@@ -1653,7 +1662,8 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 class Hit(object):
     """A tool that a command runs."""
 
-    def __init__(self, tool, line, writes, non_blocking, command, via=None, via_file=None, via_line=None):
+    def __init__(self, tool, line, writes, non_blocking, command, via=None, via_file=None, via_line=None, cwd=None):
+        self.cwd = cwd
         self.tool = tool
         self.line = line
         self.writes = writes
@@ -1676,7 +1686,8 @@ class Ctx(object):
     """Where a command is read: following depth, the script it came from, and the caller's line."""
 
     def __init__(self, follow=True, depth=0, stack=(), via=None, nb=False, command="", base_line=None, env=None,
-                 probe=None):
+                 probe=None, cwd=None):
+        self.cwd = cwd            # folder the command runs in (working-directory or `cd`), repo-relative; None: root
         self.probe = probe        # a list: script and target references are recorded there, not followed
         self.follow = follow
         self.depth = depth
@@ -1689,7 +1700,7 @@ class Ctx(object):
 
     def but(self, **changes):
         copy = Ctx(self.follow, self.depth, self.stack, self.via, self.nb, self.command, self.base_line, self.env,
-                   self.probe)
+                   self.probe, self.cwd)
         for key, value in changes.items():
             setattr(copy, key, value)
         return copy
@@ -1795,12 +1806,13 @@ class CommandReader(object):
         self.detector = detector
         self.repo = detector.repo
         self.tools = {tool.name: tool for tool in ALL_TOOLS}
+        self.tools[TEST_SCRIPT_TOOL.name] = TEST_SCRIPT_TOOL
 
     # -- entry points ----------------------------------------------------
 
-    def read(self, text, line=1, follow=True, nb=False):
+    def read(self, text, line=1, follow=True, nb=False, cwd=None):
         out = Outcome()
-        self.read_into(out, text, line, Ctx(follow=follow, nb=nb))
+        self.read_into(out, text, line, Ctx(follow=follow, nb=nb, cwd=cwd))
         return out
 
     def read_uses(self, text, line, nb=False):
@@ -1817,6 +1829,9 @@ class CommandReader(object):
     def read_into(self, out, text, line, ctx):
         for unit in split_commands(text):
             where = line + unit.line
+            if unit.argv and unit.argv[0] == "cd" and len(unit.argv) == 2 and "$" not in unit.argv[1]:
+                ctx = ctx.but(cwd=posixpath.normpath(posixpath.join(ctx.cwd or ".", unit.argv[1])))
+                continue
             here = ctx.but(nb=ctx.nb or unit.swallowed, command=" ".join(unit.argv)[:200])
             self.command(out, unit.argv, where, here)
             for word in unit.argv:
@@ -1837,7 +1852,7 @@ class CommandReader(object):
             via_line = via_line or line
             line = ctx.base_line
         out.hits.append(Hit(tool, line, writes, ctx.nb or never_fails(args), ctx.command,
-                            via_name, via_file, via_line))
+                            via_name, via_file, via_line, ctx.cwd))
 
     def where(self, line, ctx):
         return ctx.base_line if ctx.base_line is not None else line
@@ -1876,8 +1891,10 @@ class CommandReader(object):
         if handler is not None:
             handler(self, out, args, line, ctx)
             return
-        if "/" in argv[0] and self.follow_script(out, argv[0], args, line, ctx):
-            return
+        if "/" in argv[0]:
+            self.test_script(out, argv[0], line, ctx)
+            if self.follow_script(out, argv[0], args, line, ctx):
+                return
         self.tool_command(out, prog, args, line, ctx)
 
     def env_facts(self, out, env, line, ctx):
@@ -2028,8 +2045,17 @@ class CommandReader(object):
             elif a == "-c":
                 return
             elif not a.startswith("-"):
+                self.test_script(out, a, line, ctx)
                 return
             i += 1
+
+    def test_script(self, out, path, line, ctx):
+        """A command that runs a script file inside a test folder counts as a test run."""
+        rel = self.detector.repo_path(path)
+        if rel is None or rel not in self.repo.file_set:
+            return
+        if any(part in TEST_DIR_NAMES for part in rel.split("/")[:-1]):
+            self.hit(out, "test-script", line, ctx, via=(rel, rel, None))
 
     def pip(self, out, args, line, ctx):
         if first_positional(args, PIP_VALUE_FLAGS) != "install":
@@ -2541,8 +2567,15 @@ class CommandReader(object):
             if a.startswith("-"):
                 i += 1
                 continue
+            self.test_script(out, a, line, ctx)
             self.follow_script(out, a, args[i + 1:], line, ctx)
             return
+
+    def node(self, out, args, line, ctx):
+        for arg in args:
+            if not arg.startswith("-"):
+                self.test_script(out, arg, line, ctx)
+                return
 
     def tox(self, out, args, line, ctx):
         self.hit(out, "tox", line, ctx)
@@ -2569,6 +2602,7 @@ class CommandReader(object):
 
 
 CommandReader.HANDLERS.update({
+    "node": CommandReader.node, "deno": CommandReader.node,
     "npx": CommandReader.npx, "bunx": CommandReader.npx, "pnpx": CommandReader.npx,
     "uvx": CommandReader.uvx, "uv": CommandReader.uv,
     "poetry": CommandReader.poetry, "pdm": CommandReader.pdm, "pipx": CommandReader.pipx,
@@ -2676,7 +2710,8 @@ def excludes_pull_request(expr):
 
 
 class CIStep(object):
-    def __init__(self, line, text, kind, pull_request, non_blocking):
+    def __init__(self, line, text, kind, pull_request, non_blocking, workdir=None):
+        self.workdir = workdir
         self.line = line
         self.text = text
         self.kind = kind                # "run" or "uses"
@@ -2686,8 +2721,13 @@ class CIStep(object):
         self.job = None
 
 
-def collect_steps(node, pull_request, non_blocking, steps, github=False):
+def collect_steps(node, pull_request, non_blocking, steps, github=False, workdir=None):
     if isinstance(node, dict):
+        defaults = node.get("defaults")
+        for candidate in (defaults.get("run") if isinstance(defaults, dict) else None, node):
+            value = candidate.get("working-directory") if isinstance(candidate, dict) else None
+            if isinstance(value, str) and value.strip() and "$" not in value:
+                workdir = posixpath.normpath(value.strip())
         local_nb = non_blocking or any(truthy(node.get(key)) for key in NON_BLOCKING_KEYS)
         local_pr = pull_request
         condition = node.get("if")
@@ -2695,24 +2735,24 @@ def collect_steps(node, pull_request, non_blocking, steps, github=False):
             local_pr = False
         for key, value in node.items():
             if key in CI_CMD_KEYS:
-                emit_steps(key, value, local_pr, local_nb, steps)
+                emit_steps(key, value, local_pr, local_nb, steps, workdir)
             elif isinstance(value, (dict, list)):
-                collect_steps(value, local_pr, local_nb, steps, github)
+                collect_steps(value, local_pr, local_nb, steps, github, workdir)
     elif isinstance(node, list):
         for item in node:
-            collect_steps(item, pull_request, non_blocking, steps, github)
+            collect_steps(item, pull_request, non_blocking, steps, github, workdir)
 
 
-def emit_steps(key, value, pull_request, non_blocking, steps):
+def emit_steps(key, value, pull_request, non_blocking, steps, workdir=None):
     if isinstance(value, str):
         if str(value).strip():
             steps.append(CIStep(value.line, str(value), "uses" if key == "uses" else "run", pull_request,
-                                non_blocking))
+                                non_blocking, workdir))
     elif isinstance(value, list):
         for item in value:
-            emit_steps(key, item, pull_request, non_blocking, steps)
+            emit_steps(key, item, pull_request, non_blocking, steps, workdir)
     elif isinstance(value, dict):
-        collect_steps(value, pull_request, non_blocking, steps)
+        collect_steps(value, pull_request, non_blocking, steps, False, workdir)
 
 
 def gitlab_pull_request(job, workflow_merge_requests):
@@ -3830,6 +3870,8 @@ class Detector(object):
                         row["via_line"] = hit.via_line
                     if hit.writes:
                         row["writes"] = True
+                    if hit.cwd:
+                        row["dir"] = hit.cwd
                 if (hit.line, hit.command) not in row["_seen"]:
                     row["_seen"].add((hit.line, hit.command))
                     row["lines"].append(hit.line)
@@ -3869,7 +3911,7 @@ class Detector(object):
                 if step.kind == "uses":
                     step.outcome = reader.read_uses(step.text, step.line, step.non_blocking)
                 else:
-                    step.outcome = reader.read(step.text, step.line, nb=step.non_blocking)
+                    step.outcome = reader.read(step.text, step.line, nb=step.non_blocking, cwd=step.workdir)
                 installs.extend(step.outcome.installs)
                 file_locks.extend(step.outcome.locks)
                 for fact in step.outcome.facts:
