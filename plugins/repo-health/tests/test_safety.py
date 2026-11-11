@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
@@ -30,6 +31,7 @@ def load(name):
 
 detect = load("detect")
 hotspots = load("hotspots")
+ghfacts = load("ghfacts")
 
 
 def git_env():
@@ -87,6 +89,13 @@ class SignedCommitRepo(unittest.TestCase):
         result = hotspots.analyse(self.root)
         self.assertTrue(result["history"]["available"])
         self.assertFalse(os.path.exists(self.marker), "hotspots.py ran the repo's gpg.program")
+
+    def test_ghfacts_does_not_run_gpg_program(self):
+        git(self.root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+        with mock.patch.object(ghfacts.shutil, "which", return_value=None):   # never reach a real gh
+            result = ghfacts.collect(self.root)
+        self.assertIn("not installed", result["why"])
+        self.assertFalse(os.path.exists(self.marker), "ghfacts.py ran the repo's gpg.program")
 
 
 if __name__ == "__main__":
