@@ -5,14 +5,18 @@ when the non-blocking test in your brief holds.
 
 ### Method: code
 
+Order of runs: do every run at the head commit first (steps 1, 2 and 3), then export the
+base commit as your brief says and do every run at the base commit. The export stays in
+`.agentic-team-scratch/`; you delete nothing.
+
 1. Start the application from a clean state, as a user would, and drive the
    change through its real interface (UI, CLI or API). Check side effects:
    files written, rows changed, messages sent to a stub. A passing test suite
    is not proof of behaviour.
-2. If the task fixes a defect (GOAL or ACCEPTANCE names a failure), first
-   reproduce the failure at the base commit named in CONTEXT, then confirm it
-   is gone at the head commit. Record both results under `Ran:`, each with its
-   commit. A check that passes at both commits proves nothing about the fix.
+2. If the task fixes a defect (GOAL or ACCEPTANCE names a failure), confirm
+   that the failure is gone at the head commit, then reproduce it at the base
+   commit named in CONTEXT, after all head runs. Record both results under
+   `Ran:`, each with its commit. A check that passes at both commits proves nothing about the fix.
 3. Run every command of the project verify skill's `Checks` section at the
    head commit, and at the base commit named in CONTEXT. Record each run under
    `Ran:` with its commit. A problem that only the head has is a miss, and

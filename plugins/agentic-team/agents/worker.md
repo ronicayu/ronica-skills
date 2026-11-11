@@ -47,19 +47,22 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   `check-report` command in REPORT refuses a Follow-ups line with no label.
 - **Your worktree.** Work and commit only inside your worktree, on its branch. Write
   nothing outside it except the report command in your brief. Before you write any
-  result, run `git status --porcelain`. Commit or delete anything your own VERIFY
-  created, and list what you leave under `Files:`. Your report file does not show there,
+  result, run `git status --porcelain`. Commit anything your own VERIFY
+  created, or leave it in `.agentic-team-scratch/` and list it under `Files:`. Your report file does not show there,
   because git ignores it; leave it and do not list it. Then commit your work on your branch,
   so `Head` is always set and the worktree is clean. On `PASS`, use a message that names
-  the task. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
+  the task. A commit message has no `Closes`, `Fixes` or `Resolves` keyword: write `Refs #n` for an
+  issue the task touches. Closing an issue is the Manager's. On `ISSUES`, `BLOCKED`, or a timebox stop, commit as
   `WIP task <id> attempt <n>: <status>`. If there is nothing to commit, that is fine. A
   verifier commits nothing, and its report file is the one file it writes. Never push, rebase, merge, reset, delete branches, or check out
   another branch or commit. A verifier may create folders in `.agentic-team-scratch/` for a
-  read-only export of the base commit or a temporary database, as its brief says, and deletes
-  them before it reports; its worktree otherwise stays at the head and unchanged.
+  read-only export of the base commit or a temporary database, as its brief says, and leaves
+  them in place; `run` removes the folder with the worktree after the merge. Its worktree
+  otherwise stays at the head and unchanged.
 - **Scratch files.** Keep every temporary file and folder in `.agentic-team-scratch/` at the top
   of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
-  worktree. Delete what you put there before you report.
+  worktree. Leave what you put there in place: `run` removes the folder with the worktree after the
+  merge.
 - **One command per step.** Do not change directory: give the tool the path (`git -C <dir>`,
   `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
   worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
@@ -73,9 +76,9 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   parties; draft them and name the file. The notify line in REPORT, and the wake line after
   an ask that MAILBOX names, both to the Manager, are the only messages you may send. Do
   not delete anything unless the brief allows it.
-- **Processes.** Anything you start that outlives a command (a server, a watcher, an emulator) runs
-  under a `trap 'kill $PID' EXIT` or is stopped by you before your final commit. Record each pid when
-  you start it. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under
+- **Processes.** Anything you start that outlives a command (a server, a watcher, an emulator) is
+  stopped by you before your final commit. Record its pid when you start it, and stop it with
+  `kill <pid>` in its own call. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under
   Follow-ups so the Manager can stop it.
   - Stop only processes that you started. Find each one by the pid that you recorded, or by a
     cwd inside your own worktree (`lsof -a -d cwd -p <pid>`).
@@ -92,7 +95,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
     folder in it loses that data. Use the instance that the project runs from its main checkout,
     as the project's docs say. If you need your own instance, give it its own project name,
     container names and ports (`docker compose -p <your worktree name>`), keep its data in a
-    folder in `.agentic-team-scratch/`, and stop and remove it before you report.
+    folder in `.agentic-team-scratch/`, and stop its containers before you report (start them with `--rm`, or stop them with
+    `docker compose -p <your worktree name> down`). Leave its data folder in place.
 - **Shared repository state.** All worktrees of a repository share one git config, and the
   `core.hooksPath` in it applies to every checkout. Do not write that config from your
   worktree: no `git config` that sets or unsets a value, no hooks installer (`pre-commit

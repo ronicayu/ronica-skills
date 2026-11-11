@@ -32,5 +32,5 @@ Check these in addition to the design-doc method. Report each miss as a `blockin
 6. Start check: each phase names its test, why it fails first, and files inside its task's scope; the plan does not contradict itself.
 7. Diagrams render (by a tool or by syntax, as stated under `Ran:`).
 8. Open decisions are listed with a recommendation and a default, not decided silently.
-9. Structure: the architecture-design template (or the project's) with each required section present.
+9. Structure: the architecture-design template (or the project's) with each required section present; a missing required part is blocking unless it passes the non-blocking test in your brief.
 10. Numbers: each names its source; one quantity has one value everywhere; a rewritten rule keeps its meaning.

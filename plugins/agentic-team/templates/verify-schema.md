@@ -14,8 +14,9 @@ when the non-blocking test in your brief holds.
 3. Execution: the DDL parses. Each migration applies and rolls back on a
    temporary database. Keys, foreign keys and non-null constraints hold on
    sample data. Use a container started with `--rm`, or a file database in
-   a folder under `.agentic-team-scratch/`; remove it before you report. A leftover goes under
-   `Follow-ups:` as `leftover container: <name>` or `leftover file: <path>`.
+   a folder under `.agentic-team-scratch/`, which you leave in place. A leftover
+   file in `.agentic-team-scratch/` is not a finding. A leftover container goes
+   under `Follow-ups:` as `leftover container: <name>`.
 4. Consistency: names and numbers agree across every artifact of the task
    (the ADR text, the DDL, the review page). Each disagreement is a miss.
 5. Compare with the base commit named in CONTEXT: `git diff --stat <base>

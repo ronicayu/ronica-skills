@@ -888,9 +888,11 @@ GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
 REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Project verify skill` note (where `.claude/skills/verify/SKILL.md` is, or that it is missing), then
 `templates/verify-<kind>.md` for the task's verify kind, and CONTEXT with the
 base commit, how it was found, and the head commit. A verifier that needs the
-base commit exports it with `git archive` into `.agentic-team-scratch/base` in
-its own worktree, and deletes the export before it runs the head's test suites
-and before it reports.
+base commit first runs every check of the head commit (the head's test suites
+and the VERIFY commands), then exports the base with `git archive` into
+`.agentic-team-scratch/base` in its own worktree and runs only the base-side
+checks there. It leaves the export in place; `run.py` removes it with the
+worktree.
 
 The worker runs `mailbox.py report` and `run.py check-report` from its own session, so
 its permission mode must allow both. Allow only a `--body-file` path in the
@@ -995,9 +997,12 @@ outside it: a write outside the worktree can raise a permission prompt that
 stalls a session nobody watches. Before a `launch`, a `verify` or a resume
 starts a session, `run.py` adds `/.agentic-team-scratch/` to the same
 `info/exclude` (once; other lines stay), so git ignores the folder in every
-worktree. A line that cannot be written is a `warn` event, not a refusal. The
-folder is on the disposable list too, and a session deletes what it put there
-before it reports.
+worktree. A line that cannot be written refuses the launch or the verify, and
+the message names the file and the fix: a folder left in a worktree that does
+not ignore it shows as uncommitted and keeps the worktree. The folder is on the
+disposable list too. No session deletes what it put there, because a deletion
+can stall an unattended session on a permission prompt; `run.py` removes the
+folder with the worktree after the merge.
 
 ## Results
 
@@ -1070,9 +1075,12 @@ then id, and the Manager launches them in that order.
 
 Version 0.18.0 adds rules from issue #89. No migration.
 
+- **No session deletes scratch.** Sessions leave `.agentic-team-scratch/` in place and `run.py` removes it with the worktree. A `/.agentic-team-scratch/` exclude line that cannot be written now refuses the launch or the verify.
+- **Refs, not Closes.** A worker commit message has no `Closes`, `Fixes` or `Resolves` keyword; it writes `Refs #n`. The Manager writes `Closes #n` only when the merge finishes the whole issue.
+- **Blocking test.** A finding whose correction changes neither the conclusion, the acceptance verdict, nor what the coders who follow would build is non-blocking; a finding that fits neither list is blocking.
 - **Blocking and non-blocking findings.** A verifier writes `blocking: <finding>: <why it blocks>` for every line under `Issues:`, and reports `ISSUES` only when one exists. A finding that does not block goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`, and the verifier reports `PASS`. `nonblocking` is a new Follow-ups label (it shows in `status`). The Manager sorts these follow-ups like the others and never opens a fix round for one.
 - **`check-report --verifier`.** The verifier brief passes the flag. With it, an `ISSUES` report needs every `Issues:` line to start with `blocking:`, and `Issues: None` with `ISSUES` is refused; a `PASS` report with an `Issues:` line is refused too. A worker report is checked as before, except for the path check below.
-- **Path check.** For a `PASS` or `ISSUES` worker report, every backticked token under `Files:`, `Evidence:` and `Ran:` that looks like a repository path (no whitespace; a `/` in it, or a common file extension; `:<line>` or `:<line>-<line>` dropped) must exist relative to the worktree. A token with `<`, `*`, `$` or `{`, a URL, a flag, or an absolute path outside the worktree is skipped. A line that says `deleted` or `removed` is exempt.
+- **Path check.** For a `PASS` or `ISSUES` worker report, every backticked token under `Files:`, `Evidence:` and `Ran:` that looks like a repository path (no whitespace; a `/` in it, or a common file extension; `:<line>` or `:<line>-<line>` dropped) must exist relative to the worktree. A token with `<`, `*`, `$` or `{`, a URL, a flag, or an absolute path outside the worktree is skipped. A line that says `deleted` or `removed` is exempt, and so is a relative path that git ignores (`git check-ignore`), and a relative path with a `..` segment is skipped.
 - **`[scope] adjacent`.** A list, empty by default, of the changes a worker may make outside SCOPE without `BLOCKED`: `lower-ratchet`, `stale-exemption`, `own-lint` (see [`[scope]`](#scope)). An unknown kind is a config error.
 - **Worker rules for every task.** Fix the root cause and never work around it; pick the option that is best over months; build on the previous attempt's commits; one command per Bash call, a path passed to the tool instead of a `cd` (a bare `cd` only in its own call); a self-review before `PASS`. The `software-engineer` role gains an impact census and the code forms of a workaround (skipped test, `xfail`, type-hiding cast and the like), and loses its long-term-choice rule to the worker. The `architect` role points to the full design template in ACCEPTANCE, required in round 1; every number in a delivered document names its source. A spent attempt cap means re-planning, not another fix round.
 
@@ -1080,7 +1088,7 @@ Version 0.18.0 adds rules from issue #89. No migration.
 
 Version 0.17.0 adds task roles (see [Roles](#roles)): the `role` meta, a `[roles] default` config key, `templates/roles/` with `architect` and `software-engineer`, project roles in `.claude/agentic-team/roles/`, and the `run.py roles` command. A task with no role and no `roles.default` behaves as before. Every brief gains a ROLE section, which reads `None.` for such a task. `launch` also adds the tier source to its `launched` line, and `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` to the attempt's `sessions` entry; `adopt` now writes an entry (with no `"id"`) where it wrote `[]`. No migration.
 
-It also makes a worker prove its `PASS`. A task report gains an `Evidence:` line, one line for each ACCEPTANCE line (the line in short, then the command and its result, or the `path:line`, that proves it), and the worker rule says to prove each check from this run's output. A worker brief's `check-report` command now carries `--acceptance <n>`, and a `PASS` report with fewer than `<n>` evidence lines fails the check; a session started before the upgrade has the old command and is not counted. Sessions now keep temporary files in `.agentic-team-scratch/` at the top of their worktree instead of a `mktemp` folder outside it: `launch`, `verify` and a resume add `/.agentic-team-scratch/` to the repository's `info/exclude`, the folder is on the default disposable list, and the verifier's base-commit export goes to `.agentic-team-scratch/base`. The Manager gains four rules in `agents/manager.md` and the `run` and `plan` playbooks: the brief of a started worker is frozen (a steer never adds a requirement), every slot stays busy, open requests that conflict with a new base are rebased after each merge in `pr` mode, and no `Follow-ups:` line is left unsorted when a task closes. No migration.
+It also makes a worker prove its `PASS`. A task report gains an `Evidence:` line, one line for each ACCEPTANCE line (the line in short, then the command and its result, or the `path:line`, that proves it), and the worker rule says to prove each check from this run's output. A worker brief's `check-report` command now carries `--acceptance <n>`, and a `PASS` report with fewer than `<n>` evidence lines fails the check; a session started before the upgrade has the old command and is not counted. Sessions now keep temporary files in `.agentic-team-scratch/` at the top of their worktree instead of a `mktemp` folder outside it: `launch`, `verify` and a resume add `/.agentic-team-scratch/` to the repository's `info/exclude`, the folder is on the default disposable list, and the verifier's base-commit export goes to `.agentic-team-scratch/base`, after the verifier has run every head-commit check, and stays there. The Manager gains four rules in `agents/manager.md` and the `run` and `plan` playbooks: the brief of a started worker is frozen (a steer never adds a requirement), every slot stays busy, open requests that conflict with a new base are rebased after each merge in `pr` mode, and no `Follow-ups:` line is left unsorted when a task closes. No migration.
 
 ### Upgrading from 0.15.0
 

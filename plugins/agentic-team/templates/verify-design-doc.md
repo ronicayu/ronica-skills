@@ -14,7 +14,8 @@ when the non-blocking test in your brief holds.
    alternative it rejected; failure modes, including half-migrated and
    rolled-back states; migration steps; a closed checklist for the coders who
    follow, with no reference to a git-ignored scratch file; census scripts in
-   the repository. Name each missing part.
+   the repository. Name each missing part. A missing part is a `blocking:`
+   finding unless it passes the non-blocking test in your brief.
 3. Contradictions: none inside the document, and none with the other
    documents of the project that it names or depends on.
 4. Compare with the base commit named in CONTEXT: `git diff <base> <head>`
@@ -34,4 +35,5 @@ Verdict levels for this kind:
 - `check-only`: a read-through without the source checks.
 - `verify-blocked`: a source could not be opened; name it.
 - `verify-failed`: a claim is wrong, a required part is missing, or the
-  document contradicts itself or another document.
+  document contradicts itself or another document, and the finding is blocking
+  (it does not pass the non-blocking test in your brief).
