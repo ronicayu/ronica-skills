@@ -80,8 +80,8 @@ Top-level keys
                                    ecosystems}: the ecosystems of dependabot's
                                    package-ecosystem lines, named python, typescript,
                                    rust, go, java, actions, docker; ["*"] for renovate)
-    architecture_docs[]            {kind: architecture|adr|model|readme-section, path,
-                                   last_commit, files? (adr), line? (readme-section)}: see
+    architecture_docs[]            {kind: architecture|readme-section, path,
+                                   last_commit, line? (readme-section)}: see
                                    Detector.architecture_docs
     docs                           readme, headings[], install/run/test ({found, via,
                                    line}), contributing, adr_dirs, architecture_docs,
@@ -4333,46 +4333,26 @@ class Detector(object):
                 break
         return docs
 
-    ADR_DIRS = ("docs/adr", "doc/adr", "docs/decisions", "docs/architecture/decisions", "adr")
     GIT_DATE_CAP = 20
 
     def architecture_docs(self, docs):
-        """architecture_docs[]: {kind, path, last_commit, files?, line?} with the committer date of the newest commit.
+        """architecture_docs[]: {kind, path, last_commit, line?}.
 
-        kinds: architecture (ARCHITECTURE.md at the root or in docs/, docs/architecture*),
-        adr (one row per ADR folder: docs/adr, doc/adr, docs/decisions,
-        docs/architecture/decisions, adr, or the folder named in .adr-dir; files counts
-        its files), model (workspace.dsl, *.c4, *.likec4) and readme-section (a README
-        heading with "Architecture"; last_commit is the README's). At most 20 git calls;
-        rows beyond that have last_commit null.
+        kinds: architecture (ARCHITECTURE.md at the root or in docs/, docs/architecture*,
+        a docs/architecture folder once) and readme-section (a README heading with
+        "Architecture", with its line; last_commit is the README's). last_commit is the
+        committer date of the newest commit, null without git. At most 20 git calls.
         """
         repo = self.repo
         rows = []
-        files = sorted(repo.files)
-        adr_dirs = list(self.ADR_DIRS)
-        for rel in repo.by_name.get(".adr-dir", []):
-            named = repo.text(rel).strip().splitlines()
-            if named and ".." not in named[0] and not named[0].startswith("/"):
-                adr_dirs.append(posixpath.normpath(posixpath.join(dir_of(rel), named[0].strip())))
-        taken = set()
-        for folder in sorted(set(adr_dirs)):
-            inside = [f for f in files if f.startswith(folder + "/")]
-            if inside:
-                taken.add(folder)
-                rows.append({"kind": "adr", "path": folder, "files": len(inside)})
-        for rel in files:
+        folder_seen = False
+        for rel in sorted(repo.files):
             low = rel.lower()
-            base = posixpath.basename(low)
-            if any(rel.startswith(f + "/") for f in taken):
-                continue
             if low in ("architecture.md", "docs/architecture.md") or re.match(r"^docs/architecture[^/]*$", low):
                 rows.append({"kind": "architecture", "path": rel})
-            elif base == "workspace.dsl" or base.endswith((".c4", ".likec4")):
-                rows.append({"kind": "model", "path": rel})
-        for rel in files:
-            if re.match(r"^docs/architecture/", rel.lower()) and not any(rel.startswith(f + "/") for f in taken):
-                if not any(r["kind"] == "architecture" and r["path"] == "docs/architecture" for r in rows):
-                    rows.append({"kind": "architecture", "path": "docs/architecture"})
+            elif low.startswith("docs/architecture/") and not folder_seen:
+                folder_seen = True
+                rows.append({"kind": "architecture", "path": "docs/architecture"})
         for heading in docs.get("headings") or []:
             if re.search(r"architecture", heading["text"], re.I) and docs.get("readme"):
                 rows.append({"kind": "readme-section", "path": docs["readme"], "line": heading["line"]})
@@ -4381,9 +4361,8 @@ class Detector(object):
             row["last_commit"] = None
             if not repo.is_git or index >= self.GIT_DATE_CAP:
                 continue
-            target = row["path"]
             out = run_git(repo.git_root, ["log", "-1", "--no-show-signature", "--format=%cI", "--",
-                                          repo.top_rel(target)])
+                                          repo.top_rel(row["path"])])
             if out:
                 row["last_commit"] = out.decode("utf-8", "replace").strip() or None
         return rows

@@ -88,24 +88,24 @@ class ArchitectureDocs(Fixture):
     def docs(self):
         return {(d["kind"], d["path"]): d for d in self.run_detect()["architecture_docs"]}
 
-    def test_architecture_files_adr_folders_models_and_readme_section(self):
+    def test_architecture_file_and_readme_section(self):
         self.write("README.md", "# x\n\n## Architecture\n\ntext\n")
         self.write("ARCHITECTURE.md", "# a\n")
-        self.write("docs/adr/0001-a.md", "# 1\n")
-        self.write("docs/adr/0002-b.md", "# 2\n")
-        self.write("workspace.dsl", "workspace {}\n")
+        self.write("docs/architecture/layers.md", "# l\n")
         self.write("x.py", "x = 1\n")
         found = self.docs()
-        self.assertEqual(sorted(found), [("adr", "docs/adr"), ("architecture", "ARCHITECTURE.md"),
-                                         ("model", "workspace.dsl"), ("readme-section", "README.md")])
-        self.assertEqual(found[("adr", "docs/adr")]["files"], 2)
+        self.assertEqual(sorted(found), [("architecture", "ARCHITECTURE.md"), ("architecture", "docs/architecture"),
+                                         ("readme-section", "README.md")])
         self.assertEqual(found[("readme-section", "README.md")]["line"], 3)
-        self.assertIsNone(found[("model", "workspace.dsl")]["last_commit"])
+        self.assertIsNone(found[("architecture", "ARCHITECTURE.md")]["last_commit"])
 
-    def test_adr_dir_file_names_the_folder(self):
-        self.write(".adr-dir", "records\n")
+    def test_adrs_and_models_do_not_count(self):
+        self.write("docs/adr/0001.md", "# 1\n")
+        self.write("workspace.dsl", "workspace {}\n")
+        self.write("a.c4", "model {}\n")
         self.write("records/0001.md", "# 1\n")
-        self.assertIn(("adr", "records"), self.docs())
+        self.write(".adr-dir", "records\n")
+        self.assertEqual(self.run_detect()["architecture_docs"], [])
 
     def test_last_commit_comes_from_git(self):
         from test_detect import git
@@ -114,10 +114,6 @@ class ArchitectureDocs(Fixture):
         git(self.root, "add", ".")
         git(self.root, "commit", "-q", "-m", "x")
         self.assertRegex(self.docs()[("architecture", "ARCHITECTURE.md")]["last_commit"], r"^\d{4}-\d\d-\d\dT")
-
-    def test_nothing_written_down(self):
-        self.write("x.py", "x = 1\n")
-        self.assertEqual(self.run_detect()["architecture_docs"], [])
 
 
 class ArchTools(Fixture):
