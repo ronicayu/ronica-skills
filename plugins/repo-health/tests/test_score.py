@@ -333,7 +333,8 @@ class Secrets(unittest.TestCase):
     def test_unknown_is_not_zero(self):
         row = dim(run(), "secrets")
         self.assertEqual((row["level"], row["status"]), (None, "unknown"))
-        self.assertTrue(row["needs"])
+        self.assertEqual(row["needs"], "GitHub secret-scanning setting (needs admin access)")
+        self.assertNotIn("gitleaks", row["needs"])
         self.assertEqual(dim(run(gh={"available": False, "why": "no gh"}), "secrets")["status"], "unknown")
 
     def test_zero_when_the_setting_is_visibly_off(self):
@@ -595,7 +596,7 @@ class Deps(unittest.TestCase):
         d = det(rows=[ci_row("pip-audit", "deps_audit", "python")], setup=self.setup_with())
         self.assertEqual(dim(run(d), "deps")["rule"], "deps.2")
 
-    def test_deps_3_needs_fresh_lockfiles_or_an_audit(self):
+    def test_deps_3_needs_fresh_lockfiles_and_ignores_audits(self):
         bots = [{"tool": "renovate", "file": "renovate.json", "line": 1, "ecosystems": ["*"]}]
         fresh = [{"file": "uv.lock", "ecosystem": "python", "subproject": ".", "last_commit": "2026-10-20T10:00:00Z"}]
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=fresh))), "deps")["level"], 3)
@@ -606,10 +607,12 @@ class Deps(unittest.TestCase):
         self.assertTrue(row["needs"])
         audit = {"audits": [{"subproject": ".", "high": 0, "critical": 0}]}
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=old)), t1=audit),
-                             "deps")["level"], 3)
+                             "deps")["level"], 2)
         dirty = {"audits": [{"subproject": ".", "high": 1, "critical": 0}]}
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=old)), t1=dirty),
                              "deps")["level"], 2)
+        self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=fresh)), t1=dirty),
+                             "deps")["level"], 3)
 
 
 class Docs(unittest.TestCase):

@@ -75,7 +75,7 @@ Each rule has an id (`tests.2`, `ci.3a`). `score.json` names the rule that set e
 - `deps.1`: lockfile, no bot and no audit in CI.
 - `deps.1p` (partial): a bot that misses an ecosystem present in the repo (GitHub Actions counts when workflows exist).
 - `deps.2`: a bot covering every ecosystem, or an audit as a blocking CI row.
-- `deps.3`: `deps.2`, and every lockfile changed in the last 90 days (lockfile age), or a tier 1 audit with no high or critical advisory.
+- `deps.3`: `deps.2`, and every lockfile changed in the last 90 days (lockfile age).
 
 ### docs
 - `docs.0`: no README.

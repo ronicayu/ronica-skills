@@ -6,7 +6,7 @@ Markers: `Cargo.toml`. Lockfile: `Cargo.lock` (expected for binaries; libraries 
 
 `cargo clippy`, `cargo test` and coverage build the project: they run `build.rs` scripts and proc macros (project code) and download crates. They write `target/` into the repo (normally git-ignored). Set `CARGO_TARGET_DIR=<scratch>/target` to keep the build out of the repo, and say a first build can take minutes. `cargo fmt --check` builds nothing.
 
-Cargo subcommands that are not installed (`cargo audit`, `cargo deny`, `cargo machete`, `cargo llvm-cov`) need `cargo install`, which installs into `~/.cargo/bin`, outside the project. Ask before installing; otherwise mark "not run: not installed".
+Cargo subcommands that are not installed (`cargo machete`, `cargo llvm-cov`) need `cargo install`, which installs into `~/.cargo/bin`, outside the project. Ask before installing; otherwise mark "not run: not installed".
 
 ## Tools
 
@@ -18,8 +18,8 @@ Cargo subcommands that are not installed (`cargo audit`, `cargo deny`, `cargo ma
 | `nextest` | tests | `.config/nextest.toml` | `cargo nextest run --workspace` if installed | |
 | `cargo-llvm-cov` | coverage | (none) | `cargo llvm-cov --workspace --summary-only` if installed | Needs the `llvm-tools-preview` component. |
 | `tarpaulin` | coverage | `tarpaulin.toml`, `.tarpaulin.toml` | `cargo tarpaulin --out Stdout` if installed | Linux-focused. |
-| `cargo-deny` | static | `deny.toml` | `cargo deny check` if installed | Checks advisories, licenses, bans and sources. |
-| `cargo-audit` | deps_audit | `.cargo/audit.toml` | `cargo audit` if installed | Reads `Cargo.lock`; needs the network (RustSec database). `rustsec/audit-check` is the GitHub Action. |
+| `cargo-deny` | static | `deny.toml` | not run (config only) |  |
+| `cargo-audit` | deps_audit | `.cargo/audit.toml` | not run (config only) | `rustsec/audit-check` is the GitHub Action. |
 | `cargo-machete` | deadcode | (none) | `cargo machete` if installed | Unused dependencies; fast, no build. |
 | `cargo-udeps` | deadcode | (none) | recommend only: needs nightly | |
 

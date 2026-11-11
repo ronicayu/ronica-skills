@@ -1,6 +1,6 @@
 ---
 name: repo-health
-description: Measure how well an existing code repository is guarded and where it needs work, then write a short ranked Markdown report that says what to do first, with a ready-to-paste first step and a command that proves it worked. Scripts check lint and formatting, type checking, static analysis, secret scanning, tests and coverage, CI enforcement and CI health, setup, dependencies, docs and architecture rules, joined with git hotspots, for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin; each dimension gets a level from absent to effective set by script, not by judgement. Cheap checks run at once; running tools or test suites and LLM code reading run only after the user agrees. Reruns show what changed. Use when asked how to improve a repo, for a code health or engineering-practice audit, or whether a project has lint, tests, CI or static analysis. Reports only; it changes no project file. For a debt list from reading code, use a tech-debt skill; for reviewing a diff, use code review.
+description: Measure how well an existing code repository is guarded and where it needs work, then write a short ranked Markdown report that says what to do first, with a ready-to-paste first step and a command that proves it worked. Scripts check lint and formatting, type checking, static analysis, secret scanning, tests and coverage, CI enforcement and CI health, setup, dependencies, docs and architecture rules, joined with git hotspots, for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin; each dimension gets a level from absent to effective set by script, not by judgement. Cheap checks run at once; running the project's lint, type and test commands and LLM code reading run only after the user agrees. Reruns show what changed. Use when asked how to improve a repo, for a code health or engineering-practice audit, or whether a project has lint, tests, CI or static analysis. Reports only; it changes no project file. For a debt list from reading code, use a tech-debt skill; for reviewing a diff, use code review.
 ---
 
 # Repo health
@@ -20,8 +20,10 @@ Each dimension gets a level: 0 absent, 1 present (configured, not enforced), 2 e
 | Tier | What runs | Consent |
 |---|---|---|
 | 0 | `detect.py`, `hotspots.py`, `ghfacts.py` (read-only `gh`, only when `gh` is signed in), `score.py` | None. Always runs. |
-| 1 | The project's own lint, type and test commands, coverage, dependency audit, secret scan | Asked: it runs project code and downloads tools |
+| 1 | The project's own lint, type and test commands, coverage | Asked: it runs project code and downloads tools |
 | 2 | Two code readers: `review` (structure, error handling, stated architecture) and `testquality` | Asked, with a token estimate |
+
+Security tools (secret scanners, static security analysis, dependency audits) are checked by their config, CI rows and GitHub settings only; the skill never runs them.
 
 Ask once, after tier 0, so each choice carries its real cost. If the session cannot ask, run tier 0 only and list the rest under "Not checked" with the command to run it. When the user names dimensions, check exactly those.
 
@@ -55,20 +57,19 @@ Build the options from the gaps and dimensions in scope. Ask with AskUserQuestio
 
 1. **Lint and type counts**: the configured linters and type checkers, error counts only (decides level 3 of lint and types; sizes the baseline advice). Time, downloads.
 2. **Tests and coverage**: the test command with a timeout (decides tests.3, finds red suites). Runs project code; name any environment setup it needs (`npm ci` writes `node_modules/`) as its own cost.
-3. **Dependency audit and secret scan** (deps.3; secrets when the GitHub setting is not visible). Network.
-4. **Code reading**: `review` and `testquality` on the top hotspots; the token estimate is the characters that will be read / 4 × 1.5, rounded up to the next 5k (see `references/tier2-prompts.md` for the file choice and cap).
+3. **Code reading**: `review` and `testquality` on the top hotspots; the token estimate is the characters that will be read / 4 × 1.5, rounded up to the next 5k (see `references/tier2-prompts.md` for the file choice and cap).
 
-Leave out options that change nothing (no linter configured → no lint count). Recommend 1 and 3; recommend 4 when it is under about 40k tokens.
+Leave out options that change nothing (no linter configured → no lint count). Recommend 1; recommend 3 when it is under about 40k tokens.
 
 ### 4. Tier 1
 
 - Never install into the project, and change no lockfile, except an environment setup the user agreed to.
 - Ephemeral runners for tools the project does not have: `uvx`, `pipx run`, `npx --yes`, `go run <module>@<version>`. Use the version the project declares; otherwise record the version the tool printed.
-- Timeout 300 s per command, 900 s for a test suite. Only lint, type, test, coverage, audit and scan commands; never deploy, publish, migrate or push.
-- Output to a scratch file; read counts from it (JSON output, `--statistics`, `grep -c`). Secret scanners always with redaction; report rule, file and line, never a value.
+- Timeout 300 s per command, 900 s for a test suite. Only lint, type, test and coverage commands; never deploy, publish, migrate or push.
+- Output to a scratch file; read counts from it (JSON output, `--statistics`, `grep -c`).
 - A tool that fails to run is "not run" with the reason, never level 0.
 
-Write `<out>/tier1-<stamp>.json` in the shape `score.py`'s docstring defines (`counts` keyed `lint:<subproject>` / `types:<subproject>`, `suite_runs`, `audits`) and run `score.py` again with `--tier1`.
+Write `<out>/tier1-<stamp>.json` in the shape `score.py`'s docstring defines (`counts` keyed `lint:<subproject>` / `types:<subproject>`, `suite_runs`) and run `score.py` again with `--tier1`.
 
 ### 5. Tier 2
 

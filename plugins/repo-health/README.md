@@ -31,12 +31,15 @@ There is no overall score.
 | Tier | What it does | Asked first? |
 | --- | --- | --- |
 | 0 | Reads configs, CI files, file lists and git history (`detect.py`, `hotspots.py`) and, with an authenticated `gh`, CI outcomes and repository settings (`ghfacts.py`, read-only). | No |
-| 1 | Runs tools: the project's lint, type and test commands, zero-config scanners, dependency audit, coverage. This executes project code and can download tools and take minutes. | Yes |
+| 1 | Runs tools: the project's lint, type and test commands, coverage. This executes project code and can download tools and take minutes. | Yes |
 | 2 | An LLM reads code: `review` (structure and error handling) and `testquality`. Costs many tokens. | Yes, with a token estimate |
 
 Tier 0 runs first. Then one question lists every tier 1 and tier 2 step with its
 cost. Nothing selected means the report covers tier 0 and lists the rest under
 "Not checked".
+
+Security tools (secret scanners, static security analysis, dependency audits) are
+checked by their config, CI rows and GitHub settings only; the plugin never runs them.
 
 ## Dimensions
 

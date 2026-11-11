@@ -2,7 +2,7 @@
 
 Markers: `build.gradle.kts` or `build.gradle` with the Kotlin plugin, `.kt` files; Maven with `kotlin-maven-plugin`. Android: `com.android.application`/`com.android.library` plugins, `AndroidManifest.xml`. Toolchain pin and multi-module: as in `java.md` (Gradle wrapper, `jvmToolchain`, `settings.gradle.kts`). Version catalogs: `gradle/libs.versions.toml` holds plugin and library versions.
 
-Kotlin projects also use the Java tools in `java.md` for tests (`junit`), coverage (`jacoco`), formatting (`spotless`) and dependency audit (`dependency-check`). Read both files.
+Kotlin projects also use the Java tools in `java.md` for tests (`junit`), coverage (`jacoco`), formatting (`spotless`) and dependency audit config (`dependency-check`, not run). Read both files.
 
 ## Environment
 

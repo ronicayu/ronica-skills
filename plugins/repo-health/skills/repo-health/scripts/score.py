@@ -16,8 +16,7 @@ A missing or unavailable ghfacts ({"available": false}) is the same as no ghfact
 Tier 1 input (--tier1), written by the skill after it ran tools:
 
     {"counts":     {"lint:<subproject>": {"errors": 0}, "types:<subproject>": {"errors": 0}},
-     "suite_runs": [{"subproject": ".", "passed": true, "duration_s": 95}],
-     "audits":     [{"subproject": ".", "high": 0, "critical": 0}]}
+     "suite_runs": [{"subproject": ".", "passed": true, "duration_s": 95}]}
 
 Output (score.json)
 
@@ -828,7 +827,7 @@ class Scorer(object):
         if not visible:
             return self.add("secrets", ".", None, "secrets.unknown", "Secret scanning setting not visible.", facts,
                             status="unknown",
-                            needs="GitHub secret-scanning setting (needs admin access) or a gitleaks run")
+                            needs="GitHub secret-scanning setting (needs admin access)")
         self.add("secrets", ".", 0, "secrets.0", "No secret scanning.", facts)
         self.gap("secrets", ".", "secrets.0", None, "Add gitleaks to CI and turn on GitHub push protection", facts,
                  "add")
@@ -1154,16 +1153,12 @@ class Scorer(object):
             age = days_between(self.now, lock.get("last_commit") or "")
             if age is None or age > RECENT_DAYS:
                 recent = False
-        clean = None
-        for audit in self.t1.get("audits") or []:
-            bad = (audit.get("high") or 0) + (audit.get("critical") or 0)
-            clean = bad == 0 if clean is None else (clean and bad == 0)
-        if recent or clean:
+        if recent:
             return self.add("deps", ".", 3, "deps.3", "Dependencies are covered and current.", facts)
         known = bool(locks) and all(l.get("last_commit") for l in locks)
-        needs = None if (known or clean is False) else "lockfile commit dates or a tier 1 audit"
+        needs = None if known else "lockfile commit dates"
         self.add("deps", ".", 2, "deps.2", "Update bot or CI audit covers the dependencies.", facts, needs=needs)
-        self.gap("deps", ".", "deps.2", None, "Refresh the lockfiles and run a dependency audit", facts, "add")
+        self.gap("deps", ".", "deps.2", None, "Refresh the lockfiles", facts, "add")
 
     # ---- arch ---------------------------------------------------------------
 

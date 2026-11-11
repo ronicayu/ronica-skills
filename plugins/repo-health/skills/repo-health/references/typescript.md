@@ -27,7 +27,7 @@ ESLint (its config imports plugins), `tsc`, test runners and knip need `node_mod
 | `nyc` | coverage | `.nycrc*` | `npx nyc --reporter=text-summary <test command>` | |
 | `vitest-coverage` | coverage | `coverage:` in `vitest.config.*` or `vite.config.*`; CI `vitest ... --coverage` | `npx vitest run --coverage` (needs `@vitest/coverage-v8` or `-istanbul`) | `test.coverage.thresholds` fails the run below the bar. |
 | `jest-coverage` | coverage | `collectCoverage: true` in `jest.config.*` or `package.json`; CI `jest --coverage` | `npm test -- --ci --coverage` | `coverageThreshold` fails the run below the bar. |
-| `npm-audit` | deps_audit | (none) | npm: `npm audit --json --omit=dev`; pnpm: `pnpm audit --json --prod`; yarn 1: `yarn audit --json`; yarn 2+: `yarn npm audit --json` | Needs the network and the lockfile; no `node_modules` needed for npm 7+. Count high and critical. |
+| `npm-audit` | deps_audit | (none) | not run (config only) |  |
 | `knip` | deadcode | `knip.json*`, `.knip.json`, `knip.config.*` | `npx knip --reporter json` (needs `node_modules`) | Finds unused files, exports and dependencies. |
 | `dependency-cruiser` | arch | `.dependency-cruiser.{js,cjs,mjs,json}` | `npx depcruise src --config` (needs `node_modules`) | Forbidden imports, layers, cycles. CI word: `depcruise`. |
 | `eslint-plugin-boundaries` | arch | `boundaries/` rules in the ESLint config | runs inside ESLint | Counts when ESLint is blocking in CI. |
