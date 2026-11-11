@@ -636,6 +636,12 @@ pattern.
 |-----|------|---------|---------|
 | `kind` | `"code"`, `"schema"`, `"design-doc"` | `"code"` | The verify kind of a task without a `verify_kind` meta. See Task metadata. |
 
+### `[scope]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `adjacent` | list of strings | `[]` | Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `"lower-ratchet"`: only lower a baseline, ratchet or allow-list count (never raise it, never add an entry). `"stale-exemption"`: delete an exemption or baseline row that a scanner run in this attempt proves stale. `"own-lint"`: fix lint or format errors that this attempt's change caused in files outside SCOPE. When set, the worker brief's SCOPE gains one line that names the kinds, and the worker lists each such change under `Deviations:` as `adjacent: <kind>: <path>`. The verifier brief names the same kinds and checks each `adjacent:` line. |
+
 ### `[roles]`
 
 | Key | Type | Default | Meaning |
@@ -1059,6 +1065,16 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.17.0
+
+Version 0.18.0 adds rules from issue #89. No migration.
+
+- **Blocking and non-blocking findings.** A verifier writes `blocking: <finding>: <why it blocks>` for every line under `Issues:`, and reports `ISSUES` only when one exists. A finding that does not block goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`, and the verifier reports `PASS`. `nonblocking` is a new Follow-ups label (it shows in `status`). The Manager sorts these follow-ups like the others and never opens a fix round for one.
+- **`check-report --verifier`.** The verifier brief passes the flag. With it, an `ISSUES` report needs every `Issues:` line to start with `blocking:`, and `Issues: None` with `ISSUES` is refused; a `PASS` report with an `Issues:` line is refused too. A worker report is checked as before, except for the path check below.
+- **Path check.** For a `PASS` or `ISSUES` worker report, every backticked token under `Files:`, `Evidence:` and `Ran:` that looks like a repository path (no whitespace; a `/` in it, or a common file extension; `:<line>` or `:<line>-<line>` dropped) must exist relative to the worktree. A token with `<`, `*`, `$` or `{`, a URL, a flag, or an absolute path outside the worktree is skipped. A line that says `deleted` or `removed` is exempt.
+- **`[scope] adjacent`.** A list, empty by default, of the changes a worker may make outside SCOPE without `BLOCKED`: `lower-ratchet`, `stale-exemption`, `own-lint` (see [`[scope]`](#scope)). An unknown kind is a config error.
+- **Worker rules for every task.** Fix the root cause and never work around it; pick the option that is best over months; continue the previous attempt's uncommitted or half-merged work; one command per Bash call and no `cd`; a self-review before `PASS`. The `software-engineer` role gains an impact census and loses the two rules that the worker now has for every task. The `architect` role gains the numbers-have-sources rule and the full design template in round 1. A spent attempt cap means re-planning, not another fix round.
 
 ### Upgrading from 0.16.0
 
