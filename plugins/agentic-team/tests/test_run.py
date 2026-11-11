@@ -628,7 +628,8 @@ class Base(unittest.TestCase):
         task = task or self.running_task()
         self.pass_report(task)
         status = {"verify-failed": "ISSUES", "verify-blocked": "BLOCKED"}.get(verdict, "PASS")
-        self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n", kind="verify", by=f"verify-{task}-1")
+        issues = "Issues:\n- blocking: a check fails\n" if status == "ISSUES" else ""
+        self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n{issues}", kind="verify", by=f"verify-{task}-1")
         return task
 
     # --- code host fakes (pr mode)
@@ -2016,6 +2017,43 @@ class RunTest(Base):
         self.assertEqual(self.named(events, "unclosed"), [])
         self.assertIn("Verdict test-verified", self.one(events, "verified")["detail"])
 
+    def unlabelled_failure(self, attempt=1, labelled=False):
+        task = self.running_task(attempt=attempt)
+        self.pass_report(task, attempt=attempt)
+        issue = "blocking: a check fails" if labelled else "a check fails"
+        self.add_result(task, "ISSUES", f"Status: ISSUES\nVerdict: verify-failed\nIssues:\n- {issue}\n",
+                        kind="verify", attempt=attempt, by=f"verify-{task}-{attempt}")
+        return task
+
+    def test_30_an_unlabelled_verify_failed_report_hints_verify_again(self):
+        task = self.unlabelled_failure()
+        verified = self.one(self.events("record"), "verified")
+        self.assertEqual(verified["next"], f"run.py verify {task} --again (the verifier's report has no blocking: line: "
+                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` and say why "
+                         "it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
+                         "<why it does not block>`)")
+
+    def test_30_close_refuses_an_unlabelled_verify_failed_report(self):
+        task = self.unlabelled_failure()
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"run.py verify {task} --again (the verifier's report has no blocking: line: Issues line", out.stderr)
+        self.assertNotIn("verdict", self.meta(task))
+        self.assertEqual(self.status_of(task), "in_progress")
+
+    def test_30_a_labelled_verify_failed_report_still_opens_a_fix_round(self):
+        task = self.unlabelled_failure(labelled=True)
+        self.assertEqual(self.one(self.events("record"), "verified")["next"], f"run run.py close {task}")
+        self.ok("close", str(task))
+        self.assertEqual(self.meta(task)["verdict"], "verify-failed")
+        self.assertEqual(self.one(self.events("record"), "unclosed")["next"], f"fix round: run.py launch {task}")
+
+    def test_30_an_unlabelled_verify_failed_report_at_the_cap_still_hints_verify_again(self):
+        task = self.unlabelled_failure(attempt=3)
+        verified = self.one(self.events("record"), "verified")
+        self.assertTrue(verified["next"].startswith(f"run.py verify {task} --again (the verifier's report has no "))
+        self.assertNotIn("abandon", verified["next"])
+
     def test_30_verifier_result_without_a_verdict_line(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
@@ -2302,7 +2340,7 @@ class RunTest(Base):
     def test_106_close_then_launch_after_a_verify_failed_verdict(self):
         task = self.running_task()
         self.pass_report(task)
-        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\nIssues:\n- blocking: a check fails\n", kind="verify", by="verify-1-1")
         self.agents(self.row("task-1", status="idle", state="working", pid=1234))
         env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
         self.ok("close", str(task), "--verdict", "verify-failed", env=env)

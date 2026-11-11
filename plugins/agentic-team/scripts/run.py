@@ -687,6 +687,22 @@ def verdict_of(row):
     return match.group(1) if match else None
 
 
+def unlabelled_failure(row):
+    """The first problem that keeps a verifier row's verify-failed verdict from opening a fix round, or None. The
+    findings rule (verifier_problems) holds for the row: an ISSUES report with no `blocking:` line is not a failure.
+    A CI row and a Manager row carry no Issues lines and are never judged."""
+    if row.get("author") in ("ci", "manager") or verdict_of(row) != "verify-failed":
+        return None
+    body = row.get("body") or ""
+    status = STATUS_LINE.search(body)
+    found = verifier_problems(body, status.group(1) if status else row.get("status"))
+    return found[0] if found else None
+
+
+def unlabelled_next(tid, problem):
+    return f"run.py verify {tid} --again (the verifier's report has no blocking: line: {problem})"
+
+
 def retry_next(tid, attempt, mode="<mode>", lead="", before=""):
     """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
     run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
@@ -2437,7 +2453,10 @@ def ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs):
 def emit_verified(run, tid, attempt, row, kind):
     level = verdict_of(row)
     nxt = f"run run.py close {tid}"
-    if row["author"] == "ci" and level == "verify-failed":
+    problem = unlabelled_failure(row)
+    if problem:
+        nxt = unlabelled_next(tid, problem)
+    elif row["author"] == "ci" and level == "verify-failed":
         nxt += " (records verify-failed), then " + retry_next(tid, attempt, lead="fix round: ")
     elif row["author"] == "ci" and level == "verify-blocked":
         nxt = f"run.py verify {tid} --again"
@@ -4745,6 +4764,9 @@ def choose_verdict(run, args, task, rows, attempt):
         return args.verdict, True, None
     last, level = found[-1], verdict_of(found[-1])
     if not args.verdict or args.verdict == level:
+        problem = unlabelled_failure(last)
+        if problem:
+            raise Refused(unlabelled_next(tid, problem))
         return level, False, None
     if not reason:
         raise Refused(f"verifier {last['author']} said {level} (result #{last['id']}); to change it, pass "
