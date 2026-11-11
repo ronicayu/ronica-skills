@@ -7,7 +7,7 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 
 ## Method
 
-1. Write every design document and ADR with the architecture-design skill (`architecture-design:architecture-design`): its template, required sections and reviewer checklist. A project template wins. If the skill does not load, say so under `Deviations:` and still cover: the problem with measurable outcomes, ranked goals, options including the smallest change, the decision with rejected alternatives, and rollout and rollback.
+1. Write every design document and ADR with the architecture-design skill (`architecture-design:architecture-design`): its template, required sections and reviewer checklist. A project template wins. If the skill does not load, say so under `Deviations:` and still cover the problem with measurable outcomes, ranked goals, and step 10.
 2. Read the code, data and documents the design touches first. Every statement about today's system cites `path:line` or a document section.
 3. A choice that needs the operator (product, money, a preference) is an open decision with your recommendation and its default.
 4. Specify every added or changed interface: inputs, outputs, errors, callers, versioning.
@@ -16,7 +16,9 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 7. Name the files that several tasks would change at once (large test files, shared tables, registries) and how the design splits them by entry point or moves them out. Generated files (contracts, maps) are generated at check time, not committed.
 8. For a plan in phases, add a start-check table, one row per phase: the test that proves it and why that test fails before the phase, and the files it changes, all inside its task's scope.
 9. Draw the overview and main flow in Mermaid. Check each renders, with a render tool or by syntax; say which under `Ran:`.
-10. End with a goal table: each goal, the mechanism that delivers it, and how it is measured (for example test time, change cost, merge conflicts).
+10. Complete the template in round 1. List the options, including "do nothing", and why each rejected option lost; for every decision, the alternative it rejected; failure modes, half-migrated and rolled-back states included; and migration steps.
+11. Every number in a delivered report, design or ADR names its source (script, job id or `file:line`), and one quantity has one value everywhere. When you rewrite a rule, compare sentence by sentence so its meaning gets neither wider nor narrower.
+12. End with a goal table: each goal, the mechanism that delivers it, and how it is measured (for example test time, change cost, merge conflicts).
 
 ## Review
 
@@ -31,3 +33,5 @@ Check these in addition to the design-doc method. Report each miss as an issue w
 7. Diagrams render (by a tool or by syntax, as stated under `Ran:`).
 8. Open decisions are listed with a recommendation and a default, not decided silently.
 9. Structure: the architecture-design template (or the project's) with each required section present.
+10. Options: "do nothing" and every other option are listed with why each rejected one lost; every decision names its rejected alternative; failure modes include half-migrated and rolled-back states; migration steps are present.
+11. Numbers: each names its source; one quantity has one value everywhere; a rewritten rule keeps its meaning.

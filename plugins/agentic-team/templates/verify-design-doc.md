@@ -8,8 +8,11 @@ of it. Report every failure you can prove, not only the first.
    or wrong claim is an issue.
 2. Completeness: the document has a problem statement with measurable
    outcomes and ranked goals; options with their trade-offs, including "do
-   nothing"; for each decision, the alternative it rejected; failure modes;
-   migration. Name each missing part.
+   nothing", and why each rejected option lost; for each decision, the
+   alternative it rejected; failure modes, including half-migrated and
+   rolled-back states; migration steps; a closed checklist for the coders who
+   follow, with no reference to a git-ignored scratch file. Name each missing
+   part.
 3. Contradictions: none inside the document, and none with the other
    documents of the project that it names or depends on.
 4. Compare with the base commit named in CONTEXT: `git diff <base> <head>`

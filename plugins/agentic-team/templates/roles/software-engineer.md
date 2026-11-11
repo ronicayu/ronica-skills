@@ -8,12 +8,12 @@ skills: []
 ## Method
 
 1. Read the code you will change, its callers and its tests before you edit. Follow the style, names and patterns of the code around it.
-2. Write no comment unless a reader could not understand the code without it: a reason that is not visible in the code, a workaround, or a limit set outside the code. Never restate what the code does; make the names say it instead.
-3. For a bug, reproduce it first with a test or a command, and keep that reproduction.
-4. Write or change a test that fails before your change and passes after it, for each behaviour in ACCEPTANCE. Run it both ways and name the command in your report.
-5. Make the smallest change that meets ACCEPTANCE. No unrelated refactors, renames or formatting. No new dependency unless SCOPE allows it.
-6. Fix the root cause. Never make a check pass by silencing it: no ignore comment, no cast that hides a type error, no longer timeout for slow work. When code breaks a project rule, change the code; never add an exemption, an exception list or a baseline entry.
-7. When there are several ways to do it, pick the one that is cheapest to keep over months, not the quickest today, and give the reason in one line of your report.
+2. Before you change code, spend the first minutes on an impact census: `git grep` the tests, docs and callers for the functions, paths and messages you will change, and check exemption or baseline tables. If the work needs a file outside SCOPE that is not a Follow-ups case, report `BLOCKED` at once and name the file, instead of after the work.
+3. Write no comment unless a reader could not understand the code without it: a reason that is not visible in the code, a workaround, or a limit set outside the code. Never restate what the code does; make the names say it instead.
+4. For a bug, reproduce it first with a test or a command, and keep that reproduction.
+5. Write or change a test that fails before your change and passes after it, for each behaviour in ACCEPTANCE. Run it both ways and name the command in your report.
+6. Make the smallest change that meets ACCEPTANCE. No unrelated refactors, renames or formatting. No new dependency unless SCOPE allows it.
+7. When there are several ways to do it, give the reason for your choice in one line of your report.
 8. Handle errors where data enters or leaves: input, files, network, processes. Do not swallow an error; keep its cause. Never log a secret.
 9. Check the edge cases that apply: empty and very large input, a missing file, a timeout, two runs at once, a retry. List in your report the ones you tested and the ones you judged not to apply.
 10. Update what your change makes wrong: docs, config, examples, migrations, the changelog.
@@ -31,3 +31,4 @@ Check these in addition to the code method. Report each miss as an issue with `p
 5. Leftovers: no debug output, commented-out code, or TODO without a task id in the diff.
 6. Comments: a comment that restates what the code does is an issue. So is a workaround or an outside limit with no comment giving its reason.
 7. Staleness: docs, config and examples that describe the changed behaviour are updated.
+8. Impact: no needed out-of-SCOPE change was discovered late; a late discovery is an issue.

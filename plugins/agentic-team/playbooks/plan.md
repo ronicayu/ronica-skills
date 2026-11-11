@@ -35,7 +35,12 @@ adds what Taskgraph cannot decide.
      `verify.kind`, else `code`). `schema`: a data model, DDL or migration; the
      verifier recomputes numbers and runs the DDL. `design-doc`: an ADR, RFC or
      architecture document; the verifier checks sources, completeness and
-     contradictions. Only `artifact-verified` closes these two kinds.
+     contradictions. Only `artifact-verified` closes these two kinds. A `design-doc` task's
+     ACCEPTANCE lists the full template in round 1: the problem statement with measurable
+     outcomes, ranked quality goals, options with "do nothing" and why each lost, the
+     rejected alternative of each decision, failure modes (half-migrated, rolled back),
+     migration steps, and a closed checklist for the coders who follow. The checklist
+     refers to no git-ignored scratch file; census scripts go into the repository.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
    Record only a dependency that is real. Keep every slot busy within priority and
