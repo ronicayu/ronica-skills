@@ -54,7 +54,10 @@ every report, and on every wake (step 6).
      A row with no status and no pid (a ghost) counts as ended after 30 quiet minutes; `run.py stop` does not clear it before that.
    - A `next:` that names `abandon` (the cap is 3 attempts): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
      add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
-     in the same hint only when the operator says so.
+     in the same hint only when the operator says so. Do not add fix rounds past the cap. First classify
+     what remains: undecided design → a design task that sets the spec; a tool problem or out-of-scope
+     work → a separate task; open-ended acceptance → rewrite it as a closed checklist. Override the cap
+     only for a clear, bounded fix, and record why in the task notes.
    - `conflict`, and `changed` from `close`: add the decision the line names. The task worktree stays
      as it was. After a host rebase that changed the diff, the request holds the host's new head, and
      `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your
@@ -110,7 +113,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted.
+   - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is sorted the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
      `local` it merges only on a `MERGE:` line into a clean checkout, and
