@@ -18,6 +18,7 @@ As in `java.md`: tools run through Gradle, build the project, and write `build/`
 | `kotlin-strict` | types | `allWarningsAsErrors` in the build | the compile step: `./gradlew compileKotlin` and count `w:` lines | |
 | `kotest` | tests | Kotest in build dependencies | `./gradlew test` | |
 | `kover` | coverage | the plugin in the build | `./gradlew koverLog` or `koverXmlReport` (check the task list) | Gate: `kover { reports { verify { rule { minBound(70) } } } }`. |
+| `konsist` | arch | `konsist` in build dependencies | runs inside the tests | Kotlin-aware architecture and convention checks; ArchUnit also works (inherited from Java). |
 
 ## Suppressions
 
@@ -36,3 +37,17 @@ kotlin { compilerOptions { allWarningsAsErrors = true } }
 ```
 
 CI: `./gradlew check` runs tests, detekt and ktlint once the plugins are applied. Start detekt with a baseline so CI fails only on new findings.
+
+Architecture rules, with Konsist (`com.lemonappdev:konsist` as a test dependency):
+
+```kotlin
+class ArchitectureTest {
+  @Test fun `domain does not depend on data`() {
+    Konsist.scopeFromProject().assertArchitecture {
+      val domain = Layer("Domain", "com.example.domain..")
+      val data = Layer("Data", "com.example.data..")
+      domain.dependsOnNothing(); data.dependsOn(domain)
+    }
+  }
+}
+```

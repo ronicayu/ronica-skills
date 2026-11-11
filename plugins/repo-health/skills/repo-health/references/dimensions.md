@@ -83,6 +83,14 @@ Each rule has an id (`tests.2`, `ci.3a`). `score.json` names the rule that set e
 - `docs.2`: the README gives commands to install, run and test, and every checkable command exists.
 - `docs.3`: `docs.2` and a CONTRIBUTING file or a development section that also gives the lint command.
 
+### arch (architecture written down and enforced)
+- Facts: `architecture_docs[]` (`ARCHITECTURE.md`, `docs/architecture*`, ADR folders such as `docs/adr`, `doc/adr`, `docs/decisions` or the folder `.adr-dir` names, C4 or Structurizr models `workspace.dsl`, `*.c4`, `*.likec4`, and a README section headed "Architecture"), each with `last_commit`; and rule tools in the `arch` category (ArchUnit, Spring Modulith, Konsist, import-linter, tach, pytestarch, dependency-cruiser, eslint-plugin-boundaries, Nx module boundaries, depguard, go-arch-lint).
+- `arch.na`: profile `scripts`, or a subproject under 3,000 source lines: status `not_applicable`, summary says why.
+- `arch.0`: no architecture doc, no ADR and no rule tool.
+- `arch.1`: a doc or ADRs exist, or a rule tool is configured but not run by blocking CI.
+- `arch.2`: architecture rules run in blocking CI. A CLI tool (`lint-imports`, `tach check`, `depcruise`, `go-arch-lint`) needs its own blocking row. A tool that runs inside the tests (ArchUnit, Spring Modulith, Konsist, pytestarch) counts when CI runs the suite that holds its tests. A linter plugin (eslint-plugin-boundaries, Nx module boundaries, depguard) counts when its host linter has a blocking row. Rust: a Cargo workspace of two or more member crates counts, because the compiler rejects a dependency the manifest does not declare.
+- `arch.3`: `arch.2`, and an architecture doc or ADR changed in the last 12 months.
+
 ## Signals (no level)
 
 ### hotspots
@@ -102,7 +110,7 @@ Each finding cites `path:line`. See `tier2-prompts.md`.
 
 `score.py` turns every level under 3, every partial and every hotspot gap into a gap with a stable `id` (`<dimension>:<subproject>:<rule or slug>`), the facts that caused it, and a `priority`:
 
-1. Weight by dimension: tests 10, ci 9, lint 7, types 6, secrets 6 (public) or 3 (private), coverage 4, setup 4, deps 4, static 3, docs 3.
+1. Weight by dimension: tests 10, ci 9, lint 7, types 6, secrets 6 (public) or 3 (private), coverage 4, setup 4, deps 4, static 3, docs 3, arch 3.
 2. Times the hotspot factor: 2 when the gap covers one of the top 5 hotspots (a missing suite that holds a hotspot, a hotspot's language without a linter), 1.5 for the top 15, 1 otherwise.
 3. Times the effort factor: 1.5 when an existing tool only needs to move into CI or block (enforce, not add), 1 otherwise, 0.7 for a large change.
 4. Times 0 when the profile makes the advice moot (required reviews in a `solo` repo, a lockfile for a `library`), and the gap is listed under "Not applicable" instead.

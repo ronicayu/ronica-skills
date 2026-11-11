@@ -29,6 +29,9 @@ ESLint (its config imports plugins), `tsc`, test runners and knip need `node_mod
 | `jest-coverage` | coverage | `collectCoverage: true` in `jest.config.*` or `package.json`; CI `jest --coverage` | `npm test -- --ci --coverage` | `coverageThreshold` fails the run below the bar. |
 | `npm-audit` | deps_audit | (none) | npm: `npm audit --json --omit=dev`; pnpm: `pnpm audit --json --prod`; yarn 1: `yarn audit --json`; yarn 2+: `yarn npm audit --json` | Needs the network and the lockfile; no `node_modules` needed for npm 7+. Count high and critical. |
 | `knip` | deadcode | `knip.json*`, `.knip.json`, `knip.config.*` | `npx knip --reporter json` (needs `node_modules`) | Finds unused files, exports and dependencies. |
+| `dependency-cruiser` | arch | `.dependency-cruiser.{js,cjs,mjs,json}` | `npx depcruise src --config` (needs `node_modules`) | Forbidden imports, layers, cycles. CI word: `depcruise`. |
+| `eslint-plugin-boundaries` | arch | `boundaries/` rules in the ESLint config | runs inside ESLint | Counts when ESLint is blocking in CI. |
+| `nx-module-boundaries` | arch | `@nx/enforce-module-boundaries` in the ESLint config | `npx nx run-many -t lint` | Tag-based project boundaries in Nx monorepos. |
 
 ## Suppressions
 
@@ -60,3 +63,15 @@ Coverage gate in Vitest:
 ```ts
 test: { coverage: { thresholds: { lines: 70 } } }
 ```
+
+Architecture rules, with dependency-cruiser (`npx depcruise --init` writes a starter config; add one rule that matches today's code):
+
+```js
+// .dependency-cruiser.cjs
+module.exports = { forbidden: [
+  { name: "domain-not-ui", severity: "error",
+    from: { path: "^src/domain" }, to: { path: "^src/(ui|pages)" } },
+] };
+```
+
+CI step: `npx depcruise src`.

@@ -47,3 +47,5 @@ updates:
 ```
 
 Require checks before merge: GitHub repository settings → Rules → a ruleset on the default branch with "Require status checks to pass".
+
+Architecture doc: a short `ARCHITECTURE.md` at the root (about one page): the problem the code solves, a map of the top-level modules with one line each on what they own, the rules between them (what may import what), and where to start reading. Record big decisions as ADRs in `docs/adr/NNNN-title.md` (context, decision, consequences). A doc a rule tool enforces stays true; a doc alone drifts.

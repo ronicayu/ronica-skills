@@ -25,6 +25,8 @@ A tool that is not in the build cannot run ephemerally in a useful way: report i
 | `testng` | tests | TestNG in build dependencies | as junit | |
 | `jacoco` | coverage | the plugin in the build | Maven: `./mvnw -B test jacoco:report`; Gradle: `./gradlew test jacocoTestReport` | Total from `jacoco.csv` or the HTML index. Gate: Maven `jacoco:check` rules, Gradle `jacocoTestCoverageVerification`. |
 | `dependency-check` | deps_audit | the OWASP plugin in the build | recommend only unless configured; it downloads the NVD database (slow; an NVD API key is advised) | Dependabot or Renovate plus GitHub's dependency graph is the light alternative. |
+| `archunit` | arch | `archunit` in build dependencies | runs inside the tests | Counts when CI runs the suite that holds the ArchUnit tests. Freeze existing violations with `FreezingArchRule`. |
+| `spring-modulith` | arch | `spring-modulith` in build dependencies | runs inside the tests (`ApplicationModules.of(App.class).verify()`) | Module boundaries for Spring Boot apps. |
 
 ## Suppressions
 
@@ -50,3 +52,20 @@ Maven: `maven-checkstyle-plugin` and `spotless-maven-plugin` bound to the `verif
 CI step: `./gradlew check` or `./mvnw -B verify`. Both run tests and every configured check in one command.
 
 Error Prone catches real bugs at compile time with few false positives; add it before a large rule set like PMD.
+
+Architecture rules, with ArchUnit (add `com.tngtech.archunit:archunit-junit5` as a test dependency; freeze today's violations so the rule passes now and blocks new ones):
+
+```java
+@AnalyzeClasses(packages = "com.example")
+class ArchitectureTest {
+  @ArchTest static final ArchRule layers = FreezingArchRule.freeze(
+      layeredArchitecture().consideringAllDependencies()
+          .layer("Web").definedBy("..web..")
+          .layer("Service").definedBy("..service..")
+          .layer("Persistence").definedBy("..persistence..")
+          .whereLayer("Web").mayNotBeAccessedByAnyLayer()
+          .whereLayer("Service").mayOnlyBeAccessedByLayers("Web"));
+}
+```
+
+It runs with the tests: no new CI step.

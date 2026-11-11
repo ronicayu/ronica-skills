@@ -30,6 +30,9 @@ Most tier 1 tools run without the project's dependencies (ruff, bandit, vulture,
 | `coverage.py` | coverage | `.coveragerc`, `[tool.coverage.*]`, `[coverage:*]` | in the project env: `python -m coverage run -m pytest -q -p no:cacheprovider && python -m coverage report --format=total` | Writes `.coverage` into the repo: set `COVERAGE_FILE=<scratch>/.coverage`. Gate: `fail_under` in `[tool.coverage.report]`. |
 | `pip-audit` | deps_audit | (none) | `uvx pip-audit -r <requirements file>`; with `uv.lock`: `uv export --frozen --format requirements-txt --no-hashes -o <scratch>/req.txt` then `uvx pip-audit -r <scratch>/req.txt`; in an env: `uvx pip-audit` with that env active | Needs the network (PyPI advisory data). |
 | `vulture` | deadcode | `[tool.vulture]` | `uvx vulture <src> --min-confidence 80` | False positives: framework entry points, `__all__`, plugins. A whitelist file is the baseline. |
+| `import-linter` | arch | `.importlinter`, `[importlinter]` in `setup.cfg`, `[tool.importlinter]` in `pyproject.toml` | `uvx --from import-linter lint-imports` (needs the package importable) | Contracts: layers, forbidden, independence. CI word: `lint-imports`. |
+| `tach` | arch | `tach.toml` | `uvx tach check` | Module boundaries and declared interfaces; fast (Rust). |
+| `pytestarch` | arch | `pytestarch` in the dependencies | runs inside `pytest` | Counts when CI runs the suite that holds its tests. |
 
 ## Suppressions
 
@@ -70,3 +73,20 @@ fail_under = 70   # the measured value, rounded down, then raise it
 ```
 
 Pre-commit: `.pre-commit-config.yaml` with the `astral-sh/ruff-pre-commit` hooks `ruff` and `ruff-format`.
+
+Architecture rules, with import-linter (start with one layers contract that matches today's code, then tighten):
+
+```ini
+# .importlinter
+[importlinter]
+root_package = myapp
+[importlinter:contract:layers]
+name = Layers
+type = layers
+layers =
+    myapp.api
+    myapp.service
+    myapp.domain
+```
+
+CI step: `uvx --from import-linter lint-imports`.

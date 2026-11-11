@@ -49,3 +49,5 @@ unsafe_code = "forbid"
 ```
 
 Each member crate then needs `[lints] workspace = true`. Clippy has no baseline file; for a crate with many warnings, deny warnings in CI for new crates first, or allow named lints at the crate root and remove them one by one.
+
+Architecture: split a large crate into a Cargo workspace of crates along its boundaries; the compiler then rejects a dependency the manifest does not declare. Write the boundaries down in `ARCHITECTURE.md` (what each crate owns, what may depend on what).

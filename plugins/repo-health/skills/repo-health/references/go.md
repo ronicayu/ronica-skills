@@ -21,6 +21,8 @@ Markers: `go.mod`. Lockfile: `go.sum`. Toolchain pin: the `go` and `toolchain` d
 | `go-test` | tests | (none) | `go test ./...` | Add `-count=1` to skip the test cache. `-race` is a recommendation for concurrent code, not a tier 1 default (slower). |
 | `go-cover` | coverage | (none) | `go test -count=1 -coverprofile=<scratch>/cover.out ./... && go tool cover -func=<scratch>/cover.out` | The last line is the total. |
 | `deadcode` | deadcode | (none) | `go run golang.org/x/tools/cmd/deadcode@latest ./...` | Unreachable functions from `main`; libraries without `main` need `-test`. |
+| `depguard` | arch | `depguard` in `.golangci.yml`/`.yaml`/`.toml` | runs inside golangci-lint | Allow or deny import lists per package. Counts when golangci-lint is blocking. |
+| `go-arch-lint` | arch | `.go-arch-lint.yml` | `go run github.com/fe3dback/go-arch-lint@latest check` | Component and layer rules. |
 
 ## Suppressions
 
@@ -49,3 +51,19 @@ linters:
 ```
 
 Vulnerabilities: `golang/govulncheck-action` in CI.
+
+Architecture rules, with depguard in golangci-lint:
+
+```yaml
+# .golangci.yml
+linters:
+  enable: [depguard]
+  settings:
+    depguard:
+      rules:
+        domain:
+          files: ["**/internal/domain/**"]
+          deny:
+            - pkg: "example.com/app/internal/http"
+              desc: domain must not import the HTTP layer
+```
