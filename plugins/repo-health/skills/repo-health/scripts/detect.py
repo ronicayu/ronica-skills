@@ -4429,41 +4429,48 @@ class Detector(object):
             return "install"
         if probe:
             return self.kind_from_name(probe[0][1])
+        kind = self.build_tool_kind(prog, args)
+        if kind:
+            return kind
         categories = {hit.tool.category for hit in out.hits}
         if categories & {"tests", "coverage"}:
             return "test"
         if categories & {"lint", "format", "types", "static", "deps_audit", "secrets", "hooks"}:
             return "lint"
-        sub = first_positional(args)
         if prog in ("make", "gmake", "just"):
             return "run" if not args else "other"
-        if prog == "cargo":
-            sub = next((a for a in args if not a.startswith(("+", "-"))), None)
-            return {"test": "test", "t": "test", "nextest": "test", "build": "build", "b": "build", "run": "run",
-                    "r": "run", "clippy": "lint", "fmt": "lint", "check": "lint", "fetch": "install",
-                    "install": "install"}.get(sub or "", "other")
-        if prog == "go":
-            return {"test": "test", "build": "build", "run": "run", "vet": "lint", "fmt": "lint", "get": "install",
-                    "install": "install"}.get(sub or "", "other")
-        if prog in ("mvn", "mvnw", "mvnd"):
-            goals = [a for a in args if not a.startswith("-")]
-            if any(g in ("test", "verify") for g in goals):
-                return "test"
-            if any(g in ("package", "compile", "install", "clean", "deploy") for g in goals):
-                return "build"
-            return "run" if any(g.startswith("exec:") or g.startswith("spring-boot:run") for g in goals) else "other"
-        if prog in ("gradle", "gradlew"):
-            goals = [a for a in args if not a.startswith("-")]
-            if any(g in ("test", "check") for g in goals):
-                return "test"
-            if any(g in ("build", "assemble", "clean", "jar") for g in goals):
-                return "build"
-            return "run" if any(g in ("run", "bootRun") for g in goals) else "other"
         if prog == "docker" or prog == "docker-compose":
             return "run" if "up" in args or "run" in args else "build" if "build" in args else "other"
         if prog.startswith("python") or prog in ("node", "deno", "uvicorn", "gunicorn", "flask", "ruby"):
             return "run"
         return "other"
+
+    @staticmethod
+    def build_tool_kind(prog, args):
+        """The kind of a cargo, go, Maven or Gradle command, or None for another program."""
+        sub = first_positional(args)
+        if prog == "cargo":
+            sub = next((a for a in args if not a.startswith(("+", "-"))), None)
+            return {"test": "test", "t": "test", "nextest": "test", "build": "build", "b": "build", "run": "run",
+                    "r": "run", "clippy": "lint", "fmt": "lint", "check": "lint", "fetch": "install",
+                    "install": "install"}.get(sub or "")
+        if prog == "go":
+            return {"test": "test", "build": "build", "run": "run", "vet": "lint", "fmt": "lint", "get": "install",
+                    "install": "install"}.get(sub or "")
+        goals = [a for a in args if not a.startswith("-")]
+        if prog in ("mvn", "mvnw", "mvnd"):
+            if any(g in ("test", "verify") for g in goals):
+                return "test"
+            if any(g in ("package", "compile", "install", "clean", "deploy") for g in goals):
+                return "build"
+            return "run" if any(g.startswith(("exec:", "spring-boot:run")) for g in goals) else None
+        if prog in ("gradle", "gradlew"):
+            if any(g in ("build", "assemble", "clean", "jar") for g in goals):
+                return "build"
+            if any(g in ("test", "check") for g in goals):
+                return "test"
+            return "run" if any(g in ("run", "bootRun") for g in goals) else None
+        return None
 
     # ---- assembly -------------------------------------------------------
 
