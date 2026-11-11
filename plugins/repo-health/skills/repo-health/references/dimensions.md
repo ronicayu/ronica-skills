@@ -84,12 +84,12 @@ Each rule has an id (`tests.2`, `ci.3a`). `score.json` names the rule that set e
 - `docs.3`: `docs.2` and a CONTRIBUTING file or a development section that also gives the lint command.
 
 ### arch (architecture written down and enforced)
-- Facts: `architecture_docs[]` (`ARCHITECTURE.md`, `docs/architecture*`, ADR folders such as `docs/adr`, `doc/adr`, `docs/decisions` or the folder `.adr-dir` names, C4 or Structurizr models `workspace.dsl`, `*.c4`, `*.likec4`, and a README section headed "Architecture"), each with `last_commit`; and rule tools in the `arch` category (ArchUnit, Spring Modulith, Konsist, import-linter, tach, pytestarch, dependency-cruiser, eslint-plugin-boundaries, Nx module boundaries, depguard, go-arch-lint).
+- Facts: `architecture_docs[]` (`ARCHITECTURE.md` at the root or in `docs/`, `docs/architecture*`, and a README section headed "Architecture"), each with `last_commit`. ADRs and C4 models do not count; and rule tools in the `arch` category (ArchUnit, Spring Modulith, Konsist, import-linter, tach, pytestarch, dependency-cruiser, eslint-plugin-boundaries, Nx module boundaries, depguard, go-arch-lint).
 - `arch.na`: profile `scripts`, or a subproject under 3,000 source lines: status `not_applicable`, summary says why.
-- `arch.0`: no architecture doc, no ADR and no rule tool.
-- `arch.1`: a doc or ADRs exist, or a rule tool is configured but not run by blocking CI.
+- `arch.0`: no architecture doc and no rule tool.
+- `arch.1`: an architecture doc exists, or a rule tool is configured but not run by blocking CI.
 - `arch.2`: architecture rules run in blocking CI. A CLI tool (`lint-imports`, `tach check`, `depcruise`, `go-arch-lint`) needs its own blocking row. A tool that runs inside the tests (ArchUnit, Spring Modulith, Konsist, pytestarch) counts when CI runs the suite that holds its tests. A linter plugin (eslint-plugin-boundaries, Nx module boundaries, depguard) counts when its host linter has a blocking row. Rust: a Cargo workspace of two or more member crates counts, because the compiler rejects a dependency the manifest does not declare.
-- `arch.3`: `arch.2`, and an architecture doc or ADR changed in the last 12 months.
+- `arch.3`: `arch.2`, and an architecture doc changed in the last 12 months.
 
 ## Signals (no level)
 
