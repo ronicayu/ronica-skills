@@ -34,7 +34,8 @@ case "$1 $2" in
     case "$2" in
       */rules/branches/*) name=rules ;;
       */branches/*/protection) name=protection ;;
-      */actions/runs*) name=actions_runs ;;
+      */actions/workflows/*/runs*) name=wf_runs ;;
+      */actions/workflows*) name=wf_list ;;
       */code-scanning/analyses*) name=code_scanning ;;
       *) name=repo_api ;;
     esac ;;
@@ -68,15 +69,19 @@ RULES = [
     {"type": "deletion", "ruleset_id": 1},
 ]
 
-API_RUNS = {"workflow_runs": [
-    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "success", "created_at": "2025-01-05T10:00:00Z"},
-    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "success", "created_at": "2025-01-06T10:00:00Z"},
-    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "cancelled", "created_at": "2025-01-07T10:00:00Z"},
-    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": None, "created_at": "2025-01-08T10:00:00Z"},
-    {"name": "Lint", "path": ".github/workflows/lint.yml@refs/heads/main", "conclusion": "failure",
-     "created_at": "2025-01-05T09:00:00Z"},
-    {"name": "Nightly", "path": ".github/workflows/nightly.yml", "conclusion": "cancelled",
-     "created_at": "2025-01-05T08:00:00Z"},
+WORKFLOWS = {"workflows": [
+    {"name": "CI", "path": ".github/workflows/ci.yml"},
+    {"name": "Lint", "path": ".github/workflows/lint.yml"},
+    {"name": "CodeQL", "path": ".github/workflows/codeql.yml"},
+    {"name": "Nightly", "path": ".github/workflows/nightly.yml"},
+    {"name": "Dynamic", "path": "dynamic/github-code-scanning/codeql"},
+]}
+
+WF_RUNS = {"workflow_runs": [
+    {"conclusion": "cancelled", "created_at": "2025-01-07T10:00:00Z"},
+    {"conclusion": "success", "created_at": "2025-01-05T10:00:00Z"},
+    {"conclusion": "failure", "created_at": "2025-01-06T10:00:00Z"},
+    {"conclusion": None, "created_at": "2025-01-08T10:00:00Z"},
 ]}
 
 PROTECTION = {"required_status_checks": {"strict": True, "contexts": ["lint"], "checks": [{"context": "test"}]},
@@ -126,7 +131,8 @@ class FakeGh(unittest.TestCase):
         self.answer("protection", out=PROTECTION)
         self.answer("repo_api", out=SECURITY)
         self.answer("pr_list", out=PRS)
-        self.answer("actions_runs", out=API_RUNS)
+        self.answer("wf_list", out=WORKFLOWS)
+        self.answer("wf_runs", out=WF_RUNS)
         self.answer("code_scanning", out=[{"created_at": "2025-01-09T12:00:00Z"}])
 
     @staticmethod
@@ -167,6 +173,7 @@ class Happy(FakeGh):
         self.assertEqual(ci, {"runs": 5, "completed": 3, "pass_rate": 0.667, "median_duration_s": 200.0,
                               "rerun_rate": 0.2, "last_failure": "2025-01-04T10:00:00Z",
                               "path": ".github/workflows/ci.yml", "last_run": "2025-01-06T10:00:00Z"})
+        self.assertEqual(set(runs["workflows"]), {"CI", "Lint", "CodeQL", "Nightly"})
         self.assertEqual(runs["workflows"]["Lint"]["pass_rate"], 1.0)
         self.assertIsNone(runs["workflows"]["Lint"]["last_failure"])
         overall = runs["overall"]
@@ -195,34 +202,35 @@ class Happy(FakeGh):
         self.assertIn("api repos/acme/widgets/branches/main/protection", calls)
         self.assertIn("api repos/acme/widgets --jq .security_and_analysis", calls)
 
-    def test_workflow_path_and_last_run_come_from_the_actions_api(self):
-        self.collect(runs=7)
-        self.assertIn("api repos/acme/widgets/actions/runs?branch=main&per_page=7", self.calls())
-        self.assertIn("api repos/acme/widgets/code-scanning/analyses?per_page=1", self.calls())
-        workflows = self.collect()["runs"]["workflows"]
-        self.assertEqual((workflows["Lint"]["path"], workflows["Lint"]["last_run"]),
-                         (".github/workflows/lint.yml", "2025-01-05T09:00:00Z"))
+    def test_each_workflow_file_is_asked_for_its_own_runs(self):
+        self.collect()
+        calls = self.calls()
+        self.assertIn("api repos/acme/widgets/actions/workflows?per_page=100", calls)
+        for name in ("ci", "lint", "codeql", "nightly"):
+            self.assertIn("api repos/acme/widgets/actions/workflows/%s.yml/runs?per_page=10" % name, calls)
+        self.assertFalse([c for c in calls if "dynamic" in c])
+        self.assertIn("api repos/acme/widgets/code-scanning/analyses?per_page=1", calls)
 
-    def test_a_workflow_the_api_does_not_show_has_no_path_and_no_date(self):
-        self.answer("actions_runs", out={"workflow_runs": []})
-        lint = self.collect()["runs"]["workflows"]["Lint"]
-        self.assertEqual((lint["path"], lint["last_run"]), (None, None))
-        self.answer("actions_runs", out="", err="gh: boom (HTTP 500)\n", code=1)
-        result = self.collect()
-        self.assertEqual(result["runs"]["workflows"]["CI"]["path"], None)
-        self.assertEqual(result["runs"]["overall"]["runs"], 6)
+    def test_a_workflow_without_default_branch_runs_still_gets_a_date(self):
+        codeql = self.collect()["runs"]["workflows"]["CodeQL"]
+        self.assertEqual(codeql, {"runs": 0, "completed": 0, "pass_rate": None, "median_duration_s": None,
+                                  "rerun_rate": None, "last_failure": None, "path": ".github/workflows/codeql.yml",
+                                  "last_run": "2025-01-06T10:00:00Z"})
 
-    def test_a_workflow_with_only_cancelled_runs_has_a_path_and_no_date(self):
-        self.answer("actions_runs", out=API_RUNS)
-        self.answer("run_list", out=RUNS + [{"conclusion": "cancelled", "createdAt": "2025-01-05T08:00:00Z",
-                                             "updatedAt": "2025-01-05T08:00:10Z", "attempt": 1,
-                                             "workflowName": "Nightly", "event": "schedule"}])
+    def test_only_completed_runs_give_a_date(self):
+        self.answer("wf_runs", out={"workflow_runs": [{"conclusion": "cancelled", "created_at": "2025-01-07T10:00:00Z"}]})
         nightly = self.collect()["runs"]["workflows"]["Nightly"]
         self.assertEqual((nightly["path"], nightly["last_run"]), (".github/workflows/nightly.yml", None))
 
-    def test_the_actions_page_size_is_at_most_100(self):
-        self.collect(runs=500)
-        self.assertIn("api repos/acme/widgets/actions/runs?branch=main&per_page=100", self.calls())
+    def test_a_failed_workflow_call_costs_only_that_file_its_date(self):
+        self.answer("wf_runs", out="", err="gh: boom (HTTP 500)\n", code=1)
+        workflows = self.collect()["runs"]["workflows"]
+        self.assertEqual((workflows["CI"]["path"], workflows["CI"]["last_run"]), (".github/workflows/ci.yml", None))
+        self.assertEqual(workflows["CI"]["runs"], 5)
+        self.answer("wf_list", out="", err="gh: boom (HTTP 500)\n", code=1)
+        result = self.collect()
+        self.assertEqual((result["runs"]["workflows"]["CI"]["path"], result["runs"]["overall"]["runs"]), (None, 6))
+        self.assertEqual(set(result["runs"]["workflows"]), {"CI", "Lint"})
 
     def test_every_call_is_read_only(self):
         self.collect()

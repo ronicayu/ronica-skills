@@ -34,15 +34,13 @@ Output when available:
                         last_failure is the createdAt of the latest failed run.
                         Each workflow also has "path" (its file, such as
                         ".github/workflows/ci.yml") and "last_run" (createdAt of its newest
-                        completed run, null when none). Both come from a second GET,
-                        `repos/<slug>/actions/runs?branch=<b>&per_page=<n>` (n is --runs,
-                        at most 100), not from `gh run list`: `gh run list` cannot print the
-                        workflow file, and the API `path` is exact, where mapping by the
-                        `name:` line of the file breaks when two files share a name or a
-                        file has none. The API run's `name` is the workflow name, the join
-                        key with `workflowName`. A workflow with no run among those n runs
-                        has path and last_run null; a repository that runs a weekly scan
-                        among many runs can raise --runs.
+                        completed run on any branch and event, so pull request and schedule
+                        runs count; null when none or when the call failed). They come from
+                        `repos/<slug>/actions/workflows` (name and path of every workflow) and
+                        one `repos/<slug>/actions/workflows/<file>/runs?per_page=10` per file
+                        under .github/workflows. A workflow with no default-branch run still
+                        gets an entry (runs 0) so that its dates show. The stats above stay
+                        default-branch only.
                         {"error": "..."} when the call failed.
   code_scanning         {"last_analysis": X} with X the created_at of the newest code
                         scanning analysis (`repos/<slug>/code-scanning/analyses?per_page=1`),
@@ -169,21 +167,23 @@ def run_stats(runs):
     }
 
 
-def workflow_files(slug, branch, limit, cwd):
-    """{workflow name: {"path", "last_run"}} from the Actions runs API; {} when the call failed."""
-    result = run_gh(["api", "repos/%s/actions/runs?branch=%s&per_page=%d" % (slug, quote(branch, safe=""),
-                                                                              max(1, min(limit, 100)))], cwd)
-    data = json_of(result) if result.code == 0 else None
-    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+def workflow_files(slug, cwd):
+    """{workflow name: {"path", "last_run"}}; a failed call leaves the date (or the whole list) out."""
+    listing = run_gh(["api", "repos/%s/actions/workflows?per_page=100" % slug], cwd)
+    data = json_of(listing) if listing.code == 0 else None
+    items = data.get("workflows") if isinstance(data, dict) else None
     found = {}
-    for run in runs if isinstance(runs, list) else []:
-        if not isinstance(run, dict) or not run.get("name") or not isinstance(run.get("path"), str):
+    for item in items if isinstance(items, list) else []:
+        path = item.get("path") if isinstance(item, dict) else None
+        if not item.get("name") or not isinstance(path, str) or not path.startswith(".github/workflows/"):
             continue
-        entry = found.setdefault(str(run["name"]), {"path": run["path"].split("@", 1)[0], "last_run": None})
-        created = run.get("created_at")
-        if run.get("conclusion") in JUDGED and parse_time(created) and (entry["last_run"] is None
-                                                                       or created > entry["last_run"]):
-            entry["last_run"] = created
+        result = run_gh(["api", "repos/%s/actions/workflows/%s/runs?per_page=10" % (
+            slug, quote(path.rsplit("/", 1)[1], safe=""))], cwd)
+        body = json_of(result) if result.code == 0 else None
+        runs = body.get("workflow_runs") if isinstance(body, dict) else None
+        dates = [r["created_at"] for r in runs if isinstance(r, dict) and r.get("conclusion") in JUDGED
+                 and parse_time(r.get("created_at"))] if isinstance(runs, list) else []
+        found[str(item["name"])] = {"path": path, "last_run": max(dates) if dates else None}
     return found
 
 
@@ -323,7 +323,8 @@ def collect(repo, runs=50, solo=False):
         data = json_of(listing) if listing.code == 0 else None
         if isinstance(data, list):
             names = sorted({str(r.get("workflowName") or "") for r in data})
-            files = workflow_files(slug, branch, runs, cwd)
+            files = workflow_files(slug, cwd)
+            names = sorted(set(names) | set(files))
             result["runs"] = {"branch": branch, "limit": runs, "overall": run_stats(data),
                               "workflows": {n: dict(run_stats([r for r in data if str(r.get("workflowName") or "") == n]),
                                                     **files.get(n, {"path": None, "last_run": None}))
