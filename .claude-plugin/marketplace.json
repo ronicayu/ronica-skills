@@ -176,6 +176,31 @@
         "pele"
       ],
       "category": "development"
+    },
+    {
+      "name": "repo-health",
+      "source": "repo-health",
+      "description": "Measure how well an existing code repository is guarded and where it needs work, then write a short ranked Markdown report: what to do first, a ready-to-paste first step and a command that proves it worked. Levels for lint, types, static analysis, secrets, tests, coverage, CI, setup, dependencies, docs and architecture rules are set by script and joined with git hotspots and CI health, for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin. Reruns show what changed; dismissed advice stays dismissed. Reports only.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yu Rong",
+        "url": "https://github.com/ronicayu"
+      },
+      "homepage": "https://github.com/ronicayu/ronica-skills/tree/main/plugins/repo-health",
+      "repository": "https://github.com/ronicayu/ronica-skills",
+      "license": "MIT",
+      "keywords": [
+        "code-health",
+        "repo-audit",
+        "lint",
+        "testing",
+        "ci",
+        "static-analysis",
+        "hotspots",
+        "code-quality",
+        "recommendations"
+      ],
+      "category": "development"
     }
   ]
 }

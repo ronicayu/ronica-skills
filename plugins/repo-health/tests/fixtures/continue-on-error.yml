@@ -1,0 +1,28 @@
+name: ci
+
+on: pull_request
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: ruff check . || true
+      - name: Types
+        run: mypy src
+        continue-on-error: true
+      - name: Tests
+        run: pytest
+
+  experimental:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: |
+          bandit -r src
+          ruff check --exit-zero .
+          npm audit || echo "audit failed"
+      - run: pytest; true
+      - if: github.event_name != 'pull_request'
+        run: ./gradlew publish
