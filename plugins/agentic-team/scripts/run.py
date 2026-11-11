@@ -169,8 +169,9 @@ Label every finding. Each line under `Issues:` starts with `blocking:` and says 
 scope breach, an error that reaches product output or user-visible text, any security or data-correctness risk. A \
 non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`. Non-blocking: a \
 theoretical gap with 0 instances in the real tree and no security or data risk (the line states `real-tree instances: 0` \
-and how you counted them); a number or wording error that, once corrected, changes neither the conclusion, the \
-acceptance verdict nor the downstream scope. Report `ISSUES` only when at least one blocking finding exists; with only \
+and how you counted them); any finding whose correction changes neither the conclusion, the acceptance \
+verdict, nor what the coders who follow would build (for example a wrong number or cross-reference, or a missing \
+diagram edge that no later task depends on). A finding that fits neither list is blocking. Report `ISSUES` only when at least one blocking finding exists; with only \
 non-blocking findings, report `PASS` and list them under `Follow-ups:`. `check-report --verifier` refuses an `ISSUES` \
 report whose `Issues:` lines do not all start with `blocking:`."""
 FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
@@ -1133,13 +1134,14 @@ def ignore_reports(run):
 
 
 def ignore_scratch(run, tid, attempt):
-    """Ignore the scratch folder in every worktree, before a session starts in one. A failure is a warning: a
-    session that cannot be ignored still works, and its worktree shows the folder until it deletes it."""
+    """Ignore the scratch folder in every worktree, before a session starts in one. A session leaves the folder
+    in place, so a worktree that does not ignore it shows it as uncommitted and keeps the worktree."""
     try:
         add_exclude(run, SCRATCH_EXCLUDE)
     except OSError as exc:
-        run.emit("warn", tid, attempt, None, f"cannot write {exc.filename}: {exc.strerror}; "
-                 f"git will show {SCRATCH_DIR}/ in the worktrees")
+        raise Refused(f"cannot write {exc.filename}: {exc.strerror}; {SCRATCH_DIR}/ would show as uncommitted in "
+                      f"the worktrees. Make the file writable (or add the line {SCRATCH_EXCLUDE} to it yourself), "
+                      "then run the command again.")
 
 
 def clear_report(path):
@@ -1455,10 +1457,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             if base_sha:
                 setup += ("\n- " + f"Base commit: {base_sha} ({how}). Head commit: {ref}. The change under review is "
                           f"`git diff {base_sha} {ref}`; `git log --oneline {base_sha}..{ref}` lists its commits. To run "
-                          f'anything at the base commit, export it read only: run `mkdir -p {SCRATCH_DIR}/base` in one call, then '
+                          f'anything at the base commit, first run every check of the head commit (the head\'s own test suites and the VERIFY '
+                          f'commands). Only then export the base read only: run `mkdir -p {SCRATCH_DIR}/base` in one call, then '
                           f'`git archive {base_sha} | tar -x -C {SCRATCH_DIR}/base` in the next (the pipe is fine), install what the run needs there (the '
-                          "export holds tracked files only), and work in that folder. Delete the export before you run the "
-                          "head's own test suites, and again before you report. Never check out, reset, or add a "
+                          "export holds tracked files only), and run only the base-side checks in that folder. Leave the "
+                          "export in place: `run` removes it with the worktree. Never check out, reset, or add a "
                           "worktree.")
             else:
                 setup += ("\n- " + f"Base commit: unknown ({how}). Head commit: {ref}. Judge the head against ACCEPTANCE "
@@ -1489,7 +1492,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
             "SCOPE": ("Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete "
-                      "anything. The one exception is your report file, which REPORT names."),
+                      f"anything. The exceptions are your report file, which REPORT names, and {SCRATCH_DIR}/."),
             "SETUP": setup,
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
@@ -2770,7 +2773,11 @@ def resume_with(run, task, entry, row, s, text, settle):
     if not os.path.isdir(wt):  # a resume outside the worktree would run the worker in the main checkout
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
         return "died"
-    ignore_scratch(run, tid, attempt)
+    try:
+        ignore_scratch(run, tid, attempt)
+    except Refused as exc:
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: {exc}; record tries again")
+        return settle("pending", "pending")
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
     # flags the same command wakes the same session with its saved options, hooks included.
@@ -4233,6 +4240,8 @@ def repository_path(token, cwd):
     if (not PATH_CHARS.fullmatch(token) or token.startswith(("-", "~")) or "://" in token
             or any(c in token for c in "<*${")):
         return None
+    if not os.path.isabs(token) and ".." in token.split("/"):
+        return None
     if "/" not in token and token.rsplit(".", 1)[-1] not in PATH_EXTENSIONS:
         return None
     if os.path.isabs(token):
@@ -4241,9 +4250,21 @@ def repository_path(token, cwd):
     return token
 
 
+def git_ignores(path, cwd):
+    """True when git reports `path` (relative to `cwd`) as ignored. Any failure (no repository, no git, a timeout)
+    counts as not ignored."""
+    try:
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-q", "--", path],
+                              cwd=cwd, check=False, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def missing_paths(body, cwd):
     """(field, token, line) for each backticked repository path under Files, Evidence and Ran of a worker report
-    that does not exist in `cwd`. A line that says deleted or removed is exempt."""
+    that does not exist in `cwd`. A line that says deleted or removed is exempt, and so is a relative path that git
+    ignores (the main checkout holds it, the worktree does not)."""
     found = []
     text = strip_comments(body or "")
     for field in PATH_FIELDS:
@@ -4252,7 +4273,8 @@ def missing_paths(body, cwd):
                 continue
             for token in BACKTICKED.findall(line):
                 path = repository_path(token, cwd)
-                if path is not None and not os.path.lexists(os.path.join(cwd, path)):
+                if (path is not None and not os.path.lexists(os.path.join(cwd, path))
+                        and (os.path.isabs(path) or not git_ignores(path, cwd))):
                     found.append((field, token, line.strip()))
     return found
 

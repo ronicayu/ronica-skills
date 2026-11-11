@@ -4558,27 +4558,30 @@ class RunTest(Base):
             self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
-    def test_110_a_scratch_line_that_cannot_be_written_is_a_warning(self):
+    def test_110_a_scratch_line_that_cannot_be_written_refuses_the_launch(self):
         exclude = os.path.join(self.root, ".git", "info", "exclude")
         with open(exclude, "w") as fh:
             fh.write("/.agentic-team/\n")
         os.chmod(exclude, 0o444)
         self.add_task()
         try:
-            events = self.events("launch", "1")
+            out = self.run_cmd("launch", "1")
         finally:
             os.chmod(exclude, 0o644)
-        self.assertEqual(len(self.named(events, "launched")), 1)
-        warn = self.one(events, "warn")
-        self.assertIn("cannot write", warn["detail"])
-        self.assertIn(".agentic-team-scratch/", warn["detail"])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertIn("Make the file writable", out.stderr)
+        self.assertNotIn("launched", out.stdout)
 
     def test_110_the_verifier_brief_exports_the_base_into_the_scratch_folder(self):
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
         self.pass_report(task)
         context = self.section(self.ok("verify", str(task), "--dry-run").stdout, "CONTEXT")
         self.assertIn(".agentic-team-scratch/base", context)
-        self.assertIn("Delete the export before you run the head's own test suites, and again before you report.", context)
+        self.assertIn("first run every check of the head commit", context)
+        self.assertLess(context.index("first run every check of the head commit"), context.index("mkdir -p"))
+        self.assertIn("Leave the export in place", context)
+        self.assertNotIn("Delete the export", context)
         self.assertNotIn("mktemp", context)
 
     def test_110_the_sweep_counts_the_scratch_folder_as_disposable(self):
@@ -4703,7 +4706,8 @@ class RunTest(Base):
         text = self.ok("verify", str(task), "--dry-run").stdout
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertEqual(self.section(text, "SCOPE"), "Read only. You run in your own worktree. Change nothing: do not "
-                         "edit, commit, or delete anything. The one exception is your report file, which REPORT names.")
+                         "edit, commit, or delete anything. The exceptions are your report file, which REPORT names, and "
+                         ".agentic-team-scratch/.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
         self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
@@ -6009,6 +6013,35 @@ class Issue89Test(Base):
         code, _, err = self.check(self.report(Files=f"`{inside}`"))
         self.assertEqual(code, 2)
         self.assertIn(f"`{inside}` under Files", err)
+
+    def check_in(self, cwd, path):
+        out = subprocess.run([sys.executable, RUN, "check-report", path], capture_output=True, text=True, cwd=cwd)
+        return out.returncode, out.stderr
+
+    def test_the_path_check_accepts_a_missing_path_that_git_ignores(self):
+        repo = os.path.join(self.dir, "wt")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+            fh.write("/.agentic-team/shots/\n")
+        self.assertEqual(self.check_in(repo, self.report(Files="`.agentic-team/shots/a.png`")), (0, ""))
+        code, err = self.check_in(repo, self.report(Files="`src/missing.py`"))
+        self.assertEqual(code, 2)
+        self.assertIn("`src/missing.py` under Files", err)
+
+    def test_the_path_check_skips_a_path_with_a_parent_segment(self):
+        self.assertEqual(self.check(self.report(Files="`../x.py`, `a/../b.py`")), (0, "ok\n", ""))
+
+    def test_the_path_check_without_a_repository_still_refuses_a_missing_path(self):
+        code, _, err = self.check(self.report(Files="`src/missing.py`"))
+        self.assertEqual(code, 2)
+        self.assertIn("`src/missing.py` under Files", err)
+
+    def test_the_verifier_brief_defines_blocking_by_what_the_coders_build(self):
+        text = self.verify_text(self.running_task())
+        self.assertIn("neither the conclusion, the acceptance verdict, nor what the coders who follow would build", text)
+        self.assertIn("A finding that fits neither list is blocking.", text)
+        self.assertNotIn("downstream scope", text)
 
     def test_the_path_check_does_not_apply_to_a_verifier(self):
         self.assertEqual(self.check(self.report(Ran="`base/gone.py`: ok"), "--verifier"), (0, "ok\n", ""))
