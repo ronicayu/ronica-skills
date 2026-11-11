@@ -349,7 +349,7 @@ class SecurityData(unittest.TestCase):
         score["security_freshness"] = [
             freshness_entry("static", tools=["bandit"], last_data=None, source=None, age_days=None, stale=True),
             freshness_entry("secrets"),
-            freshness_entry("deps", tools=["pip-audit"], age_days=45, last_data="2026-09-26", source="lockfile",
+            freshness_entry("deps", tools=["pip-audit"], age_days=45, last_data="2026-09-26", source="ci:.github/workflows/audit.yml",
                             stale=True)]
         text = render.render(sample_findings(), score)
         self.assertLess(text.index("## Scorecard"), text.index("## Security data"))
@@ -358,7 +358,7 @@ class SecurityData(unittest.TestCase):
         self.assertIn("| Static analysis and security | bandit | — | — | stale (no run date visible) |", section)
         self.assertIn("| Secret scanning | gitleaks | 2026-10-31 (ci:.github/workflows/scan.yml) | 10 days | fresh |",
                       section)
-        self.assertIn("| Dependencies | pip-audit | 2026-09-26 (lockfile) | 45 days | stale (older than 30 days) |",
+        self.assertIn("| Dependencies | pip-audit | 2026-09-26 (ci:.github/workflows/audit.yml) | 45 days | stale (older than 30 days) |",
                       section)
 
     def test_a_tier1_run_shows_its_counts(self):

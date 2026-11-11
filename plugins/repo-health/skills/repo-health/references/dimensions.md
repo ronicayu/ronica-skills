@@ -100,7 +100,7 @@ From `hotspots.json`: the top files by commits × indent complexity, their size,
 From ghfacts: default-branch pass rate, median duration, re-run rate, last failure, per workflow; median time to merge and the share of PRs merged with no review (`team` only). These feed `tests.3`, `ci.3s` and gaps (a pass rate under 80% is a gap of its own: a red main teaches people to ignore CI).
 
 ### security_freshness
-One entry per security dimension that has a tool configured (static, secrets, deps; nothing configured → no entry, the gap covers it): tools, last data date and its source, age. The last data is the newest of the last completed run of a workflow that holds a CI row of the dimension's tool, the newest code scanning analysis (static), the newest lockfile commit (deps) and a tier 1 security run. It is stale when older than 30 days or when no date is visible ("no run date visible"); GitHub secret scanning or push protection on makes secrets continuous, never stale. It sets no level. A stale entry makes the skill offer to re-run the configured security tools.
+One entry per security dimension that has a tool configured (static, secrets, deps; nothing configured → no entry, the gap covers it): tools, last data date and its source, age. The last data is the newest of the last completed run of a workflow that holds a CI row of the dimension's tool, the newest code scanning analysis (static) and a tier 1 security run; a lockfile commit is not audit data. It is stale when older than 30 days or when no date is visible ("no run date visible"); GitHub secret scanning or push protection on makes secrets continuous, never stale. It sets no level. A stale entry makes the skill offer to re-run the configured security tools.
 
 ## Tier 2 reviews (no level)
 

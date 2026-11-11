@@ -706,13 +706,13 @@ class SecurityFreshness(unittest.TestCase):
         entry = freshness(run(gh=g), "static")
         self.assertEqual((entry["tools"], entry["stale"]), (["github-code-scanning"], False))
 
-    def test_deps_takes_the_newest_lockfile_commit(self):
+    def test_a_lockfile_commit_is_not_audit_data(self):
         locks = [{"file": "uv.lock", "ecosystem": "python", "subproject": ".", "last_commit": "2026-11-02T10:00:00Z"},
                  {"file": "a/uv.lock", "ecosystem": "python", "subproject": "a", "last_commit": "2026-01-02T10:00:00Z"}]
         setup = Deps().setup_with(lockfiles=locks)
         d = det(rows=[ci_row("pip-audit", "deps_audit", "python", file=".github/workflows/audit.yml")], setup=setup)
         entry = freshness(run(d, gh=flows(Audit=(".github/workflows/audit.yml", "2026-06-01"))), "deps")
-        self.assertEqual((entry["last_data"], entry["source"], entry["stale"]), ("2026-11-02", "lockfile", False))
+        self.assertEqual((entry["last_data"], entry["source"], entry["stale"]), ("2026-06-01", "ci:.github/workflows/audit.yml", True))
         self.assertIsNone(freshness(run(det(setup=Deps().setup_with(lockfiles=locks))), "deps"))
 
     def test_tier1_security_runs_make_the_entry_fresh(self):

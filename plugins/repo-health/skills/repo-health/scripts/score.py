@@ -42,12 +42,12 @@ Output (score.json)
                  linted_in_ci, the owning test suite
     security_freshness[]  one entry per security dimension (static, secrets, deps) that has a
                   tool configured: {dimension, tools [...], last_data (YYYY-MM-DD or null),
-                  source ("ci:<workflow file>", "code-scanning", "lockfile", "tier1" or null),
+                  source ("ci:<workflow file>", "code-scanning", "tier1" or null),
                   age_days, stale, why, run (null, or the summed security_runs counts)}.
                   last_data is the newest of: the last completed run of a workflow file that holds
                   a CI row of one of the dimension's tools (ghfacts runs.workflows[].path and
-                  last_run), the newest code scanning analysis (static), the newest lockfile
-                  commit (deps) and a tier 1 run. Stale: older than SECURITY_STALE_DAYS, or no
+                  last_run), the newest code scanning analysis (static) and a tier 1 run. A lockfile
+                  commit is not audit data. Stale: older than SECURITY_STALE_DAYS, or no
                   date visible ("no run date visible"). GitHub secret scanning or push
                   protection on makes secrets continuous: never stale. Levels ignore freshness.
     ci_health    from ghfacts: {available, default_branch_pass_rate, median_duration_s,
@@ -1231,9 +1231,6 @@ class Scorer(object):
             analysis = self.gh_get("code_scanning", "last_analysis")
             if dimension == "static" and days_between(self.now, analysis or "") is not None:
                 found.append((analysis[:10], 0, "code-scanning"))
-            if dimension == "deps":
-                found += [(l["last_commit"][:10], 0, "lockfile") for l in (self.det.get("setup") or {}).get("lockfiles") or []
-                          if days_between(self.now, l.get("last_commit") or "") is not None]
             runs = [r for r in self.security_runs(dimension) if days_between(self.now, r["ran_at"]) is not None]
             found += [(r["ran_at"], 2, "tier1") for r in runs]
             last = max(found) if found else None
