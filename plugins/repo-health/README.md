@@ -106,7 +106,7 @@ $S/render.py findings.json [-o report.md] [--share share.md]
 
 ## Safety
 
-- Read-only for project files. The only writes are the report and the findings JSON.
+- Read-only for project files. The only writes are the files in `.repo-health/` (and `decisions.json` when you run `score.py decide`).
 - Tier 1 never installs into the project: no `npm install`, no `pip install`
   into the project environment, no lockfile change. It uses ephemeral runners
   (`uvx`, `pipx run`, `npx`, `go run`) with a timeout per command.
