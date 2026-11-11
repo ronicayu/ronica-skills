@@ -1149,7 +1149,7 @@ def ignore_reports(run):
         raise Refused(f"cannot write {exc.filename}: {exc.strerror}")
 
 
-def ignore_scratch(run, tid, attempt):
+def ignore_scratch(run):
     """Ignore the scratch folder in every worktree, before a session starts in one. A session leaves the folder
     in place, so a worktree that does not ignore it shows it as uncommitted and keeps the worktree."""
     try:
@@ -1978,6 +1978,9 @@ def cmd_launch(run, args):
     orders = run.orders()
     if orders.stop:
         raise Refused(f"standing orders say {orders.stop_line!r}; launch nothing", 3)
+    if not args.dry_run:  # a refusal here changes nothing: no session is stopped and no commit is made
+        ignore_reports(run)
+        ignore_scratch(run)
     if args.keyword and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", args.keyword):
         raise Refused(f"keyword {args.keyword!r} may hold letters, digits, and hyphens only")
     task = run.show(tid)
@@ -2161,8 +2164,6 @@ def cmd_launch(run, args):
     if current:
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
     try:
-        ignore_reports(run)
-        ignore_scratch(run, tid, nxt)
         clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         write_ctx(run, task, nxt, session, cap)
@@ -2325,6 +2326,9 @@ def cmd_verify(run, args):
         raise Refused(f"#{tid} attempt {attempt} already has verify result #{last['id']} "
                       f"(Verdict: {verdict_of(last) or 'none'}); run run.py close {tid}, "
                       "or pass --again once a verify-blocked cause is fixed")
+    if not args.dry_run:  # before the over verifier is stopped
+        ignore_reports(run)
+        ignore_scratch(run)
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
@@ -2373,8 +2377,6 @@ def cmd_verify(run, args):
     if is_sha(ref):
         add_worktree(run, name, ref)
     try:
-        ignore_reports(run)
-        ignore_scratch(run, tid, attempt)
         clear_report(report_path(run, name, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         said = start_session(run, name, name, model, effort, text, profile)
@@ -2780,6 +2782,11 @@ def resume_with(run, task, entry, row, s, text, settle):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: no full session id on file to resume; "
                  "record tries again")
         return settle("pending", "pending")
+    try:
+        ignore_scratch(run)  # before the stop: a refusal leaves the process as it is
+    except Refused as exc:
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: {exc}; record tries again")
+        return settle("pending", "pending")
     if s.row.get("pid"):
         stop_session(run, s.sid, check=False, profile=s.profile)
         if not wait_for_exit(run, s):  # not a try: a process that never exits must not spend the cap
@@ -2792,11 +2799,6 @@ def resume_with(run, task, entry, row, s, text, settle):
     if not os.path.isdir(wt):  # a resume outside the worktree would run the worker in the main checkout
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
         return "died"
-    try:
-        ignore_scratch(run, tid, attempt)
-    except Refused as exc:
-        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: {exc}; record tries again")
-        return settle("pending", "pending")
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
     # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
     # flags the same command wakes the same session with its saved options, hooks included.

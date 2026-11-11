@@ -4611,6 +4611,44 @@ class RunTest(Base):
         self.assertIn("Make the file writable", out.stderr)
         self.assertNotIn("launched", out.stdout)
 
+    def read_only_exclude(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        os.chmod(exclude, 0o444)
+        self.addCleanup(lambda: os.path.exists(exclude) and os.chmod(exclude, 0o644))
+        return exclude
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_110_a_read_only_exclude_refuses_launch_before_a_session_is_stopped_or_a_wip_commit_is_made(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.touch(wt, "wip.txt")
+        before = self.git("rev-parse", "HEAD", cwd=wt)
+        self.agents(self.row("task-1", status="idle", state="blocked"))
+        exclude = self.read_only_exclude()
+        out = self.run_cmd("launch", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), before)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? wip.txt")
+        self.assertEqual([r["status"] for r in self.results(task)], ["ISSUES"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_110_a_read_only_exclude_refuses_verify_and_the_over_verifier_stays(self):
+        task = self.running_task()
+        self.pass_report(task)
+        self.add_result(task, "BLOCKED", "Verdict: verify-blocked\n", kind="verify", by="verify-1-1")
+        self.agents(self.row("verify-1-1", status="idle", state="blocked"))
+        exclude = self.read_only_exclude()
+        out = self.run_cmd("verify", str(task), "--again", env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertEqual(self.calls("stop"), [])
+
     def test_110_the_verifier_brief_exports_the_base_into_the_scratch_folder(self):
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
         self.pass_report(task)
@@ -8426,6 +8464,23 @@ class DeliveryTest(Base):
         self.assertEqual(self.stopped_ids(), [])  # resumed: not stopped any more
         self.assertEqual(self.one(self.events("record"), "running")["session"], "sess-task-1-1")  # the same row, busy again
         self.assertEqual(self.calls_in("stop", None), [])  # nothing ran under the Manager's profile
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_t9_a_read_only_exclude_leaves_the_process_running_and_the_message_pending(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        with open(exclude, "a"):
+            pass
+        os.chmod(exclude, 0o444)
+        self.addCleanup(lambda: os.path.exists(exclude) and os.chmod(exclude, 0o644))
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertTrue(any(f"cannot write {exclude}" in e["detail"] for e in self.named(events, "deliver-fallback")))
+        self.assertEqual(self.calls_in("stop", self.c2), [])
+        self.assertEqual(self.resumes(), [])
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(self.mailbox_meta(task)[str(answer["id"])].get("tries", 0), 0)
 
     def test_t9_a_parked_worker_with_no_process_is_resumed_without_a_stop(self):
         task = self.worker(status=None, state="done")
