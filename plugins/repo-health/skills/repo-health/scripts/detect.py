@@ -22,6 +22,7 @@ manifest is well formed ("parse_errors").
 """
 
 import argparse
+import difflib
 import fnmatch
 import json
 import os
@@ -1510,7 +1511,9 @@ class Outcome(object):
 class Ctx(object):
     """Where a command is read: following depth, the script it came from, and the caller's line."""
 
-    def __init__(self, follow=True, depth=0, stack=(), via=None, nb=False, command="", base_line=None, env=None):
+    def __init__(self, follow=True, depth=0, stack=(), via=None, nb=False, command="", base_line=None, env=None,
+                 probe=None):
+        self.probe = probe        # a list: script and target references are recorded there, not followed
         self.follow = follow
         self.depth = depth
         self.stack = stack
@@ -1521,7 +1524,8 @@ class Ctx(object):
         self.env = env or {}
 
     def but(self, **changes):
-        copy = Ctx(self.follow, self.depth, self.stack, self.via, self.nb, self.command, self.base_line, self.env)
+        copy = Ctx(self.follow, self.depth, self.stack, self.via, self.nb, self.command, self.base_line, self.env,
+                   self.probe)
         for key, value in changes.items():
             setattr(copy, key, value)
         return copy
@@ -2168,7 +2172,7 @@ class CommandReader(object):
                 self.run_script(out, "npm", names[2] if names[1] == "run" and len(names) > 2 else names[1],
                                 scope, line, ctx)
             elif sub not in PNPM_BUILTINS:
-                self.run_script(out, "npm", sub, scope, line, ctx)
+                self.run_script(out, "npm", sub, scope, line, ctx, explicit=False)
             return
         if prog == "yarn":
             if sub == "run" and len(names) > 1:
@@ -2183,7 +2187,7 @@ class CommandReader(object):
             elif sub in ("dlx", "exec"):
                 self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
             elif sub not in YARN_BUILTINS:
-                self.run_script(out, "npm", sub, scope, line, ctx)
+                self.run_script(out, "npm", sub, scope, line, ctx, explicit=False)
             return
         if prog == "bun":
             if sub == "run" and len(names) > 1:
@@ -2191,7 +2195,7 @@ class CommandReader(object):
             elif sub == "x":
                 self.command(out, drop_flags(rest, NPX_VALUE_FLAGS), line, ctx)
             elif sub not in BUN_BUILTINS:
-                self.run_script(out, "npm", sub, scope, line, ctx)
+                self.run_script(out, "npm", sub, scope, line, ctx, explicit=False)
 
     def yarn_workspaces(self, out, rest, line, ctx):
         action = first_positional(rest)
@@ -2308,7 +2312,10 @@ class CommandReader(object):
 
     # -- following -----------------------------------------------------------
 
-    def run_script(self, out, kind, name, scope, line, ctx):
+    def run_script(self, out, kind, name, scope, line, ctx, explicit=True):
+        if ctx.probe is not None:
+            ctx.probe.append((kind, name, scope, explicit))
+            return
         if not ctx.follow:
             return
         entries = self.detector.scripts_for(kind, name, scope)
@@ -3092,6 +3099,45 @@ def find_subprojects(repo):
         found.pop(member, None)
     return found, workspaces
 
+
+README_KNOWN_PROGRAMS = {
+    "npm", "pnpm", "yarn", "bun", "npx", "pnpx", "bunx", "pip", "pip3", "python", "python3", "pytest", "uv", "uvx",
+    "poetry", "pdm", "pipx", "hatch", "tox", "nox", "make", "gmake", "just", "cargo", "go", "mvn", "mvnw", "gradle",
+    "gradlew", "pre-commit", "ruff", "black", "isort", "mypy", "pyright", "flake8", "pylint", "eslint", "prettier",
+    "biome", "tsc", "jest", "vitest", "docker", "docker-compose", "node", "deno", "golangci-lint", "gofmt", "bundle",
+    "rake",
+}
+README_IGNORED = {"echo", "export", "source", ".", "true", "false", ":", "exit", "set", "unset", "alias", "read",
+                  "printf", "test", "[", "ls", "cat", "mkdir", "cp", "mv", "rm", "touch", "chmod", "sleep", "pwd",
+                  "open", "tee", "grep", "sed", "head", "tail"}
+README_PLACEHOLDER = re.compile(r"<[A-Za-z][\w\- ]*>|(?<![\w./])\.\.\.(?![\w./])|…")
+README_STANDALONE = {"pytest", "tox", "nox", "make", "pre-commit", "mypy", "ruff", "eslint", "prettier", "tsc", "jest",
+                     "vitest"}
+CARGO_BUILTIN = {
+    "add", "bench", "build", "b", "check", "c", "clean", "clippy", "doc", "d", "fetch", "fix", "fmt",
+    "generate-lockfile", "help", "init", "install", "locate-project", "login", "logout", "metadata", "miri", "new",
+    "owner", "package", "pkgid", "publish", "read-manifest", "remove", "report", "run", "r", "rustc", "rustdoc",
+    "search", "test", "t", "tree", "uninstall", "update", "vendor", "verify-project", "version", "yank",
+}
+CARGO_PLUGINS = {
+    "nextest", "llvm-cov", "tarpaulin", "deny", "audit", "machete", "udeps", "expand", "watch", "make", "outdated",
+    "bloat", "fuzz", "insta", "release", "edit", "hack", "geiger", "vet", "careful", "semver-checks", "binstall",
+    "zigbuild", "leptos", "tauri", "component", "generate", "xtask", "mutants", "shear", "dist", "sqlx", "diesel",
+}
+GO_SUBCOMMANDS = {"bug", "build", "clean", "doc", "env", "fix", "fmt", "generate", "get", "install", "list", "mod",
+                  "work", "run", "telemetry", "test", "tool", "version", "vet", "help"}
+GRADLE_STANDARD_TASKS = {
+    "assemble", "build", "check", "clean", "test", "jar", "javadoc", "run", "bootRun", "tasks", "help", "dependencies",
+    "projects", "properties", "wrapper", "init", "classes", "testClasses", "compileJava", "compileKotlin", "bootJar",
+    "publish", "publishToMavenLocal", "installDist", "distZip", "dependencyInsight", "buildEnvironment", "components",
+    "outgoingVariants", "resolvableConfigurations",
+}
+PYTHON_STDLIB_MODULES = {
+    "pip", "venv", "http", "unittest", "json", "timeit", "cProfile", "profile", "pdb", "doctest", "zipapp", "ensurepip",
+    "compileall", "py_compile", "site", "this", "sqlite3", "tarfile", "zipfile", "tokenize", "trace", "calendar",
+    "uuid", "base64", "webbrowser", "pydoc", "pickle", "platform", "sysconfig", "wsgiref", "xml", "asyncio", "ast",
+    "dis", "gzip", "glob", "shlex", "tkinter", "turtle", "cmd", "code", "codecs", "csv",
+}
 
 # --------------------------------------------------------------------------
 # Dependencies
@@ -4025,12 +4071,13 @@ class Detector(object):
             if re.match(r"^readme(\.[a-z]+)?$", rel, re.I):
                 readme = rel
                 break
-        docs = {"readme": readme, "headings": [], "install": None, "run": None, "test": None,
+        docs = {"readme": readme, "headings": [], "commands": [], "install": None, "run": None, "test": None,
                 "contributing": None, "adr_dirs": [], "architecture_docs": [], "docs_dir": None}
         if readme:
             text = repo.text(readme)
             headings = self.headings(text, readme)
             docs["headings"] = headings[:80]
+            docs["commands"] = self.readme_commands(text, readme)
             lines = text.splitlines()
             for key, head_re, cmd_re in (("install", self.INSTALL_HEAD, self.INSTALL_CMD),
                                          ("run", self.RUN_HEAD, self.RUN_CMD),
@@ -4084,6 +4131,339 @@ class Detector(object):
             if cmd_re.search(line):
                 return {"found": True, "via": "command", "line": number}
         return {"found": False, "via": None, "line": None}
+
+    # ---- README commands --------------------------------------------------
+
+    README_SHELL = {"sh", "bash", "shell", "zsh", "console", "shell-session", "terminal", "shellsession"}
+
+    @staticmethod
+    def readme_blocks(text):
+        """([(language, [(line, text)])] fenced blocks, [(line, text)] inline code spans)."""
+        blocks = []
+        inline = []
+        fence = None
+        for number, raw in enumerate(text.splitlines(), 1):
+            m = re.match(r"^\s{0,3}(`{3,}|~{3,})\s*([\w+\-.]*)", raw)
+            if fence is None:
+                if m:
+                    fence = (m.group(1), m.group(2).lower(), [])
+                    blocks.append(fence)
+                    continue
+                for span in re.finditer(r"(`+)([^`\n]+?)\1", raw):
+                    inline.append((number, span.group(2).strip()))
+            elif m and m.group(1)[0] == fence[0][0] and len(m.group(1)) >= len(fence[0]) and not m.group(2):
+                fence = None
+            else:
+                fence[2].append((number, raw))
+        return [(b[1], b[2]) for b in blocks], inline
+
+    def readme_commands(self, text, readme):
+        """Shell commands of the README with what can be checked without running them."""
+        base = dir_of(readme)
+        blocks, inline = self.readme_blocks(text)
+        found = []
+        seen = set()
+
+        def add(number, argv, cwd):
+            record = self.check_command(argv, cwd)
+            key = (number, record["command"])
+            if key not in seen and len(found) < 200:
+                seen.add(key)
+                record["line"] = number
+                found.append(record)
+
+        for language, lines in blocks:
+            cwd = [base]
+            if language in self.README_SHELL and language not in ("console", "shell-session", "shellsession"):
+                body = "\n".join("" if README_PLACEHOLDER.search(text_) else re.sub(r"^(\s*)[$>] ", r"\1", text_)
+                                 for _n, text_ in lines)
+                self.readme_units(body, lines[0][0] if lines else 1, cwd, add)
+            elif language in self.README_SHELL or language == "":
+                for number, raw in lines:
+                    stripped = raw.strip()
+                    if README_PLACEHOLDER.search(stripped):
+                        continue
+                    if stripped.startswith("$ "):
+                        self.readme_units(stripped[2:], number, cwd, add)
+                    elif language == "" and posixpath.basename(stripped.split(" ")[0]) in README_KNOWN_PROGRAMS:
+                        self.readme_units(stripped, number, cwd, add)
+        for number, span in inline:
+            words = span.split()
+            if README_PLACEHOLDER.search(span) or not words or posixpath.basename(words[0]) not in README_KNOWN_PROGRAMS:
+                continue
+            if len(words) == 1 and words[0] not in README_STANDALONE:
+                continue
+            self.readme_units(span, number, [base], add)
+        found.sort(key=lambda r: r["line"])
+        return found
+
+    def readme_units(self, body, first_line, cwd, add):
+        for unit in split_commands(body):
+            argv = unit.argv
+            if not argv or argv[0].startswith(("<", "{", "[")) or posixpath.basename(argv[0]) in README_IGNORED:
+                continue
+            if argv[0] in ("sh", "bash", "zsh") and len(argv) == 1:
+                continue
+            if argv[0] == "cd":
+                target = argv[1] if len(argv) > 1 else "."
+                joined = posixpath.normpath(posixpath.join(cwd[0], target)) if cwd[0] is not None and \
+                    not target.startswith(("/", "~", "$")) else None
+                cwd[0] = joined if joined is not None and not joined.startswith("..") else None
+                continue
+            add(first_line + unit.line, argv, cwd[0])
+
+    def check_command(self, argv, cwd):
+        """{"command", "kind", "check", "why"} of one README command."""
+        probe = []
+        out = Outcome()
+        self.reader.command(out, argv, 0, Ctx(follow=False, probe=probe))
+        env = {}
+        stripped = self.reader.strip_wrappers(argv, env)
+        command = " ".join(argv)[:200]
+        if not stripped:
+            return {"command": command, "kind": "other", "check": "unknown", "why": "nothing to check"}
+        prog = re.sub(r"@[^@/]*$", "", posixpath.basename(stripped[0]))
+        args = stripped[1:]
+        results = []
+        if cwd is None:
+            results.append(("unknown", "the directory is not known after `cd`"))
+        else:
+            for kind, name, scope, explicit in probe:
+                results.append(self.check_script(kind, name, scope, explicit, cwd))
+            if prog in ("make", "gmake", "just") and not probe:
+                results.append(self.check_bare_runner(prog, args, cwd))
+            results.extend(self.check_paths(stripped, prog, args, cwd))
+            results.extend(self.check_tool_command(prog, args, cwd))
+        missing = [r for r in results if r[0] == "missing"]
+        ok = [r for r in results if r[0] == "ok"]
+        unknown = [r for r in results if r[0] == "unknown"]
+        if missing:
+            check, why = missing[0]
+        elif unknown:
+            check, why = unknown[0]
+        elif ok:
+            check, why = ok[0]
+        else:
+            check, why = "unknown", "not checkable without running it"
+        return {"command": command, "kind": self.readme_kind(prog, args, out, probe), "check": check, "why": why}
+
+    def find_up(self, cwd, names):
+        """First existing file of names in cwd or a folder above it (inside the scanned folder)."""
+        for d in ancestors(cwd):
+            for name in names:
+                if join(d, name) in self.repo.file_set:
+                    return join(d, name)
+        return None
+
+    def check_script(self, kind, name, scope, explicit, cwd):
+        if kind == "npm":
+            if scope.get("workspace"):
+                dirs = self.workspace_dirs_for(scope.get("filters") or [])
+                if dirs is None:
+                    return "unknown", "no workspace found"
+                dirs = set(dirs)
+            else:
+                package = self.find_up(cwd, ["package.json"])
+                if package is None:
+                    return "missing", "no package.json in %s or above" % cwd
+                dirs = {dir_of(package)}
+            if any(e["dir"] in dirs for e in self.scripts["npm"].get(name, [])):
+                return "ok", "script `%s` exists in package.json" % name
+            if name == "start" and join(cwd, "server.js") in self.repo.file_set:
+                return "ok", "`npm start` runs server.js"
+            if not explicit:
+                return "unknown", "`%s` is not a script; it may be a binary or a built-in command" % name
+            return "missing", "package.json has no script `%s`" % name
+        label = "Makefile" if kind == "make" else "justfile"
+        directory = posixpath.normpath(posixpath.join(cwd, scope["directory"])) if scope.get("directory") else cwd
+        files = [f for f in (self.repo.by_dir.get(directory) or []) if f in
+                 (("Makefile", "GNUmakefile", "makefile") if kind == "make" else ("justfile", "Justfile", ".justfile"))]
+        if not files:
+            return "missing", "no %s in %s" % (label, directory)
+        if any(e["dir"] == directory for e in self.scripts[kind].get(name, [])):
+            return "ok", "%s has the %s `%s`" % (label, "target" if kind == "make" else "recipe", name)
+        if kind == "make" and re.search(r"^-?include\b", self.repo.text(join(directory, files[0])), re.M):
+            return "unknown", "target `%s` may come from an included makefile" % name
+        return "missing", "%s has no %s `%s`" % (label, "target" if kind == "make" else "recipe", name)
+
+    def check_bare_runner(self, prog, args, cwd):
+        kind = "just" if prog == "just" else "make"
+        names = ("justfile", "Justfile", ".justfile") if kind == "just" else ("Makefile", "GNUmakefile", "makefile")
+        if any(join(cwd, n) in self.repo.file_set for n in names):
+            return "ok", "%s exists" % (names[0])
+        return "missing", "no %s in %s" % (names[0], cwd)
+
+    PATH_FLAGS = {"-f": {"make", "gmake", "docker", "docker-compose", "mvn", "mvnw"}, "--file": {"make", "docker",
+                  "docker-compose", "mvn", "mvnw"}, "-r": {"pip", "pip3", "uv"}, "--requirement": {"pip", "pip3", "uv"},
+                  "-c": {"pip", "pip3"}, "--constraint": {"pip", "pip3"}, "--manifest-path": {"cargo"},
+                  "-b": {"gradle", "gradlew"}}
+    INTERPRETERS = {"bash", "sh", "zsh", "python", "python3", "node", "deno", "ruby", "perl", "ts-node", "tsx"}
+
+    def check_paths(self, argv, prog, args, cwd):
+        """Existence of the repository paths a command names."""
+        results = []
+
+        def look(path):
+            if (not path or path.startswith(("-", "/", "~", "http")) or re.search(r"[*?\[\]{}<>$|;=]|\.\.\.|://", path)
+                    or path in (".", "..")):
+                return
+            rel = posixpath.normpath(posixpath.join(cwd, path))
+            if rel.startswith(".."):
+                return
+            if rel in self.repo.file_set or rel in self.repo.dirs:
+                results.append(("ok", "%s exists" % path))
+            else:
+                results.append(("missing", "%s does not exist" % path))
+
+        if "/" in argv[0]:
+            look(argv[0])
+        base = re.sub(r"[0-9.]+$", "", prog) if prog.startswith("python") else prog
+        if base in self.INTERPRETERS or prog in self.INTERPRETERS:
+            i = 0
+            while i < len(args):
+                a = args[i]
+                if a == "-m" or a == "-c" or a == "-e":
+                    break
+                if not a.startswith("-"):
+                    if "/" in a or re.search(r"\.(sh|py|js|mjs|cjs|ts|rb|pl)$", a):
+                        look(a)
+                    break
+                i += 1
+        previous_flag = False
+        for index, a in enumerate(args):
+            if a == "--":
+                break
+            if a.startswith("-"):
+                flag, eq, value = a.partition("=")
+                if prog in self.PATH_FLAGS.get(flag, ()):
+                    target = value if eq else (args[index + 1] if index + 1 < len(args) else "")
+                    look(target)
+                previous_flag = not eq
+                continue
+            if previous_flag:
+                previous_flag = False
+                continue
+            if "/" in a and re.search(r"\.[A-Za-z0-9]{1,5}$", a) and prog in README_KNOWN_PROGRAMS \
+                    and prog not in self.INTERPRETERS:
+                look(a)
+        return results
+
+    def check_tool_command(self, prog, args, cwd):
+        results = []
+        sub = first_positional(args)
+        if prog.startswith("python") and "-m" in args and args.index("-m") + 1 < len(args):
+            results.append(self.check_python_module(args[args.index("-m") + 1], cwd))
+        elif prog == "cargo":
+            sub = next((a for a in args if not a.startswith(("+", "-"))), None)
+            if sub:
+                if sub in CARGO_BUILTIN:
+                    results.append(("ok", "`cargo %s` is a cargo command" % sub))
+                elif sub in CARGO_PLUGINS:
+                    results.append(("ok", "`cargo %s` is a common cargo plugin" % sub))
+                else:
+                    close = difflib.get_close_matches(sub, sorted(CARGO_BUILTIN), 1, 0.75)
+                    results.append(("missing", "`cargo %s` is not a cargo command (did you mean `%s`?)" % (sub, close[0]))
+                                   if close else ("unknown", "`cargo %s` is not built in; it may be a plugin" % sub))
+        elif prog == "go":
+            if sub:
+                if sub in GO_SUBCOMMANDS:
+                    results.append(("ok", "`go %s` is a go command" % sub))
+                else:
+                    results.append(("missing", "`go %s` is not a go command" % sub))
+        elif prog in ("mvn", "mvnw", "mvnd"):
+            goals = [a for a in args if not a.startswith("-")]
+            for goal in goals:
+                if ":" in goal:
+                    results.append(("unknown", "`%s` is a plugin goal" % goal))
+                elif goal in MVN_PHASES:
+                    results.append(("ok", "`%s` is a Maven phase" % goal))
+                else:
+                    results.append(("missing", "`%s` is not a Maven phase" % goal))
+        elif prog in ("gradle", "gradlew"):
+            for task in [a for a in args if not a.startswith("-")]:
+                name = task.split(":")[-1]
+                if name in GRADLE_STANDARD_TASKS:
+                    results.append(("ok", "`%s` is a standard Gradle task" % name))
+                elif any(re.search(r"\b" + re.escape(name) + r"\b", self.repo.text(f)) for f in self.repo.files
+                         if f.endswith((".gradle", ".gradle.kts"))):
+                    results.append(("ok", "`%s` appears in the build files" % name))
+                else:
+                    results.append(("unknown", "`%s` is not a standard task and is not in the build files" % name))
+        return results
+
+    def check_python_module(self, module, cwd):
+        module = module.split(" ")[0]
+        path = module.replace(".", "/")
+        roots = [cwd, posixpath.join(cwd, "src")] if cwd != "." else [".", "src"]
+        for root in roots:
+            for candidate in (join(root, path + ".py"), join(root, path + "/__init__.py"),
+                              join(root, path + "/__main__.py")):
+                if candidate in self.repo.file_set:
+                    return "ok", "module `%s` is in the repository" % module
+        top = module.split(".")[0]
+        if top in PYTHON_STDLIB_MODULES:
+            return "ok", "`%s` is in the standard library" % module
+        for rel in self.repo.by_name.get("pyproject.toml", []):
+            m = re.search(r"^name\s*=\s*[\"']([^\"']+)", "\n".join(t for _n, t in self.section_lines(rel, {"project"})), re.M)
+            if m and m.group(1).replace("-", "_").lower() == top.lower():
+                return "missing", "the project `%s` has no module `%s` in the repository" % (m.group(1), module)
+        return "unknown", "`%s` is not in the repository; it may be an installed package" % module
+
+    @staticmethod
+    def kind_from_name(name):
+        low = name.lower()
+        if re.search(r"(^|[:\-_])(test|tests|spec|e2e|unit|integration|coverage|cov)($|[:\-_])", low):
+            return "test"
+        if re.search(r"lint|format|fmt|typecheck|type-check|check|style|prettier|eslint|mypy|types", low):
+            return "lint"
+        if re.search(r"build|compile|dist|bundle|package|release", low):
+            return "build"
+        if re.search(r"^(dev|start|serve|watch|run|preview|up|storybook)($|[:\-_])", low):
+            return "run"
+        if re.search(r"install|^ci$|setup|bootstrap|sync|^deps", low):
+            return "install"
+        return "other"
+
+    def readme_kind(self, prog, args, out, probe):
+        if out.installs:
+            return "install"
+        if probe:
+            return self.kind_from_name(probe[0][1])
+        categories = {hit.tool.category for hit in out.hits}
+        if categories & {"tests", "coverage"}:
+            return "test"
+        if categories & {"lint", "format", "types", "static", "deps_audit", "secrets", "hooks"}:
+            return "lint"
+        sub = first_positional(args)
+        if prog in ("make", "gmake", "just"):
+            return "run" if not args else "other"
+        if prog == "cargo":
+            sub = next((a for a in args if not a.startswith(("+", "-"))), None)
+            return {"test": "test", "t": "test", "nextest": "test", "build": "build", "b": "build", "run": "run",
+                    "r": "run", "clippy": "lint", "fmt": "lint", "check": "lint", "fetch": "install",
+                    "install": "install"}.get(sub or "", "other")
+        if prog == "go":
+            return {"test": "test", "build": "build", "run": "run", "vet": "lint", "fmt": "lint", "get": "install",
+                    "install": "install"}.get(sub or "", "other")
+        if prog in ("mvn", "mvnw", "mvnd"):
+            goals = [a for a in args if not a.startswith("-")]
+            if any(g in ("test", "verify") for g in goals):
+                return "test"
+            if any(g in ("package", "compile", "install", "clean", "deploy") for g in goals):
+                return "build"
+            return "run" if any(g.startswith("exec:") or g.startswith("spring-boot:run") for g in goals) else "other"
+        if prog in ("gradle", "gradlew"):
+            goals = [a for a in args if not a.startswith("-")]
+            if any(g in ("test", "check") for g in goals):
+                return "test"
+            if any(g in ("build", "assemble", "clean", "jar") for g in goals):
+                return "build"
+            return "run" if any(g in ("run", "bootRun") for g in goals) else "other"
+        if prog == "docker" or prog == "docker-compose":
+            return "run" if "up" in args or "run" in args else "build" if "build" in args else "other"
+        if prog.startswith("python") or prog in ("node", "deno", "uvicorn", "gunicorn", "flask", "ruby"):
+            return "run"
+        return "other"
 
     # ---- assembly -------------------------------------------------------
 
