@@ -180,7 +180,7 @@
     {
       "name": "repo-health",
       "source": "repo-health",
-      "description": "Measure how well an existing code repository is guarded and where it needs work, then write a ranked Markdown report of recommendations. Checks lint, types, static analysis, tests, coverage, CI, setup, docs, dependencies, file sizes and git hotspots for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin, and gives each dimension a level from absent to effective. Cheap checks run at once; running tools or tests and LLM code reading run only after you agree. Reports only; it changes no project file.",
+      "description": "Measure how well an existing code repository is guarded and where it needs work, then write a short ranked Markdown report: what to do first, a ready-to-paste first step and a command that proves it worked. Levels for lint, types, static analysis, secrets, tests, coverage, CI, setup, dependencies, docs and architecture rules are set by script and joined with git hotspots and CI health, for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin. Reruns show what changed; dismissed advice stays dismissed. Reports only.",
       "version": "0.1.0",
       "author": {
         "name": "Yu Rong",
