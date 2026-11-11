@@ -1,5 +1,7 @@
 Then exercise the real output: run the scripts, apply the DDL, read the
-values. Report every failure you can prove, not only the first.
+values. Report every failure you can prove, not only the first. A miss is a
+`blocking:` finding under `Issues:`, or a `nonblocking:` line under Follow-ups
+when the non-blocking test in your brief holds.
 
 ### Method: schema
 
@@ -11,14 +13,15 @@ values. Report every failure you can prove, not only the first.
    dropped or unchanged). Report a field that is missing or counted twice.
 3. Execution: the DDL parses. Each migration applies and rolls back on a
    temporary database. Keys, foreign keys and non-null constraints hold on
-   sample data. Use a container started with `--rm`, or a file database under
-   `mktemp -d`; remove it before you report. A leftover goes under
-   `Follow-ups:` as `leftover container: <name>` or `leftover file: <path>`.
+   sample data. Use a container started with `--rm`, or a file database in
+   a folder under `.agentic-team-scratch/`, which you leave in place. A leftover
+   file in `.agentic-team-scratch/` is not a finding. A leftover container goes
+   under `Follow-ups:` as `leftover container: <name>`.
 4. Consistency: names and numbers agree across every artifact of the task
-   (the ADR text, the DDL, the review page). Each disagreement is an issue.
+   (the ADR text, the DDL, the review page). Each disagreement is a miss.
 5. Compare with the base commit named in CONTEXT: `git diff --stat <base>
    <head>` lists what changed. Flag every file, field or decision that
-   changed outside SCOPE under `Issues:`.
+   changed outside SCOPE.
 
 Verdict levels for this kind:
 - `artifact-verified`: scripts recomputed the numbers and the coverage, the

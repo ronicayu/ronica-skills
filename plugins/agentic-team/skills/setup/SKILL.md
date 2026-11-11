@@ -41,7 +41,9 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
    passes; if it does not, say the operator runs the login.
 5. **Ask for the rest.** Ask the user one question for the remaining `"TODO"`,
    `forbidden`. It affects safety, so do not set it to `[]` unless the user
-   confirms that nothing applies.
+   confirms that nothing applies. Leave `[scope] adjacent` unset unless the user
+   asks for it: it lets a worker make narrow changes outside SCOPE
+   (`lower-ratchet`, `stale-exemption`, `own-lint`; see the README).
 6. **Keep private values and run state out of git.** Put machine-specific or
    private values in `.agentic-team.local.toml`, with the same tables and
    only the keys that override. Its keys win; a list there replaces the

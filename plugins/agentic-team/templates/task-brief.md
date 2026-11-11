@@ -39,6 +39,10 @@ Time zone: {{TIMEZONE}}
 
 {{AUTONOMY}}
 
+## ROLE
+
+{{ROLE}}
+
 ## STANDING ORDERS
 
 {{STANDING_ORDERS}}

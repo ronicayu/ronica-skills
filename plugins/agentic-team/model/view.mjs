@@ -1,7 +1,7 @@
-// Full view of Lifecycle.tla (agentic-team 0.12.0): every state the Manager can tell apart in `record` and `status`.
+// Full view of Lifecycle.tla (agentic-team 0.18.0): every state the Manager can tell apart in `record` and `status`.
 // State labels are in the operator's words; step labels say what happens.
 
-export const title = "Task attempt lifecycle (agentic-team 0.12.1)";
+export const title = "Task attempt lifecycle (agentic-team 0.18.0)";
 
 const LEVEL = {
   "artifact-verified": "passes",
@@ -33,7 +33,8 @@ export const state = (v) => {
   }
   if (v.status === "open") return "Not started";
   if (v.lastTask === "STOPPED") return v.stopReason === "pause" ? "Paused, WIP not committed yet" : "Stopped, WIP not committed yet";
-  if (v.verdict !== "none") return `Verdict ${LEVEL[v.verdict]} recorded, not closed${sessionNote("verifier", v.verifier)}`;
+  const faultNote = v.fault === "role" ? ", role file broken" : v.fault === "exclude" ? ", info/exclude read-only" : "";
+  if (v.verdict !== "none") return `Verdict ${LEVEL[v.verdict]} recorded${v.vIssues === "unlabelled" ? " (ISSUES with no blocking: line)" : ""}, not closed${sessionNote("verifier", v.verifier)}${faultNote}`;
   if (v.verifier !== "none") {
     if (v.vv !== "none") return `Verdict ${LEVEL[v.vv]} filed${sessionNote("verifier", v.verifier)}`;
     if (v.vManager === "BLOCKED") return "Verifier stuck, filed BLOCKED";
@@ -88,7 +89,11 @@ export const step = (action, from, to) => {
       : "launch stops the idle session, then refuses";
     case "VerifyPlain": return "you start a verifier";
     case "VerifyAgain": return "you start a verifier (--again)";
-    case "CloseAuto": return "you close";
+    case "VerifierFilesUnchecked": return "the verifier files ISSUES with no blocking: line (fails)";
+    case "RoleBreaks": return "the role file goes missing or breaks";
+    case "ExcludeBreaks": return "info/exclude turns read-only";
+    case "OperatorRepairs": return "the operator repairs the file";
+    case "CloseAuto": return to.merged && !from.merged && to.pr === "none" && !to.mainHas ? "you close (no commit beyond the base: recorded merged)" : "you close";
     case "CloseManual": return `you close with verdict ${LEVEL[to.verdict]}`;
     case "Stop": return from.worker === "busy" ? "the operator orders a pause"
       : from.worker === "ghost" ? "you stop the ghost worker (record's hint): the row ends"

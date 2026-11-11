@@ -54,7 +54,10 @@ every report, and on every wake (step 6).
      A row with no status and no pid (a ghost) counts as ended after 30 quiet minutes; `run.py stop` does not clear it before that.
    - A `next:` that names `abandon` (the cap is 3 attempts): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
      add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
-     in the same hint only when the operator says so.
+     in the same hint only when the operator says so. Do not add fix rounds past the cap. First classify
+     what remains: undecided design → a design task that sets the spec; a tool problem or out-of-scope
+     work → a separate task; open-ended acceptance → rewrite it as a closed checklist. Override the cap
+     only for a clear, bounded fix, and record why in the task notes.
    - `conflict`, and `changed` from `close`: add the decision the line names. The task worktree stays
      as it was. After a host rebase that changed the diff, the request holds the host's new head, and
      `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your
@@ -64,6 +67,7 @@ every report, and on every wake (step 6).
    - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
+   - `merged` (a request merged): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. The rebase round is the `pr-behind` step below; a `conflict` line gets its decision now.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` asks the host to rebase the request
      (`[merge] catch_up = "host"`, the default), or rebases the worktree and pushes (`"local"`). A
      `pr-behind` line from `close` that says the host did not rebase it: follow its `next:`.
@@ -109,6 +113,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
+   - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is sorted the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
      `local` it merges only on a `MERGE:` line into a clean checkout, and
@@ -132,6 +137,7 @@ every report, and on every wake (step 6).
      answer in the standing orders, and rerun with `dangerouslyDisableSandbox`
      only if they agreed. Never edit a rendered brief.
    - Refill after every drain; never wait for a whole batch.
+   - Keep every slot busy within priority and dependency order. When a slot is free and the ready list is empty, check each blocked task's dependencies: drop a dependency that is not real, and when the dependency is verified and waiting to merge, launch on it with `launch --base <its branch>`. Split a task that is too large to finish in one attempt.
    - `launch <id> --base <sha|branch>` starts from that commit; use it for a fix on an unmerged feature
      branch. It lifts the unmerged-dependency refusal when the base contains the dependency's commit.
      `--base` applies to a first attempt; a retry continues in the task worktree.
@@ -172,8 +178,7 @@ every report, and on every wake (step 6).
    needs, write the text to a file and run
    `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <file> [--kind info|redirect|wrap-up]`. A steer may change focus, order,
    approach and facts inside SCOPE; it never widens SCOPE and never overrides FORBIDDEN or the
-   standing orders. If it needs a wider SCOPE, change SCOPE in Taskgraph first
-   (`"${CLAUDE_PLUGIN_ROOT}/scripts/tg" --project <project> edit <id> --meta scope="..."`); the worker's inbox command prints the new SCOPE.
+   standing orders. Once a worker has started, its task's SCOPE and ACCEPTANCE do not change. A requirement found later becomes a new task. `run steer` corrects a worker's course inside its brief; it never adds a requirement.
    `--interrupt` stops and resumes a busy worker; use it only when the steer cannot wait. A verifier takes
    no steer, and a task with no live worker refuses it: put the text in the task notes for the next brief.
    `"${CLAUDE_PLUGIN_ROOT}/scripts/run" inbox <id>` shows the thread and each message's delivery state. A message is never

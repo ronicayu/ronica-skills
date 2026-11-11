@@ -1,23 +1,28 @@
 Then check the real document against its sources, not the worker's summary
-of it. Report every failure you can prove, not only the first.
+of it. Report every failure you can prove, not only the first. A miss is a
+`blocking:` finding under `Issues:`, or a `nonblocking:` line under Follow-ups
+when the non-blocking test in your brief holds.
 
 ### Method: design-doc
 
 1. Sources: each factual claim (a requirement, the current state, a number)
    points to a source. Open each source and confirm the claim. An unsourced
-   or wrong claim is an issue.
+   or wrong claim is a miss.
 2. Completeness: the document has a problem statement with measurable
    outcomes and ranked goals; options with their trade-offs, including "do
-   nothing"; for each decision, the alternative it rejected; failure modes;
-   migration. Name each missing part.
+   nothing", and why each rejected option lost; for each decision, the
+   alternative it rejected; failure modes, including half-migrated and
+   rolled-back states; migration steps; a closed checklist for the coders who
+   follow, with no reference to a git-ignored scratch file; census scripts in
+   the repository. Name each missing part. A missing part is a `blocking:`
+   finding unless it passes the non-blocking test in your brief.
 3. Contradictions: none inside the document, and none with the other
    documents of the project that it names or depends on.
 4. Compare with the base commit named in CONTEXT: `git diff <base> <head>`
-   shows what changed. Flag every file or decision that changed outside SCOPE
-   under `Issues:`.
+   shows what changed. Flag every file or decision that changed outside SCOPE.
 5. Boundary: you do not judge whether a decision is right. That belongs to
    the operator or the design review. A finding about a decision itself is
-   not an issue and does not lower the verdict. Write it under `Follow-ups:`
+   not a miss and does not lower the verdict. Write it under `Follow-ups:`
    as `decision: <the question, one line>`; the Manager turns it into a
    Taskgraph decision.
 
@@ -30,4 +35,5 @@ Verdict levels for this kind:
 - `check-only`: a read-through without the source checks.
 - `verify-blocked`: a source could not be opened; name it.
 - `verify-failed`: a claim is wrong, a required part is missing, or the
-  document contradicts itself or another document.
+  document contradicts itself or another document, and the finding is blocking
+  (it does not pass the non-blocking test in your brief).

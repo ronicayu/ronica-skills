@@ -63,6 +63,14 @@ PROFILES = "profiles"  # an optional table: profile name -> CLAUDE_CONFIG_DIR; t
 DEFAULT_PROFILE = "default"  # the Manager's own environment; reserved, never defined in [profiles]
 PLUGIN_NAME = "agentic-team"
 
+# [scope] adjacent: the kinds of change outside a task's SCOPE that a worker may make without reporting BLOCKED.
+# The worker brief and the verifier brief name the kinds that the project allows.
+ADJACENT_KINDS = {
+    "lower-ratchet": "only lower a baseline, ratchet or allow-list count; never raise it and never add an entry",
+    "stale-exemption": "delete an exemption or baseline row that a scanner run in this attempt proves stale",
+    "own-lint": "fix lint or format errors that this attempt's change caused in files outside SCOPE",
+}
+
 # Ignored paths that run.py may delete with a merged worktree: dependencies, environments, caches, build output
 # and operating-system files that a command rebuilds. Nothing that can be data (an .env file, logs, a database).
 # [merge] disposable adds patterns; an entry "!<pattern>" there turns off one of these.
@@ -79,8 +87,8 @@ DISPOSABLE_DEFAULT = (
     ".cache/", "dist/", "build/", "target/", ".gradle/",
     # operating system files
     ".DS_Store", "Thumbs.db",
-    # the session report files of agentic-team; each report is in Taskgraph
-    ".agentic-team/",
+    # the session report files of agentic-team (each report is in Taskgraph), and the scratch folder of a session
+    ".agentic-team/", ".agentic-team-scratch/",
 )
 
 
@@ -133,6 +141,8 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "disposable": ("patterns", []),
     },
     "verify": {"kind": ("choice:code,schema,design-doc", "code")},
+    "roles": {"default": ("str", "")},
+    "scope": {"adjacent": ("adjacent", [])},
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),
         "ask_due_minutes": ("posint", 60),
@@ -148,6 +158,7 @@ TYPE_NAMES = {
     "nonempty": "a non-empty string",
     "list": "a list of strings",
     "patterns": "a list of path patterns",
+    "adjacent": "a list of adjacent-change kinds",
     "posint": "a positive integer",
     "nonneg": "an integer that is 0 or more",
     "bool": "true or false",
@@ -335,6 +346,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "patterns":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "adjacent":
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "nonneg":
@@ -388,6 +401,10 @@ def problems(config):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
             if kind == "patterns":
                 found += pattern_problems(dotted, value)
+            if kind == "adjacent":
+                found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
+                          f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"
+                          for v in value if v not in ADJACENT_KINDS]
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")

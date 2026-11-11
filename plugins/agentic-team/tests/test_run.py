@@ -473,6 +473,10 @@ class Base(unittest.TestCase):
         return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
                 "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet"}
 
+    def launched(self, task, attempt=1, **over):
+        """The entry that `launch` records: the session entry, with the role, tier and verify kind it stores."""
+        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code", **over}
+
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
 
@@ -624,7 +628,8 @@ class Base(unittest.TestCase):
         task = task or self.running_task()
         self.pass_report(task)
         status = {"verify-failed": "ISSUES", "verify-blocked": "BLOCKED"}.get(verdict, "PASS")
-        self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n", kind="verify", by=f"verify-{task}-1")
+        issues = "Issues:\n- blocking: a check fails\n" if status == "ISSUES" else ""
+        self.add_result(task, status, f"Status: {status}\nVerdict: {verdict}\n{issues}", kind="verify", by=f"verify-{task}-1")
         return task
 
     # --- code host fakes (pr mode)
@@ -1078,7 +1083,9 @@ class RunTest(Base):
         context, _, text = self.verify_context(task)
         self.assertIn(f"Base commit: {old_head} (the task's base meta). Head commit: {head}.", context)
         self.assertIn(f"git diff {old_head} {head}", context)
-        self.assertIn(f'git archive {old_head} | tar -x -C "$(mktemp -d)"', context)
+        self.assertIn(f"run `mkdir -p .agentic-team-scratch/base` in one call, then `git archive {old_head} | tar -x -C "
+                      ".agentic-team-scratch/base` in the next", context)
+        self.assertNotIn("&&", context)
         self.assertIn("Never check out, reset, or add a worktree.", context)
         self.assertNotRegex(text, r"git (reset|checkout|switch)")
 
@@ -1149,7 +1156,7 @@ class RunTest(Base):
         _, verify, _ = self.verify_context(task)
         method = verify[verify.index("### Method: code"):]
         for want in ("Run every command of the project verify skill's `Checks` section at the\n   head commit, and at the base commit",
-                     "A problem that only the head has goes under\n   `Issues:`",
+                     "A problem that only the head has is a miss, and\n   the change fails that check",
                      "has goes under `Follow-ups:` as `found:`",
                      "`doc: .claude/skills/verify/SKILL.md: no <kind> check; ask the user to add one`"):
             self.assertIn(want, method)
@@ -1270,7 +1277,7 @@ class RunTest(Base):
         self.assertEqual(self.status_of(task), "in_progress")
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
-        self.assertEqual(meta["sessions"], [self.entry(task)])
+        self.assertEqual(meta["sessions"], [self.launched(task)])
         self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
         self.assertNotIn("verdict", meta)
         self.assertNotIn("verdict_ref", meta)
@@ -1464,7 +1471,7 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["session"], "task-1-2")
         self.assertEqual(meta["base"], first["base"])
-        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
         self.assertEqual(self.worktree_state()[2], ["task-1"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("task-1")), first["base"])
 
@@ -1612,7 +1619,7 @@ class RunTest(Base):
         self.assertIn("It holds the commits of the earlier attempts of this task.", text)
         self.assertNotIn("Base commit:", text)
         meta = self.meta(task)
-        self.assertEqual(meta["sessions"], [self.entry(task, 1), self.entry(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
         self.assertEqual((meta["attempt"], meta["base"]), (2, first["base"]))
 
     def test_23_base_on_a_retry_is_refused_and_creates_nothing(self):
@@ -1705,8 +1712,8 @@ class RunTest(Base):
         self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
         meta = self.meta(task)
         self.assertEqual((meta["attempt"], meta["base"]), (2, base))
-        self.assertEqual(len(meta["sessions"]), 1)
-        self.assertEqual(meta["sessions"][0]["attempt"], 2)
+        self.assertEqual([e["attempt"] for e in meta["sessions"]], [1, 2])  # the adopted attempt's entry has no id
+        self.assertEqual(meta["sessions"][1]["id"], "sess-task-1-2")
 
     def test_23_nothing_to_continue_from_asks_for_a_base(self):
         task = self.running_task()
@@ -2010,6 +2017,43 @@ class RunTest(Base):
         self.assertEqual(self.named(events, "unclosed"), [])
         self.assertIn("Verdict test-verified", self.one(events, "verified")["detail"])
 
+    def unlabelled_failure(self, attempt=1, labelled=False):
+        task = self.running_task(attempt=attempt)
+        self.pass_report(task, attempt=attempt)
+        issue = "blocking: a check fails" if labelled else "a check fails"
+        self.add_result(task, "ISSUES", f"Status: ISSUES\nVerdict: verify-failed\nIssues:\n- {issue}\n",
+                        kind="verify", attempt=attempt, by=f"verify-{task}-{attempt}")
+        return task
+
+    def test_30_an_unlabelled_verify_failed_report_hints_verify_again(self):
+        task = self.unlabelled_failure()
+        verified = self.one(self.events("record"), "verified")
+        self.assertEqual(verified["next"], f"run.py verify {task} --again (the verifier's report has no blocking: line: "
+                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` and say why "
+                         "it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
+                         "<why it does not block>`)")
+
+    def test_30_close_refuses_an_unlabelled_verify_failed_report(self):
+        task = self.unlabelled_failure()
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"run.py verify {task} --again (the verifier's report has no blocking: line: Issues line", out.stderr)
+        self.assertNotIn("verdict", self.meta(task))
+        self.assertEqual(self.status_of(task), "in_progress")
+
+    def test_30_a_labelled_verify_failed_report_still_opens_a_fix_round(self):
+        task = self.unlabelled_failure(labelled=True)
+        self.assertEqual(self.one(self.events("record"), "verified")["next"], f"run run.py close {task}")
+        self.ok("close", str(task))
+        self.assertEqual(self.meta(task)["verdict"], "verify-failed")
+        self.assertEqual(self.one(self.events("record"), "unclosed")["next"], f"fix round: run.py launch {task}")
+
+    def test_30_an_unlabelled_verify_failed_report_at_the_cap_still_hints_verify_again(self):
+        task = self.unlabelled_failure(attempt=3)
+        verified = self.one(self.events("record"), "verified")
+        self.assertTrue(verified["next"].startswith(f"run.py verify {task} --again (the verifier's report has no "))
+        self.assertNotIn("abandon", verified["next"])
+
     def test_30_verifier_result_without_a_verdict_line(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
@@ -2296,7 +2340,7 @@ class RunTest(Base):
     def test_106_close_then_launch_after_a_verify_failed_verdict(self):
         task = self.running_task()
         self.pass_report(task)
-        self.add_result(task, "ISSUES", "Verdict: verify-failed\n", kind="verify", by="verify-1-1")
+        self.add_result(task, "ISSUES", "Verdict: verify-failed\nIssues:\n- blocking: a check fails\n", kind="verify", by="verify-1-1")
         self.agents(self.row("task-1", status="idle", state="working", pid=1234))
         env = dict(self.env, FAKE_CLAUDE_STOP_CLEARS_STATUS="1")
         self.ok("close", str(task), "--verdict", "verify-failed", env=env)
@@ -3427,7 +3471,8 @@ class RunTest(Base):
         self.assertTrue(arrived["detail"].endswith("; adopted"))
         closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
-        self.assertEqual(self.meta(task)["sessions"], [])
+        self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
+                                                        "tier": "implementation", "verify_kind": "code"}])
         self.assertEqual(self.status_of(task), "done")
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
@@ -3703,25 +3748,26 @@ class RunTest(Base):
         row = json.dumps(self.row("task-3"))  # the session appears in `claude agents` when it starts
         env = dict(self.env, FAKE_CLAUDE_BG_SAID="backgrounded \u00b7 garbage \u00b7 task-3-1", FAKE_CLAUDE_BG_ROW=row)
         detail = self.one(self.events("launch", str(wrong), env=env), "launched")["detail"]
-        self.assertEqual(sessions(wrong), [self.entry(wrong, 1)])
+        self.assertEqual(sessions(wrong), [self.launched(wrong, 1)])
         self.assertIn("claude printed garbage; recorded the row sess-task-3-1 found in the worktree", detail)
         silent = self.add_task()
         self.agents()
         detail = self.one(self.events("launch", str(silent), env=dict(self.env, FAKE_CLAUDE_BG_SAID="")), "launched")["detail"]
-        self.assertEqual(sessions(silent), [])
+        self.assertEqual(sessions(silent), [{"kind": "task", "attempt": 1, "name": "task-4-1", "worktree": "task-4", "model": "sonnet",
+                                             "role": None, "tier": "implementation", "verify_kind": "code"}])  # no id, but the stored values
         self.assertIn("no session id printed; the row is matched by its folder", detail)
         self.assertNotIn("claude said", detail)
         text_only = self.add_task()  # no `backgrounded` line: a finished row in the folder is not the new session
         self.agents(self.finished("task-5"))
         detail = self.one(self.events("launch", str(text_only), env=dict(self.env, FAKE_CLAUDE_BG_SAID="garbage")),
                           "launched")["detail"]
-        self.assertEqual(sessions(text_only), [])
+        self.assertEqual([e.get("id") for e in sessions(text_only)], [None])  # an entry with no id: it holds the stored values
         self.assertIn("no session id printed", detail)
         live_only = self.add_task()  # no `backgrounded` line, but exactly one live unrecorded row in the folder
         self.agents()
         env = dict(self.env, FAKE_CLAUDE_BG_SAID="garbage", FAKE_CLAUDE_BG_ROW=json.dumps(self.row("task-6")))
         detail = self.one(self.events("launch", str(live_only), env=env), "launched")["detail"]
-        self.assertEqual(sessions(live_only), [self.entry(live_only, 1)])
+        self.assertEqual(sessions(live_only), [self.launched(live_only, 1)])
         self.assertIn("no session id printed; recorded the row sess-task-6-1 found in the worktree", detail)
         stale = self.add_task()  # a printed id that is not listed, and only a finished row: the printed id stands
         self.agents(self.finished("task-7"))
@@ -4507,7 +4553,7 @@ class RunTest(Base):
         self.ok("launch", str(task))
         self.ok("launch", str(other))
         with open(exclude) as fh:
-            self.assertEqual(fh.read(), ".claude/worktrees/\n.agentic-team.toml\n/.agentic-team/\n")
+            self.assertEqual(fh.read(), ".claude/worktrees/\n.agentic-team.toml\n/.agentic-team/\n/.agentic-team-scratch/\n")
         wt = self.wt_path("task-1")
         self.assertEqual(self.git("rev-parse", "--git-path", "info/exclude", cwd=wt), exclude)
         report = self.write_report("task-1", "task-1-1", "report\n")
@@ -4517,11 +4563,137 @@ class RunTest(Base):
         self.assertEqual(self.git("status", "--porcelain", "--ignored=matching", cwd=wt), "!! .agentic-team/")
         self.assertTrue(os.path.isfile(report))
 
+    def test_110_launch_and_verify_ignore_the_scratch_folder_once(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("# mine\n.claude/worktrees/\n/.agentic-team/")  # no newline at the end; no scratch line yet
+        task = self.add_task()
+        self.add_task()
+        self.ok("launch", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read(), "# mine\n.claude/worktrees/\n/.agentic-team/\n/.agentic-team-scratch/\n")
+        wt = self.wt_path("task-1")
+        self.touch(wt, ".agentic-team-scratch/base/a.txt")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored=matching", cwd=wt), "!! .agentic-team-scratch/")
+        self.ok("launch", "2")
+        self.pass_report(task, wt=wt)
+        self.ok("verify", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read().splitlines().count("/.agentic-team-scratch/"), 1)
+        verifier = self.wt_path("verify-1-1")
+        self.touch(verifier, ".agentic-team-scratch/base/b.txt")
+        self.assertEqual(self.git("status", "--porcelain", cwd=verifier), "")
+
+    def test_110_verify_adds_the_scratch_line_before_the_session_starts(self):
+        task = self.running_task()
+        self.pass_report(task)
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        self.ok("verify", str(task))
+        with open(exclude) as fh:
+            self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_110_a_scratch_line_that_cannot_be_written_refuses_the_launch(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        os.chmod(exclude, 0o444)
+        self.add_task()
+        try:
+            out = self.run_cmd("launch", "1")
+        finally:
+            os.chmod(exclude, 0o644)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertIn("Make the file writable", out.stderr)
+        self.assertNotIn("launched", out.stdout)
+
+    def read_only_exclude(self):
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        with open(exclude, "w") as fh:
+            fh.write("/.agentic-team/\n")
+        os.chmod(exclude, 0o444)
+        self.addCleanup(lambda: os.path.exists(exclude) and os.chmod(exclude, 0o644))
+        return exclude
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_110_a_read_only_exclude_refuses_launch_before_a_session_is_stopped_or_a_wip_commit_is_made(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.touch(wt, "wip.txt")
+        before = self.git("rev-parse", "HEAD", cwd=wt)
+        self.agents(self.row("task-1", status="idle", state="blocked"))
+        exclude = self.read_only_exclude()
+        out = self.run_cmd("launch", str(task), env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), before)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? wip.txt")
+        self.assertEqual([r["status"] for r in self.results(task)], ["ISSUES"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_110_a_read_only_exclude_refuses_verify_and_the_over_verifier_stays(self):
+        task = self.running_task()
+        self.pass_report(task)
+        self.add_result(task, "BLOCKED", "Verdict: verify-blocked\n", kind="verify", by="verify-1-1")
+        self.agents(self.row("verify-1-1", status="idle", state="blocked"))
+        exclude = self.read_only_exclude()
+        out = self.run_cmd("verify", str(task), "--again", env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"cannot write {exclude}", out.stderr)
+        self.assertEqual(self.calls("stop"), [])
+
+    def test_110_the_verifier_brief_exports_the_base_into_the_scratch_folder(self):
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        self.pass_report(task)
+        context = self.section(self.ok("verify", str(task), "--dry-run").stdout, "CONTEXT")
+        self.assertIn(".agentic-team-scratch/base", context)
+        self.assertIn("first run every check of the head commit", context)
+        self.assertLess(context.index("first run every check of the head commit"), context.index("mkdir -p"))
+        self.assertIn("Leave the export in place", context)
+        self.assertNotIn("Delete the export", context)
+        self.assertNotIn("mktemp", context)
+
+    def test_110_the_sweep_counts_the_scratch_folder_as_disposable(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        with open(os.path.join(self.root, ".git", "info", "exclude"), "a") as fh:
+            fh.write("/.agentic-team-scratch/\n")  # what launch writes
+        self.touch(wt, ".agentic-team-scratch/base/a.txt")
+        self.agents()
+        events = self.events("merged", str(task))
+        self.assertEqual([e["detail"] for e in self.named(events, "removed")],
+                         [f"worktree task-1 (merged at {self.short()}) (ignored files removed: 1: .agentic-team-scratch/)"])
+        self.assertFalse(os.path.exists(wt))
+
+    def test_110_no_instruction_file_tells_a_session_to_use_mktemp(self):
+        base = os.path.dirname(HERE)
+        text = {}
+        for folder in ("agents", "templates", "playbooks"):
+            for where, _, names in os.walk(os.path.join(base, folder)):
+                for name in names:
+                    with open(os.path.join(where, name), encoding="utf-8") as fh:
+                        text[name] = re.sub(r"\s+", " ", fh.read())
+        mentions = {name: re.findall(r"mktemp|/tmp", body) for name, body in text.items() if re.search(r"mktemp|/tmp", body)}
+        self.assertEqual(mentions, {"worker.md": ["mktemp", "/tmp"]})  # only the rule that forbids both
+        self.assertIn("Do not use `mktemp`, `/tmp` or another folder outside your worktree", text["worker.md"])
+
+    def test_109_the_worker_report_format_has_an_evidence_line(self):
+        with open(os.path.join(os.path.dirname(HERE), "agents", "worker.md"), encoding="utf-8") as fh:
+            block = re.search(r"```text\n(.*?)```", fh.read(), re.S).group(1)
+        self.assertRegex(block, r"(?m)^Ran: .*\nEvidence: ")
+
     def test_101_a_missing_info_folder_is_created(self):
         shutil.rmtree(os.path.join(self.root, ".git", "info"))
         self.ok("launch", str(self.add_task()))
         with open(os.path.join(self.root, ".git", "info", "exclude")) as fh:
-            self.assertEqual(fh.read(), "/.agentic-team/\n")
+            self.assertEqual(fh.read(), "/.agentic-team/\n/.agentic-team-scratch/\n")
 
     def test_101_a_report_file_does_not_block_cleanup(self):
         task = self.merged_task()
@@ -4610,7 +4782,8 @@ class RunTest(Base):
         text = self.ok("verify", str(task), "--dry-run").stdout
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertEqual(self.section(text, "SCOPE"), "Read only. You run in your own worktree. Change nothing: do not "
-                         "edit, commit, or delete anything. The one exception is your report file, which REPORT names.")
+                         "edit, commit, or delete anything. The exceptions are your report file, which REPORT names, and "
+                         ".agentic-team-scratch/.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
         self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
@@ -5335,6 +5508,7 @@ class RunTest(Base):
             "none": "None",
             "leftover": "\nleftover process: pid 4242 port 8080\n- leftover container: demo-db\nleftover file: /tmp/x",
             "decision": "decision: should the flag keep its old name?",
+            "nonblocking": "nonblocking: docs/a.md: a typo: the conclusion does not change",
         }
         for name, text in cases.items():
             with self.subTest(name):
@@ -5344,7 +5518,7 @@ class RunTest(Base):
     def test_107_check_report_refuses_an_unlabelled_line(self):
         out = self.check_report("\ncaller: src/b.py: calls the old name\n- fix the README too\nBug: src/c.py: wrong")
         self.assertEqual((out.returncode, out.stdout), (2, ""))
-        hint = ("start it with one of caller, doc, test, other, found, split, decision, "
+        hint = ("start it with one of caller, doc, test, other, found, split, decision, nonblocking, "
                 "as `<label>: <path or question>: <why>`")
         self.assertEqual(out.stderr.splitlines(), [
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
@@ -5377,12 +5551,13 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}"')  # 0.16.0: a worker's check also reads its steers
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.17.0: its evidence
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- caller: src/b.py: calls it\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
+                     f"Checkpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
         with open(path, "w") as fh:
@@ -5396,7 +5571,54 @@ class RunTest(Base):
         self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
         report = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
-        self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}"`\n', report)
+        self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}" --verifier`\n', report)
+
+    def evidence_report(self, status, evidence, after=""):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: {status}\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
+                     f"Checkpoint: {CHECKPOINT}\n")
+        return path
+
+    def test_109_check_report_counts_evidence_lines_of_a_pass(self):
+        problem = "run.py: PASS needs one `Evidence:` line per ACCEPTANCE line: found {}, ACCEPTANCE has 2\n"
+        cases = {
+            "two lines": ("PASS", "Evidence:\nfirst -> make test: ok\nsecond -> src/a.py:3\n", (0, "ok\n", "")),
+            "one line": ("PASS", "Evidence: first -> make test: ok\n", (2, "", problem.format(1))),
+            "none": ("PASS", "Evidence: None\n", (2, "", problem.format(0))),
+            "no field": ("PASS", "", (2, "", problem.format(0))),
+            "issues": ("ISSUES", "", (0, "ok\n", "")),
+            "blocked": ("BLOCKED", "Evidence: None\n", (0, "ok\n", "")),
+        }
+        for name, (status, evidence, expected) in cases.items():
+            with self.subTest(name):
+                out = self.run_cmd("check-report", self.evidence_report(status, evidence), "--acceptance", "2")
+                self.assertEqual((out.returncode, out.stdout, out.stderr), expected)
+
+    def test_109_check_report_without_acceptance_ignores_evidence(self):
+        out = self.run_cmd("check-report", self.evidence_report("PASS", ""))
+        self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
+
+    def test_109_evidence_starts_on_its_line_and_ends_at_the_next_field(self):
+        def found(text):
+            path = os.path.join(self.dir, "report.md")
+            with open(path, "w") as fh:
+                fh.write(f"Task: 1\nStatus: PASS\n{text}Checkpoint: {CHECKPOINT}\n")
+            out = self.run_cmd("check-report", path, "--acceptance", "99")
+            return int(re.search(r"found (\d+),", out.stderr).group(1))
+        self.assertEqual(found("Ran: make test\nOK\nEvidence: first -> ok\nsecond -> src/a.py:3\nFiles: a\n"), 2)
+        self.assertEqual(found("Evidence: first -> ok\nFiles: a.txt\nb.txt\nIssues: None\n"), 1)
+        self.assertEqual(found("Evidence:\n\n  - a -> b\n\nDeviations: None\n"), 1)
+        self.assertEqual(found("Ran: x\nEvidence: None\nFiles: a\n"), 0)
+
+    def test_109_a_worker_brief_names_the_acceptance_count_and_a_verifier_brief_none(self):
+        task = self.add_task(notes="Why: reason.\n- [ ] one\n- [ ] two\n- [ ] three")
+        report = self.section(self.brief(task), "REPORT")
+        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3`', report)
+        other = self.running_task()
+        self.add_result(other, "PASS", f"Task: {other}\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(other), "--dry-run").stdout, "REPORT")
+        self.assertNotIn("--acceptance", verify)
 
     def test_107_status_counts_worker_follow_ups_by_label_and_the_mean_attempts(self):
         first = self.add_task("First", attempt=3)
@@ -5426,6 +5648,520 @@ class RunTest(Base):
         self.assertEqual((later["follow_ups"], later["attempts"]), ([], {"tasks": 0, "mean": None}))
         self.assertIn("Attempts per task done in the period: no task done.",
                       self.status_sections("--since", "2099-01-01")["Follow-ups by label"])
+
+
+class RoleTest(Base):
+    """agentic-team 0.17.0: a task names a role (its `role` meta, else [roles] default); the role adds a method to the worker
+    brief and review checks to the verifier brief, and supplies the task's default tier and verify kind."""
+
+    def role_file(self, name, method="Method text of {name}.", review="Review text of {name}.", **front):
+        """A project role file. `front` overrides the frontmatter keys (a value None leaves the key out); `method` or
+        `review` None leaves the section out."""
+        keys = {"fits": f"tasks for the {name} tests", "tier": None, "verify_kind": None, "skills": None, **front}
+        lines = ["---"] + [f"{k}: {v}" for k, v in keys.items() if v is not None] + ["---", ""]
+        if method is not None:
+            lines += ["## Method", "", method.format(name=name), ""]
+        if review is not None:
+            lines += ["## Review", "", review.format(name=name), ""]
+        folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{name}.md")
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        return path
+
+    def bg_flag(self, flag, call=-1):
+        argv = self.calls("--bg")[call]
+        return argv[argv.index(flag) + 1] if flag in argv else None
+
+    def verify_text(self, task, *extra):
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\nFiles: out.txt\n")
+        return self.ok("verify", str(task), "--dry-run", *extra).stdout
+
+    def refused(self, *args, **kw):
+        out = self.run_cmd(*args, **kw)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        return out.stderr
+
+    # --- the briefs
+
+    def test_01_the_worker_brief_gets_the_method_and_the_verifier_brief_the_review(self):
+        path = self.role_file("designer", skills="[alpha:one, beta:two]")
+        task = self.add_task(role="designer")
+        role = self.section(self.brief(task), "ROLE")
+        self.assertTrue(role.startswith(f"Role: designer ({path})."), role)
+        self.assertIn("ROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS.", role)
+        self.assertIn("Load these skills with the Skill tool before you start: alpha:one, beta:two. If one does not load, "
+                      "say so under Deviations: and follow the method below.", role)
+        self.assertTrue(role.endswith("Method text of designer."), role)
+        self.assertNotIn("Review text", role)
+        running = self.running_task(role="designer")
+        text = self.verify_text(running)
+        role = self.section(text, "ROLE")
+        self.assertEqual(role, f"Task role: designer ({path}). Check these in addition to the method under VERIFY:\n\n"
+                               "Review text of designer.")
+        self.assertNotIn("Method text", text)
+        self.assertNotIn("Load these skills", text)
+
+    def test_01_a_role_with_no_review_says_so_in_the_verifier_brief(self):
+        self.role_file("plain", review=None)
+        self.assertEqual(self.section(self.verify_text(self.running_task(role="plain")), "ROLE"),
+                         "Task role: plain. No review checks.")
+
+    def test_02_no_role_reads_none_between_autonomy_and_standing_orders(self):
+        worker, verifier = self.brief(self.add_task()), self.verify_text(self.running_task())
+        for text in (worker, verifier):
+            self.assertEqual(self.section(text, "ROLE"), "None.")
+            self.assertLess(text.index("## AUTONOMY"), text.index("## ROLE"))
+            self.assertLess(text.index("## ROLE"), text.index("## STANDING ORDERS"))
+        self.assertNotIn("Role:", worker)
+
+    def test_11_a_role_with_no_skills_has_no_skills_paragraph(self):
+        for text in (self.brief(self.add_task(role="software-engineer")), self.brief(self.add_task(role="architect"))):
+            self.assertTrue(self.section(text, "ROLE").startswith("Role: "))
+        engineer = self.section(self.brief(self.add_task(role="software-engineer")), "ROLE")
+        architect = self.section(self.brief(self.add_task(role="architect")), "ROLE")
+        self.assertNotIn("Load these skills", engineer)
+        self.assertIn("Load these skills with the Skill tool before you start: ", architect)
+
+    def test_11_a_role_with_an_empty_skills_list_has_no_skills_paragraph(self):
+        self.role_file("bare", skills="[]")
+        self.assertNotIn("Load these skills", self.section(self.brief(self.add_task(role="bare")), "ROLE"))
+
+    # --- tier and verify kind
+
+    def test_03_the_tier_comes_from_the_flag_then_the_meta_then_the_role(self):
+        self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        cases = ((dict(role="judge"), (), "opus", "judgement", "role judge"),
+                 (dict(role="judge", tier="mechanical"), (), "haiku", "mechanical", "meta"),
+                 (dict(role="judge", tier="mechanical"), ("--tier", "implementation"), "sonnet", "implementation", "--tier"),
+                 (dict(role="judge"), ("--tier", "mechanical"), "haiku", "mechanical", "--tier"),
+                 (dict(), (), "sonnet", "implementation", "default"))
+        for meta, flags, model, tier, source in cases:
+            with self.subTest(meta=meta, flags=flags):
+                self.fresh()
+                self.role_file("judge", tier="judgement", verify_kind="design-doc")
+                task = self.add_task(**meta)
+                events = self.events("launch", str(task), *flags)
+                self.assertEqual(self.bg_flag("--model"), model)
+                detail = self.one(events, "launched")["detail"]
+                self.assertIn(f"tier {tier} ({source})", detail)
+                if meta.get("role") and source != "role judge":
+                    self.assertIn("; role judge", detail)
+                entry = self.meta(task)["sessions"][0]
+                want = "design-doc" if meta.get("role") else "code"
+                self.assertEqual((entry["role"], entry["tier"], entry["verify_kind"]),
+                                 (meta.get("role"), tier, want))
+
+    def test_03_the_launch_line_in_text_mode_names_the_role(self):
+        self.role_file("judge", tier="judgement")
+        out = self.ok("launch", str(self.add_task(role="judge"))).stdout
+        self.assertIn("tier judgement (role judge)", out)
+
+    def test_03_adopt_stores_the_role_and_close_still_finds_no_session(self):
+        tip = self.feature_branch("feat")  # before the role file: a commit would take the file along
+        self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("adopt", str(task), "--branch", "feat", "--head", tip)
+        (entry,) = self.meta(task)["sessions"]
+        self.assertEqual((entry["kind"], entry["attempt"], entry["role"], entry["tier"], entry["verify_kind"]),
+                         ("task", 1, "judge", "judgement", "design-doc"))
+        self.assertNotIn("id", entry)
+        os.remove(os.path.join(self.root, ".claude", "agentic-team", "roles", "judge.md"))
+        closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertEqual(self.one(closed, "verdict")["detail"], "test-verified; not closed")  # the stored design-doc kind
+        self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
+
+    def test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify(self):
+        path = self.role_file("judge", tier="judgement", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("launch", str(task))
+        wt, head = self.pass_report(task)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        for damage in ("broken", "deleted"):
+            with self.subTest(damage):
+                if damage == "broken":
+                    with open(path, "w") as fh:
+                        fh.write("no frontmatter at all\n")
+                else:
+                    os.remove(path)
+                for command in (("record",), ("status",)):
+                    self.ok(*command)
+                self.assertEqual(self.named(self.events("record"), "warn"), [])  # the stored values are used: nothing to warn about
+                err = self.refused("verify", str(task), "--again")
+                self.assertIn("no role named 'judge'" if damage == "deleted" else f"role file {path}: ", err)
+                self.assertIn("available roles:", err)
+        events = self.events("close", str(task))  # stored design-doc: test-verified does not close
+        self.assertEqual(self.one(events, "verdict")["detail"], "test-verified; not closed")
+        self.assertIn("design-doc", self.one(events, "verdict")["next"])
+        self.assertEqual(self.named(events, "warn"), [])
+
+    def test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind(self):
+        self.role_file("judge", verify_kind="design-doc")
+        task = self.add_task(role="judge")
+        self.ok("launch", str(task))
+        self.pass_report(task)
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verify_kind=code")
+        events = self.events("close", str(task))  # code closes on test-verified; the stored design-doc would not
+        self.one(events, "closed")
+
+    def test_04_the_verify_kind_comes_from_the_meta_then_the_role_then_the_config(self):
+        self.role_file("doc", verify_kind="design-doc")
+        cases = (("role", dict(role="doc"), "", "design-doc"), ("meta", dict(role="doc", verify_kind="schema"), "", "schema"),
+                 ("config", dict(), '[verify]\nkind = "schema"\n', "schema"),
+                 ("role over config", dict(role="doc"), '[verify]\nkind = "schema"\n', "design-doc"))
+        for label, meta, extra, kind in cases:
+            with self.subTest(label):
+                self.fresh()
+                self.role_file("doc", verify_kind="design-doc")
+                self.write_config(extra)
+                text = self.verify_text(self.running_task(**meta))
+                self.assertIn(f"### Method: {kind}", self.section(text, "VERIFY"))
+
+    # --- lookup
+
+    def test_05_a_project_file_overrides_the_plugin_file_and_a_project_role_is_added(self):
+        path = self.role_file("architect", fits="the project's own architect", method="Project architect method.")
+        self.role_file("solo", fits="only in this project")
+        text = self.section(self.brief(self.add_task(role="architect")), "ROLE")
+        self.assertIn(f"Role: architect ({path}).", text)
+        self.assertTrue(text.endswith("Project architect method."))
+        self.assertNotIn("Load these skills", text)  # the plugin file's skills are not merged in
+        self.assertTrue(self.section(self.brief(self.add_task(role="solo")), "ROLE").endswith("Method text of solo."))
+        rows = {r["name"]: r for r in json.loads(self.ok("roles", pre=["--json"]).stdout)}
+        self.assertEqual({n: r["source"] for n, r in rows.items()},
+                         {"architect": "project, overrides plugin", "solo": "project", "software-engineer": "plugin"})
+        self.assertEqual(rows["architect"]["fits"], "the project's own architect")
+        text = self.ok("roles").stdout
+        self.assertIn("role: architect (project, overrides plugin); fits: the project's own architect; tier -; verify kind -; skills -", text)
+        self.assertIn("role: software-engineer (plugin); fits: code changes", text)
+        self.assertIn("role: solo (project); fits: only in this project", text)
+
+    def test_05_the_roles_command_shows_each_default(self):
+        self.role_file("full", tier="judgement", verify_kind="schema", skills="[a:b, c]")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "full")
+        self.assertEqual((row["tier"], row["verify_kind"], row["skills"], row["error"]), ("judgement", "schema", ["a:b", "c"], None))
+        self.assertIn("tier judgement; verify kind schema; skills a:b, c", self.ok("roles").stdout)
+
+    def test_06_an_unknown_role_refuses_launch_and_verify_and_only_warns_in_record(self):
+        self.role_file("known")
+        task = self.add_task(role="nosuch")
+        err = self.refused("launch", str(task))
+        self.assertIn("no role named 'nosuch'", err)
+        self.assertIn("available roles: architect (plugin), known (project), software-engineer (plugin)", err)
+        self.assertEqual(self.calls("--bg"), [])
+        running = self.running_task(role="nosuch")
+        self.pass_report(running)
+        err = self.refused("verify", str(running), "--dry-run")
+        self.assertIn("no role named 'nosuch'", err)
+        self.assertIn("available roles:", err)
+        events = self.events("record")
+        warns = [e for e in self.named(events, "warn") if e["task"] == running]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("no role named 'nosuch'", warns[0]["detail"])
+        self.assertIn("read as no role", warns[0]["detail"])
+
+    def test_06_an_unknown_default_role_refuses_launch(self):
+        self.write_config('[roles]\ndefault = "nosuch"\n')
+        self.assertIn("[roles] default: no role named 'nosuch'", self.refused("launch", str(self.add_task())))
+
+    def test_07_a_broken_role_file_is_refused_with_its_path_and_the_problem(self):
+        cases = (("no fits", dict(fits=None), "no `fits` line"),
+                 ("no method", dict(method=None), "no ## Method section"),
+                 ("an empty method", dict(method="  "), "no ## Method section, or it is empty"),
+                 ("a bad tier", dict(tier="poetry"), "no tier or models.overrides entry named 'poetry'"),
+                 ("a tier with no model", dict(tier="verifier"), "tier 'verifier' has no model"),
+                 ("a bad verify kind", dict(verify_kind="essay"), "verify_kind must be one of code, schema, design-doc"),
+                 ("an unknown key", dict(color="blue"), "unknown key 'color'"),
+                 ("skills without brackets", dict(skills="a:b"), "skills must be a list in brackets"),
+                 ("an unclosed list", dict(skills="[a:b"), "a list has no closing ]"),
+                 ("a bad skill name", dict(skills="[a:b, c d]"), "'c d' is not a skill name"),
+                 ("text after a list", dict(skills="[a] b"), "text after the closing ]"))
+        for label, front, problem in cases:
+            with self.subTest(label):
+                self.fresh()
+                path = self.role_file("bad", **front)
+                task = self.add_task(role="bad")
+                err = self.refused("launch", str(task))
+                self.assertIn(f"role file {path}: ", err)
+                self.assertIn(problem, err)
+                self.assertIn("available roles:", err)
+                self.assertEqual(self.calls("--bg"), [])
+                out = self.run_cmd("roles")
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertIn(f"role-broken: bad (project): {path}: ", out.stdout)
+                self.assertIn(problem, out.stdout)
+                self.assertIn("software-engineer (plugin)", out.stdout)  # the good roles are still listed
+                rows = json.loads(self.run_cmd("roles", pre=["--json"]).stdout)
+                self.assertIn(problem, next(r for r in rows if r["name"] == "bad")["error"])
+
+    def test_07_a_file_with_no_frontmatter_and_a_bad_file_name_are_broken(self):
+        folder = os.path.dirname(self.role_file("ok"))
+        with open(os.path.join(folder, "plain.md"), "w") as fh:
+            fh.write("## Method\n\ntext\n")
+        with open(os.path.join(folder, "Bad Name.md"), "w") as fh:
+            fh.write("---\nfits: x\n---\n\n## Method\n\ntext\n")
+        out = self.run_cmd("roles")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("plain (project)", out.stdout)
+        self.assertIn("must start with a --- line", out.stdout)
+        self.assertIn("the file name must be lowercase letters, digits and -", out.stdout)
+        self.assertIn("2 role files broken", out.stderr)
+
+    def test_07_the_frontmatter_reads_colons_comments_and_blank_lines(self):
+        self.role_file("tidy", fits="code: features, fixes   # a comment", tier="judgement  # why", skills="[a:b]   # two\n\n# note")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "tidy")
+        self.assertEqual((row["fits"], row["tier"], row["skills"]), ("code: features, fixes", "judgement", ["a:b"]))
+
+    # --- [roles] default
+
+    def test_08_the_default_role_applies_to_a_task_with_no_role_and_the_meta_beats_it(self):
+        self.role_file("first")
+        self.role_file("second")
+        self.write_config('[roles]\ndefault = "first"\n')
+        self.assertTrue(self.section(self.brief(self.add_task()), "ROLE").endswith("Method text of first."))
+        self.assertTrue(self.section(self.brief(self.add_task(role="second")), "ROLE").endswith("Method text of second."))
+        self.assertTrue(self.section(self.brief(self.add_task(role='""')), "ROLE").endswith("Method text of first."))  # an empty meta is no role
+
+    def test_08_the_default_role_supplies_the_tier(self):
+        self.role_file("first", tier="mechanical")
+        self.write_config('[roles]\ndefault = "first"\n')
+        self.ok("launch", str(self.add_task()))
+        self.assertEqual(self.bg_flag("--model"), "haiku")
+
+    # --- size
+
+    def test_09_a_long_project_role_warns_and_the_shipped_roles_do_not(self):
+        words = lambda n: " ".join(["word"] * n)  # noqa: E731
+        self.role_file("long", method=words(400), review=words(201))
+        self.role_file("edge", method=words(400), review=words(200))
+        task = self.add_task(role="long")
+        events = self.events("launch", str(task), "--dry-run")
+        (warn,) = self.named(events, "warn")
+        self.assertIn("role long", warn["detail"])
+        self.assertIn("is 601 words; over 600 words", warn["detail"])
+        self.assertEqual(self.named(self.events("launch", str(self.add_task(role="edge")), "--dry-run"), "warn"), [])
+        events = self.events("launch", str(task))  # a real launch continues
+        self.assertEqual(len(self.named(events, "warn")), 1)
+        self.assertEqual(len(self.named(events, "launched")), 1)
+        running = self.running_task(role="long")
+        self.add_result(running, "PASS", f"Task: {running}\nStatus: PASS\nHead: {SHA_A}\n")
+        verifying = self.events("verify", str(running), "--dry-run")
+        self.assertEqual(len(self.named(verifying, "warn")), 1)
+        for name in ("architect", "software-engineer"):
+            events = self.events("launch", str(self.add_task(role=name)), "--dry-run")
+            self.assertEqual(self.named(events, "warn"), [], name)
+
+    def test_10_the_shipped_roles_parse_and_stay_under_the_size_limit(self):
+        import run as runner
+        fake = types.SimpleNamespace(config=config.load(self.root))
+        folder = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles")
+        names = sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md"))
+        self.assertEqual(names, ["architect", "software-engineer"])
+        for name in names:
+            with self.subTest(name):
+                role = runner.Role(name, os.path.join(folder, name + ".md"), "plugin")
+                runner.parse_role(fake, role)
+                self.assertIsNone(role.error)
+                self.assertTrue(role.fits)
+                self.assertTrue(role.method)
+                self.assertTrue(role.review)
+                self.assertLess(role.words, 600)
+        self.assertEqual(json.loads(self.ok("roles", pre=["--json"]).stdout)[0]["error"], None)
+
+    # --- the ask cap
+
+    def test_12_the_ask_cap_takes_the_resolved_tier(self):
+        self.role_file("sweeper", tier="mechanical")
+        for meta, want in ((dict(role="sweeper"), 0), (dict(role="sweeper", asks=2), 2), (dict(role="sweeper", tier="judgement"), 3)):
+            with self.subTest(meta=meta):
+                self.fresh()
+                self.role_file("sweeper", tier="mechanical")
+                task = self.add_task(**meta)
+                mailbox = self.section(self.brief(task), "MAILBOX")
+                self.assertEqual("Ask. This task allows no asks." in mailbox, want == 0)
+                self.ok("launch", str(task))
+                with open(os.path.join(self.root, ".agentic-team", "inbox", f"{task}-1.ctx.json")) as fh:
+                    self.assertEqual(json.load(fh)["asks_cap"], want)
+
+    def test_12_asks_cap_is_given_the_tier(self):
+        import run as runner
+        fake = types.SimpleNamespace(config=config.load(self.root))
+        self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "mechanical"), 0)
+        self.assertEqual(runner.asks_cap(fake, {"meta": {}}, "judgement"), 3)
+        self.assertEqual(runner.asks_cap(fake, {"meta": {"asks": 1}}, "mechanical"), 1)
+
+
+class Issue89Test(Base):
+    """agentic-team 0.18.0: blocking findings, the path check, [scope] adjacent."""
+
+    def report(self, status="PASS", **fields):
+        path = os.path.join(self.dir, "report.md")
+        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+                "Issues": "None", "Deviations": "None", "Follow-ups": "None", "Checkpoint": CHECKPOINT, **fields}
+        with open(path, "w") as fh:
+            fh.write("".join(f"{k}: {v}\n" for k, v in text.items() if v is not None))
+        return path
+
+    def verify_text(self, task):
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\nFiles: out.txt\n")
+        return self.ok("verify", str(task), "--dry-run").stdout
+
+    def check(self, path, *flags):
+        out = self.run_cmd("check-report", path, *flags)
+        return out.returncode, out.stdout, out.stderr
+
+    # --- verifier reports
+
+    def test_verifier_issues_need_a_blocking_label_on_every_line(self):
+        ok = "\nblocking: src/a.py:3: red test, the change fails ACCEPTANCE 1\n- blocking: a scope breach: README.md"
+        self.assertEqual(self.check(self.report("ISSUES", Issues=ok), "--verifier"), (0, "ok\n", ""))
+        code, out, err = self.check(self.report("ISSUES", Issues="\nblocking: a real defect\nthe wording is off"),
+                                    "--verifier")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Issues line `the wording is off` has no `blocking:` label; start it with `blocking:`", err)
+        self.assertIn("`nonblocking: <finding>: <why it does not block>`", err)
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_verifier_issues_status_needs_a_blocking_line(self):
+        code, out, err = self.check(self.report("ISSUES", Issues="None"), "--verifier")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Status ISSUES needs at least one `blocking:` line under `Issues:`", err)
+        self.assertEqual(self.check(self.report("ISSUES", Issues=None), "--verifier")[0], 2)
+
+    def test_verifier_with_only_nonblocking_findings_reports_pass(self):
+        follow = "nonblocking: docs/a.md: wrong count: the corrected number changes no conclusion"
+        self.assertEqual(self.check(self.report("PASS", **{"Follow-ups": follow}), "--verifier"), (0, "ok\n", ""))
+        code, _, err = self.check(self.report("PASS", Issues="blocking: a defect"), "--verifier")
+        self.assertEqual(code, 2)
+        self.assertIn("a PASS report has no blocking finding", err)
+
+    def test_a_worker_report_keeps_free_issue_lines(self):
+        self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails")), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Issues="None")), (0, "ok\n", ""))
+
+    def test_the_brief_passes_verifier_only_to_a_verifier(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(task), "--dry-run").stdout, "REPORT")
+        self.assertIn("--verifier`", verify)
+        self.assertIn("does not start with `blocking:`", verify)
+        self.assertNotIn("--verifier", self.section(self.brief(self.add_task()), "REPORT"))
+
+    # --- the path check
+
+    def test_the_path_check_refuses_a_missing_path_and_names_token_and_line(self):
+        os.makedirs(os.path.join(self.dir, "src"))
+        for name in ("a.py", "README.md"):
+            with open(os.path.join(self.dir, name), "w") as fh:
+                fh.write("x\n")
+        with open(os.path.join(self.dir, "src", "b.py"), "w") as fh:
+            fh.write("x\n")
+        good = self.report(Files="`README.md`, `src/`", Evidence="\nfirst -> `a.py:3`\nsecond -> `src/b.py:2-9`",
+                           Ran="`make test`: ok\n`python3 a.py`: ok")
+        self.assertEqual(self.check(good), (0, "ok\n", ""))
+        bad = self.report(Files="`src/missing.py`", Evidence="first -> `docs/gone.md:4`", Ran="`tests/test_x.py`: ok")
+        code, out, err = self.check(bad)
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(err.splitlines(), [
+            "run.py: `src/missing.py` under Files is not a path in this worktree (line: `src/missing.py`); correct "
+            "the path, or say on that line that it was deleted or removed",
+            "run.py: `docs/gone.md:4` under Evidence is not a path in this worktree (line: first -> `docs/gone.md:4`); "
+            "correct the path, or say on that line that it was deleted or removed",
+            "run.py: `tests/test_x.py` under Ran is not a path in this worktree (line: `tests/test_x.py`: ok); "
+            "correct the path, or say on that line that it was deleted or removed"])
+
+    def test_the_path_check_skips_what_is_not_a_repository_path(self):
+        tokens = ["make test", "src/<name>.py", "tests/*.py", "$HOME/x.py", "{a,b}/c.py", "https://x.io/a/b.html",
+                  "--flag=a/b", "/etc/hosts", "~/notes.md", "os.path", "True", "v1.2", "node_modules/.bin/x y",
+                  "yes/no|maybe"]
+        report = self.report(Ran="\n".join(f"`{t}`: ok" for t in tokens))
+        self.assertEqual(self.check(report), (0, "ok\n", ""))
+
+    def test_the_path_check_exempts_a_deleted_line_and_a_blocked_report(self):
+        report = self.report(Files="`old/gone.py` (deleted)\n`old/other.py` removed in this task")
+        self.assertEqual(self.check(report), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("BLOCKED", Files="`no/such.py`")), (0, "ok\n", ""))
+
+    def test_the_path_check_looks_up_an_absolute_path_inside_the_worktree(self):
+        inside = os.path.join(self.dir, "missing", "x.py")
+        code, _, err = self.check(self.report(Files=f"`{inside}`"))
+        self.assertEqual(code, 2)
+        self.assertIn(f"`{inside}` under Files", err)
+
+    def check_in(self, cwd, path):
+        out = subprocess.run([sys.executable, RUN, "check-report", path], capture_output=True, text=True, cwd=cwd)
+        return out.returncode, out.stderr
+
+    def test_the_path_check_accepts_a_missing_path_that_git_ignores(self):
+        repo = os.path.join(self.dir, "wt")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+            fh.write("/.agentic-team/shots/\n")
+        self.assertEqual(self.check_in(repo, self.report(Files="`.agentic-team/shots/a.png`")), (0, ""))
+        code, err = self.check_in(repo, self.report(Files="`src/missing.py`"))
+        self.assertEqual(code, 2)
+        self.assertIn("`src/missing.py` under Files", err)
+
+    def test_the_path_check_skips_a_path_with_a_parent_segment(self):
+        self.assertEqual(self.check(self.report(Files="`../x.py`, `a/../b.py`")), (0, "ok\n", ""))
+
+    def test_the_path_check_without_a_repository_still_refuses_a_missing_path(self):
+        code, _, err = self.check(self.report(Files="`src/missing.py`"))
+        self.assertEqual(code, 2)
+        self.assertIn("`src/missing.py` under Files", err)
+
+    def test_the_verifier_brief_defines_blocking_by_what_the_coders_build(self):
+        text = self.verify_text(self.running_task())
+        self.assertIn("neither the conclusion, the acceptance verdict, nor what the coders who follow would build", text)
+        self.assertIn("A finding that fits neither list is blocking.", text)
+        self.assertNotIn("downstream scope", text)
+
+    def test_the_path_check_does_not_apply_to_a_verifier(self):
+        self.assertEqual(self.check(self.report(Ran="`base/gone.py`: ok"), "--verifier"), (0, "ok\n", ""))
+
+    def test_the_worker_brief_names_the_path_check(self):
+        self.assertIn("does not exist in your worktree", self.section(self.brief(self.add_task()), "REPORT"))
+
+    # --- [scope] adjacent
+
+    def test_no_adjacent_line_by_default(self):
+        task = self.add_task()
+        self.assertNotIn("Also allowed outside SCOPE", self.brief(task))
+        self.write_config("[scope]\nadjacent = []\n")
+        self.assertNotIn("Also allowed outside SCOPE", self.brief(task))
+        self.assertNotIn("Adjacent changes", self.verify_text(self.running_task()))
+
+    def test_verifier_brief_holds_the_findings_rule_once(self):
+        text = self.verify_text(self.running_task())
+        self.assertEqual(text.count("### Findings"), 1)
+        self.assertIn("Each line under `Issues:` starts with `blocking:`", text)
+        self.assertIn("`nonblocking: <finding>: <why it does not block>`", text)
+        self.assertIn("`real-tree instances: 0`", text)
+        self.assertIn("report `PASS` and list them under `Follow-ups:`", text)
+
+    def test_adjacent_kinds_go_into_the_worker_and_verifier_briefs(self):
+        self.write_config('[scope]\nadjacent = ["lower-ratchet", "own-lint"]\n')
+        scope = self.section(self.brief(self.add_task()), "SCOPE")
+        self.assertTrue(scope.startswith("src/\n\nAlso allowed outside SCOPE, nothing more: `lower-ratchet`: only lower "
+                                         "a baseline, ratchet or allow-list count; never raise it and never add an entry; "
+                                         "`own-lint`: fix lint or format errors"), scope)
+        self.assertNotIn("stale-exemption", scope)
+        self.assertIn("`adjacent: <kind>: <path>`", scope)
+        text = self.verify_text(self.running_task())
+        self.assertIn("### Adjacent changes", text)
+        self.assertIn("`lower-ratchet`: only lower", text)
+        self.assertIn("Check that each `adjacent: <kind>: <path>` line", text)
+        self.assertNotIn("stale-exemption", text)
+
+    def test_an_unknown_adjacent_kind_is_refused_naming_the_kinds(self):
+        self.write_config('[scope]\nadjacent = ["lower-ratchet", "lower-ratchett"]\n')
+        out = self.run_cmd("status")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('scope.adjacent: "lower-ratchett" is not an adjacent-change kind; the kinds are lower-ratchet, '
+                      "stale-exemption, own-lint (did you mean lower-ratchet?)", out.stderr)
 
 
 class PrTest(Base):
@@ -6867,7 +7603,8 @@ class ProfileTest(Base):
         self.assertEqual(self.started_under(), [self.api])
         entry = self.meta(task)["sessions"][0]
         self.assertEqual(entry, {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
-                                 "worktree": "task-1", "model": "sonnet", "profile": "api"})
+                                 "worktree": "task-1", "model": "sonnet", "profile": "api", "role": None,
+                                 "tier": "implementation", "verify_kind": "code"})
         detail = self.one(events, "launched")["detail"]
         self.assertTrue(detail.startswith("sonnet profile api session task-1-1 "), detail)
         self.assertNotIn("does not list", detail)  # the id was checked against the api profile's own list
@@ -6884,7 +7621,8 @@ class ProfileTest(Base):
                 events = self.events("launch", str(task))
                 self.assertEqual(self.meta(task)["sessions"],
                                  [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
-                                   "worktree": "task-1", "model": "sonnet"}])
+                                   "worktree": "task-1", "model": "sonnet", "role": None, "tier": "implementation",
+                                   "verify_kind": "code"}])
                 self.assertEqual(self.one(events, "launched")["detail"].split(" session ")[0], "sonnet/high")
                 with open(self.log + ".dirs") as fh:
                     self.assertEqual({json.loads(line)["dir"] for line in fh}, {None})
@@ -7726,6 +8464,23 @@ class DeliveryTest(Base):
         self.assertEqual(self.stopped_ids(), [])  # resumed: not stopped any more
         self.assertEqual(self.one(self.events("record"), "running")["session"], "sess-task-1-1")  # the same row, busy again
         self.assertEqual(self.calls_in("stop", None), [])  # nothing ran under the Manager's profile
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_t9_a_read_only_exclude_leaves_the_process_running_and_the_message_pending(self):
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        with open(exclude, "a"):
+            pass
+        os.chmod(exclude, 0o444)
+        self.addCleanup(lambda: os.path.exists(exclude) and os.chmod(exclude, 0o644))
+        events = self.events("answer", str(task), "--file", self.text_file("v2"))
+        self.assertTrue(any(f"cannot write {exclude}" in e["detail"] for e in self.named(events, "deliver-fallback")))
+        self.assertEqual(self.calls_in("stop", self.c2), [])
+        self.assertEqual(self.resumes(), [])
+        (answer,) = [r for r in self.results(task) if r["kind"] == "answer"]
+        self.assertEqual(self.mailbox_meta(task)[str(answer["id"])].get("tries", 0), 0)
 
     def test_t9_a_parked_worker_with_no_process_is_resumed_without_a_stop(self):
         task = self.worker(status=None, state="done")
@@ -8715,6 +9470,49 @@ class DeliveryTest(Base):
         before = (self.results(task), self.meta(task))
         self.events("inbox", str(task))
         self.assertEqual((self.results(task), self.meta(task)), before)  # read only
+
+    # --- 0.17.0: a rowless resume keeps the tier that launch stored
+
+    def rowless_resume(self, *launch_flags, role_files=(), **meta):
+        """Launch on c2, lose the job (`claude rm`; the transcript stays), answer an ask: the resume passes the launch flags.
+        Returns the argv of that resume. The judgement tier is opus at max effort, so the effort shows which tier ran."""
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[models]\njudgement = {{ model = "opus", effort = "max" }}\n',
+                          sessions="max_parallel = 3\n")
+        for name, tier in role_files:
+            folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, name + ".md"), "w") as fh:
+                fh.write(f"---\nfits: x\ntier: {tier}\n---\n\n## Method\n\nDo it.\n")
+        task = self.add_task(**meta)
+        self.ok("launch", str(task), "--profile", "c2", *launch_flags)
+        for name, _ in role_files:  # the role file is gone before the resume
+            os.remove(os.path.join(self.root, ".claude", "agentic-team", "roles", name + ".md"))
+        entries = self.meta(task)["sessions"]
+        entries[0]["sessionId"] = UUID1
+        self.record_sessions(task, *entries)
+        folder = os.path.join(self.c2, "projects", re.sub(r"[^A-Za-z0-9]", "-", self.task_wt(task)))
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, UUID1 + ".jsonl"), "w") as fh:
+            fh.write(transcript_text(1))
+        self.c2_agents()
+        self.ask(task)
+        self.events("record")
+        env = dict(self.env, FAKE_CLAUDE_REMOVED_ID="sess-task-1-1")
+        self.events("answer", str(task), "--file", self.text_file("v2"), env=env)
+        (argv,) = [a for a, _ in self.calls_in("--bg", self.c2) if "--resume" in a]
+        return argv
+
+    def test_r17_a_tier_flag_at_launch_survives_a_rowless_resume(self):
+        argv = self.rowless_resume("--tier", "judgement")
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("opus", "max"))
+
+    def test_r17_a_role_tier_survives_a_rowless_resume_even_when_the_role_file_is_gone(self):
+        argv = self.rowless_resume(role_files=(("judge", "judgement"),), role="judge")
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("opus", "max"))
+
+    def test_r17_a_task_with_no_role_or_tier_resumes_as_before(self):
+        argv = self.rowless_resume()
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("sonnet", "high"))
 
 
 def transcript_text(tokens):

@@ -65,6 +65,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
                                              "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code"})
+        self.assertEqual(cfg["roles"], {"default": ""})
+        self.assertEqual(cfg["scope"], {"adjacent": []})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_template_needs_filling(self):
@@ -206,9 +208,23 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[merge]\ndisposable = ["TODO"]\n')
         self.assertEqual(config.problems(config.load(self.root)),
                          ['merge.disposable is TODO; set it, or "" / [] if it does not apply'])
-        self.assertEqual(len(config.DISPOSABLE_DEFAULT), 36)
+        self.assertEqual(len(config.DISPOSABLE_DEFAULT), 37)
         for pattern in config.DISPOSABLE_DEFAULT:
             self.assertEqual(config.pattern_problems("x", [pattern, "!" + pattern]), [], pattern)
+
+    def test_scope_adjacent_is_a_list_of_known_kinds(self):
+        self.write(MINIMAL + '[scope]\nadjacent = ["lower-ratchet", "stale-exemption", "own-lint"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "scope.adjacent")[:2],
+                         (0, '["lower-ratchet", "stale-exemption", "own-lint"]\n'))
+        self.write(MINIMAL + '[scope]\nadjacent = ["lower-ratchet", "raise-ratchet"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'scope.adjacent: "raise-ratchet" is not an adjacent-change kind; the kinds are '
+            "lower-ratchet, stale-exemption, own-lint (did you mean lower-ratchet?)"])
+        self.assertEqual(self.run_cli("check")[0], 2)
+        self.write(MINIMAL + '[scope]\nadjacent = "own-lint"\n')
+        self.assertEqual(config.problems(config.load(self.root)),
+                         ['scope.adjacent must be a list of adjacent-change kinds, not "own-lint"'])
 
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")

@@ -18,6 +18,10 @@ adds what Taskgraph cannot decide.
    - `--priority P0|P1|P2|P3` (optional; P0 is the highest, no priority is the
      default). `record` lists ready tasks in priority order, then by id. Never
      pass it with `--meta`;
+   - `--meta role=<name>`: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" roles` once while
+     planning and pick the role whose `fits` matches the task. Set `tier` or
+     `verify_kind` only to depart from the role's defaults. A task that needs two
+     roles is two tasks. No role is fine for work no role fits.
    - `--meta tier=<mechanical|implementation|judgement|override key>`;
    - `--meta risk=low|high`. Use `high` when a check is expensive or needs
      judgement, when other work builds on the output, or when readers rely on it;
@@ -31,9 +35,16 @@ adds what Taskgraph cannot decide.
      `verify.kind`, else `code`). `schema`: a data model, DDL or migration; the
      verifier recomputes numbers and runs the DDL. `design-doc`: an ADR, RFC or
      architecture document; the verifier checks sources, completeness and
-     contradictions. Only `artifact-verified` closes these two kinds.
+     contradictions. Only `artifact-verified` closes these two kinds. A `design-doc` task's
+     ACCEPTANCE lists the full template in round 1: the problem statement with measurable
+     outcomes, ranked quality goals, options with "do nothing" and why each lost, the
+     rejected alternative of each decision, failure modes (half-migrated, rolled back),
+     migration steps, and a closed checklist for the coders who follow. The checklist
+     refers to no git-ignored scratch file; census scripts go into the repository.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
+   Record only a dependency that is real. Keep every slot busy within priority and
+   dependency order: split a task that is too large to finish in one attempt.
 4. **Relay context through dependencies.** A task that needs an upstream
    result depends on that task. The brief pastes the upstream result.
 5. **Ask through decisions.** A question only the operator can answer is a
@@ -43,7 +54,9 @@ adds what Taskgraph cannot decide.
    three tasks. For work the operator already asked for, add one or two tasks
    without asking again.
 7. **Re-plan on evidence.** When a report changes scope, assumptions, or
-   dependencies, update Taskgraph first, then continue.
+   dependencies, update Taskgraph first, then continue. Once a worker has started,
+   its task's SCOPE and ACCEPTANCE do not change: a requirement found later becomes a
+   new task.
 
 **Reply:** tasks added or changed, the critical path, and the first tasks you
 will launch, with tier and risk for each.

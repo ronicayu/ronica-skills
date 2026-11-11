@@ -20,10 +20,15 @@ Usage:
     status         print the status report (tables), with the Follow-ups
                    lines of the worker reports counted by label and the mean
                    attempts of the tasks done in the period
+    roles          list the task roles (the plugin's and the project's) with
+                   their tier, verify kind and skills; read only; exit 1 when
+                   a role file is broken
     check-report <file>
                    check a report file before a session files it: Status,
-                   Checkpoint, a label on each Follow-ups line; needs no
-                   config, Taskgraph or repository
+                   Checkpoint, a label on each Follow-ups line, the paths
+                   quoted in a worker report (--verifier: the blocking
+                   labels of a verifier report); needs no config, Taskgraph
+                   or repository
     wait           poll until something in flight changes, or a time limit
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
@@ -108,7 +113,7 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
-from config import (DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
+from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
                     profile_path, resolve_model, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
@@ -154,17 +159,38 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
-REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Files|Issues|Deviations|Follow-ups|"
+REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
-FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision")  # decision: a verifier's line
+VERIFIER_FINDINGS = """### Findings
+
+Label every finding. Each line under `Issues:` starts with `blocking:` and says why it blocks. Blocking: a real defect \
+(behaviour, output, red test), a design gap (an undefined decision, a contradiction), an acceptance line not met, a \
+scope breach, an error that reaches product output or user-visible text, any security or data-correctness risk. A \
+non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`. Non-blocking: a \
+theoretical gap with 0 instances in the real tree and no security or data risk (the line states `real-tree instances: 0` \
+and how you counted them); any finding whose correction changes neither the conclusion, the acceptance \
+verdict, nor what the coders who follow would build (for example a wrong number or cross-reference, or a missing \
+diagram edge that no later task depends on). A finding that fits neither list is blocking. Report `ISSUES` only when at least one blocking finding exists; with only \
+non-blocking findings, report `PASS` and list them under `Follow-ups:`. `check-report --verifier` refuses an `ISSUES` \
+report whose `Issues:` lines do not all start with `blocking:`."""
+FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
 FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
 FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
+PATH_FIELDS = ("Files", "Evidence", "Ran")  # the fields whose backticked paths check-report looks up in a worker report
+BACKTICKED = re.compile(r"`([^`\n]+)`")
+PATH_LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
+PATH_CHARS = re.compile(r"[\w./@+~-]+")
+PATH_EXTENSIONS = frozenset("py md toml json yaml yml txt sh js ts tsx jsx css html cfg ini lock sql rs go java c h cpp "
+                            "csv xml rb php kt swift".split())
+DELETED_WORD = re.compile(r"\b(deleted|removed)\b", re.I)
 COMMENT_LIMIT = 8000  # characters of evidence in the request comment
 DOCKER_TIMEOUT = 20  # seconds for each docker command of the cleanup check
 COMPOSE_DIR_LABEL = "com.docker.compose.project.working_dir"
 REPORT_DIR = ".agentic-team"  # in a worktree, the folder of the session's report file
 REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it in every worktree
+SCRATCH_DIR = ".agentic-team-scratch"  # in a worktree, the one folder for a session's temporary files
+SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
@@ -275,6 +301,7 @@ class Run:
         self.host_failed = False
         self._fetched = set()
         self._docker = None  # (what docker_read() returned,) once containers() has asked
+        self.warned = set()  # role problems already printed as a warn event by this command
         self.resumed = set()  # (task, attempt) that this command resumed: the CLI's rows may lag, so it holds for the rest of the command
         self.locks = {}  # task id -> how deep this command holds the task's lock (task_lock)
         self.socket_failures, self.socket_off = 0, False  # failed socket posts of this command; two turn them off
@@ -660,6 +687,22 @@ def verdict_of(row):
     return match.group(1) if match else None
 
 
+def unlabelled_failure(row):
+    """The first problem that keeps a verifier row's verify-failed verdict from opening a fix round, or None. The
+    findings rule (verifier_problems) holds for the row: an ISSUES report with no `blocking:` line is not a failure.
+    A CI row and a Manager row carry no Issues lines and are never judged."""
+    if row.get("author") in ("ci", "manager") or verdict_of(row) != "verify-failed":
+        return None
+    body = row.get("body") or ""
+    status = STATUS_LINE.search(body)
+    found = verifier_problems(body, status.group(1) if status else row.get("status"))
+    return found[0] if found else None
+
+
+def unlabelled_next(tid, problem):
+    return f"run.py verify {tid} --again (the verifier's report has no blocking: line: {problem})"
+
+
 def retry_next(tid, attempt, mode="<mode>", lead="", before=""):
     """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
     run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
@@ -762,6 +805,298 @@ def ids_text(ids):
     return " ".join(f"#{i}" for i in ids) or "none"
 
 
+# ------------------------------------------------------------------- roles
+
+ROLE_KEYS = ("fits", "tier", "verify_kind", "skills")
+ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
+ROLE_NAME = re.compile(r"[a-z0-9-]+")
+ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
+STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
+
+
+class Role:
+    """One role file. `source` is "plugin" or "project"; `overrides` marks a project file that hides a plugin file of the
+    same name. parse_role fills the rest, or sets `error` to one line that names the problem."""
+
+    def __init__(self, name, path, source, overrides=False):
+        self.name, self.path, self.source, self.overrides = name, path, source, overrides
+        self.fits = self.tier = self.verify_kind = self.review = None
+        self.skills, self.method, self.error = [], "", None
+
+    @property
+    def where(self):
+        return "project, overrides plugin" if self.overrides else self.source
+
+    @property
+    def words(self):
+        return len(f"{self.method} {self.review or ''}".split())
+
+
+def role_value(raw):
+    """The value of one frontmatter line: a `[...]` list to its closing bracket, else the text up to a `#` comment (a `#`
+    that starts the value or follows a space)."""
+    value = raw.strip()
+    if value.startswith("["):
+        close = value.find("]")
+        if close < 0:
+            raise ValueError("a list has no closing ]")
+        if value[close + 1:].strip() and not value[close + 1:].strip().startswith("#"):
+            raise ValueError("text after the closing ] of a list")
+        return value[:close + 1]
+    return re.split(r"(?:^|\s)#", value, maxsplit=1)[0].strip()
+
+
+def parse_role(run, role):
+    """Read role.path into `role`. Any problem sets role.error and stops."""
+    try:
+        with open(role.path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        role.error = f"cannot read the file: {exc}"
+        return
+    try:
+        fields, body = role_frontmatter(run, lines)
+    except ValueError as exc:
+        role.error = str(exc)
+        return
+    role.fits, role.tier, role.verify_kind, role.skills = (fields.get(k) for k in ROLE_KEYS)
+    role.skills = role.skills or []
+    sections, current = {}, None
+    for line in body:
+        if line.startswith("## "):
+            current = line[3:].strip()
+            if current in ("Method", "Review"):  # any other `## ` heading ends the section and its text is dropped
+                if current in sections:
+                    role.error = f"two ## {current} sections"
+                    return
+                sections[current] = []
+            else:
+                current = None
+        elif current:
+            sections[current].append(line)
+    role.method = "\n".join(sections.get("Method", [])).strip()
+    role.review = "\n".join(sections.get("Review", [])).strip() or None
+    if not role.method:
+        role.error = "no ## Method section, or it is empty"
+
+
+def role_frontmatter(run, lines):
+    """({key: value}, the lines after the frontmatter) of a role file; ValueError names a problem."""
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("the file must start with a --- line that opens the frontmatter")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise ValueError("the frontmatter has no closing --- line")
+    fields = {}
+    for number, line in enumerate(lines[1:end], 2):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        key, colon, raw = text.partition(":")  # the first colon only: a `fits` value holds more
+        key = key.strip()
+        if not colon:
+            raise ValueError(f"line {number}: expected `key: value`")
+        if key not in ROLE_KEYS:
+            raise ValueError(f"line {number}: unknown key {key!r}; the keys are {', '.join(ROLE_KEYS)}")
+        if key in fields:
+            raise ValueError(f"line {number}: {key} is set twice")
+        try:
+            value = role_value(raw)
+        except ValueError as exc:
+            raise ValueError(f"line {number}: {key}: {exc}")
+        if key == "skills":
+            fields[key] = role_skills(value, number)
+        elif value:
+            fields[key] = value
+    if not fields.get("fits"):
+        raise ValueError("no `fits` line: say in one line which tasks the role is for")
+    if tier := fields.get("tier"):
+        try:
+            if not resolve_model(run.config, tier)["model"]:
+                raise ValueError(f"tier {tier!r} has no model; set [models] {tier} or name another tier")
+        except ConfigError as exc:
+            raise ValueError(f"tier: {exc}")
+    if fields.get("verify_kind") and fields["verify_kind"] not in VERIFY_KINDS:
+        raise ValueError(f"verify_kind must be one of {', '.join(VERIFY_KINDS)}, not {fields['verify_kind']!r}")
+    return fields, lines[end + 1:]
+
+
+def role_skills(value, number):
+    """The skill names of a `skills:` value: empty, `[]`, or `[plugin:skill, ...]`."""
+    if not value:
+        return []
+    if not value.startswith("["):
+        raise ValueError(f"line {number}: skills must be a list in brackets, as [plugin:skill, ...], not {value!r}")
+    names = [item.strip() for item in value[1:-1].split(",")] if value[1:-1].strip() else []
+    for name in names:
+        if not ROLE_SKILL.fullmatch(name):
+            raise ValueError(f"line {number}: skills: {name!r} is not a skill name such as plugin:skill")
+    return names
+
+
+def role_files(run):
+    """{name: Role} for every role file, not yet parsed. A project file hides the plugin file of the same name. A file
+    whose name is not lowercase letters, digits and `-` is kept under its name, with its error set."""
+    found = {}
+    for source, folder in (("plugin", os.path.join(PLUGIN_ROOT, "templates", "roles")),
+                           ("project", os.path.join(run.root, ".claude", "agentic-team", "roles"))):
+        for path in sorted(glob.glob(os.path.join(glob.escape(folder), "*.md"))):
+            name = os.path.basename(path)[:-3]
+            found[name] = Role(name, path, source, overrides=name in found)
+    return found
+
+
+def role_list(found):
+    return ", ".join(f"{name} ({found[name].source})" for name in sorted(found)) or "none"
+
+
+def load_role(run, name, origin):
+    """The parsed role `name`. Refused, with the problem and the roles there are, when no file has that name or its file is
+    broken. `origin` says where the name came from, for the message."""
+    found = role_files(run)
+    role = found.get(name)
+    if role is None:
+        raise Refused(f"{origin}: no role named {name!r}; available roles: {role_list(found)}")
+    if not ROLE_NAME.fullmatch(name):
+        role.error = "the file name must be lowercase letters, digits and -"
+    else:
+        parse_role(run, role)
+    if role.error:
+        raise Refused(f"{origin}: role file {role.path}: {role.error}; available roles: {role_list(found)}")
+    return role
+
+
+def role_size_warning(run, task, role, attempt=None):
+    """One `warn` event when the role is longer than ROLE_WORDS_MAX words."""
+    if role and role.words > ROLE_WORDS_MAX:
+        run.emit("warn", task["id"], attempt, None,
+                 f"role {role.name} ({role.path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
+                 "closely; shorten Method and Review")
+
+
+class Choice:
+    """The role, tier and verify kind of a task, and where the tier and the verify kind came from."""
+
+    def __init__(self, role, tier, tier_from, verify_kind, kind_from):
+        self.role, self.tier, self.tier_from, self.verify_kind, self.kind_from = role, tier, tier_from, verify_kind, kind_from
+
+    @property
+    def stored(self):
+        return {"role": self.role.name if self.role else None, "tier": self.tier, "verify_kind": self.verify_kind}
+
+    @property
+    def tier_text(self):
+        """`tier judgement (role architect)`; a role that did not set the tier is named after it."""
+        named = f"; role {self.role.name}" if self.role and self.tier_from != f"role {self.role.name}" else ""
+        return f"tier {self.tier} ({self.tier_from}){named}"
+
+
+def choose(run, task, tier=None, strict=True, kind_strict=None):
+    """The role, tier and verify kind of a task, from its meta, its role and the config.
+
+    Role: the task's `role` meta, else [roles] default, else none. A role that has no file, or a broken one, is refused when
+    `strict`; otherwise it is one `warn` event and no role.
+    Tier: `tier` (--tier), else the `tier` meta, else the role's tier, else implementation.
+    Verify kind: the `verify_kind` meta, else the role's, else [verify] kind. A bad meta value is refused when `kind_strict`
+    (default: `strict`), else it is passed over."""
+    meta = task.get("meta") or {}
+    tid = task["id"]
+    kind_strict = strict if kind_strict is None else kind_strict
+    named, origin = str(meta.get("role") or "").strip(), f"#{tid} role meta"
+    if not named:
+        named, origin = str(run.config["roles"]["default"]).strip(), "[roles] default"
+    role = None
+    if named:
+        try:
+            role = load_role(run, named, origin)
+        except Refused as exc:
+            if strict:
+                raise
+            if str(exc) not in run.warned:  # one line for the command, however many readers ask
+                run.warned.add(str(exc))
+                run.emit("warn", tid, None, None, f"{exc}; read as no role")
+    if tier:
+        chosen_tier, tier_from = tier, "--tier"
+    elif meta.get("tier"):
+        chosen_tier, tier_from = str(meta["tier"]), "meta"
+    elif role and role.tier:
+        chosen_tier, tier_from = role.tier, f"role {role.name}"
+    else:
+        chosen_tier, tier_from = "implementation", "default"
+    value = meta.get("verify_kind")
+    if value in (None, "") or (str(value) not in VERIFY_KINDS and not kind_strict):
+        value = None
+    elif str(value) not in VERIFY_KINDS:
+        raise Refused(f'#{tid} verify_kind must be "code", "schema" or "design-doc", not {value}')
+    if value:
+        kind, kind_from = str(value), "meta"
+    elif role and role.verify_kind:
+        kind, kind_from = role.verify_kind, f"role {role.name}"
+    else:
+        kind, kind_from = run.config["verify"]["kind"], "config"
+    return Choice(role, chosen_tier, tier_from, kind, kind_from)
+
+
+def stored_choice(task):
+    """The `sessions` entry of the current attempt that launch or adopt stored a role, tier and verify kind in, or None
+    for an attempt from before 0.17.0. It needs no session id: an adopted attempt has none."""
+    attempt = wanted_attempt(task)
+    found = [e for e in recorded_sessions(task)
+             if e.get("kind") == "task" and e.get("attempt") == attempt and "verify_kind" in e]
+    return found[-1] if found else None
+
+
+def verify_role(run, task):
+    """The role whose Review the verifier gets: the one the attempt was launched with, read from its file now, else the
+    one the task names now. Refused when that role has no file or a broken one: the operator fixes the file."""
+    stored = stored_choice(task)
+    if stored is None:
+        return choose(run, task).role
+    name = stored.get("role")
+    return load_role(run, name, f"#{task['id']} attempt {stored.get('attempt')} role") if name else None
+
+
+def role_section(role, kind):
+    """The text of the ROLE section of a worker brief (the Method) or of a verifier brief (the Review)."""
+    if role is None:
+        return "None."
+    if kind == "verify":
+        if not role.review:
+            return f"Task role: {role.name}. No review checks."
+        return (f"Task role: {role.name} ({role.path}). Check these in addition to the method under VERIFY:\n\n"
+                f"{role.review}")
+    parts = [f"Role: {role.name} ({role.path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
+    if role.skills:
+        parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
+                     "load, say so under Deviations: and follow the method below.")
+    return "\n\n".join(parts + [role.method])
+
+
+def cmd_roles(run, args):
+    """List every role file with its source and defaults. Read only. Exits 1 when a file is broken."""
+    found, rows, broken = role_files(run), [], 0
+    for name in sorted(found):
+        role = found[name]
+        if ROLE_NAME.fullmatch(name):
+            parse_role(run, role)
+        else:
+            role.error = "the file name must be lowercase letters, digits and -"
+        broken += bool(role.error)
+        rows.append({"name": name, "source": role.where, "path": role.path, "fits": role.fits, "tier": role.tier,
+                     "verify_kind": role.verify_kind, "skills": role.skills, "words": None if role.error else role.words,
+                     "error": role.error})
+        if role.error:
+            run.emit("role-broken", None, None, None, f"{name} ({role.where}): {role.path}: {role.error}")
+        else:
+            run.emit("role", None, None, None,
+                     f"{name} ({role.where}); fits: {role.fits}; tier {role.tier or '-'}; verify kind {role.verify_kind or '-'}; "
+                     f"skills {', '.join(role.skills) or '-'}")
+    if run.json:
+        run.payload = rows
+    if broken:
+        raise Refused(f"{broken} role file{'s' * (broken != 1)} broken; fix {'them' if broken != 1 else 'it'} before a launch", 1)
+
+
 # ------------------------------------------------------------------- brief
 
 def parse_notes(notes):
@@ -790,22 +1125,39 @@ def report_path(run, worktree, session):
     return os.path.join(run.wt_dir, worktree, REPORT_DIR, f"report-{session}.md")
 
 
-def ignore_reports(run):
-    """Add the report folder to the repository's info/exclude, once. Every linked worktree reads that file from the
-    common git dir, so `git status` does not show a report file and `git add -A` does not add it."""
+def add_exclude(run, line):
+    """Add one line to the repository's info/exclude, once. Every linked worktree reads that file from the common
+    git dir. Other lines stay as they are."""
     path = os.path.join(run.root, run.git("rev-parse", "--git-path", "info/exclude").stdout.strip())
+    text = ""
+    if os.path.isfile(path):
+        with open(path) as fh:
+            text = fh.read()
+    if line in text.splitlines():
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(("" if not text or text.endswith("\n") else "\n") + line + "\n")
+
+
+def ignore_reports(run):
+    """Ignore the report folder in every worktree, so `git status` does not show a report file and `git add -A`
+    does not add it."""
     try:
-        text = ""
-        if os.path.isfile(path):
-            with open(path) as fh:
-                text = fh.read()
-        if REPORT_EXCLUDE in text.splitlines():
-            return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a") as fh:
-            fh.write(("" if not text or text.endswith("\n") else "\n") + REPORT_EXCLUDE + "\n")
+        add_exclude(run, REPORT_EXCLUDE)
     except OSError as exc:
-        raise Refused(f"cannot write {path}: {exc.strerror}")
+        raise Refused(f"cannot write {exc.filename}: {exc.strerror}")
+
+
+def ignore_scratch(run):
+    """Ignore the scratch folder in every worktree, before a session starts in one. A session leaves the folder
+    in place, so a worktree that does not ignore it shows it as uncommitted and keeps the worktree."""
+    try:
+        add_exclude(run, SCRATCH_EXCLUDE)
+    except OSError as exc:
+        raise Refused(f"cannot write {exc.filename}: {exc.strerror}; {SCRATCH_DIR}/ would show as uncommitted in "
+                      f"the worktrees. Make the file writable (or add the line {SCRATCH_EXCLUDE} to it yourself), "
+                      "then run the command again.")
 
 
 def clear_report(path):
@@ -1047,8 +1399,14 @@ def result_command(py, tg, db, project, task_id, kind, attempt, session, report)
             f"--status <STATUS> --body-file {quote(report)}")
 
 
-def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0):
-    """The brief text. Taskgraph is the only source of task content."""
+def adjacent_text(config):
+    """The kinds of change outside SCOPE that the project allows, one line each; "" when [scope] adjacent is empty."""
+    return "; ".join(f"`{kind}`: {ADJACENT_KINDS[kind]}" for kind in config["scope"]["adjacent"])
+
+
+def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None):
+    """The brief text. Taskgraph is the only source of task content. `role` is the task's role: its Method goes into a worker
+    brief and its Review into a verifier brief."""
     tid = task["id"]
     meta = task.get("meta") or {}
     tg_cmd = f"{quote(sys.executable)} {quote(run.tg_path)} --db {quote(run.db)} --project {shlex.quote(run.project)}"
@@ -1073,7 +1431,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     forbidden = [f"- {item}" for item in config["constraints"]["forbidden"] if item.strip()]
     orders = run.orders()
     report = report_path(run, session if kind == "verify" else f"task-{tid}", session)
-    mailbox_arg = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))}" if kind != "verify" else "")
+    worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
+                   if kind != "verify" else "")
+    verifier_arg = " --verifier" if kind == "verify" else ""
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -1084,11 +1444,15 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "VERIFY": str(meta["verify"]).strip(),
         "TIMEBOX": timebox,
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
+        "ROLE": role_section(role, kind),
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
-                          f"check-report {quote(report)}{mailbox_arg}"),
-        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked." if kind != "verify" else ""),
+                          f"check-report {quote(report)}{worker_args}{verifier_arg}"),
+        "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked, a `PASS` report with fewer "
+                       "`Evidence:` lines than ACCEPTANCE lines, and a path in backticks under `Files:`, `Evidence:` or "
+                       "`Ran:` that does not exist in your worktree." if kind != "verify" else
+                       " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                           report) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
@@ -1109,9 +1473,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             if base_sha:
                 setup += ("\n- " + f"Base commit: {base_sha} ({how}). Head commit: {ref}. The change under review is "
                           f"`git diff {base_sha} {ref}`; `git log --oneline {base_sha}..{ref}` lists its commits. To run "
-                          f'anything at the base commit, export it read only: `git archive {base_sha} | tar -x -C '
-                          '"$(mktemp -d)"`, install what the run needs there (the export holds tracked files only), '
-                          "work in that folder, and delete it before you report. Never check out, reset, or add a "
+                          f'anything at the base commit, first run every check of the head commit (the head\'s own test suites and the VERIFY '
+                          f'commands). Only then export the base read only: run `mkdir -p {SCRATCH_DIR}/base` in one call, then '
+                          f'`git archive {base_sha} | tar -x -C {SCRATCH_DIR}/base` in the next (the pipe is fine), install what the run needs there (the '
+                          "export holds tracked files only), and run only the base-side checks in that folder. Leave the "
+                          "export in place: `run` removes it with the worktree. Never check out, reset, or add a "
                           "worktree.")
             else:
                 setup += ("\n- " + f"Base commit: unknown ({how}). Head commit: {ref}. Judge the head against ACCEPTANCE "
@@ -1142,12 +1508,16 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
             "SCOPE": ("Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete "
-                      "anything. The one exception is your report file, which REPORT names."),
+                      f"anything. The exceptions are your report file, which REPORT names, and {SCRATCH_DIR}/."),
             "SETUP": setup,
             "CHECKPOINT": "None",
             "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
                          f"{strip_comments(worker['body']).strip()}"),
-            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method,
+            "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + "\n\n" + VERIFIER_FINDINGS + (
+                f"\n\n### Adjacent changes\n\nThe project allows these changes outside SCOPE, nothing more: "
+                f"{adjacent_text(config)}. Check that each `adjacent: <kind>: <path>` line under the worker's "
+                "`Deviations:` is of an allowed kind and the change does only that. Any other change outside SCOPE "
+                "is a blocking issue." if adjacent_text(config) else ""),
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
                             "verify-blocked, or verify-failed."),
@@ -1178,7 +1548,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         autonomy = config["autonomy"]
         values.update({
             "GOAL": f"{task['title']}. {why}",
-            "SCOPE": str(meta["scope"]).strip(),
+            "SCOPE": (str(meta["scope"]).strip() + (
+                f"\n\nAlso allowed outside SCOPE, nothing more: {adjacent_text(config)}. List each such change under "
+                "`Deviations:` as `adjacent: <kind>: <path>`." if adjacent_text(config) else "")),
             "SETUP": (f"Attempt {attempt}. Your worktree is at `{base}` on branch `{task_branch(tid)}`. It holds the "
                       "commits of the earlier attempts of this task. Read the previous report under UPSTREAM and build "
                       "on it; do not redo what passed. Do not reset the worktree or check out another commit. If "
@@ -1430,17 +1802,21 @@ def verify_mode(run, task):
 
 
 def verify_kind(run, task, strict=True):
-    """"code", "schema" or "design-doc": the task's verify_kind meta, else verify.kind from the config.
-    strict refuses any other value; record passes strict=False and falls back to the config default."""
+    """"code", "schema" or "design-doc": the task's verify_kind meta, else the kind that launch or adopt stored for the
+    attempt, else its role's, else verify.kind from the config. The meta is read live, so the Manager can change it after a
+    launch; the stored kind stands in for the role, so a role file that changed or went away cannot fail a later command.
+    strict refuses a bad meta value; record passes strict=False and passes it over. A role problem is never refused here:
+    it reads as no role, with one warn event."""
     value = (task.get("meta") or {}).get("verify_kind")
-    if value is None or value == "":
-        return run.config["verify"]["kind"]
-    text = str(value)
-    if text in VERIFY_KINDS:
-        return text
-    if not strict:
-        return run.config["verify"]["kind"]
-    raise Refused(f'#{task["id"]} verify_kind must be "code", "schema" or "design-doc", not {text}')
+    if value not in (None, ""):
+        if str(value) in VERIFY_KINDS:
+            return str(value)
+        if strict:
+            raise Refused(f'#{task["id"]} verify_kind must be "code", "schema" or "design-doc", not {value}')
+    stored = stored_choice(task)
+    if stored and stored.get("verify_kind") in VERIFY_KINDS:
+        return stored["verify_kind"]
+    return choose(run, task, strict=False, kind_strict=False).verify_kind
 
 
 def verify_base(run, task, head):
@@ -1602,6 +1978,9 @@ def cmd_launch(run, args):
     orders = run.orders()
     if orders.stop:
         raise Refused(f"standing orders say {orders.stop_line!r}; launch nothing", 3)
+    if not args.dry_run:  # a refusal here changes nothing: no session is stopped and no commit is made
+        ignore_reports(run)
+        ignore_scratch(run)
     if args.keyword and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", args.keyword):
         raise Refused(f"keyword {args.keyword!r} may hold letters, digits, and hyphens only")
     task = run.show(tid)
@@ -1613,7 +1992,7 @@ def cmd_launch(run, args):
         raise Refused(f"#{tid} is done")
     refuse_legacy(task)
     verify_mode(run, task)
-    verify_kind(run, task)
+    picked = choose(run, task, args.tier)  # the role, tier and verify kind of this attempt; refused for a bad role
     blockers = waiting_for(run, task)
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
@@ -1727,9 +2106,10 @@ def cmd_launch(run, args):
     base = commit_of(run, base) or base  # a full SHA for the brief, the meta and the worktree check
     continuing = mode in ("continue", "reattach", "head")
     session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
-    tier = args.tier or str(meta.get("tier") or "implementation")
+    tier = picked.tier
+    role_size_warning(run, task, picked.role, nxt)
     cap = asks_cap(run, task, tier)
-    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap)
+    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
     check_cap(run)
     if args.model:
         model, effort = args.model, args.effort
@@ -1768,7 +2148,7 @@ def cmd_launch(run, args):
             shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
             notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
                             "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
-            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap)
+            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
     elif mode == "reattach":
         if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
             raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
@@ -1784,7 +2164,6 @@ def cmd_launch(run, args):
     if current:
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
     try:
-        ignore_reports(run)
         clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{nxt}.md", text)
         write_ctx(run, task, nxt, session, cap)
@@ -1793,7 +2172,10 @@ def cmd_launch(run, args):
         started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
     entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model, profile)
-    sessions = recorded_sessions(task) + ([entry] if entry else [])
+    if entry is None:  # no session id is known; the attempt still keeps its role, tier and verify kind
+        entry = {"kind": "task", "attempt": nxt, "name": session, "worktree": worktree, "model": model,
+                 **profile_field(profile)}
+    sessions = recorded_sessions(task) + [{**entry, **picked.stored}]
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts. `base` is the commit the
@@ -1812,7 +2194,7 @@ def cmd_launch(run, args):
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
-              f"session {session} worktree {rel} {where} brief {path}"
+              f"session {session} worktree {rel} {where} brief {path}; {picked.tier_text}"
               + "".join(f"; {n}" for n in notes)
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
               + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
@@ -1851,7 +2233,7 @@ def cmd_adopt(run, args):
     if blockers:
         raise Refused(f"#{tid} waits for {' '.join(blockers)}; finish or decide them first")
     verify_mode(run, task)
-    verify_kind(run, task)
+    chosen = choose(run, task)
     refuse_past_cap(tid, current + 1, task_rows(run.results_for(tid), current), None)
     if not re.fullmatch(r"[0-9a-f]{7,40}", args.head):
         raise Refused(f"--head {args.head} is not a commit SHA (7 to 40 hex characters)")
@@ -1883,9 +2265,10 @@ def cmd_adopt(run, args):
     nxt, now = current + 1, run.now()
     if task["status"] == "open":
         run.tg("start", str(tid))
-    fresh = {} if "sessions" in meta else {"sessions": []}
+    # No session ran, so the entry has no id; it holds the attempt's role, tier and verify kind for later commands.
+    sessions = recorded_sessions(task) + [{"kind": "task", "attempt": nxt, "name": "adopted", **chosen.stored}]
     run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in {"attempt": nxt, "session": "adopted", "started_at": now,
-           "base": base, **fresh, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
+           "base": base, "sessions": sessions, **extra}.items()], "--unset-meta", "verdict", "verdict_ref", "abandoned")
     run.add_result(tid, "task", nxt, "manager", "PASS",
                    f"Task: {tid}\nStatus: PASS\nBranch: {branch}\nHead: {head}\nWorktree: None\nRan: not stated (adopted)\n"
                    f"Files: None\nIssues: None\nDeviations: adopted by the Manager at {now}; the work was done outside run.py\n"
@@ -1926,10 +2309,13 @@ def cmd_verify(run, args):
     task = run.show(tid)
     refuse_legacy(task)
     mode = verify_mode(run, task)
-    kind = verify_kind(run, task)
     if mode != "session":
+        verify_kind(run, task)
         return verify_ci(run, args, task, mode[3:])
     attempt = refuse_unless_running(task)
+    role = verify_role(run, task)  # refused when the role of this attempt has no file or a broken one
+    role_size_warning(run, task, role, attempt)
+    kind = verify_kind(run, task)
     rows, worker = worker_for(run, tid, attempt, args.result)
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
     if not ref:
@@ -1940,6 +2326,9 @@ def cmd_verify(run, args):
         raise Refused(f"#{tid} attempt {attempt} already has verify result #{last['id']} "
                       f"(Verdict: {verdict_of(last) or 'none'}); run run.py close {tid}, "
                       "or pass --again once a verify-blocked cause is fixed")
+    if not args.dry_run:  # before the over verifier is stopped
+        ignore_reports(run)
+        ignore_scratch(run)
     verifiers = own_sessions(run, tid, "verify", attempt)
     running = [s for s in verifiers if s.live and not verifier_over(run, s)]
     if running:
@@ -1976,7 +2365,7 @@ def cmd_verify(run, args):
         full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
         ref = full.stdout.strip() if full.returncode == 0 else ref
     where = verify_skill(run, ref)[0] or "none"
-    text = render(run, task, "verify", attempt, name, ref=ref, worker=worker)
+    text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role)
     if args.dry_run:
         print(claude_line(run, profile, name, name, model, effort), file=sys.stderr)
         if run.json:
@@ -1988,7 +2377,6 @@ def cmd_verify(run, args):
     if is_sha(ref):
         add_worktree(run, name, ref)
     try:
-        ignore_reports(run)
         clear_report(report_path(run, name, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         said = start_session(run, name, name, model, effort, text, profile)
@@ -2067,7 +2455,10 @@ def ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs):
 def emit_verified(run, tid, attempt, row, kind):
     level = verdict_of(row)
     nxt = f"run run.py close {tid}"
-    if row["author"] == "ci" and level == "verify-failed":
+    problem = unlabelled_failure(row)
+    if problem:
+        nxt = unlabelled_next(tid, problem)
+    elif row["author"] == "ci" and level == "verify-failed":
         nxt += " (records verify-failed), then " + retry_next(tid, attempt, lead="fix round: ")
     elif row["author"] == "ci" and level == "verify-blocked":
         nxt = f"run.py verify {tid} --again"
@@ -2365,7 +2756,7 @@ def rowless_flags(run, task, s):
     --agent, --model, --effort, --permission-mode, --name and --settings, and no --bg or --worktree (the resume runs in
     the worktree). With a job present a flag would start a copy, so this is only for a row that is not listed."""
     entry = recorded_entry(task, wanted_attempt(task)) or {}
-    tier = str((task.get("meta") or {}).get("tier") or "implementation")
+    tier = (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier  # a --tier at launch survives
     try:
         chosen = resolve_model(run.config, tier)
     except ConfigError:
@@ -2390,6 +2781,11 @@ def resume_with(run, task, entry, row, s, text, settle):
     if not session_id:
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: no full session id on file to resume; "
                  "record tries again")
+        return settle("pending", "pending")
+    try:
+        ignore_scratch(run)  # before the stop: a refusal leaves the process as it is
+    except Refused as exc:
+        run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: {exc}; record tries again")
         return settle("pending", "pending")
     if s.row.get("pid"):
         stop_session(run, s.sid, check=False, profile=s.profile)
@@ -3848,6 +4244,68 @@ def follow_ups(body):
     return found
 
 
+def issue_lines(body):
+    """The non-empty lines of a report's Issues field, a list marker dropped. A line that says None does not count."""
+    found = []
+    for raw in report_field(strip_comments(body or ""), "Issues").splitlines():
+        text = FOLLOW_UP_BULLET.sub("", raw.strip())
+        if text and text.rstrip(".").lower() != "none":
+            found.append(text)
+    return found
+
+
+def repository_path(token, cwd):
+    """The path a backticked token names, when it looks like a path of this repository, else None. Conservative: a
+    command, a flag, a pattern, a URL, a placeholder, an absolute path outside `cwd` and a bare word are not paths."""
+    token = PATH_LINE_SUFFIX.sub("", token)
+    if (not PATH_CHARS.fullmatch(token) or token.startswith(("-", "~")) or "://" in token
+            or any(c in token for c in "<*${")):
+        return None
+    if not os.path.isabs(token) and ".." in token.split("/"):
+        return None
+    if "/" not in token and token.rsplit(".", 1)[-1] not in PATH_EXTENSIONS:
+        return None
+    if os.path.isabs(token):
+        root = os.path.join(os.path.realpath(cwd), "")
+        return token if os.path.realpath(token).startswith(root) or os.path.realpath(token) == root[:-1] else None
+    return token
+
+
+def git_ignores(path, cwd):
+    """True when git reports `path` (relative to `cwd`) as ignored. Any failure (no repository, no git, a timeout)
+    counts as not ignored."""
+    try:
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-q", "--", path],
+                              cwd=cwd, check=False, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def missing_paths(body, cwd):
+    """(field, token, line) for each backticked repository path under Files, Evidence and Ran of a worker report
+    that does not exist in `cwd`. A line that says deleted or removed is exempt, and so is a relative path that git
+    ignores (the main checkout holds it, the worktree does not)."""
+    found = []
+    text = strip_comments(body or "")
+    for field in PATH_FIELDS:
+        for line in report_field(text, field).splitlines():
+            if DELETED_WORD.search(line):
+                continue
+            for token in BACKTICKED.findall(line):
+                path = repository_path(token, cwd)
+                if (path is not None and not os.path.lexists(os.path.join(cwd, path))
+                        and (os.path.isabs(path) or not git_ignores(path, cwd))):
+                    found.append((field, token, line.strip()))
+    return found
+
+
+def evidence_lines(body):
+    """The non-empty lines of a report's Evidence field, stripped. A line that says None does not count."""
+    lines = (line.strip() for line in report_field(strip_comments(body or ""), "Evidence").splitlines())
+    return [line for line in lines if line and line.rstrip(".").lower() != "none"]
+
+
 def verdict_marker(tid):
     return f"<!-- agentic-team verdict task={tid} -->"
 
@@ -4308,6 +4766,9 @@ def choose_verdict(run, args, task, rows, attempt):
         return args.verdict, True, None
     last, level = found[-1], verdict_of(found[-1])
     if not args.verdict or args.verdict == level:
+        problem = unlabelled_failure(last)
+        if problem:
+            raise Refused(unlabelled_next(tid, problem))
         return level, False, None
     if not reason:
         raise Refused(f"verifier {last['author']} said {level} (result #{last['id']}); to change it, pass "
@@ -4383,7 +4844,8 @@ def cmd_close(run, args):
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
     run.edit_meta(tid, verdict=level, verdict_ref=ref)
-    entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt), None)
+    entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt
+                  and e.get("id")), None)  # an adopted attempt has an entry with no id
     if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
         sid, row = entry["id"], next((s for s in run.sessions() if s.sid == entry["id"]), None)
     else:  # an unrecorded row in the task folder is the current attempt's
@@ -4544,7 +5006,8 @@ def cmd_abandon(run, args):
 
 def cmd_check_report(args):
     """Check a report file before a session files it: a Status: line that STATUS_LINE reads, a Checkpoint: line,
-    and a label on each Follow-ups line (follow_ups). Prints `ok`, or prints one problem per line to stderr and
+    and a label on each Follow-ups line (follow_ups). With --acceptance N, a PASS also needs N lines under
+    `Evidence:` (evidence_lines). Prints `ok`, or prints one problem per line to stderr and
     exits 2. main() calls it before it builds Run: a session runs it in its worktree, which has no
     .agentic-team.local.toml and may not find tg.py, so it needs no config, no Taskgraph and no repository. It
     reads the file and writes nothing."""
@@ -4560,10 +5023,22 @@ def cmd_check_report(args):
         problems.append("no `Status:` line that says PASS, ISSUES or BLOCKED")
     if not CHECKPOINT_LINE.search(body):
         problems.append("no `Checkpoint:` line")
+    status = STATUS_LINE.search(body)
+    if args.acceptance is not None and status and status.group(1) == "PASS":
+        found = len(evidence_lines(body))
+        if found < args.acceptance:
+            problems.append(f"PASS needs one `Evidence:` line per ACCEPTANCE line: found {found}, "
+                            f"ACCEPTANCE has {args.acceptance}")
     for label, line in follow_ups(body):
         if label == "unlabelled":
             problems.append(f"Follow-ups line with no label: `{line}`; start it with one of "
                             f"{', '.join(FOLLOW_UP_LABELS)}, as `<label>: <path or question>: <why>`")
+    if args.verifier:
+        problems += verifier_problems(body, status.group(1) if status else None)
+    elif status and status.group(1) != "BLOCKED":
+        for field, token, line in missing_paths(body, os.getcwd()):
+            problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
+                            "path, or say on that line that it was deleted or removed")
     for row in unacked_steers_of(args.mailbox):
         problems.append(f"steer #{row['id']} has no ack: run the inbox command in MAILBOX, act on it and ack it, "
                         "then list it under Deviations")
@@ -4571,6 +5046,25 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+def verifier_problems(body, status):
+    """The findings rule of a verifier report: ISSUES needs a blocking finding, and every Issues line is one."""
+    issues = issue_lines(body)
+    found = []
+    if status == "ISSUES" and not issues:
+        found.append("Status ISSUES needs at least one `blocking:` line under `Issues:`; with only non-blocking "
+                     "findings, report PASS and list them under `Follow-ups:` as `nonblocking: <finding>: <why it "
+                     "does not block>`")
+    if status in ("ISSUES", "PASS"):
+        for line in issues:
+            if status == "PASS" or not line.startswith("blocking:"):
+                fix = ("a PASS report has no blocking finding; report ISSUES, or move a non-blocking finding to "
+                       "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`" if status == "PASS" else
+                       "start it with `blocking:` and say why it blocks, or move a non-blocking finding to "
+                       "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`")
+                found.append(f"Issues line `{line}` {'is not allowed' if status == 'PASS' else 'has no `blocking:` label'}; {fix}")
+    return found
 
 
 def unacked_steers_of(ctx_path):
@@ -4748,7 +5242,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -4803,11 +5297,17 @@ def build_parser():
     p.add_argument("--limit", type=int, default=25, help="max rows per table (default 25)")
     p.add_argument("--mark", action="store_true", help="save now as the start of the next report")
 
+    sub.add_parser("roles", help="list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken")
+
     p = sub.add_parser("check-report", help="check a report file before a session files it; needs no config, "
                                             "Taskgraph or repository")
     p.add_argument("file", help="the report file that the brief's REPORT section names")
     p.add_argument("--mailbox", metavar="CTX", help="a worker's context file: also name a steer of its attempt that "
                    "has no ack (reads Taskgraph through the file's tg.py)")
+    p.add_argument("--verifier", action="store_true", help="the report is a verifier's: an ISSUES report needs a "
+                   "`blocking:` label on every Issues line, and a report with only non-blocking findings is a PASS")
+    p.add_argument("--acceptance", type=int, metavar="N", help="a PASS report needs at least N non-empty lines "
+                   "under Evidence:, one for each ACCEPTANCE line of the task")
 
     p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,
@@ -4849,7 +5349,7 @@ def build_parser():
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
