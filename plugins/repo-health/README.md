@@ -8,31 +8,35 @@ Version 0.1.0 reports and recommends; it changes no project file.
 Say it in plain words: "how can I improve this repo", "audit this project's
 engineering practice", "does this project have lint, tests and CI?".
 
-## Three levels per dimension
+## Levels per dimension
 
-"Is there a linter?" is the weak question. Each dimension gets a level:
+"Is there a linter?" is the weak question. Each dimension gets a level, set by
+`scripts/score.py` from the rules in `skills/repo-health/references/dimensions.md`
+(every level names the rule that set it, so two runs on one repository agree):
 
 | Level | Name | Meaning |
 | --- | --- | --- |
 | 0 | absent | No config, no tool, no tests |
-| 1 | present | Configured, but nothing makes people follow it |
-| 2 | enforced | Runs in CI or a pre-commit hook on every change |
-| 3 | effective | Enforced, and the results show it works: few warnings, passing and fast tests, known coverage, few suppressions |
+| 1 | present | Configured, but nothing makes people follow it (or only some suites, languages or ecosystems are covered: "partial") |
+| 2 | enforced | Runs in blocking CI on every pull request |
+| 3 | effective | Enforced, and the results show it works: passing and fast tests, known coverage, strict types, few suppressions |
 
-There is no overall score. A single number invites gaming and hides which
-dimension is weak. A rerun compares each dimension with the previous report.
+A fact the tools cannot see (a GitHub setting without admin access, a tier 1
+count that did not run) gives `unknown`, never 0. A rule that does not fit the
+repository (a lockfile for a library, coverage with no tests) gives `n/a`.
+There is no overall score.
 
 ## Tiers and consent
 
 | Tier | What it does | Asked first? |
 | --- | --- | --- |
-| 0 | Reads configs, CI files, file lists and git history through `detect.py` and `hotspots.py`. Small output. | No |
+| 0 | Reads configs, CI files, file lists and git history (`detect.py`, `hotspots.py`) and, with an authenticated `gh`, CI outcomes and repository settings (`ghfacts.py`, read-only). | No |
 | 1 | Runs tools: the project's lint, type and test commands, zero-config scanners, dependency audit, coverage. This executes project code and can download tools and take minutes. | Yes |
-| 2 | An LLM reads code: structure, error handling, test quality, docs accuracy. Costs many tokens. | Yes, with a token estimate |
+| 2 | An LLM reads code: `review` (structure and error handling) and `testquality`. Costs many tokens. | Yes, with a token estimate |
 
 Tier 0 runs first. Then one question lists every tier 1 and tier 2 step with its
 cost. Nothing selected means the report covers tier 0 and lists the rest under
-"Not checked". You can also name dimensions ("only lint and tests").
+"Not checked".
 
 ## Dimensions
 
@@ -40,36 +44,64 @@ cost. Nothing selected means the report covers tier 0 and lists the rest under
 | --- | --- | --- |
 | `lint` | Lint and formatting | 0, 1 |
 | `types` | Type checking | 0, 1 |
-| `static` | Static analysis and security | 0, 1 |
-| `secrets` | Secret scanning (redacted) | 0, 1 |
-| `tests` | Tests | 0, 1 |
-| `coverage` | Coverage | 1 |
+| `static` | Static analysis and security | 0 |
+| `secrets` | Secret scanning | 0 |
+| `tests` | Tests (every suite, not just some) | 0, 1 |
+| `coverage` | Coverage | 0 |
 | `ci` | CI | 0 |
 | `setup` | Setup and reproducibility | 0 |
-| `docs` | Docs | 0 |
-| `deps` | Dependencies | 0, 1 |
-| `size` | Size and structure metrics | 0 |
-| `hotspots` | Hotspots (churn x size x indentation) | 0 |
-| `deadcode` | Dead code | 1 |
-| `structure` | Structure review | 2 |
-| `errors` | Error handling and observability | 2 |
-| `testquality` | Test quality | 2 |
-| `docsaccuracy` | Docs accuracy | 2 |
+| `docs` | Docs (README commands are checked to exist) | 0 |
+| `deps` | Dependencies (update bot per ecosystem, audit, lockfile age) | 0, 1 |
+| `arch` | Architecture written down and enforced | 0 |
+
+Hotspots (churn x indentation), CI health and the two tier 2 reviews give
+signals and findings, not levels.
 
 ## Output
 
-`<repo>/.repo-health/report-<YYYY-MM-DD>.md` and
-`findings-<YYYY-MM-DD>.json` (or a path you give). The report starts with the
-conclusion and the top five actions, then a scorecard with the change since the
-previous run, details per dimension, and what was not checked. The skill does
-not edit `.gitignore`; ignore or commit the folder as you like.
+Files go to `<repo>/.repo-health/`, named with a stamp `YYYY-MM-DDTHHMM` so two
+runs on one day do not overwrite each other:
+
+- `detect-<stamp>.json`, `hotspots-<stamp>.json`, `ghfacts-<stamp>.json`: the facts
+- `score-<stamp>.json`: levels, gaps (ranked, with stable ids), profile, hotspots joined with guardrails, changes since the previous run
+- `findings-<stamp>.json`: the model's recommendations (schema 2)
+- `report-<stamp>.md`: the report
+- `share-<stamp>.md`: at most 15 lines to paste into a pull request, issue or chat
+
+The report starts with the conclusion and the top five actions (each with a first
+step and a command that verifies it), then what changed since the previous run, a
+scorecard, hotspots, evidence for the weak dimensions and what was not checked.
+The skill does not edit `.gitignore`; ignore or commit the folder as you like.
+
+## Gap ids and decisions
+
+Every gap has a stable id, printed next to its recommendation, for example
+`tests:.:missing-suite:plugins/agentic-team/tests`. To drop a gap from the
+ranking, record a decision in `.repo-health/decisions.json`:
+
+```json
+{"tests:.:missing-suite:plugins/agentic-team/tests": {"status": "dismissed", "reason": "run by make ci", "date": "2026-11-10"}}
+```
+
+`status` is `dismissed` (the gap leaves the ranking and appears collapsed, with its
+reason), `later` (it stays at half priority) or `done` (informational; if the gap is
+detected again the report lists it as a regression). Or let the script edit the file
+(it creates it, keeps the other entries and sorts the keys):
+
+```sh
+score.py decide 'tests:.:missing-suite:plugins/agentic-team/tests' --dismiss --reason "run by make ci"
+```
 
 The scripts also run by hand:
 
 ```sh
-skills/repo-health/scripts/detect.py REPO      # languages, tools, CI, setup, docs (JSON)
-skills/repo-health/scripts/hotspots.py REPO    # hotspots, largest files, co-change (JSON)
-skills/repo-health/scripts/render.py findings.json [--previous OLD.json] [-o report.md]
+S=skills/repo-health/scripts
+$S/detect.py REPO > detect.json                  # languages, tools, CI, setup, docs (JSON)
+$S/hotspots.py REPO > hotspots.json              # hotspots, largest files, co-change (JSON)
+$S/ghfacts.py REPO > ghfacts.json                # CI outcomes and repository settings (needs gh)
+$S/score.py --detect detect.json --hotspots hotspots.json [--ghfacts ghfacts.json] [--tier1 t1.json] \
+            [--previous score-old.json] -o score.json
+$S/render.py findings.json [-o report.md] [--share share.md]
 ```
 
 ## Safety

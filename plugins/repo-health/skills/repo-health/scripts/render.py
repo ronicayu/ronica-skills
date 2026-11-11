@@ -1,34 +1,42 @@
 #!/usr/bin/env python3
-"""Render a repo-health findings.json as a Markdown report.
+"""Render a repo-health findings.json (schema 2) and its score.json as a Markdown report.
 
-    render.py findings.json [--previous OLD.json | --no-previous] [-o report.md]
+    render.py findings.json [-o report.md] [--share share.md] [--previous OLD.json | --no-previous]
 
-Writes the report, then prints a terminal summary: the headline, the top five
-actions (title and first step) and the report path. Standard library only;
-Python 3.9+.
+Writes the report (default report-<stamp>.md beside the input), a share file of at
+most 15 lines for a pull request or chat (default share-<stamp>.md beside the input),
+then prints a terminal summary: the headline, the top five actions with their first
+command, the "since last run" counts and the absolute report path. Standard library
+only; Python 3.9+.
 
-render.py orders and lays out; it does not judge. The model writes the headline,
-the levels, the recommendations and their impact and effort into findings.json
-(schema 1, see the skill), so the report has the same shape on every run.
+render.py lays out; it does not judge. Levels, gaps, the profile, hotspots and changes
+come from the score.json that findings["score"] names (beside the findings file); the
+model writes the headline, the recommendations, overrides and reviews.
 
-Required fields (an error names the missing field):
-  top level        schema (must be 1), repo, date, headline, dimensions,
-                   recommendations, not_checked
-  dimensions[]     id, subproject, status (checked|not_run|skipped), summary;
-                   level is an integer 0-3, or null for the metric and review
-                   dimensions (size, hotspots, structure, errors, testquality,
-                   docsaccuracy) and for status not_run or skipped
-  recommendations[] id, dimension, title, why, impact, effort, first_step
-  not_checked[]    what, why
-Optional: commit, subproject(s), tier, evidence, not_run_reason, how_to_run.
-Unknown fields are ignored. An impact or effort value outside the schema sorts
-last instead of failing.
+findings.json, schema 2 (an error names the field):
 
-Top actions rank by impact (high, medium, low), then effort (small, medium,
-large), then the order in the file. The scorecard compares each dimension and
-subproject with the previous run: up, down, "=" or "new". A dimension whose
-level is null compares as "=" when the previous run had the row, else "new".
-With no previous run the Change column shows "—".
+    schema 2, repo, stamp (YYYY-MM-DDTHHMM, local time), headline, score (file name),
+    recommendations[], not_checked[]
+    optional: lang (zh or en), commit, inputs {detect, hotspots, ghfacts: file names},
+              overrides[] {dimension, subproject, level 0-3, reason}, reviews {}
+    recommendations[]  {gap, title, why, impact high|medium|low, effort small|medium|large,
+                        first_step {file, snippet, command, verify}, reorder_reason}
+                       gap is a gap id of score.json, or "extra:<slug>" for a tier 2 finding.
+    not_checked[]      {what, why, how_to_run?}
+
+Validation
+    * first_step needs `verify` and a `snippet` or a `command`.
+    * A first_step text (snippet, command, verify) that is prose is rejected: more than one
+      sentence (two or more of . ! ? followed by space or the end) and none of the code
+      characters ` $ | = / { } ( ) < >. A command is at most 12 lines.
+    * Every `gap` exists in score.json (or starts with "extra:").
+    * The order of recommendations follows the gaps' priority order in score.json. A
+      recommendation placed above one with a higher-priority gap needs `reorder_reason`.
+
+Previous runs: the newest findings-<stamp>.json older than this one beside it (an old
+findings-YYYY-MM-DD.json counts; schema 1 files give level changes only, no gap changes).
+The score.json `changes` block (made with score.py --previous) wins when present.
+In a zh report the one-line summaries of score.py stay in English.
 """
 
 import argparse
@@ -37,86 +45,77 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import score as scoring  # noqa: E402  (changes_between for a previous run without a changes block)
+
+DIMENSIONS = [("lint", "Lint and formatting"), ("types", "Type checking"), ("static", "Static analysis and security"),
+              ("secrets", "Secret scanning"), ("tests", "Tests"), ("coverage", "Coverage"), ("ci", "CI"),
+              ("setup", "Setup and reproducibility"), ("docs", "Docs"), ("deps", "Dependencies"),
+              ("arch", "Architecture")]
+DIMENSION_ORDER = {key: i for i, (key, _n) in enumerate(DIMENSIONS)}
+NAMES = dict(DIMENSIONS)
 LEVEL_NAMES = {0: "absent", 1: "present", 2: "enforced", 3: "effective"}
 
-DIMENSIONS = [
-    ("lint", "Lint and formatting"),
-    ("types", "Type checking"),
-    ("static", "Static analysis and security"),
-    ("secrets", "Secret scanning"),
-    ("tests", "Tests"),
-    ("coverage", "Coverage"),
-    ("ci", "CI"),
-    ("setup", "Setup and reproducibility"),
-    ("docs", "Docs"),
-    ("deps", "Dependencies"),
-    ("size", "Size and structure metrics"),
-    ("hotspots", "Hotspots"),
-    ("deadcode", "Dead code"),
-    ("structure", "Structure review"),
-    ("errors", "Error handling and observability"),
-    ("testquality", "Test quality"),
-    ("docsaccuracy", "Docs accuracy"),
-]
-DIMENSION_NAMES = dict(DIMENSIONS)
-
-# Report text per language. findings["lang"] picks one: "zh..." gives Chinese, anything else English.
 TEXT = {
     "en": {
         "title": "# Repo health report: %s", "commit": "Commit: `%s`", "date": "Date: %s",
-        "compared": "Compared with the run of %s", "top": "## Top actions", "no_recs": "No recommendations.",
-        "scorecard": "## Scorecard", "no_dims": "No dimensions were measured.", "root": "repo root (.)",
-        "table": "| Dimension | Level | Summary | Change |",
-        "legend": "Levels: 0 absent, 1 present, 2 enforced, 3 effective. — means measured without a level.",
-        "details": "## Details", "no_details": "No details.", "level": "Level: %s.",
-        "measured": "measured, no level", "not_run_reason": "Not run: %s", "evidence": "Evidence:",
-        "not_checked": "## Not checked", "to_run": " To run it: `%s`", "none_skipped": "Nothing was skipped.",
-        "impact": "%s impact", "effort": "%s effort", "first_step": "First step:",
-        "levels": LEVEL_NAMES,
-        "not_run": "not run", "skipped": "skipped", "new": "new",
-        "values": {}, "names": {},
-        "summary_top": "Top actions:", "summary_step": "   first step: %s%s", "report": "Report: %s",
+        "compared": "compared with %s", "first": "## Do these first", "no_recs": "No recommendations.",
+        "why": "Why: %s", "verify": "Verify: `%s`", "touches": "Touches hotspots: %s",
+        "since": "## Since last run", "closed": "Closed gaps (%d)", "new": "New gaps (%d)",
+        "regressed": "Regressions: marked done, detected again (%d)", "levels_changed": "Level changes (%d)",
+        "nothing": "none", "scorecard": "## Scorecard", "table": "| Dimension | Level | Summary | Change |",
+        "legend": "Levels: 0 absent, 1 present, 2 enforced, 3 effective. unknown: a fact is not visible, "
+                  "the level is not guessed. n/a: does not apply to this repository.",
+        "more": "## More recommendations", "hotspots": "## Hotspots",
+        "hot_table": "| File | Commits | LOC | Tests in CI | Top author |", "evidence": "## Evidence",
+        "override": "Override to level %s: %s", "not_checked": "## Not checked", "to_run": " To run it: `%s`",
+        "none_skipped": "Nothing was skipped.", "dismissed": "Dismissed", "reason": "reason",
+        "levels": LEVEL_NAMES, "unknown": "unknown (needs: %s)", "na": "n/a", "partial": "partial: %d of %d %s",
+        "units": {}, "yes": "yes", "no": "no", "unk": "unknown", "new_row": "new", "names": {},
+        "summary_first": "Do these first:", "summary_cmd": "   first step: %s", "report": "Report: %s",
+        "summary_since": "Since last run: %d closed, %d new, %d regressed.", "share_first": "Do first:",
+        "share_card": "Scorecard: %s", "no_gaps_note": "Gap changes are not available: the previous run has no score file.",
     },
     "zh": {
-        "title": "# 仓库健康报告：%s", "commit": "提交：`%s`", "date": "日期：%s",
-        "compared": "对比 %s 的结果", "top": "## 优先行动", "no_recs": "没有建议。",
-        "scorecard": "## 计分表", "no_dims": "没有测量任何维度。", "root": "仓库根目录 (.)",
-        "table": "| 维度 | 等级 | 摘要 | 变化 |",
-        "legend": "等级：0 没有，1 有配置，2 强制，3 有效。— 表示只测量、不定级。",
-        "details": "## 细节", "no_details": "没有细节。", "level": "等级：%s。",
-        "measured": "只测量，不定级", "not_run_reason": "未运行：%s", "evidence": "证据：",
-        "not_checked": "## 未检查", "to_run": " 运行方法：`%s`", "none_skipped": "没有跳过任何项。",
-        "impact": "影响%s", "effort": "工作量%s", "first_step": "第一步：",
-        "levels": {0: "没有", 1: "有配置", 2: "强制", 3: "有效"},
-        "not_run": "未运行", "skipped": "已跳过", "new": "新",
-        "values": {"high": "高", "medium": "中", "low": "低", "small": "小", "large": "大"},
-        "names": {
-            "lint": "Lint 与格式化", "types": "类型检查", "static": "静态分析与安全", "secrets": "密钥扫描",
-            "tests": "测试", "coverage": "覆盖率", "ci": "CI", "setup": "环境搭建与可复现", "docs": "文档",
-            "deps": "依赖", "size": "规模", "hotspots": "热点", "deadcode": "死代码", "structure": "结构审查",
-            "errors": "错误处理与可观测性", "testquality": "测试质量", "docsaccuracy": "文档准确性",
-        },
-        "summary_top": "优先行动：", "summary_step": "   第一步：%s%s", "report": "报告：%s",
+        "title": "# 仓库健康报告：%s", "commit": "提交：`%s`", "date": "日期：%s", "compared": "对比 %s",
+        "first": "## 优先行动", "no_recs": "没有建议。", "why": "原因：%s", "verify": "验证：`%s`",
+        "touches": "涉及热点：%s", "since": "## 自上次运行", "closed": "已关闭的缺口（%d）",
+        "new": "新增缺口（%d）", "regressed": "回退：标记为完成但再次检出（%d）", "levels_changed": "等级变化（%d）",
+        "nothing": "无", "scorecard": "## 计分表", "table": "| 维度 | 等级 | 摘要 | 变化 |",
+        "legend": "等级：0 没有，1 有配置，2 强制，3 有效。未知：看不到判定所需的事实，不猜等级。n/a：不适用于本仓库。",
+        "more": "## 更多建议", "hotspots": "## 热点", "hot_table": "| 文件 | 提交数 | 行数 | CI 跑测试 | 最大作者占比 |",
+        "evidence": "## 证据", "override": "改为等级 %s：%s", "not_checked": "## 未检查", "to_run": " 运行方法：`%s`",
+        "none_skipped": "没有跳过任何项。", "dismissed": "已忽略", "reason": "原因",
+        "levels": {0: "没有", 1: "有配置", 2: "强制", 3: "有效"}, "unknown": "未知（需要：%s）", "na": "不适用",
+        "partial": "部分：%d/%d %s", "units": {"test suites": "个测试套件", "languages": "种语言", "ecosystems": "个生态"},
+        "yes": "是", "no": "否", "unk": "未知", "new_row": "新",
+        "names": {"lint": "Lint 与格式化", "types": "类型检查", "static": "静态分析与安全", "secrets": "密钥扫描",
+                  "tests": "测试", "coverage": "覆盖率", "ci": "CI", "setup": "环境搭建与可复现", "docs": "文档",
+                  "deps": "依赖", "arch": "架构"},
+        "summary_first": "优先行动：", "summary_cmd": "   第一步：%s", "report": "报告：%s",
+        "summary_since": "自上次运行：关闭 %d，新增 %d，回退 %d。", "share_first": "先做：",
+        "share_card": "计分：%s", "no_gaps_note": "无法比较缺口：上次运行没有 score 文件。",
     },
 }
+
+STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{4}$")
+FINDINGS_NAME = re.compile(r"^findings-(\d{4}-\d{2}-\d{2}(?:T\d{4})?).*\.json$")
+IMPACT = ("high", "medium", "low")
+EFFORT = ("small", "medium", "large")
+TOP = 5
+MAX_COMMAND_LINES = 12
+SHARE_LINES = 15
+CODE_CHARS = set("`$|=/{}()<>")
+HOTSPOT_ROWS = 10
+
+
+class FindingsError(ValueError):
+    """The findings file is not valid; the message names the field."""
 
 
 def text_for(findings):
     lang = findings.get("lang") if isinstance(findings, dict) else None
     return TEXT["zh"] if isinstance(lang, str) and lang.lower().startswith("zh") else TEXT["en"]
-DIMENSION_ORDER = {key: i for i, (key, _name) in enumerate(DIMENSIONS)}
-
-NULL_LEVEL_OK = {"size", "hotspots", "structure", "errors", "testquality", "docsaccuracy"}
-STATUSES = ("checked", "not_run", "skipped")
-IMPACT_RANK = {"high": 0, "medium": 1, "low": 2}
-EFFORT_RANK = {"small": 0, "medium": 1, "large": 2}
-TOP_ACTIONS = 5
-NO_CHANGE_DATA = "—"
-FINDINGS_NAME = re.compile(r"^findings-(\d{4}-\d{2}-\d{2}).*\.json$")
-
-
-class FindingsError(ValueError):
-    """The findings file is not valid; the message names the field."""
 
 
 # --------------------------------------------------------------------------
@@ -124,55 +123,82 @@ class FindingsError(ValueError):
 # --------------------------------------------------------------------------
 
 def _require(obj, field, where, kind=None):
+    prefix = where + "." if where else ""
     if not isinstance(obj, dict):
-        raise FindingsError("%s must be an object" % where)
+        raise FindingsError("%s must be an object" % (where or "findings"))
     if field not in obj or obj[field] is None:
-        raise FindingsError("missing required field: %s%s" % (where + "." if where else "", field))
-    value = obj[field]
-    if kind is not None and not isinstance(value, kind):
-        raise FindingsError("%s%s must be %s" % (where + "." if where else "", field, kind.__name__))
-    return value
+        raise FindingsError("missing required field: %s%s" % (prefix, field))
+    if kind is not None and not isinstance(obj[field], kind):
+        raise FindingsError("%s%s must be %s" % (prefix, field, kind.__name__))
+    return obj[field]
 
 
-def validate(findings):
-    """Raise FindingsError for the first missing or malformed required field."""
+def is_prose(text):
+    """More than one sentence and no code characters."""
+    sentences = len(re.findall(r"[.!?。！？](?:\s|$)", text.strip()))
+    return sentences > 1 and not (CODE_CHARS & set(text))
+
+
+def validate(findings, gap_order=None):
+    """Raise FindingsError for the first problem. gap_order maps gap id to its priority index."""
     if not isinstance(findings, dict):
         raise FindingsError("findings must be a JSON object")
-    schema = _require(findings, "schema", "")
-    if schema != 1:
-        raise FindingsError("schema must be 1, got %r" % (schema,))
+    if _require(findings, "schema", "") != 2:
+        raise FindingsError("schema must be 2, got %r" % (findings["schema"],))
     _require(findings, "repo", "", str)
-    _require(findings, "date", "", str)
-    headline = _require(findings, "headline", "", str)
-    if not headline.strip():
+    if not STAMP.match(_require(findings, "stamp", "", str)):
+        raise FindingsError("stamp must look like 2026-11-10T0930, got %r" % findings["stamp"])
+    if not _require(findings, "headline", "", str).strip():
         raise FindingsError("headline must not be empty")
-    dimensions = _require(findings, "dimensions", "", list)
-    recommendations = _require(findings, "recommendations", "", list)
+    _require(findings, "score", "", str)
+    recs = _require(findings, "recommendations", "", list)
     not_checked = _require(findings, "not_checked", "", list)
-    for i, dim in enumerate(dimensions):
-        where = "dimensions[%d]" % i
-        dim_id = _require(dim, "id", where, str)
-        _require(dim, "subproject", where, str)
-        status = _require(dim, "status", where, str)
-        _require(dim, "summary", where, str)
-        if status not in STATUSES:
-            raise FindingsError("%s.status must be one of %s, got %r" % (where, "|".join(STATUSES), status))
-        level = dim.get("level")
-        if level is None:
-            if dim_id not in NULL_LEVEL_OK and status == "checked":
-                raise FindingsError("%s.level is required (0-3) for the checked dimension %r" % (where, dim_id))
-        elif isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 3:
-            raise FindingsError("%s.level must be an integer 0-3 or null, got %r" % (where, level))
-        if "evidence" in dim and not isinstance(dim["evidence"], list):
-            raise FindingsError("%s.evidence must be a list" % where)
-    for i, rec in enumerate(recommendations):
+    for i, item in enumerate(findings.get("overrides") or []):
+        where = "overrides[%d]" % i
+        _require(item, "dimension", where, str)
+        _require(item, "subproject", where, str)
+        _require(item, "reason", where, str)
+        level = _require(item, "level", where)
+        if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 3:
+            raise FindingsError("%s.level must be an integer 0-3, got %r" % (where, level))
+    for i, rec in enumerate(recs):
         where = "recommendations[%d]" % i
-        for field in ("id", "dimension", "title", "why", "impact", "effort", "first_step"):
-            _require(rec, field, where, str)
+        gap = _require(rec, "gap", where, str)
+        _require(rec, "title", where, str)
+        _require(rec, "why", where, str)
+        if _require(rec, "impact", where, str) not in IMPACT:
+            raise FindingsError("%s.impact must be one of %s" % (where, "|".join(IMPACT)))
+        if _require(rec, "effort", where, str) not in EFFORT:
+            raise FindingsError("%s.effort must be one of %s" % (where, "|".join(EFFORT)))
+        step = _require(rec, "first_step", where, dict)
+        w = where + ".first_step"
+        for field in ("file", "snippet", "command", "verify"):
+            if step.get(field) is not None and not isinstance(step[field], str):
+                raise FindingsError("%s.%s must be text or null" % (w, field))
+        if not (step.get("verify") or "").strip():
+            raise FindingsError("%s.verify is required: a command whose output proves it worked" % w)
+        if not ((step.get("snippet") or "").strip() or (step.get("command") or "").strip()):
+            raise FindingsError("%s needs a snippet or a command" % w)
+        for field in ("snippet", "command", "verify"):
+            if step.get(field) and is_prose(step[field]):
+                raise FindingsError("%s.%s is prose, not code or a command" % (w, field))
+        if len((step.get("command") or "").strip().splitlines()) > MAX_COMMAND_LINES:
+            raise FindingsError("%s.command is longer than %d lines" % (w, MAX_COMMAND_LINES))
+        if gap_order is not None and not gap.startswith("extra:") and gap not in gap_order:
+            raise FindingsError("%s.gap %r is not a gap of score.json" % (where, gap))
     for i, item in enumerate(not_checked):
         where = "not_checked[%d]" % i
         _require(item, "what", where, str)
         _require(item, "why", where, str)
+    if gap_order is not None:
+        indexes = [gap_order.get(r["gap"]) for r in recs]
+        for i, rec in enumerate(recs):
+            if indexes[i] is None:
+                continue
+            later_higher = any(j is not None and j < indexes[i] for j in indexes[i + 1:])
+            if later_higher and not (rec.get("reorder_reason") or "").strip():
+                raise FindingsError("recommendations[%d].reorder_reason is required: it is placed above a "
+                                    "recommendation with a higher-priority gap" % i)
 
 
 # --------------------------------------------------------------------------
@@ -184,203 +210,235 @@ def cell(text):
 
 
 def fence(text):
-    """Fence the text with more backticks than any run inside it."""
     longest = max([len(m) for m in re.findall(r"`+", text)] or [0])
     ticks = "`" * max(3, longest + 1)
     return "%s\n%s\n%s" % (ticks, text.strip("\n"), ticks)
 
 
-def dimension_name(dim_id, t=TEXT["en"]):
-    return t["names"].get(dim_id) or DIMENSION_NAMES.get(dim_id, dim_id)
+def dimension_name(dim_id, t):
+    return t["names"].get(dim_id) or NAMES.get(dim_id, dim_id)
 
 
-def level_text(dim, t=TEXT["en"]):
-    level = dim.get("level")
-    if level is not None:
-        return "%d %s" % (level, t["levels"][level])
-    status = dim.get("status")
-    if status == "not_run":
-        return t["not_run"]
-    if status == "skipped":
-        return t["skipped"]
-    return "—"
+def first_command(rec):
+    step = rec["first_step"]
+    command = (step.get("command") or "").strip()
+    if command:
+        return command.splitlines()[0]
+    return (step.get("file") or (step.get("snippet") or "").strip().splitlines()[0]).strip()
 
 
-def rank_recommendations(recommendations):
-    """Recommendations with their original index, ordered for the report."""
-    indexed = list(enumerate(recommendations))
-    indexed.sort(key=lambda pair: (IMPACT_RANK.get(pair[1].get("impact"), 99),
-                                   EFFORT_RANK.get(pair[1].get("effort"), 99), pair[0]))
-    return [rec for _i, rec in indexed]
+def pointer_names(findings):
+    inputs = findings.get("inputs") or {}
+    return {key: inputs[key] for key in ("detect", "hotspots", "ghfacts") if isinstance(inputs.get(key), str)}
 
 
-def dimension_sort_key(pair):
-    index, dim = pair
-    return (DIMENSION_ORDER.get(dim["id"], len(DIMENSION_ORDER)), index)
+def real_fact(fact, names):
+    for key, name in names.items():
+        fact = fact.replace("%s.json#" % key, "%s#" % name)
+    return fact
 
 
-def subproject_order(findings):
-    order = []
-    for sub in findings.get("subprojects") or []:
-        if isinstance(sub, dict) and isinstance(sub.get("path"), str) and sub["path"] not in order:
-            order.append(sub["path"])
-    for dim in findings["dimensions"]:
-        if dim["subproject"] not in order:
-            order.append(dim["subproject"])
-    return order
+def effective_rows(score, findings):
+    """Dimension rows with overrides applied: [(row, level, override or None)]."""
+    overrides = {(o["dimension"], o["subproject"]): o for o in findings.get("overrides") or []}
+    out = []
+    for row in score["dimensions"]:
+        override = overrides.get((row["id"], row["subproject"]))
+        out.append((row, override["level"] if override else row["level"], override))
+    out.sort(key=lambda p: (DIMENSION_ORDER.get(p[0]["id"], 99), p[0]["subproject"]))
+    return out
 
 
-def previous_index(previous):
-    """{(dimension id, subproject): level or None} from an earlier findings dict."""
-    index = {}
-    if not isinstance(previous, dict):
-        return index
-    for dim in previous.get("dimensions") or []:
-        if isinstance(dim, dict) and isinstance(dim.get("id"), str):
-            level = dim.get("level")
-            index[(dim["id"], dim.get("subproject", "."))] = level if isinstance(level, int) else None
-    return index
+def level_text(row, level, t):
+    if row["status"] == "not_applicable":
+        return t["na"]
+    if level is None:
+        return t["unknown"] % (row.get("needs") or "?")
+    text = "%d %s" % (level, t["levels"][level])
+    partial = row.get("partial")
+    if partial and level == row["level"]:
+        text += " (%s)" % (t["partial"] % (partial["covered"], partial["total"],
+                                           t["units"].get(partial.get("unit"), partial.get("unit", ""))))
+    return text
 
 
-def change_text(dim, index, t=TEXT["en"]):
-    if index is None:
-        return NO_CHANGE_DATA
-    key = (dim["id"], dim["subproject"])
-    if key not in index:
-        return t["new"]
-    before, now = index[key], dim.get("level")
-    if now is None:
-        return "="
-    if before is None:
-        return t["new"]
-    if now > before:
-        return "↑"
-    if now < before:
-        return "↓"
-    return "="
+def changes_text(change, t):
+    return {"up": "↑", "down": "↓", "same": "=", "new": t["new_row"], "changed": "~"}.get(change, "—")
 
 
 # --------------------------------------------------------------------------
 # Report
 # --------------------------------------------------------------------------
 
-def recommendation_block(rec, heading, t=TEXT["en"]):
-    meta = [t["impact"] % t["values"].get(rec["impact"], rec["impact"]),
-            t["effort"] % t["values"].get(rec["effort"], rec["effort"]), rec["dimension"]]
-    if rec.get("subproject") not in (None, ".", ""):
-        meta.append(rec["subproject"])
-    lines = ["%s %s" % (heading, rec["title"]), "", "*%s*" % " · ".join(meta), "", rec["why"].strip(), "",
-             t["first_step"], "", fence(rec["first_step"]), ""]
-    return lines
+def rec_block(number, rec, gaps, t):
+    gap = gaps.get(rec["gap"])
+    step = rec["first_step"]
+    label = "" if rec["gap"].startswith("extra:") else " (`%s`)" % rec["gap"]
+    out = ["### %d. %s%s" % (number, rec["title"].strip(), label)]
+    out += ["", t["why"] % rec["why"].strip(), ""]
+    if step.get("file"):
+        out += ["`%s`" % step["file"], ""]
+    if (step.get("snippet") or "").strip():
+        out += [fence(step["snippet"]), ""]
+    if (step.get("command") or "").strip():
+        out += [fence(step["command"]), ""]
+    out += [t["verify"] % step["verify"].strip().replace("`", "'"), ""]
+    files = (gap or {}).get("hotspot_files") or []
+    if files:
+        out += [t["touches"] % ", ".join("`%s`" % f for f in files[:3]), ""]
+    return out
 
 
-def render(findings, previous=None):
-    """The report for a findings dict, as Markdown. `previous` is an earlier findings dict."""
-    validate(findings)
+def since_section(changes, score, t):
+    gaps_now = {g["id"]: g for g in score["gaps"]}
+    out = [t["since"], ""]
+    if changes.get("gaps") is not None:
+        gaps = changes["gaps"]
+        for label, items in ((t["closed"], [(g["id"], g["what"]) for g in gaps["closed"]]),
+                             (t["new"], [(i, gaps_now[i]["what"]) for i in gaps["new"] if i in gaps_now])):
+            out.append("- %s: %s" % (label % len(items), "" if items else t["nothing"]))
+            out += ["  - `%s` %s" % (i, w) for i, w in items]
+        out.append("- %s: %s" % (t["regressed"] % len(score["regressed"]), "" if score["regressed"] else t["nothing"]))
+        out += ["  - `%s` %s" % (g["id"], g["what"]) for g in score["regressed"]]
+    else:
+        out.append("- %s" % t["no_gaps_note"])
+    moved = [c for c in changes["dimensions"] if c["change"] in ("up", "down")]
+    out.append("- %s: %s" % (t["levels_changed"] % len(moved), "" if moved else t["nothing"]))
+    out += ["  - %s%s: %s → %s %s" % (c["id"], "" if c["subproject"] == "." else " (%s)" % c["subproject"],
+                                       c["before"], c["after"], changes_text(c["change"], t)) for c in moved]
+    return out + [""]
+
+
+def render(findings, score, previous_changes=None, compared=None):
+    """The report, as Markdown. previous_changes overrides score["changes"] when given."""
+    gap_order = {g["id"]: i for i, g in enumerate(score["gaps"])}
+    validate(findings, gap_order)
     t = text_for(findings)
-    index = previous_index(previous) if previous is not None else None
-    ranked = rank_recommendations(findings["recommendations"])
-    top = ranked[:TOP_ACTIONS]
-    rest = ranked[TOP_ACTIONS:]
-    out = [t["title"] % findings["repo"], ""]
+    names = pointer_names(findings)
+    gaps = {g["id"]: g for g in score["gaps"]}
+    changes = score.get("changes") or previous_changes
+    if changes and not compared:
+        compared = changes.get("compared_with")
+    stamp = findings["stamp"]
     meta = []
     if findings.get("commit"):
         meta.append(t["commit"] % str(findings["commit"])[:12])
-    meta.append(t["date"] % findings["date"])
-    if previous is not None and isinstance(previous, dict) and previous.get("date"):
-        meta.append(t["compared"] % previous["date"])
-    out += [" · ".join(meta), "", "**%s**" % findings["headline"].strip(), ""]
-
-    out += [t["top"], ""]
-    if top:
-        for number, rec in enumerate(top, 1):
-            out += recommendation_block(rec, "### %d." % number, t)
+    meta.append(t["date"] % stamp[:10])
+    if changes and compared:
+        meta.append(t["compared"] % compared)
+    out = [t["title"] % findings["repo"], "", " · ".join(meta), "", "**%s**" % findings["headline"].strip(), ""]
+    recs = findings["recommendations"]
+    out += [t["first"], ""]
+    if recs:
+        for number, rec in enumerate(recs[:TOP], 1):
+            out += rec_block(number, rec, gaps, t)
     else:
         out += [t["no_recs"], ""]
+    if changes:
+        out += since_section(changes, score, t)
 
-    out += [t["scorecard"], ""]
-    order = subproject_order(findings)
-    indexed = list(enumerate(findings["dimensions"]))
-    groups = []
-    for sub in order:
-        rows = sorted([p for p in indexed if p[1]["subproject"] == sub], key=dimension_sort_key)
-        if rows:
-            groups.append((sub, [dim for _i, dim in rows]))
-    if not groups:
-        out += [t["no_dims"], ""]
-    for sub, rows in groups:
-        if len(groups) > 1:
-            out += ["### %s" % (t["root"] if sub == "." else sub), ""]
-        out += [t["table"], "| --- | --- | --- | --- |"]
-        for dim in rows:
-            out.append("| %s | %s | %s | %s |" % (cell(dimension_name(dim["id"], t)), cell(level_text(dim, t)),
-                                                  cell(dim["summary"]), change_text(dim, index, t)))
+    rows = effective_rows(score, findings)
+    change_of = {(c["id"], c["subproject"]): c["change"] for c in (changes or {}).get("dimensions", [])}
+    several = len({r["subproject"] for r, _l, _o in rows}) > 1
+    out += [t["scorecard"], "", t["table"], "| --- | --- | --- | --- |"]
+    for row, level, override in rows:
+        label = dimension_name(row["id"], t)
+        if several and row["subproject"] != ".":
+            label += " (%s)" % row["subproject"]
+        shown = level_text(row, level, t)
+        change = changes_text(change_of.get((row["id"], row["subproject"])), t) if changes else "—"
+        out.append("| %s | %s | %s | %s |" % (cell(label), cell(shown), cell(row["summary"]), change))
+    out += ["", t["legend"], ""]
+
+    if len(recs) > TOP:
+        out += [t["more"], ""]
+        for rec in recs[TOP:]:
+            out.append("- %s (`%s`) — `%s`" % (rec["title"].strip(), rec["gap"], first_command(rec).replace("`", "'")))
         out.append("")
-    out += [t["legend"], ""]
 
-    out += [t["details"], ""]
-    by_dimension = {}
-    for pair in sorted(indexed, key=dimension_sort_key):
-        by_dimension.setdefault(pair[1]["id"], []).append(pair[1])
-    rest_by_dimension = {}
-    for rec in rest:
-        rest_by_dimension.setdefault(rec["dimension"], []).append(rec)
-    ids = sorted(set(by_dimension) | set(rest_by_dimension),
-                 key=lambda d: (DIMENSION_ORDER.get(d, len(DIMENSION_ORDER)), d))
-    if not ids:
-        out += [t["no_details"], ""]
-    for dim_id in ids:
-        out += ["### %s (`%s`)" % (dimension_name(dim_id, t), dim_id), ""]
-        entries = by_dimension.get(dim_id, [])
-        for dim in entries:
-            label = "**%s** — " % dim["subproject"] if (len(entries) > 1 or dim["subproject"] != ".") else ""
-            shown = level_text(dim, t)
-            if dim.get("level") is None and dim.get("status") == "checked":
-                shown = t["measured"]
-            text = label + t["level"] % shown
-            if dim["summary"].strip():
-                text += " " + dim["summary"].strip()
-            out += [text, ""]
-            if dim.get("not_run_reason"):
-                out += [t["not_run_reason"] % dim["not_run_reason"], ""]
-            evidence = dim.get("evidence") or []
-            if evidence:
-                out += [t["evidence"], ""] + ["- " + re.sub(r"\s*\n\s*", " ", str(e)) for e in evidence] + [""]
-        for rec in rest_by_dimension.get(dim_id, []):
-            out += recommendation_block(rec, "####", t)
+    table = score.get("hotspots") or []
+    if table:
+        out += [t["hotspots"], "", t["hot_table"], "| --- | --- | --- | --- | --- |"]
+        for item in table[:HOTSPOT_ROWS]:
+            ci = {True: t["yes"], False: t["no"]}.get(item["tests_in_ci"], t["unk"])
+            share = "%d%%" % round(item["top_author_share"] * 100) if item.get("top_author_share") is not None else "—"
+            out.append("| %s | %s | %s | %s | %s |" % (cell(item["path"]), item.get("commits", "—"),
+                                                       item.get("loc", "—"), ci, share))
+        out.append("")
+
+    evidence = [(r, lv, o) for r, lv, o in rows if r["status"] != "not_applicable" and
+                (lv is None or lv < 2 or r.get("partial") or o)]
+    if evidence:
+        out += [t["evidence"], ""]
+        for row, level, override in evidence:
+            label = dimension_name(row["id"], t) + ("" if row["subproject"] == "." else " (%s)" % row["subproject"])
+            out.append("**%s** — %s" % (label, level_text(row, level, t)))
+            if override:
+                out.append("- " + t["override"] % (override["level"], override["reason"].strip()))
+            partial = row.get("partial")
+            if partial and partial.get("missing"):
+                out.append("- %s" % ", ".join("`%s`" % m for m in partial["missing"][:6]))
+            out += ["- " + real_fact(f, names) for f in row["facts"][:5]]
+            out.append("")
 
     out += [t["not_checked"], ""]
-    if findings["not_checked"]:
-        for item in findings["not_checked"]:
-            why = item["why"].strip()
-            if why and why[-1] not in ".!?。！？":
-                why += "."
-            line = "- **%s** — %s" % (item["what"].strip(), why)
-            if item.get("how_to_run"):
-                line += t["to_run"] % item["how_to_run"].strip().replace("`", "'")
-            out.append(line)
-        out.append("")
-    else:
-        out += [t["none_skipped"], ""]
+    seen = set()
+    shown = 0
+    for item in findings["not_checked"]:
+        key = item["what"].strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        why = item["why"].strip()
+        if why and why[-1] not in ".!?。！？":
+            why += "."
+        line = "- **%s** — %s" % (key, why)
+        if item.get("how_to_run"):
+            line += t["to_run"] % item["how_to_run"].strip().replace("`", "'")
+        out.append(line)
+        shown += 1
+    if not shown:
+        out.append(t["none_skipped"])
+    out.append("")
+    if score["dismissed"]:
+        out += ["<details><summary>%s (%d)</summary>" % (t["dismissed"], len(score["dismissed"])), ""]
+        out += ["- `%s` — %s: %s (%s)" % (d["id"], t["reason"], d["reason"] or "—", d["date"] or "—")
+                for d in score["dismissed"]]
+        out += ["", "</details>", ""]
     return "\n".join(out).rstrip("\n") + "\n"
 
 
-def summary(findings, report_path=None):
-    """Terminal summary: headline, top five actions with first steps, report path."""
-    validate(findings)
+def share(findings, score):
+    """At most 15 lines of Markdown for a pull request, issue or chat."""
+    t = text_for(findings)
+    worst = {}
+    for row, level, _o in effective_rows(score, findings):
+        if row["status"] == "not_applicable":
+            continue
+        value = -1 if level is None else level
+        worst[row["id"]] = min(worst.get(row["id"], 9), value)
+    card = " · ".join("%s %s" % (k, "?" if v < 0 else v) for k, v in sorted(
+        worst.items(), key=lambda kv: DIMENSION_ORDER.get(kv[0], 99)))
+    lines = ["**%s**" % findings["headline"].strip(), "", t["share_card"] % card, "", t["share_first"]]
+    for number, rec in enumerate(findings["recommendations"][:3], 1):
+        lines.append("%d. %s — `%s`" % (number, rec["title"].strip(), first_command(rec).replace("`", "'")))
+    return "\n".join(lines[:SHARE_LINES]) + "\n"
+
+
+def summary(findings, score, report_path=None, changes=None):
     t = text_for(findings)
     lines = [findings["headline"].strip(), ""]
-    top = rank_recommendations(findings["recommendations"])[:TOP_ACTIONS]
-    if top:
-        lines.append(t["summary_top"])
-        for number, rec in enumerate(top, 1):
-            step = rec["first_step"].strip().splitlines()
-            first = step[0] if step else ""
-            more = " …" if len(step) > 1 else ""
-            lines.append("%d. %s" % (number, rec["title"]))
-            lines.append(t["summary_step"] % (first, more))
+    recs = findings["recommendations"][:TOP]
+    if recs:
+        lines.append(t["summary_first"])
+        for number, rec in enumerate(recs, 1):
+            lines += ["%d. %s" % (number, rec["title"].strip()), t["summary_cmd"] % first_command(rec)]
     else:
         lines.append(t["no_recs"])
+    changes = changes or score.get("changes")
+    if changes and changes.get("gaps") is not None:
+        gaps = changes["gaps"]
+        lines += ["", t["summary_since"] % (len(gaps["closed"]), len(gaps["new"]), len(score["regressed"]))]
     if report_path:
         lines += ["", t["report"] % report_path]
     return "\n".join(lines) + "\n"
@@ -400,11 +458,15 @@ def load_json(path):
         raise FindingsError("%s is not valid JSON: %s" % (path, exc))
 
 
-def find_previous(path, findings):
-    """The newest findings-DATE*.json beside `path` that is older than it, or None."""
-    folder = os.path.dirname(os.path.abspath(path))
+def current_stamp(path, findings):
     own = FINDINGS_NAME.match(os.path.basename(path))
-    current = own.group(1) if own else str(findings.get("date", ""))
+    return own.group(1) if own else str(findings.get("stamp", ""))
+
+
+def find_previous(path, findings):
+    """(path, data, stamp) of the newest findings file beside `path` that is older, or None."""
+    folder = os.path.dirname(os.path.abspath(path))
+    current = current_stamp(path, findings)
     candidates = []
     try:
         names = os.listdir(folder)
@@ -414,54 +476,78 @@ def find_previous(path, findings):
         m = FINDINGS_NAME.match(name)
         if m and m.group(1) < current and os.path.join(folder, name) != os.path.abspath(path):
             candidates.append((m.group(1), name))
-    for _date, name in sorted(candidates, reverse=True):
+    for stamp, name in sorted(candidates, reverse=True):
         full = os.path.join(folder, name)
         try:
             data = load_json(full)
         except FindingsError as exc:
             sys.stderr.write("render.py: skipping %s\n" % exc)
             continue
-        if isinstance(data, dict) and isinstance(data.get("dimensions"), list):
-            return full, data
+        if isinstance(data, dict) and (isinstance(data.get("dimensions"), list) or data.get("schema") == 2):
+            return full, data, stamp
     return None
 
 
-def default_output(path, findings):
-    folder = os.path.dirname(os.path.abspath(path))
-    name = os.path.basename(path)
-    if name.startswith("findings"):
-        return os.path.join(folder, "report" + name[len("findings"):].rsplit(".", 1)[0] + ".md")
-    return os.path.join(folder, "report-%s.md" % findings["date"])
+def previous_changes(score, previous_path, previous):
+    """changes block against an earlier findings file (schema 1: levels only)."""
+    folder = os.path.dirname(os.path.abspath(previous_path))
+    if previous.get("schema") == 2 and isinstance(previous.get("score"), str):
+        old_path = os.path.join(folder, previous["score"])
+        if os.path.exists(old_path):
+            return scoring.changes_between(score, load_json(old_path), os.path.basename(previous_path))
+    old = {"dimensions": [{"id": d.get("id"), "subproject": d.get("subproject", "."), "level": d.get("level"),
+                           "summary": "", "facts": []} for d in previous.get("dimensions") or []
+                          if isinstance(d, dict)], "gaps": [], "dismissed": []}
+    result = scoring.changes_between(score, old, os.path.basename(previous_path))
+    result["gaps"] = None
+    return result
+
+
+def default_name(path, findings, prefix):
+    return os.path.join(os.path.dirname(os.path.abspath(path)), "%s-%s.md" % (prefix, findings["stamp"]))
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Render a repo-health findings.json as Markdown.")
+    parser = argparse.ArgumentParser(description="Render a repo-health findings.json (schema 2) as Markdown.")
     parser.add_argument("findings")
-    parser.add_argument("--previous", help="an earlier findings.json to compare with")
+    parser.add_argument("--previous", help="an earlier findings file to compare with")
     parser.add_argument("--no-previous", action="store_true", help="do not look for an earlier findings file")
-    parser.add_argument("-o", "--output", help="report path (default: report-DATE.md beside the input)")
+    parser.add_argument("-o", "--output", help="report path (default: report-STAMP.md beside the input)")
+    parser.add_argument("--share", help="share file path (default: share-STAMP.md beside the input)")
     args = parser.parse_args(argv)
     try:
         findings = load_json(args.findings)
-        validate(findings)
-        previous = None
-        if args.previous:
-            previous = load_json(args.previous)
-            if not isinstance(previous, dict) or not isinstance(previous.get("dimensions"), list):
-                raise FindingsError("%s is not a findings file" % args.previous)
-        elif not args.no_previous:
-            found = find_previous(args.findings, findings)
-            previous = found[1] if found else None
-        report = render(findings, previous)
-        output = args.output or default_output(args.findings, findings)
-        folder = os.path.dirname(os.path.abspath(output))
-        os.makedirs(folder, exist_ok=True)
-        with open(output, "w", encoding="utf-8") as handle:
-            handle.write(report)
-    except (FindingsError, OSError) as exc:
-        sys.stderr.write("render.py: %s\n" % exc)
+        if isinstance(findings, dict) and findings.get("schema") == 2:
+            score_path = os.path.join(os.path.dirname(os.path.abspath(args.findings)), str(findings.get("score", "")))
+            score = load_json(score_path)
+        else:
+            validate(findings)
+            return 2
+        gap_order = {g["id"]: i for i, g in enumerate(score["gaps"])}
+        validate(findings, gap_order)
+        changes = None
+        compared = None
+        if not score.get("changes") and not args.no_previous:
+            found = None
+            if args.previous:
+                found = (args.previous, load_json(args.previous), None)
+            else:
+                found = find_previous(args.findings, findings)
+            if found:
+                changes = previous_changes(score, found[0], found[1])
+                compared = found[2] or os.path.basename(found[0])
+        report = render(findings, score, changes, compared)
+        output = args.output or default_name(args.findings, findings, "report")
+        share_path = args.share or default_name(args.findings, findings, "share")
+        for target, body in ((output, report), (share_path, share(findings, score))):
+            os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(body)
+    except (FindingsError, OSError, KeyError) as exc:
+        sys.stderr.write("render.py: %s\n" % (("missing key %s in score.json" % exc) if isinstance(exc, KeyError)
+                                              else exc))
         return 2
-    sys.stdout.write(summary(findings, os.path.abspath(output)))
+    sys.stdout.write(summary(findings, score, os.path.abspath(output), changes))
     return 0
 
 

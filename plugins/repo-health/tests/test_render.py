@@ -1,4 +1,4 @@
-"""Tests for scripts/render.py. Findings are built inline.
+"""Tests for scripts/render.py (findings schema 2 with a score.json). Inputs are built inline.
 
 Run: python -m unittest discover -s plugins/repo-health/tests
 """
@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,321 +17,360 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "render.py")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPT = os.path.join(SCRIPTS, "render.py")
 
+sys.path.insert(0, SCRIPTS)
 _spec = importlib.util.spec_from_file_location("repo_health_render", SCRIPT)
 render = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(render)
 
 
-def dim(dim_id, level, summary="a summary", status="checked", subproject=".", **extra):
-    entry = {"id": dim_id, "subproject": subproject, "tier": 0, "status": status, "level": level,
-             "summary": summary, "evidence": ["pyproject.toml:12 → [tool.ruff]"], "not_run_reason": None}
+def row(dim_id, level, summary="a summary", sub=".", status="checked", **extra):
+    entry = {"id": dim_id, "subproject": sub, "level": level, "status": status, "rule": dim_id + ".x",
+             "partial": None, "needs": None, "facts": ["pyproject.toml:12 (ruff)"], "summary": summary}
     entry.update(extra)
     return entry
 
 
-def rec(rec_id, impact, effort, dimension="lint", title=None, **extra):
-    entry = {"id": rec_id, "dimension": dimension, "subproject": ".", "title": title or "Title " + rec_id,
-             "why": "Why %s." % rec_id, "impact": impact, "effort": effort,
-             "first_step": "do-%s --now" % rec_id}
-    entry.update(extra)
-    return entry
+def gap(gap_id, dimension="lint", what="Do the thing", priority=5.0, hotspot_files=()):
+    return {"id": gap_id, "dimension": dimension, "subproject": ".", "rule": "x", "what": what, "facts": [],
+            "hotspot_files": list(hotspot_files), "effort": "add", "priority": priority}
 
 
-def sample():
+def sample_score():
+    gaps = [gap("g%d" % i, priority=10 - i, what="What %d" % i, hotspot_files=["src/hot%d.py" % i] if i == 1 else [])
+            for i in range(1, 8)]
     return {
-        "schema": 1, "repo": "demo", "commit": "0123456789abcdef0123", "date": "2026-11-10",
-        "headline": "Tests run in CI, lint does not; enforce ruff first.",
-        "subprojects": [{"path": ".", "languages": ["python"]}],
+        "as_of": "2026-11-10", "repo": "/r/demo", "commit": "0123456789abcdef",
+        "profile": {"authors": "team", "visibility": "public", "kind": "application"},
         "dimensions": [
-            dim("tests", 2, "pytest runs in CI"),
-            dim("lint", 1, "ruff configured, not in CI"),
-            dim("ci", 2, "GitHub Actions on pull_request"),
-            dim("size", None, "3 files over 500 lines"),
-            dim("structure", None, "", status="not_run", not_run_reason="needs consent", tier=2),
+            row("lint", 1, "Linter configured, not blocking in CI."),
+            row("types", 2, "Type checker blocks in CI."),
+            row("secrets", None, "Secret scanning setting not visible.", status="unknown",
+                needs="GitHub secret-scanning setting", facts=["ghfacts.json#/security_and_analysis = not_visible"]),
+            row("tests", 1, "CI runs 2 of 4 test suites.",
+                partial={"covered": 2, "total": 4, "missing": ["a/tests", "b/tests"], "unit": "test suites"}),
+            row("coverage", None, "No tests to measure.", status="not_applicable", facts=[]),
+            row("ci", 3, "Pull requests run tests and lint.", facts=[]),
         ],
-        "recommendations": [
-            rec("r1", "medium", "small"),
-            rec("r2", "high", "large"),
-            rec("r3", "high", "small"),
-            rec("r4", "low", "small"),
-            rec("r5", "high", "small"),
-            rec("r6", "medium", "medium"),
-            rec("r7", "low", "large"),
-        ],
-        "not_checked": [{"what": "structure review", "why": "needs consent",
-                         "how_to_run": "ask for the structure dimension"}],
+        "hotspots": [{"path": "src/hot%d.py" % i, "commits": 10 - i, "loc": 100 * i, "tests_in_ci": [True, False, "unknown"][i % 3],
+                      "top_author_share": 0.5 + i / 20.0} for i in range(1, 13)],
+        "ci_health": {"available": False}, "gaps": gaps, "dismissed": [], "regressed": [], "deferred": [],
+        "not_applicable": [], "changes": None, "inputs": {},
     }
 
 
-class Sections(unittest.TestCase):
+def rec(gap_id, impact="high", effort="small", title=None, **step):
+    first = {"file": "pyproject.toml", "snippet": "[tool.ruff]\nline-length = 100", "command": "uvx ruff check .",
+             "verify": "uvx ruff check . && echo ok"}
+    first.update(step)
+    return {"gap": gap_id, "title": title or "Title " + gap_id, "why": "Because %s matters." % gap_id,
+            "impact": impact, "effort": effort, "first_step": first, "reorder_reason": None}
+
+
+def sample_findings(count=7):
+    return {
+        "schema": 2, "lang": "en", "repo": "demo", "commit": "0123456789abcdef0123", "stamp": "2026-11-10T0930",
+        "headline": "Tests run in CI for two of four suites; lint does not block.",
+        "score": "score-2026-11-10T0930.json",
+        "inputs": {"detect": "detect-2026-11-10T0930.json", "hotspots": "hotspots-2026-11-10T0930.json",
+                   "ghfacts": "ghfacts-2026-11-10T0930.json"},
+        "overrides": [],
+        "recommendations": [rec("g%d" % i) for i in range(1, count + 1)],
+        "reviews": {},
+        "not_checked": [{"what": "structure review", "why": "needs consent", "how_to_run": "ask for the review"}],
+    }
+
+
+def card_rows(text):
+    card = text[text.index("## Scorecard"):]
+    card = card[:card.index("\n\n", card.index("| ---"))]
+    return [line for line in card.splitlines() if line.startswith("| ") and "---" not in line][1:]
+
+
+class Layout(unittest.TestCase):
     def test_sections_come_in_order_conclusion_first(self):
-        text = render.render(sample())
-        marks = ["# Repo health report: demo", "**Tests run in CI", "## Top actions", "## Scorecard",
-                 "## Details", "## Not checked"]
+        text = render.render(sample_findings(), sample_score())
+        marks = ["# Repo health report: demo", "**Tests run in CI", "## Do these first", "## Scorecard",
+                 "## More recommendations", "## Hotspots", "## Evidence", "## Not checked"]
         positions = [text.index(m) for m in marks]
         self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("## Since last run", text)
         self.assertIn("Commit: `0123456789ab`", text)
         self.assertIn("Date: 2026-11-10", text)
+        self.assertNotIn("compared with", text)
 
-    def test_top_actions_are_ranked_by_impact_then_effort_then_file_order(self):
-        text = render.render(sample())
-        top = text[text.index("## Top actions"):text.index("## Scorecard")]
-        order = [t for t in ("r3", "r5", "r2", "r1", "r6") if "Title %s" % t in top]
-        self.assertEqual(order, ["r3", "r5", "r2", "r1", "r6"])
-        self.assertEqual([top.index("Title %s" % t) for t in order], sorted(top.index("Title %s" % t) for t in order))
-        self.assertNotIn("Title r4", top)
-        self.assertNotIn("Title r7", top)
-        self.assertEqual(top.count("### "), 5)
-        self.assertIn("### 1. Title r3", top)
+    def test_top_five_blocks_have_step_verify_and_gap_id(self):
+        text = render.render(sample_findings(), sample_score())
+        top = text[text.index("## Do these first"):text.index("## Scorecard")]
+        self.assertEqual(len(re.findall(r"^### \d\.", top, re.M)), 5)
+        self.assertIn("### 1. Title g1 (`g1`)", top)
+        self.assertIn("```\nuvx ruff check .\n```", top)
+        self.assertIn("[tool.ruff]", top)
+        self.assertIn("Verify: `uvx ruff check . && echo ok`", top)
+        self.assertIn("Touches hotspots: `src/hot1.py`", top)
+        self.assertIn("Title g6", text[text.index("## More recommendations"):])
 
-    def test_remaining_recommendations_go_to_details_of_their_dimension(self):
-        text = render.render(sample())
-        details = text[text.index("## Details"):text.index("## Not checked")]
-        self.assertIn("#### Title r4", details)
-        self.assertIn("#### Title r7", details)
-        self.assertNotIn("Title r3", details)
-        self.assertLess(details.index("### Lint and formatting (`lint`)"), details.index("#### Title r4"))
-        self.assertIn("pyproject.toml:12 → [tool.ruff]", details)
+    def test_more_recommendations_are_one_line_with_the_first_command(self):
+        text = render.render(sample_findings(), sample_score())
+        more = text[text.index("## More recommendations"):text.index("## Hotspots")]
+        self.assertIn("- Title g6 (`g6`) — `uvx ruff check .`", more)
+        findings = sample_findings()
+        findings["recommendations"][5]["first_step"]["command"] = None
+        text = render.render(findings, sample_score())
+        self.assertIn("(`g6`) — `pyproject.toml`", text)
 
-    def test_scorecard_levels_and_dashes(self):
-        text = render.render(sample())
-        card = text[text.index("## Scorecard"):text.index("## Details")]
-        rows = {line.split("|")[1].strip(): line for line in card.splitlines() if line.startswith("| ") and "---" not in line}
-        self.assertIn("2 enforced", rows["Tests"])
-        self.assertIn("1 present", rows["Lint and formatting"])
-        self.assertIn("| — |", rows["Size and structure metrics"])
-        self.assertIn("| not run |", rows["Structure review"])
-        order = [line.split("|")[1].strip() for line in card.splitlines() if line.startswith("| ") and "---" not in line][1:]
-        self.assertEqual(order, ["Lint and formatting", "Tests", "CI", "Size and structure metrics", "Structure review"])
+    def test_scorecard_levels(self):
+        rows = card_rows(render.render(sample_findings(), sample_score()))
+        self.assertTrue(rows[0].startswith("| Lint and formatting | 1 present |"))
+        joined = "\n".join(rows)
+        self.assertIn("| Type checking | 2 enforced |", joined)
+        self.assertIn("| Tests | 1 present (partial: 2 of 4 test suites) |", joined)
+        self.assertIn("| Secret scanning | unknown (needs: GitHub secret-scanning setting) |", joined)
+        self.assertIn("| Coverage | n/a |", joined)
+        self.assertIn("| CI | 3 effective |", joined)
+        order = [r.split("|")[1].strip() for r in rows]
+        self.assertEqual(order, ["Lint and formatting", "Type checking", "Secret scanning", "Tests", "Coverage", "CI"])
 
-    def test_secret_scanning_is_a_named_guardrail_dimension(self):
-        findings = sample()
-        findings["dimensions"] += [dim("secrets", 2), dim("static", 0)]
-        card = render.render(findings)
-        card = card[card.index("## Scorecard"):card.index("## Details")]
-        self.assertIn("| Secret scanning | 2 enforced |", card)
-        self.assertLess(card.index("Static analysis and security"), card.index("Secret scanning"))
-        findings["dimensions"][-2] = dim("secrets", None)
-        with self.assertRaises(render.FindingsError):
-            render.render(findings)
+    def test_several_subprojects_name_the_subproject(self):
+        score = sample_score()
+        score["dimensions"].append(row("lint", 0, "No linter.", sub="web"))
+        text = render.render(sample_findings(), score)
+        self.assertIn("| Lint and formatting (web) | 0 absent |", text)
 
-    def test_chinese_report_text(self):
-        findings = sample()
-        findings["lang"] = "zh-CN"
-        text = render.render(findings)
-        for heading in ("# 仓库健康报告：demo", "提交：`0123456789ab`", "## 优先行动", "## 计分表", "## 细节", "## 未检查", "第一步："):
-            self.assertIn(heading, text)
-        self.assertIn("| 测试 | 2 强制 |", text)
-        self.assertIn("| 结构审查 | 未运行 |", text)
-        self.assertIn("*影响高 · 工作量小 · lint*", text)
-        for english in ("Top actions", "Scorecard", "First step", "Not checked", "enforced"):
-            self.assertNotIn(english, text)
-        out = render.summary(findings, "/x/report.md")
-        self.assertIn("优先行动：", out)
-        self.assertTrue(out.rstrip().endswith("报告：/x/report.md"))
-        findings["lang"] = "fr"                                   # no French text: English
-        self.assertIn("## Top actions", render.render(findings))
+    def test_hotspots_table_has_ten_rows(self):
+        text = render.render(sample_findings(), sample_score())
+        table = text[text.index("## Hotspots"):text.index("## Evidence")]
+        lines = [l for l in table.splitlines() if l.startswith("| src/")]
+        self.assertEqual(len(lines), 10)
+        self.assertIn("| src/hot1.py | 9 | 100 | no | 55% |", table)
+        self.assertIn("| unknown |", table)
 
-    def test_not_checked_section(self):
-        text = render.render(sample())
-        tail = text[text.index("## Not checked"):]
-        self.assertIn("**structure review** — needs consent", tail)
-        self.assertIn("`ask for the structure dimension`", tail)
-        findings = sample()
+    def test_evidence_only_for_weak_unknown_partial_or_overridden(self):
+        findings = sample_findings()
+        findings["overrides"] = [{"dimension": "ci", "subproject": ".", "level": 2, "reason": "required checks seen"}]
+        text = render.render(findings, sample_score())
+        evidence = text[text.index("## Evidence"):text.index("## Not checked")]
+        self.assertIn("**Lint and formatting**", evidence)
+        self.assertIn("**Tests**", evidence)
+        self.assertIn("`a/tests`", evidence)
+        self.assertIn("**Secret scanning**", evidence)
+        self.assertIn("**CI** — 2 enforced", evidence)
+        self.assertIn("Override to level 2: required checks seen", evidence)
+        self.assertNotIn("Type checking", evidence)
+        self.assertNotIn("Coverage", evidence)
+
+    def test_override_changes_the_scorecard_level(self):
+        findings = sample_findings()
+        findings["overrides"] = [{"dimension": "lint", "subproject": ".", "level": 3, "reason": "seen in CI log"}]
+        self.assertIn("| Lint and formatting | 3 effective |", render.render(findings, sample_score()))
+
+    def test_input_pointers_name_the_stamped_file(self):
+        text = render.render(sample_findings(), sample_score())
+        self.assertIn("ghfacts-2026-11-10T0930.json#/security_and_analysis = not_visible", text)
+        self.assertNotIn("ghfacts.json#", text)
+
+    def test_not_checked_lists_each_item_once_and_dismissed_is_collapsed(self):
+        findings = sample_findings()
+        findings["not_checked"] = findings["not_checked"] * 2
+        score = sample_score()
+        score["dismissed"] = [{"id": "x:.:y", "what": "w", "reason": "vendored code", "date": "2026-11-01"}]
+        text = render.render(findings, score)
+        self.assertEqual(text.count("**structure review**"), 1)
+        self.assertIn("To run it: `ask for the review`", text)
+        self.assertIn("<details><summary>Dismissed (1)</summary>", text)
+        self.assertIn("`x:.:y` — reason: vendored code (2026-11-01)", text)
+
+    def test_nothing_skipped(self):
+        findings = sample_findings()
         findings["not_checked"] = []
-        self.assertIn("Nothing was skipped.", render.render(findings))
+        self.assertIn("Nothing was skipped.", render.render(findings, sample_score()))
 
-    def test_empty_recommendations_still_render_every_section(self):
-        findings = sample()
-        findings["recommendations"] = []
-        text = render.render(findings)
-        self.assertIn("No recommendations.", text)
-        for heading in ("## Top actions", "## Scorecard", "## Details", "## Not checked"):
-            self.assertIn(heading, text)
+    def test_sample_report_is_short(self):
+        text = render.render(sample_findings(), sample_score())
+        self.assertLess(len(text.splitlines()), 150)
 
-    def test_not_run_reason_is_shown(self):
-        self.assertIn("Not run: needs consent", render.render(sample()))
-
-    def test_unknown_fields_are_ignored(self):
-        findings = sample()
-        findings["extra"] = {"x": 1}
-        findings["dimensions"][0]["whatever"] = [1]
-        findings["recommendations"][0]["note"] = "n"
-        self.assertEqual(render.render(findings), render.render(sample()))
-
-    def test_pipes_and_backticks_do_not_break_the_layout(self):
-        findings = sample()
-        findings["dimensions"][0]["summary"] = "a | b\nc"
-        findings["recommendations"][2]["first_step"] = "echo ```nested```"
-        text = render.render(findings)
-        self.assertIn("a \\| b c", text)
-        self.assertIn("````\necho ```nested```\n````", text)
-
-    def test_unknown_impact_sorts_last_and_unknown_dimension_keeps_its_id(self):
-        findings = sample()
-        findings["recommendations"].append(rec("r8", "urgent", "small", dimension="custom", title="Odd one"))
-        findings["recommendations"] = [r for r in findings["recommendations"] if r["id"] in ("r3", "r8")]
-        text = render.render(findings)
-        top = text[text.index("## Top actions"):text.index("## Scorecard")]
-        self.assertLess(top.index("Title r3"), top.index("Odd one"))
-        findings["recommendations"].extend(rec("x%d" % i, "high", "small") for i in range(5))
-        details = render.render(findings)
-        details = details[details.index("## Details"):]
-        self.assertIn("### custom (`custom`)", details)
-        self.assertIn("#### Odd one", details)
-
-    def test_several_subprojects_get_one_table_each(self):
-        findings = sample()
-        findings["subprojects"] = [{"path": ".", "languages": ["python"]}, {"path": "web", "languages": ["typescript"]}]
-        findings["dimensions"].append(dim("lint", 3, "eslint in CI", subproject="web"))
-        text = render.render(findings)
-        card = text[text.index("## Scorecard"):text.index("## Details")]
-        self.assertEqual(card.count("| Dimension |"), 2)
-        self.assertLess(card.index("### repo root (.)"), card.index("### web"))
-        self.assertIn("**web** — Level: 3 effective", text)
-
-    def test_single_subproject_has_no_subproject_heading(self):
-        card = render.render(sample())
-        card = card[card.index("## Scorecard"):card.index("## Details")]
-        self.assertNotIn("### ", card)
+    def test_pipes_and_backticks_do_not_break_tables_or_fences(self):
+        score = sample_score()
+        score["dimensions"][0]["summary"] = "a | b"
+        findings = sample_findings()
+        findings["recommendations"][0]["first_step"]["command"] = "echo ``` | cat"
+        findings["recommendations"][0]["first_step"]["verify"] = "echo `x`"
+        text = render.render(findings, score)
+        self.assertIn("a \\| b", text)
+        self.assertIn("````\necho ``` | cat\n````", text)
+        self.assertIn("Verify: `echo 'x'`", text)
 
 
-class Comparison(unittest.TestCase):
-    def previous(self):
-        old = sample()
-        old["date"] = "2026-11-01"
-        old["dimensions"] = [dim("lint", 2), dim("tests", 1), dim("ci", 2), dim("size", None),
-                             dim("deps", 0)]
-        return old
+class SinceLastRun(unittest.TestCase):
+    def changed_score(self):
+        score = sample_score()
+        score["changes"] = {"compared_with": "findings-2026-11-01.json",
+                            "dimensions": [{"id": "lint", "subproject": ".", "change": "up", "before": 0, "after": 1},
+                                           {"id": "tests", "subproject": ".", "change": "down", "before": 2, "after": 1},
+                                           {"id": "ci", "subproject": ".", "change": "same", "before": 3, "after": 3}],
+                            "gaps": {"closed": [{"id": "old:.:x", "dimension": "lint", "what": "Old thing"}],
+                                     "new": ["g1"], "still_open": ["g2"]}}
+        score["regressed"] = [{"id": "g3", "what": "Came back", "reason": "", "date": ""}]
+        return score
 
-    def changes(self, text):
-        card = text[text.index("## Scorecard"):text.index("## Details")]
-        out = {}
-        for line in card.splitlines():
-            if line.startswith("| ") and "---" not in line and "Dimension" not in line:
-                cols = [c.strip() for c in line.strip("|").split("|")]
-                out[cols[0]] = cols[-1]
-        return out
+    def test_section_sits_between_actions_and_scorecard(self):
+        text = render.render(sample_findings(), self.changed_score())
+        self.assertLess(text.index("## Do these first"), text.index("## Since last run"))
+        self.assertLess(text.index("## Since last run"), text.index("## Scorecard"))
+        since = text[text.index("## Since last run"):text.index("## Scorecard")]
+        self.assertIn("Closed gaps (1)", since)
+        self.assertIn("`old:.:x` Old thing", since)
+        self.assertIn("New gaps (1)", since)
+        self.assertIn("`g1` What 1", since)
+        self.assertIn("Regressions: marked done, detected again (1)", since)
+        self.assertIn("`g3` Came back", since)
+        self.assertIn("lint: 0 → 1 ↑", since)
+        self.assertIn("tests: 2 → 1 ↓", since)
+        self.assertNotIn("ci:", since)
+        self.assertIn("compared with findings-2026-11-01.json", text)
 
-    def test_arrows(self):
-        text = render.render(sample(), self.previous())
-        changes = self.changes(text)
-        self.assertEqual(changes["Lint and formatting"], "↓")
-        self.assertEqual(changes["Tests"], "↑")
-        self.assertEqual(changes["CI"], "=")
-        self.assertEqual(changes["Size and structure metrics"], "=")      # null level, row existed
-        self.assertEqual(changes["Structure review"], "new")             # null level, no row before
-        self.assertIn("Compared with the run of 2026-11-01", text)
+    def test_scorecard_change_column(self):
+        rows = card_rows(render.render(sample_findings(), self.changed_score()))
+        by = {r.split("|")[1].strip(): r.split("|")[-2].strip() for r in rows}
+        self.assertEqual((by["Lint and formatting"], by["Tests"], by["CI"], by["Type checking"]), ("↑", "↓", "=", "—"))
+        first_run = card_rows(render.render(sample_findings(), sample_score()))
+        self.assertTrue(all(r.rstrip().endswith("| — |") for r in first_run))
 
-    def test_new_row_without_previous_entry(self):
-        previous = self.previous()
-        previous["dimensions"] = [d for d in previous["dimensions"] if d["id"] != "tests"]
-        self.assertEqual(self.changes(render.render(sample(), previous))["Tests"], "new")
-
-    def test_change_is_per_subproject(self):
-        findings = sample()
-        findings["dimensions"] = [dim("lint", 2, subproject="a"), dim("lint", 1, subproject="b")]
-        previous = copy.deepcopy(findings)
-        previous["dimensions"] = [dim("lint", 1, subproject="a"), dim("lint", 1, subproject="b")]
-        text = render.render(findings, previous)
-        self.assertIn("↑", text)
-        self.assertIn("| = |", text)
-
-    def test_without_previous_the_column_shows_a_dash(self):
-        text = render.render(sample())
-        self.assertEqual(set(self.changes(text).values()), {"—"})
-        self.assertNotIn("Compared with", text)
-
-    def test_current_level_after_a_null_level_is_new(self):
-        previous = self.previous()
-        previous["dimensions"][0]["level"] = None
-        previous["dimensions"][0]["status"] = "not_run"
-        self.assertEqual(self.changes(render.render(sample(), previous))["Lint and formatting"], "new")
+    def test_summary_counts(self):
+        out = render.summary(sample_findings(), self.changed_score(), "/x/report.md")
+        self.assertIn("Since last run: 1 closed, 1 new, 1 regressed.", out)
+        self.assertNotIn("Since last run", render.summary(sample_findings(), sample_score(), "/x/report.md"))
 
 
 class Validation(unittest.TestCase):
-    def assert_error(self, findings, text):
-        with self.assertRaises(render.FindingsError) as ctx:
-            render.render(findings)
-        self.assertIn(text, str(ctx.exception))
+    def check(self, mutate, expect):
+        findings = sample_findings()
+        mutate(findings)
+        with self.assertRaises(render.FindingsError) as caught:
+            render.render(findings, sample_score())
+        self.assertIn(expect, str(caught.exception))
 
-    def test_missing_top_level_fields_are_named(self):
-        for field in ("schema", "repo", "date", "headline", "dimensions", "recommendations", "not_checked"):
-            findings = sample()
-            del findings[field]
-            self.assert_error(findings, field)
+    def test_first_step_needs_verify(self):
+        self.check(lambda f: f["recommendations"][0]["first_step"].update(verify=None),
+                   "recommendations[0].first_step.verify")
 
-    def test_headline_must_be_a_non_empty_string(self):
-        findings = sample()
-        findings["headline"] = "  "
-        self.assert_error(findings, "headline")
-        findings["headline"] = 3
-        self.assert_error(findings, "headline")
+    def test_first_step_needs_a_snippet_or_a_command(self):
+        self.check(lambda f: f["recommendations"][1]["first_step"].update(snippet=None, command=None),
+                   "recommendations[1].first_step needs a snippet or a command")
+        findings = sample_findings()
+        findings["recommendations"][1]["first_step"].update(snippet=None)
+        render.render(findings, sample_score())
 
-    def test_schema_must_be_1(self):
-        findings = sample()
-        findings["schema"] = 2
-        self.assert_error(findings, "schema")
+    def test_prose_is_rejected_but_code_is_not(self):
+        self.check(lambda f: f["recommendations"][0]["first_step"].update(
+            command="Run the linter. Then fix every error."), "first_step.command is prose")
+        self.check(lambda f: f["recommendations"][0]["first_step"].update(
+            verify="Check that it passes. Look at the output."), "first_step.verify is prose")
+        findings = sample_findings()
+        findings["recommendations"][0]["first_step"].update(command="make lint")
+        findings["recommendations"][0]["first_step"].update(snippet="Done. Really. Yes /x")
+        render.render(findings, sample_score())
 
-    def test_missing_dimension_and_recommendation_fields_are_named_with_their_index(self):
-        findings = sample()
-        del findings["dimensions"][1]["summary"]
-        self.assert_error(findings, "dimensions[1].summary")
-        findings = sample()
-        del findings["recommendations"][2]["first_step"]
-        self.assert_error(findings, "recommendations[2].first_step")
-        findings = sample()
-        del findings["not_checked"][0]["why"]
-        self.assert_error(findings, "not_checked[0].why")
+    def test_command_is_a_short_block(self):
+        self.check(lambda f: f["recommendations"][0]["first_step"].update(command="\n".join(["ls -l"] * 13)),
+                   "longer than 12 lines")
 
-    def test_level_rules(self):
-        findings = sample()
-        findings["dimensions"][1]["level"] = None            # lint, checked: not allowed
-        self.assert_error(findings, "dimensions[1].level")
-        findings = sample()
-        findings["dimensions"][1]["status"] = "not_run"      # lint, not run: null is fine
-        findings["dimensions"][1]["level"] = None
-        render.render(findings)
-        findings = sample()
-        findings["dimensions"][3]["level"] = None            # size: null is fine when checked
-        render.render(findings)
-        for bad in (4, -1, "2", True, 1.5):
-            findings = sample()
-            findings["dimensions"][1]["level"] = bad
-            self.assert_error(findings, "dimensions[1].level")
+    def test_unknown_gap_is_named(self):
+        self.check(lambda f: f["recommendations"][2].update(gap="nope:.:x"), "recommendations[2].gap 'nope:.:x'")
 
-    def test_status_must_be_known(self):
-        findings = sample()
-        findings["dimensions"][0]["status"] = "done"
-        self.assert_error(findings, "dimensions[0].status")
+    def test_extra_gaps_are_allowed(self):
+        findings = sample_findings()
+        findings["recommendations"][2]["gap"] = "extra:swallowed-errors"
+        render.render(findings, sample_score())
 
-    def test_findings_must_be_an_object(self):
-        with self.assertRaises(render.FindingsError):
-            render.render([])
+    def test_reorder_reason_is_required_for_a_changed_order(self):
+        def swap(f):
+            f["recommendations"][0], f["recommendations"][1] = f["recommendations"][1], f["recommendations"][0]
+        self.check(swap, "recommendations[0].reorder_reason is required")
+        findings = sample_findings()
+        findings["recommendations"][0], findings["recommendations"][1] = findings["recommendations"][1], \
+            findings["recommendations"][0]
+        findings["recommendations"][0]["reorder_reason"] = "quick win first"
+        render.render(findings, sample_score())
+
+    def test_skipping_gaps_needs_no_reason(self):
+        findings = sample_findings()
+        del findings["recommendations"][1]
+        render.render(findings, sample_score())
+
+    def test_missing_and_malformed_fields_are_named(self):
+        for field in ("repo", "stamp", "headline", "score", "recommendations", "not_checked"):
+            self.check(lambda f, field=field: f.pop(field), "missing required field: " + field)
+        self.check(lambda f: f.update(schema=1), "schema must be 2")
+        self.check(lambda f: f.update(stamp="2026-11-10"), "stamp must look like")
+        self.check(lambda f: f["recommendations"][0].update(impact="huge"), "recommendations[0].impact")
+        self.check(lambda f: f["recommendations"][0].update(effort="huge"), "recommendations[0].effort")
+        self.check(lambda f: f.update(overrides=[{"dimension": "lint", "subproject": ".", "level": 9, "reason": "r"}]),
+                   "overrides[0].level")
+        self.check(lambda f: f.update(headline="  "), "headline must not be empty")
+        self.check(lambda f: f["not_checked"][0].pop("why"), "not_checked[0].why")
 
 
-class Summary(unittest.TestCase):
-    def test_terminal_summary(self):
-        text = render.summary(sample(), "/x/report.md")
+class Chinese(unittest.TestCase):
+    def test_zh_has_no_english_headings_or_labels(self):
+        findings = sample_findings()
+        findings["lang"] = "zh-CN"
+        score = sample_score()
+        score["changes"] = SinceLastRun().changed_score()["changes"]
+        score["dismissed"] = [{"id": "x", "what": "w", "reason": "r", "date": "d"}]
+        text = render.render(findings, score)
+        for heading in ("# 仓库健康报告：demo", "提交：`0123456789ab`", "## 优先行动", "## 自上次运行", "## 计分表",
+                        "## 更多建议", "## 热点", "## 证据", "## 未检查", "验证：", "原因：", "已忽略"):
+            self.assertIn(heading, text)
+        self.assertIn("| 测试 | 1 有配置 (部分：2/4 个测试套件) |", text)
+        self.assertIn("| 密钥扫描 | 未知（需要：GitHub secret-scanning setting） |", text)
+        self.assertIn("| 覆盖率 | 不适用 |", text)
+        for english in ("Do these first", "Scorecard", "Since last run", "Verify:", "Hotspots", "Evidence",
+                        "Not checked", "More recommendations", "Dismissed", "enforced", "Why:"):
+            self.assertNotIn(english, text)
+        out = render.summary(findings, score, "/x/report.md")
+        self.assertIn("优先行动：", out)
+        self.assertIn("自上次运行：关闭 1，新增 1，回退 0。", out)
+        self.assertTrue(out.rstrip().endswith("报告：/x/report.md"))
+        self.assertIn("计分：", render.share(findings, score))
+
+    def test_other_languages_fall_back_to_english(self):
+        findings = sample_findings()
+        findings["lang"] = "fr"
+        self.assertIn("## Do these first", render.render(findings, sample_score()))
+
+
+class Share(unittest.TestCase):
+    def test_share_is_short_and_useful(self):
+        text = render.share(sample_findings(), sample_score())
         lines = text.splitlines()
-        self.assertEqual(lines[0], "Tests run in CI, lint does not; enforce ruff first.")
-        self.assertIn("Top actions:", lines)
-        self.assertIn("1. Title r3", lines)
-        self.assertIn("   first step: do-r3 --now", lines)
-        self.assertEqual(sum(1 for l in lines if l[:2] in ("1.", "2.", "3.", "4.", "5.", "6.")), 5)
-        self.assertEqual(lines[-1], "Report: /x/report.md")
+        self.assertLessEqual(len(lines), 15)
+        self.assertTrue(lines[0].startswith("**Tests run in CI"))
+        self.assertIn("Scorecard: lint 1 · types 2 · secrets ? · tests 1 · ci 3", text)
+        self.assertNotIn("coverage", text)
+        self.assertEqual(len([l for l in lines if re.match(r"^\d\. ", l)]), 3)
+        self.assertIn("1. Title g1 — `uvx ruff check .`", text)
 
-    def test_multi_line_first_step_shows_its_first_line(self):
-        findings = sample()
-        findings["recommendations"][2]["first_step"] = "line one\nline two"
-        self.assertIn("first step: line one …", render.summary(findings))
+    def test_share_stays_short_with_many_dimensions_and_recommendations(self):
+        score = sample_score()
+        score["dimensions"] += [row(d, 0) for d in ("static", "setup", "docs", "deps", "arch")]
+        self.assertLessEqual(len(render.share(sample_findings(20), score).splitlines()), 15)
+
+
+class Terminal(unittest.TestCase):
+    def test_summary_has_headline_top_five_and_report_path(self):
+        out = render.summary(sample_findings(), sample_score(), "/x/report.md")
+        self.assertTrue(out.startswith("Tests run in CI"))
+        self.assertEqual(len(re.findall(r"^\d\. ", out, re.M)), 5)
+        self.assertIn("   first step: uvx ruff check .", out)
+        self.assertTrue(out.rstrip().endswith("Report: /x/report.md"))
 
 
 class Files(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="repo-health-render-")
+        self.dir = tempfile.mkdtemp(prefix="rh-render-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
 
     def save(self, name, data):
@@ -342,101 +382,107 @@ class Files(unittest.TestCase):
                 json.dump(data, handle)
         return path
 
-    def findings(self, date):
-        data = sample()
-        data["date"] = date
+    def findings(self, stamp):
+        data = sample_findings()
+        data["stamp"] = stamp
+        data["score"] = "score-%s.json" % stamp
         return data
 
-    def test_previous_is_the_newest_older_findings_file(self):
-        self.save("findings-2026-11-01.json", self.findings("2026-11-01"))
-        self.save("findings-2026-11-05.json", self.findings("2026-11-05"))
-        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
-        self.save("findings-2026-11-12.json", self.findings("2026-11-12"))
-        self.save("other.json", self.findings("2026-11-09"))
-        path, data = render.find_previous(current, self.findings("2026-11-10"))
-        self.assertEqual(os.path.basename(path), "findings-2026-11-05.json")
-        self.assertEqual(data["date"], "2026-11-05")
+    def test_previous_is_the_newest_older_stamp_including_old_date_only_names(self):
+        self.save("findings-2026-11-01.json", {"schema": 1, "dimensions": []})
+        self.save("findings-2026-11-10T0800.json", self.findings("2026-11-10T0800"))
+        self.save("findings-2026-11-10T1500.json", self.findings("2026-11-10T1500"))
+        self.save("other.json", {"dimensions": []})
+        current = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        path, data, stamp = render.find_previous(current, self.findings("2026-11-10T0930"))
+        self.assertEqual((os.path.basename(path), stamp), ("findings-2026-11-10T0800.json", "2026-11-10T0800"))
+        os.remove(path)
+        path, data, stamp = render.find_previous(current, self.findings("2026-11-10T0930"))
+        self.assertEqual(stamp, "2026-11-01")
 
-    def test_broken_older_file_is_skipped(self):
-        self.save("findings-2026-11-01.json", self.findings("2026-11-01"))
+    def test_a_date_only_name_is_older_than_a_stamp_of_the_same_day(self):
+        self.save("findings-2026-11-10.json", {"schema": 1, "dimensions": []})
+        current = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        self.assertEqual(render.find_previous(current, self.findings("2026-11-10T0930"))[2], "2026-11-10")
+
+    def test_broken_older_file_is_skipped_and_none_when_alone(self):
+        self.save("findings-2026-11-01.json", {"schema": 1, "dimensions": []})
         self.save("findings-2026-11-05.json", "{not json")
-        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
+        current = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            found = render.find_previous(current, self.findings("2026-11-10"))
-        self.assertEqual(os.path.basename(found[0]), "findings-2026-11-01.json")
+            found = render.find_previous(current, self.findings("2026-11-10T0930"))
+        self.assertEqual(found[2], "2026-11-01")
         self.assertIn("findings-2026-11-05.json", err.getvalue())
+        os.remove(os.path.join(self.dir, "findings-2026-11-01.json"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(render.find_previous(current, self.findings("2026-11-10T0930")))
 
-    def test_no_older_file(self):
-        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
-        self.assertIsNone(render.find_previous(current, self.findings("2026-11-10")))
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, SCRIPT] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, cwd=self.dir)
 
-    def test_cli_writes_the_report_and_prints_the_summary(self):
-        old = self.findings("2026-11-01")
-        old["dimensions"][1]["level"] = 2
+    def test_cli_writes_report_and_share_beside_the_input(self):
+        self.save("score-2026-11-10T0930.json", sample_score())
+        path = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        done = self.run_cli(path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        report = os.path.join(self.dir, "report-2026-11-10T0930.md")
+        share = os.path.join(self.dir, "share-2026-11-10T0930.md")
+        self.assertTrue(os.path.exists(report) and os.path.exists(share))
+        self.assertTrue(done.stdout.rstrip().endswith("Report: " + os.path.realpath(report))
+                        or done.stdout.rstrip().endswith("Report: " + report))
+        with open(share) as handle:
+            self.assertLessEqual(len(handle.read().splitlines()), 15)
+        done = self.run_cli(path, "-o", os.path.join(self.dir, "x", "r.md"), "--share", os.path.join(self.dir, "s.md"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "x", "r.md")))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "s.md")))
+
+    def test_cli_compares_with_a_schema_1_run_by_levels_only(self):
+        old = {"schema": 1, "date": "2026-11-01", "dimensions": [
+            {"id": "lint", "subproject": ".", "level": 0}, {"id": "tests", "subproject": ".", "level": 2}]}
         self.save("findings-2026-11-01.json", old)
-        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
-        proc = subprocess.run([sys.executable, SCRIPT, current], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        report = os.path.join(self.dir, "report-2026-11-10.md")
-        self.assertTrue(os.path.exists(report))
-        with open(report) as handle:
+        self.save("score-2026-11-10T0930.json", sample_score())
+        path = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        done = self.run_cli(path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(os.path.join(self.dir, "report-2026-11-10T0930.md")) as handle:
             text = handle.read()
-        self.assertIn("↓", text)                              # compared with the older file beside it
-        out = proc.stdout.decode()
-        self.assertIn("Tests run in CI", out)
-        self.assertIn("Report: " + report, out)
+        self.assertIn("compared with 2026-11-01", text)
+        self.assertIn("lint: 0 → 1 ↑", text)
+        self.assertIn("Gap changes are not available", text)
+        self.assertNotIn("Since last run:", done.stdout)
 
-    def test_cli_prints_an_absolute_report_path(self):
-        current = self.save("findings-2026-11-10.json", self.findings("2026-11-10"))
-        proc = subprocess.run([sys.executable, SCRIPT, "findings-2026-11-10.json", "-o", "r.md"], cwd=self.dir,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        printed = proc.stdout.decode().rstrip().splitlines()[-1]
-        self.assertTrue(printed.startswith("Report: /"), printed)
-        self.assertEqual(os.path.realpath(printed[len("Report: "):]), os.path.realpath(os.path.join(self.dir, "r.md")))
-
-    def test_cli_options(self):
-        old = self.save("old.json", self.findings("2026-10-01"))
-        current = self.save("findings.json", self.findings("2026-11-10"))
-        target = os.path.join(self.dir, "out", "r.md")
-        proc = subprocess.run([sys.executable, SCRIPT, current, "--previous", old, "-o", target],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        with open(target) as handle:
-            self.assertIn("Compared with the run of 2026-10-01", handle.read())
-        self.save("findings-2026-01-01.json", self.findings("2026-01-01"))
-        subprocess.run([sys.executable, SCRIPT, current, "--no-previous", "-o", target],
-                       stdout=subprocess.PIPE, check=True)
-        with open(target) as handle:
-            self.assertNotIn("Compared with", handle.read())
+    def test_cli_compares_with_a_schema_2_run_through_its_score(self):
+        old_score = sample_score()
+        old_score["gaps"] = [gap("gone:.:x", what="Gone one")]
+        old_score["dimensions"][0] = row("lint", 0, "No linter.")
+        self.save("score-2026-11-09T1000.json", old_score)
+        self.save("findings-2026-11-09T1000.json", self.findings("2026-11-09T1000"))
+        self.save("score-2026-11-10T0930.json", sample_score())
+        path = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        done = self.run_cli(path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Since last run: 1 closed, 7 new, 0 regressed.", done.stdout)
 
     def test_cli_error_names_the_field(self):
-        data = sample()
-        del data["headline"]
-        path = self.save("findings.json", data)
-        proc = subprocess.run([sys.executable, SCRIPT, path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("headline", proc.stderr.decode())
-        self.assertFalse(os.path.exists(os.path.join(self.dir, "report.md")))
+        self.save("score-2026-11-10T0930.json", sample_score())
+        data = self.findings("2026-11-10T0930")
+        data["recommendations"][0]["first_step"]["verify"] = ""
+        path = self.save("findings-2026-11-10T0930.json", data)
+        done = self.run_cli(path)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("recommendations[0].first_step.verify", done.stderr)
 
-    def test_cli_rejects_missing_and_invalid_files(self):
-        proc = subprocess.run([sys.executable, SCRIPT, os.path.join(self.dir, "none.json")],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 2)
-        bad = self.save("bad.json", "{oops")
-        proc = subprocess.run([sys.executable, SCRIPT, bad], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("not valid JSON", proc.stderr.decode())
-
-    def test_default_output_names(self):
-        self.assertTrue(render.default_output("/a/findings-2026-11-10.json", {"date": "x"}).endswith("/a/report-2026-11-10.md"))
-        self.assertTrue(render.default_output("/a/findings.json", {"date": "x"}).endswith("/a/report.md"))
-        self.assertTrue(render.default_output("/a/other.json", {"date": "2026-11-10"}).endswith("/a/report-2026-11-10.md"))
+    def test_cli_rejects_missing_score_schema_1_and_bad_json(self):
+        path = self.save("findings-2026-11-10T0930.json", self.findings("2026-11-10T0930"))
+        self.assertEqual(self.run_cli(path).returncode, 2)
+        self.assertEqual(self.run_cli(self.save("old.json", {"schema": 1})).returncode, 2)
+        self.assertEqual(self.run_cli(self.save("bad.json", "{nope")).returncode, 2)
+        self.assertEqual(self.run_cli(os.path.join(self.dir, "missing.json")).returncode, 2)
 
     def test_script_is_executable(self):
         self.assertTrue(os.access(SCRIPT, os.X_OK))
-        with open(SCRIPT) as handle:
-            self.assertEqual(handle.readline().strip(), "#!/usr/bin/env python3")
 
 
 if __name__ == "__main__":
