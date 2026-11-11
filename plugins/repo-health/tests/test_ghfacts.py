@@ -34,6 +34,8 @@ case "$1 $2" in
     case "$2" in
       */rules/branches/*) name=rules ;;
       */branches/*/protection) name=protection ;;
+      */actions/runs*) name=actions_runs ;;
+      */code-scanning/analyses*) name=code_scanning ;;
       *) name=repo_api ;;
     esac ;;
 esac
@@ -65,6 +67,17 @@ RULES = [
     {"type": "pull_request", "ruleset_id": 1, "parameters": {"required_approving_review_count": 2}},
     {"type": "deletion", "ruleset_id": 1},
 ]
+
+API_RUNS = {"workflow_runs": [
+    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "success", "created_at": "2025-01-05T10:00:00Z"},
+    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "success", "created_at": "2025-01-06T10:00:00Z"},
+    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": "cancelled", "created_at": "2025-01-07T10:00:00Z"},
+    {"name": "CI", "path": ".github/workflows/ci.yml", "conclusion": None, "created_at": "2025-01-08T10:00:00Z"},
+    {"name": "Lint", "path": ".github/workflows/lint.yml@refs/heads/main", "conclusion": "failure",
+     "created_at": "2025-01-05T09:00:00Z"},
+    {"name": "Nightly", "path": ".github/workflows/nightly.yml", "conclusion": "cancelled",
+     "created_at": "2025-01-05T08:00:00Z"},
+]}
 
 PROTECTION = {"required_status_checks": {"strict": True, "contexts": ["lint"], "checks": [{"context": "test"}]},
               "required_pull_request_reviews": {"required_approving_review_count": 1},
@@ -113,6 +126,8 @@ class FakeGh(unittest.TestCase):
         self.answer("protection", out=PROTECTION)
         self.answer("repo_api", out=SECURITY)
         self.answer("pr_list", out=PRS)
+        self.answer("actions_runs", out=API_RUNS)
+        self.answer("code_scanning", out=[{"created_at": "2025-01-09T12:00:00Z"}])
 
     @staticmethod
     def restore(saved):
@@ -150,7 +165,8 @@ class Happy(FakeGh):
         self.assertEqual((runs["branch"], runs["limit"]), ("main", 50))
         ci = runs["workflows"]["CI"]
         self.assertEqual(ci, {"runs": 5, "completed": 3, "pass_rate": 0.667, "median_duration_s": 200.0,
-                              "rerun_rate": 0.2, "last_failure": "2025-01-04T10:00:00Z"})
+                              "rerun_rate": 0.2, "last_failure": "2025-01-04T10:00:00Z",
+                              "path": ".github/workflows/ci.yml", "last_run": "2025-01-06T10:00:00Z"})
         self.assertEqual(runs["workflows"]["Lint"]["pass_rate"], 1.0)
         self.assertIsNone(runs["workflows"]["Lint"]["last_failure"])
         overall = runs["overall"]
@@ -163,6 +179,7 @@ class Happy(FakeGh):
             "advanced_security": "enabled", "secret_scanning": "enabled", "secret_scanning_push_protection": "disabled"})
         self.assertEqual(result["pull_requests"], {"prs": 4, "median_time_to_merge_s": 18000.0,
                                                    "no_review_share": 0.5})
+        self.assertEqual(result["code_scanning"], {"last_analysis": "2025-01-09T12:00:00Z"})
 
     def test_run_limit_is_passed_and_repo_is_named_with_r(self):
         self.collect(runs=7)
@@ -177,6 +194,35 @@ class Happy(FakeGh):
         self.assertIn("api repos/acme/widgets/rules/branches/main", calls)
         self.assertIn("api repos/acme/widgets/branches/main/protection", calls)
         self.assertIn("api repos/acme/widgets --jq .security_and_analysis", calls)
+
+    def test_workflow_path_and_last_run_come_from_the_actions_api(self):
+        self.collect(runs=7)
+        self.assertIn("api repos/acme/widgets/actions/runs?branch=main&per_page=7", self.calls())
+        self.assertIn("api repos/acme/widgets/code-scanning/analyses?per_page=1", self.calls())
+        workflows = self.collect()["runs"]["workflows"]
+        self.assertEqual((workflows["Lint"]["path"], workflows["Lint"]["last_run"]),
+                         (".github/workflows/lint.yml", "2025-01-05T09:00:00Z"))
+
+    def test_a_workflow_the_api_does_not_show_has_no_path_and_no_date(self):
+        self.answer("actions_runs", out={"workflow_runs": []})
+        lint = self.collect()["runs"]["workflows"]["Lint"]
+        self.assertEqual((lint["path"], lint["last_run"]), (None, None))
+        self.answer("actions_runs", out="", err="gh: boom (HTTP 500)\n", code=1)
+        result = self.collect()
+        self.assertEqual(result["runs"]["workflows"]["CI"]["path"], None)
+        self.assertEqual(result["runs"]["overall"]["runs"], 6)
+
+    def test_a_workflow_with_only_cancelled_runs_has_a_path_and_no_date(self):
+        self.answer("actions_runs", out=API_RUNS)
+        self.answer("run_list", out=RUNS + [{"conclusion": "cancelled", "createdAt": "2025-01-05T08:00:00Z",
+                                             "updatedAt": "2025-01-05T08:00:10Z", "attempt": 1,
+                                             "workflowName": "Nightly", "event": "schedule"}])
+        nightly = self.collect()["runs"]["workflows"]["Nightly"]
+        self.assertEqual((nightly["path"], nightly["last_run"]), (".github/workflows/nightly.yml", None))
+
+    def test_the_actions_page_size_is_at_most_100(self):
+        self.collect(runs=500)
+        self.assertIn("api repos/acme/widgets/actions/runs?branch=main&per_page=100", self.calls())
 
     def test_every_call_is_read_only(self):
         self.collect()
@@ -282,6 +328,25 @@ class Protection(FakeGh):
         self.answer("rules", out=[])
         protection = self.collect()["branch_protection"]
         self.assertEqual((protection["state"], protection["required_status_checks"]), ("protected", []))
+
+
+class CodeScanning(FakeGh):
+    def test_no_analysis_is_none(self):
+        self.answer("code_scanning", out=[])
+        self.assertEqual(self.collect()["code_scanning"], {"last_analysis": "none"})
+        self.answer("code_scanning", out='{"message":"No analysis found","status":"404"}',
+                    err="gh: No analysis found (HTTP 404)\n", code=1)
+        self.assertEqual(self.collect()["code_scanning"], {"last_analysis": "none"})
+
+    def test_other_errors_are_not_visible(self):
+        self.answer("code_scanning", out='{"message":"Forbidden","status":"403"}', err="gh: Forbidden (HTTP 403)\n",
+                    code=1)
+        self.assertEqual(self.collect()["code_scanning"], {"last_analysis": "not_visible"})
+        self.answer("code_scanning", out='{"message":"Not Found","status":"404"}', err="gh: Not Found (HTTP 404)\n",
+                    code=1)
+        self.assertEqual(self.collect()["code_scanning"], {"last_analysis": "not_visible"})
+        self.answer("code_scanning", out=[{"created_at": "yesterday"}])
+        self.assertEqual(self.collect()["code_scanning"], {"last_analysis": "none"})
 
 
 class SecurityAndOthers(FakeGh):

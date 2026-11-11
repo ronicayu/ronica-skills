@@ -32,7 +32,22 @@ Output when available:
                         median of updatedAt - createdAt over completed runs;
                         rerun_rate is the share of runs with attempt > 1;
                         last_failure is the createdAt of the latest failed run.
+                        Each workflow also has "path" (its file, such as
+                        ".github/workflows/ci.yml") and "last_run" (createdAt of its newest
+                        completed run, null when none). Both come from a second GET,
+                        `repos/<slug>/actions/runs?branch=<b>&per_page=<n>` (n is --runs,
+                        at most 100), not from `gh run list`: `gh run list` cannot print the
+                        workflow file, and the API `path` is exact, where mapping by the
+                        `name:` line of the file breaks when two files share a name or a
+                        file has none. The API run's `name` is the workflow name, the join
+                        key with `workflowName`. A workflow with no run among those n runs
+                        has path and last_run null; a repository that runs a weekly scan
+                        among many runs can raise --runs.
                         {"error": "..."} when the call failed.
+  code_scanning         {"last_analysis": X} with X the created_at of the newest code
+                        scanning analysis (`repos/<slug>/code-scanning/analyses?per_page=1`),
+                        "none" (the API says no analysis exists) or "not_visible" (any other
+                        error, such as HTTP 403 for a token without security read access).
   branch_protection     {"state": "protected" | "none" | "not_visible",
                         "required_status_checks": [names],
                         "required_approving_reviews": int or null,
@@ -152,6 +167,39 @@ def run_stats(runs):
         if runs else None,
         "last_failure": failures[-1] if failures else None,
     }
+
+
+def workflow_files(slug, branch, limit, cwd):
+    """{workflow name: {"path", "last_run"}} from the Actions runs API; {} when the call failed."""
+    result = run_gh(["api", "repos/%s/actions/runs?branch=%s&per_page=%d" % (slug, quote(branch, safe=""),
+                                                                              max(1, min(limit, 100)))], cwd)
+    data = json_of(result) if result.code == 0 else None
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    found = {}
+    for run in runs if isinstance(runs, list) else []:
+        if not isinstance(run, dict) or not run.get("name") or not isinstance(run.get("path"), str):
+            continue
+        entry = found.setdefault(str(run["name"]), {"path": run["path"].split("@", 1)[0], "last_run": None})
+        created = run.get("created_at")
+        if run.get("conclusion") in JUDGED and parse_time(created) and (entry["last_run"] is None
+                                                                       or created > entry["last_run"]):
+            entry["last_run"] = created
+    return found
+
+
+def code_scanning(slug, cwd):
+    """The newest analysis date, "none" or "not_visible"."""
+    result = run_gh(["api", "repos/%s/code-scanning/analyses?per_page=1" % slug], cwd)
+    data = json_of(result)
+    if result.code == 0:
+        if isinstance(data, list):
+            created = data[0].get("created_at") if data and isinstance(data[0], dict) else None
+            return created if parse_time(created) else "none"
+        return "not_visible"
+    message = (data.get("message", "") if isinstance(data, dict) else "") + " " + result.err
+    if "(HTTP 404)" in message and "no analysis found" in message.lower():
+        return "none"
+    return "not_visible"
 
 
 def api_state(path, cwd):
@@ -275,13 +323,16 @@ def collect(repo, runs=50, solo=False):
         data = json_of(listing) if listing.code == 0 else None
         if isinstance(data, list):
             names = sorted({str(r.get("workflowName") or "") for r in data})
+            files = workflow_files(slug, branch, runs, cwd)
             result["runs"] = {"branch": branch, "limit": runs, "overall": run_stats(data),
-                              "workflows": {n: run_stats([r for r in data if str(r.get("workflowName") or "") == n])
+                              "workflows": {n: dict(run_stats([r for r in data if str(r.get("workflowName") or "") == n]),
+                                                    **files.get(n, {"path": None, "last_run": None}))
                                             for n in names}}
         else:
             result["runs"] = {"error": first_line(listing.err) or "gh run list failed"}
         result["branch_protection"] = branch_protection(slug, branch, cwd)
         result["security_and_analysis"] = security(slug, cwd)
+        result["code_scanning"] = {"last_analysis": code_scanning(slug, cwd)}
         result["pull_requests"] = {"skipped": "solo repository"} if solo else pull_requests(slug, cwd)
         return result
     finally:
