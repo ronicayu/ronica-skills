@@ -596,7 +596,7 @@ class Deps(unittest.TestCase):
         d = det(rows=[ci_row("pip-audit", "deps_audit", "python")], setup=self.setup_with())
         self.assertEqual(dim(run(d), "deps")["rule"], "deps.2")
 
-    def test_deps_3_needs_fresh_lockfiles_and_ignores_audits(self):
+    def test_deps_3_needs_fresh_lockfiles_or_a_clean_audit_run(self):
         bots = [{"tool": "renovate", "file": "renovate.json", "line": 1, "ecosystems": ["*"]}]
         fresh = [{"file": "uv.lock", "ecosystem": "python", "subproject": ".", "last_commit": "2026-10-20T10:00:00Z"}]
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=fresh))), "deps")["level"], 3)
@@ -605,14 +605,146 @@ class Deps(unittest.TestCase):
         self.assertEqual((row["level"], row["needs"]), (2, None))
         row = dim(run(det(setup=self.setup_with(update_bots=bots))), "deps")
         self.assertTrue(row["needs"])
-        audit = {"audits": [{"subproject": ".", "high": 0, "critical": 0}]}
+        audit = {"security_runs": [{"dimension": "deps", "tool": "pip-audit", "high": 0, "critical": 0,
+                                    "findings": 2, "ran_at": "2026-11-10"}]}
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=old)), t1=audit),
-                             "deps")["level"], 2)
-        dirty = {"audits": [{"subproject": ".", "high": 1, "critical": 0}]}
+                             "deps")["level"], 3)
+        dirty = {"security_runs": [{"dimension": "deps", "tool": "pip-audit", "high": 1, "critical": 0,
+                                    "findings": 1, "ran_at": "2026-11-10"}]}
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=old)), t1=dirty),
                              "deps")["level"], 2)
         self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=fresh)), t1=dirty),
                              "deps")["level"], 3)
+        other = {"security_runs": [dict(audit["security_runs"][0], dimension="secrets")]}
+        self.assertEqual(dim(run(det(setup=self.setup_with(update_bots=bots, lockfiles=old)), t1=other),
+                             "deps")["level"], 2)
+
+
+def flows(extra=None, **by_name):
+    return gh(**dict(extra or {}, runs={"overall": {"completed": 50, "pass_rate": 0.97, "rerun_rate": 0.02, "median_duration_s": 100,
+                                "last_failure": None},
+                    "workflows": {name: {"path": path, "last_run": last} for name, (path, last) in by_name.items()}}))
+
+
+def freshness(result, dimension):
+    found = [e for e in result["security_freshness"] if e["dimension"] == dimension]
+    return found[0] if found else None
+
+
+class SecurityFreshness(unittest.TestCase):
+    LOCAL = {"secrets": [cfg_row("gitleaks", "secrets", ".gitleaks.toml")]}
+
+    def secret_ci(self, **extra):
+        return det(rows=[ci_row("gitleaks", "secrets", "shared", file=".github/workflows/scan.yml", **extra)])
+
+    def test_a_recent_ci_run_is_fresh(self):
+        entry = freshness(run(self.secret_ci(), gh=flows(Scan=(".github/workflows/scan.yml", "2026-10-31"))),
+                          "secrets")
+        self.assertEqual((entry["tools"], entry["last_data"], entry["source"], entry["age_days"], entry["stale"]),
+                         (["gitleaks"], "2026-10-31", "ci:.github/workflows/scan.yml", 10, False))
+
+    def test_an_old_ci_run_is_stale(self):
+        entry = freshness(run(self.secret_ci(), gh=flows(Scan=(".github/workflows/scan.yml", "2026-09-26"))),
+                          "secrets")
+        self.assertEqual((entry["age_days"], entry["stale"]), (45, True))
+        self.assertIn("45 days", entry["why"])
+        edge = freshness(run(self.secret_ci(), gh=flows(Scan=(".github/workflows/scan.yml", "2026-10-11"))), "secrets")
+        self.assertEqual((edge["age_days"], edge["stale"]), (30, False))
+
+    def test_only_the_workflow_that_holds_the_tool_counts(self):
+        g = flows(Scan=(".github/workflows/scan.yml", "2026-09-01"), Build=(".github/workflows/ci.yml", "2026-11-09"))
+        entry = freshness(run(self.secret_ci(), gh=g), "secrets")
+        self.assertEqual((entry["last_data"], entry["stale"]), ("2026-09-01", True))
+
+    def test_the_newest_workflow_of_the_dimension_wins(self):
+        d = det(rows=[ci_row("gitleaks", "secrets", "shared", file=".github/workflows/a.yml"),
+                      ci_row("trufflehog", "secrets", "shared", file=".github/workflows/b.yml")])
+        g = flows(A=(".github/workflows/a.yml", "2026-08-01"), B=(".github/workflows/b.yml", "2026-11-01"))
+        entry = freshness(run(d, gh=g), "secrets")
+        self.assertEqual((entry["tools"], entry["source"], entry["stale"]),
+                         (["gitleaks", "trufflehog"], "ci:.github/workflows/b.yml", False))
+
+    def test_config_only_has_no_run_date(self):
+        entry = freshness(run(det([sub(cats=self.LOCAL)], shared=self.LOCAL["secrets"]), gh=flows()), "secrets")
+        self.assertEqual((entry["last_data"], entry["source"], entry["age_days"], entry["stale"], entry["why"]),
+                         (None, None, None, True, "no run date visible"))
+
+    def test_a_ci_row_without_a_visible_run_is_stale_and_without_ghfacts_too(self):
+        entry = freshness(run(self.secret_ci()), "secrets")
+        self.assertEqual((entry["stale"], entry["why"]), (True, "no run date visible"))
+        entry = freshness(run(self.secret_ci(), gh={"available": False, "why": "no gh"}), "secrets")
+        self.assertEqual((entry["stale"], entry["why"]), (True, "no run date visible"))
+
+    def test_github_secret_scanning_is_continuous(self):
+        on = {"secret_scanning": "enabled", "secret_scanning_push_protection": "enabled"}
+        entry = freshness(run(self.secret_ci(), gh=gh(security_and_analysis=on)), "secrets")
+        self.assertEqual((entry["stale"], entry["last_data"]), (False, None))
+        self.assertEqual(entry["tools"], ["github-secret-scanning", "gitleaks"])
+        entry = freshness(run(gh=gh(security_and_analysis={"secret_scanning_push_protection": "enabled"})), "secrets")
+        self.assertEqual((entry["tools"], entry["stale"]), (["github-secret-scanning"], False))
+
+    def test_no_tool_configured_means_no_entry(self):
+        result = run(gh=flows(Build=(".github/workflows/ci.yml", "2026-11-09")))
+        self.assertEqual(result["security_freshness"], [])
+        d = det(rows=[ci_row("ruff", "lint", "python")])
+        self.assertEqual(run(d)["security_freshness"], [])
+
+    def test_static_takes_code_scanning_and_ci(self):
+        d = det(rows=[ci_row("codeql", "static", "shared", file=".github/workflows/codeql.yml")])
+        g = flows({"code_scanning": {"last_analysis": "2026-11-05T10:00:00Z"}},
+                  CodeQL=(".github/workflows/codeql.yml", "2026-08-01"))
+        entry = freshness(run(d, gh=g), "static")
+        self.assertEqual((entry["last_data"], entry["source"], entry["stale"]), ("2026-11-05", "code-scanning", False))
+        g["code_scanning"] = {"last_analysis": "not_visible"}
+        entry = freshness(run(d, gh=g), "static")
+        self.assertEqual((entry["source"], entry["stale"]), ("ci:.github/workflows/codeql.yml", True))
+        g["code_scanning"] = {"last_analysis": "none"}
+        self.assertTrue(freshness(run(d, gh=g), "static")["stale"])
+
+    def test_default_setup_code_scanning_is_configured(self):
+        g = gh(security_and_analysis={"code_security": "enabled"}, code_scanning={"last_analysis": "2026-11-01T00:00:00Z"})
+        entry = freshness(run(gh=g), "static")
+        self.assertEqual((entry["tools"], entry["stale"]), (["github-code-scanning"], False))
+
+    def test_deps_takes_the_newest_lockfile_commit(self):
+        locks = [{"file": "uv.lock", "ecosystem": "python", "subproject": ".", "last_commit": "2026-11-02T10:00:00Z"},
+                 {"file": "a/uv.lock", "ecosystem": "python", "subproject": "a", "last_commit": "2026-01-02T10:00:00Z"}]
+        setup = Deps().setup_with(lockfiles=locks)
+        d = det(rows=[ci_row("pip-audit", "deps_audit", "python", file=".github/workflows/audit.yml")], setup=setup)
+        entry = freshness(run(d, gh=flows(Audit=(".github/workflows/audit.yml", "2026-06-01"))), "deps")
+        self.assertEqual((entry["last_data"], entry["source"], entry["stale"]), ("2026-11-02", "lockfile", False))
+        self.assertIsNone(freshness(run(det(setup=Deps().setup_with(lockfiles=locks))), "deps"))
+
+    def test_tier1_security_runs_make_the_entry_fresh(self):
+        t1 = {"security_runs": [
+            {"dimension": "secrets", "tool": "gitleaks", "high": 0, "critical": 0, "findings": 3, "ran_at": "2026-11-10"},
+            {"dimension": "secrets", "tool": "trufflehog", "high": 1, "critical": 1, "findings": 2,
+             "ran_at": "2026-11-10"}]}
+        d = det(rows=[ci_row("gitleaks", "secrets", "shared", file=".github/workflows/scan.yml"),
+                      ci_row("trufflehog", "secrets", "shared", file=".github/workflows/scan.yml")])
+        old = flows(Scan=(".github/workflows/scan.yml", "2026-06-01"))
+        before = run(d, gh=old)
+        after = run(d, gh=old, t1=t1)
+        entry = freshness(after, "secrets")
+        self.assertEqual((entry["source"], entry["age_days"], entry["stale"]), ("tier1", 0, False))
+        self.assertEqual(entry["run"], {"tools": ["gitleaks", "trufflehog"], "high": 1, "critical": 1, "findings": 5,
+                                        "ran_at": "2026-11-10"})
+        self.assertTrue(freshness(before, "secrets")["stale"])
+        self.assertIsNone(freshness(before, "secrets")["run"])
+        self.assertEqual(dim(after, "secrets")["level"], dim(before, "secrets")["level"])
+
+    def test_a_security_run_of_an_unconfigured_dimension_adds_no_entry(self):
+        t1 = {"security_runs": [{"dimension": "static", "tool": "semgrep", "high": 0, "critical": 0, "findings": 0,
+                                 "ran_at": "2026-11-10"}]}
+        self.assertEqual(run(t1=t1)["security_freshness"], [])
+
+    def test_entries_follow_the_dimension_order_and_levels_do_not_change(self):
+        d = det([sub(cats={"static": [cfg_row("bandit", "static")]})], shared=self.LOCAL["secrets"])
+        stale = run(d)
+        self.assertEqual([e["dimension"] for e in stale["security_freshness"]], ["static", "secrets"])
+        fresh = run(d, t1={"security_runs": [{"dimension": "static", "tool": "bandit", "high": 0, "critical": 0,
+                                              "findings": 0, "ran_at": "2026-11-10"}]})
+        self.assertEqual([r["level"] for r in stale["dimensions"]], [r["level"] for r in fresh["dimensions"]])
 
 
 class Docs(unittest.TestCase):

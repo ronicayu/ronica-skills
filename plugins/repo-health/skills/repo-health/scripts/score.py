@@ -10,13 +10,20 @@ The model never sets a tier 0 level. This script reads the JSON of detect.py,
 hotspots.py and ghfacts.py (see their docstrings for the shapes) and applies every
 rule of dimensions.md. The same inputs give the same bytes: keys are sorted, every
 list is ordered, and the only date inside is `as_of` (--now, today by default),
-which decides the 90-day lockfile age of deps.3. Standard library only; Python 3.9+.
+which decides the 90-day lockfile age of deps.3 and the 30-day age of security data.
+Standard library only; Python 3.9+.
 A missing or unavailable ghfacts ({"available": false}) is the same as no ghfacts.
 
 Tier 1 input (--tier1), written by the skill after it ran tools:
 
     {"counts":     {"lint:<subproject>": {"errors": 0}, "types:<subproject>": {"errors": 0}},
-     "suite_runs": [{"subproject": ".", "passed": true, "duration_s": 95}]}
+     "suite_runs": [{"subproject": ".", "passed": true, "duration_s": 95}],
+     "security_runs": [{"dimension": "secrets|static|deps", "tool": "gitleaks", "high": 0, "critical": 0,
+                        "findings": 0, "ran_at": "YYYY-MM-DD"}]}
+
+security_runs are the configured security tools that the user agreed to run because their data
+was stale. A run makes the freshness entry of its dimension fresh and, for deps, a run with no
+high and no critical finding gives deps.3. static and secrets levels do not change.
 
 Output (score.json)
 
@@ -33,6 +40,16 @@ Output (score.json)
     hotspots[]   the top 15 of hotspots.json plus tests_in_ci (true, false or "unknown"),
                  suppressions (count when the file is among detect's top files, else null),
                  linted_in_ci, the owning test suite
+    security_freshness[]  one entry per security dimension (static, secrets, deps) that has a
+                  tool configured: {dimension, tools [...], last_data (YYYY-MM-DD or null),
+                  source ("ci:<workflow file>", "code-scanning", "lockfile", "tier1" or null),
+                  age_days, stale, why, run (null, or the summed security_runs counts)}.
+                  last_data is the newest of: the last completed run of a workflow file that holds
+                  a CI row of one of the dimension's tools (ghfacts runs.workflows[].path and
+                  last_run), the newest code scanning analysis (static), the newest lockfile
+                  commit (deps) and a tier 1 run. Stale: older than SECURITY_STALE_DAYS, or no
+                  date visible ("no run date visible"). GitHub secret scanning or push
+                  protection on makes secrets continuous: never stale. Levels ignore freshness.
     ci_health    from ghfacts: {available, default_branch_pass_rate, median_duration_s,
                  rerun_rate, last_failure, completed_runs, workflows, pull_requests, why}
     gaps[]       {id, dimension, subproject, rule, what, facts, hotspot_files,
@@ -134,6 +151,8 @@ TOOL_LANGUAGE = {row[1]: row[0] for row in detect.TOOLS}
 TEST_DIR_NAMES = detect.TEST_DIR_NAMES
 IGNORED_SETUP_DIRS = ("tests", "test", "fixtures", "testdata", "__tests__")
 RECENT_DAYS = 90
+SECURITY_STALE_DAYS = 30
+SECURITY_DIMENSIONS = ("static", "secrets", "deps")
 ARCH_MIN_LOC = 3000
 MIN_RUNS = 10
 SUPPRESSIONS_PER_KLOC = 2.0
@@ -1153,12 +1172,87 @@ class Scorer(object):
             age = days_between(self.now, lock.get("last_commit") or "")
             if age is None or age > RECENT_DAYS:
                 recent = False
-        if recent:
+        audits = self.security_runs("deps")
+        clean = bool(audits) and all(not (a["high"] or a["critical"]) for a in audits)
+        if recent or clean:
             return self.add("deps", ".", 3, "deps.3", "Dependencies are covered and current.", facts)
         known = bool(locks) and all(l.get("last_commit") for l in locks)
-        needs = None if known else "lockfile commit dates"
+        needs = None if known else "lockfile commit dates or a tier 1 audit"
         self.add("deps", ".", 2, "deps.2", "Update bot or CI audit covers the dependencies.", facts, needs=needs)
         self.gap("deps", ".", "deps.2", None, "Refresh the lockfiles", facts, "add")
+
+    # ---- security data freshness -----------------------------------------------
+
+    def security_runs(self, dimension):
+        """The tier 1 runs of one security dimension, with counts as integers."""
+        runs = []
+        for item in self.t1.get("security_runs") or []:
+            if isinstance(item, dict) and item.get("dimension") == dimension:
+                count = lambda key: item[key] if isinstance(item.get(key), int) and item[key] > 0 else 0
+                runs.append({"tool": str(item.get("tool") or "?"), "high": count("high"),
+                             "critical": count("critical"), "findings": count("findings"),
+                             "ran_at": str(item.get("ran_at") or "")[:10]})
+        return runs
+
+    def security_tools(self, dimension):
+        """(tool names, CI rows) of the tools configured for a security dimension."""
+        category = {"deps": "deps_audit"}.get(dimension, dimension)
+        rows = [r for sub in self.subs for r in self.cfg_rows(sub, category)]
+        rows += [r for r in (self.det.get("shared") or []) if r.get("category") == category]
+        rows += [r for r in self.precommit_rows if r.get("category") == category]
+        ci = self.ci_of(category)
+        if dimension == "secrets":
+            names = ("gitleaks", "trufflehog")
+            rows = [r for r in rows if r.get("tool") in names]
+            ci = [r for r in ci if r["tool"] in names]
+        return sorted({r["tool"] for r in rows + ci}), ci
+
+    def security_freshness(self):
+        workflows = self.gh_get("runs", "workflows")
+        last_by_path = {}
+        for flow in workflows.values() if isinstance(workflows, dict) else []:
+            if isinstance(flow, dict) and flow.get("path") and days_between(self.now, flow.get("last_run") or "") is not None:
+                last_by_path[flow["path"]] = max(last_by_path.get(flow["path"], ""), flow["last_run"][:10])
+        settings = self.gh_get("security_and_analysis")
+        settings = settings if isinstance(settings, dict) else {}
+        entries = []
+        for dimension in SECURITY_DIMENSIONS:
+            tools, ci = self.security_tools(dimension)
+            if dimension == "static" and any(settings.get(k) == "enabled" for k in (
+                    "advanced_security", "code_security", "code_scanning_default_setup")):
+                tools = sorted(set(tools) | {"github-code-scanning"})
+            continuous = dimension == "secrets" and (settings.get("secret_scanning") == "enabled" or
+                                                     settings.get("secret_scanning_push_protection") == "enabled")
+            if continuous:
+                tools = sorted(set(tools) | {"github-secret-scanning"})
+            if not tools:
+                continue
+            found = [(last_by_path[r["file"]], 1, "ci:" + r["file"]) for r in ci if r.get("file") in last_by_path]
+            analysis = self.gh_get("code_scanning", "last_analysis")
+            if dimension == "static" and days_between(self.now, analysis or "") is not None:
+                found.append((analysis[:10], 0, "code-scanning"))
+            if dimension == "deps":
+                found += [(l["last_commit"][:10], 0, "lockfile") for l in (self.det.get("setup") or {}).get("lockfiles") or []
+                          if days_between(self.now, l.get("last_commit") or "") is not None]
+            runs = [r for r in self.security_runs(dimension) if days_between(self.now, r["ran_at"]) is not None]
+            found += [(r["ran_at"], 2, "tier1") for r in runs]
+            last = max(found) if found else None
+            age = max(days_between(self.now, last[0]), 0) if last else None
+            if continuous:
+                stale, why = False, "GitHub secret scanning is on: continuous"
+            elif last is None:
+                stale, why = True, "no run date visible"
+            elif age > SECURITY_STALE_DAYS:
+                stale, why = True, "last data %d days ago, over %d" % (age, SECURITY_STALE_DAYS)
+            else:
+                stale, why = False, "last data %d days ago" % age
+            counts = {"tools": sorted({r["tool"] for r in runs}), "high": sum(r["high"] for r in runs),
+                      "critical": sum(r["critical"] for r in runs), "findings": sum(r["findings"] for r in runs),
+                      "ran_at": max(r["ran_at"] for r in runs)} if runs else None
+            entries.append({"dimension": dimension, "tools": tools, "last_data": last[0] if last else None,
+                            "source": last[2] if last else None, "age_days": age, "stale": stale, "why": why,
+                            "run": counts})
+        return entries
 
     # ---- arch ---------------------------------------------------------------
 
@@ -1313,7 +1407,8 @@ def build(det, hot, gh=None, tier1=None, decisions=None, previous=None, now=None
     result = {
         "as_of": scorer.now.isoformat(), "repo": det.get("repo"), "commit": det.get("commit"),
         "default_branch": det.get("default_branch"), "profile": scorer.profile, "dimensions": scorer.rows,
-        "hotspots": table, "ci_health": scorer.ci_health(), "gaps": ranking,
+        "hotspots": table, "ci_health": scorer.ci_health(), "security_freshness": scorer.security_freshness(),
+        "gaps": ranking,
         "dismissed": sorted(dismissed, key=lambda d: d["id"]), "regressed": sorted(regressed, key=lambda d: d["id"]),
         "deferred": sorted(deferred), "not_applicable": scorer.not_applicable,
         "tier1": bool(tier1), "inputs": input_names or {}, "changes": None,
