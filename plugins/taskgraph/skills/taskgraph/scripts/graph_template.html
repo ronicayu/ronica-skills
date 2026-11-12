@@ -1307,7 +1307,7 @@ function layoutGraph() {
   let seen = layoutMemo.get(key);
   if (seen) layoutMemo.delete(key);
   else {
-    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
+    seen = packedLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
     if (layoutMemo.size >= LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
   }
   layoutMemo.set(key, seen);
@@ -1325,6 +1325,83 @@ function layoutGraph() {
   });
 }
 
+// Dagre puts a whole rank in one row, so a long rank draws far wider than tall. Wrap long ranks into
+// stacked sub-rows toward GRAPH_ASPECT; the target is fixed so the layout does not depend on the window.
+const GRAPH_ASPECT = 1.6, SUBROW_GAP = 24;
+function wrapRanks(g, nodes, opts) {
+  const ranks = [...groupBy(nodes.map(n => ({ id: n.id(), ...g.node(n.id()) })), d => Math.round(d.y)).entries()].sort((p, q) => p[0] - q[0]).map(([, list]) => list.sort((p, q) => p.x - q.x));
+  const widest = Math.max(...ranks.map(r => r.length));
+  if (widest < 4) return;
+  const avg = key => nodes.length ? nodes.reduce((sum, n) => sum + g.node(n.id())[key], 0) / nodes.length : 0;
+  const w = avg('width') + opts.nodesep, h = avg('height');
+  let cap = widest, best = Infinity;
+  for (let c = 3; c <= widest; c++) {
+    const height = ranks.reduce((sum, r) => { const k = Math.ceil(r.length / c); return sum + k * h + (k - 1) * SUBROW_GAP; }, 0) + (ranks.length - 1) * opts.ranksep;
+    const off = Math.abs(c * w / height - GRAPH_ASPECT);
+    if (off <= best) { best = off; cap = c; }
+  }
+  if (cap >= widest) return;
+  const moved = new Map();
+  let y = 0;
+  ranks.forEach(list => {
+    const cx = (Math.min(...list.map(d => d.x - d.width / 2)) + Math.max(...list.map(d => d.x + d.width / 2))) / 2;
+    const wrap = list.length > cap;
+    const rows = wrap ? Array.from({ length: Math.ceil(list.length / cap) }, (_, k) => list.slice(k * cap, (k + 1) * cap)) : [list];
+    rows.forEach((row, k) => {
+      const rowH = Math.max(...row.map(d => d.height));
+      let x = cx - (row.reduce((sum, d) => sum + d.width, 0) + (row.length - 1) * opts.nodesep) / 2;
+      row.forEach(d => {
+        const node = g.node(d.id);
+        if (wrap) { node.x = x + d.width / 2; x += d.width + opts.nodesep; }
+        node.y = y + rowH / 2;
+      });
+      y += rowH + (k + 1 < rows.length ? SUBROW_GAP : 0);
+    });
+    if (rows.length === 1) moved.set(Math.round(list[0].y), g.node(list[0].id).y);
+    y += opts.ranksep;
+  });
+  g.edges().forEach(e => {
+    const pts = g.edge(e).points || [];
+    g.edge(e).points = pts.map((p, i) => i === 0 || i === pts.length - 1 ? p : { x: p.x, y: moved.has(Math.round(p.y)) ? moved.get(Math.round(p.y)) : NaN });
+  });
+}
+
+// Dagre puts disconnected chains side by side in one row, so each component is laid out alone and
+// the boxes are shelf-packed toward GRAPH_ASPECT, largest first, tops aligned, each shelf centred.
+function packedLayout(nodes, edges, opts) {
+  const parts = nodes.union(edges).components().map(comp => {
+    const ns = comp.nodes(), res = dagreLayout(ns, comp.edges(), opts);
+    const box = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
+    const grow = (x, y) => { box.x1 = Math.min(box.x1, x); box.x2 = Math.max(box.x2, x); box.y1 = Math.min(box.y1, y); box.y2 = Math.max(box.y2, y); };
+    ns.forEach(n => {
+      const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
+      grow(p.x - d.w / 2, p.y - d.h / 2);
+      grow(p.x + d.w / 2, p.y + d.h / 2);
+    });
+    Object.values(res.routes).forEach(r => r.path.forEach(([x, y]) => grow(x, y)));
+    return { res, box, w: box.x2 - box.x1, h: box.y2 - box.y1, size: ns.length, id: Math.min(...ns.map(n => Number(n.id()))) };
+  }).sort((p, q) => q.size - p.size || p.id - q.id);
+  if (parts.length === 1) return parts[0].res;
+  const limit = Math.max(...parts.map(c => c.w), Math.sqrt(parts.reduce((sum, c) => sum + c.w * c.h, 0) * GRAPH_ASPECT));
+  const shelves = [];
+  parts.forEach(c => {
+    const last = shelves[shelves.length - 1];
+    if (last && last.w + opts.ranksep + c.w <= limit) { c.left = last.w + opts.ranksep; last.w = c.left + c.w; last.h = Math.max(last.h, c.h); last.items.push(c); }
+    else { c.left = 0; shelves.push({ w: c.w, h: c.h, items: [c] }); }
+  });
+  const pos = {}, routes = {};
+  let top = 0;
+  shelves.forEach(shelf => {
+    shelf.items.forEach(c => {
+      const dx = c.left - shelf.w / 2 - c.box.x1, dy = top - c.box.y1;
+      Object.entries(c.res.pos).forEach(([id, p]) => { pos[id] = { x: p.x + dx, y: p.y + dy }; });
+      Object.entries(c.res.routes).forEach(([id, r]) => { routes[id] = { ...r, path: r.path.map(([x, y]) => [x + dx, y + dy]) }; });
+    });
+    top += shelf.h + opts.ranksep;
+  });
+  return { pos, routes };
+}
+
 // Runs dagre directly, not through cytoscape-dagre, which throws away the edge routes. Each edge
 // leaves its predecessor on its own port, follows dagre's bend points round nodes on long edges,
 // and shifts sideways in the gap between ranks. The shifts into one item share a bus; the shifts
@@ -1337,6 +1414,7 @@ function dagreLayout(nodes, edges, opts) {
   nodes.forEach(n => { const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }); g.setNode(n.id(), { width: d.w, height: d.h }); });
   edges.forEach(e => g.setEdge(e.source().id(), e.target().id(), { minlen: 1, weight: 1 }, e.id()));
   dagre.layout(g);
+  wrapRanks(g, nodes, opts);
   const pos = {}, routes = {};
   nodes.forEach(n => { const d = g.node(n.id()); pos[n.id()] = { x: d.x, y: d.y }; });
   // Each rank's vertical extent, top of the picture first, so the gaps between ranks are known.
@@ -1657,6 +1735,7 @@ function rebuild(keepView, flash) {
     cy.add(edges.map(e => ({ group: 'edges', classes: e.kind + (byId.get(e.source)?.type === 'risk' ? ' threat' : ''), data: { id: e.id, source: String(e.source), target: String(e.target), kind: e.kind } })));
   });
   if (pinned && cy.getElementById(String(pinned)).empty()) closePanel();
+  if (lit && cy.getElementById(String(lit)).empty()) lit = null;
   layout(!keepView);
   if (keepView) {
     fitIfOutside();
@@ -1813,9 +1892,17 @@ function focusOn(n, fade) {
   return keep;
 }
 
+// A single click lights an item's chain without opening it; `lit` outranks the open panel's item.
+let lit = null;
+function highlight(id) {
+  lit = id;
+  refocus();
+}
+
 function refocus() {
   cy.elements().removeClass('faded hl');
-  if (pinned) focusOn(cy.getElementById(String(pinned)), true);
+  const at = lit ?? pinned;
+  if (at) focusOn(cy.getElementById(String(at)), true);
   mirrorNames();
   if (document.activeElement === $('cy') && kbdNode()) kbdNode().addClass('kbd');
 }
@@ -2388,7 +2475,7 @@ function goBack() {
 
 function closePanel() {
   const had = $('panel').contains(document.activeElement);
-  pinned = null;
+  pinned = lit = null;
   trail = [];
   $('panel').style.display = 'none';
   if (had || panelReturn) (panelReturn && panelReturn.isConnected ? panelReturn : $('cy')).focus();
@@ -2405,7 +2492,7 @@ function select(id, center, how) {
   if (node.empty() && (view !== 'load' || !byId.has(id))) return;
   if (how === 'ref' && pinned != null && pinned !== id) trail = [...trail, pinned].slice(-5);
   else if (how !== 'back') trail = [];
-  pinned = id;
+  pinned = lit = id;
   openPanel(byId.get(id));
   refocus();
   syncUrl();
@@ -2485,19 +2572,12 @@ cy.on('mouseout', 'node', () => {
   hovered = null;
   refocus();
 });
-let pendingSelect;
 cy.on('tap', 'node', e => {
   const n = byId.get(Number(e.target.id()));
   kbdId = n.id;
-  clearTimeout(pendingSelect);
-  if (n.children.length && $('panel').style.display !== 'block') pendingSelect = setTimeout(() => select(n.id, false), 300);
-  else select(n.id, false);
+  highlight(n.id);
 });
-cy.on('dbltap', 'node', e => {
-  const n = byId.get(Number(e.target.id()));
-  clearTimeout(pendingSelect);
-  if (n.children.length) toggleExpand(n.id);
-});
+cy.on('dbltap', 'node', e => select(Number(e.target.id()), false));
 // Keyboard on the plan: the canvas is one tab stop with a current item, ringed while it has focus
 // and spoken through the live region. Arrows move by position (by row in the Timeline), Home and
 // End jump, Enter opens the panel, Space expands or collapses a summary, + and - zoom.
@@ -2584,7 +2664,7 @@ $('cy').addEventListener('focus', () => {
 $('cy').addEventListener('blur', () => cy.nodes('.kbd').removeClass('kbd'));
 
 // A line explains itself: hover says who waits for whom and any date conflict in words;
-// a click opens the late side, whose panel lists the conflict.
+// a double click opens the late side, whose panel lists the conflict.
 function edgeConflicts(edge) {
   const open = expandedIds(), s = edge.source().id(), t = edge.target().id();
   return DATA.nodes.flatMap(n => (n.conflicts ?? []).filter(c => c.kind === 'dependency' && c.from === n.id && byId.has(c.to)
@@ -2607,13 +2687,13 @@ cy.on('mouseout', 'edge', e => {
   e.target.removeClass('hl');
   refocus();
 });
-cy.on('tap', 'edge', e => {
-  if (e.target.hasClass('bg')) return;
-  const clash = edgeConflicts(e.target)[0];
-  const id = clash ? clash.from : Number(e.target.target().id());
-  if (cy.getElementById(String(id)).nonempty()) select(id, false);
-  else select(Number(e.target.source().id()), false);
-});
+function edgeItem(edge) {
+  const clash = edgeConflicts(edge)[0];
+  const id = clash ? clash.from : Number(edge.target().id());
+  return cy.getElementById(String(id)).nonempty() ? id : Number(edge.source().id());
+}
+cy.on('tap', 'edge', e => { if (!e.target.hasClass('bg')) highlight(edgeItem(e.target)); });
+cy.on('dbltap', 'edge', e => { if (!e.target.hasClass('bg')) select(edgeItem(e.target), false); });
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
 
 const projectSelect = $('project');

@@ -18,7 +18,7 @@ You can filter by status (done is hidden by default), flags (late, at risk, conf
 
 Press `/` to focus Search. Search matches titles, exact `#id`, owner, decider, party, contact, lane, team, tags, and notes. Use the arrow keys, Enter, or a click to open a result. Enter moves through results. Search expands collapsed summaries to show matches, then folds them again. Search also reports when a filter hides a match.
 
-Keyboard controls: Press **F** to fit the view, **E** to expand all, and **C** to collapse all. Press **Esc** to clear a focused search box, close an open menu, or close the panel. Browser Back and Forward move through views, goals, and projects. Hover over a dependency to see who waits for whom and the conflict gap. Click it to open the late item. A chase-due external names the party to chase.
+Keyboard controls: Press **F** to fit the view, **E** to expand all, and **C** to collapse all. Press **Esc** to clear a focused search box, close an open menu, or close the panel. Browser Back and Forward move through views, goals, and projects. Hover over a dependency to see who waits for whom and the conflict gap. Double-click it to open the late item. A chase-due external names the party to chase.
 
 ## Items, lanes, and accessibility
 
@@ -30,7 +30,7 @@ Swimlane and Timeline group rows by lane. A child nests under its parent only if
 
 The page supports keyboard and screen-reader use. Press Tab to reach **Skip to the plan**, then move through each control. The plan is one tab stop. Use the arrow keys to move between items (by row in Timeline), Home and End to jump, Enter to open a panel, Esc to return focus, Space to expand or collapse a summary, and plus/minus to zoom. Screen readers can read each item's status, dates, owner, and flags. Status uses text or a shape as well as colour: ✓ done, ◔ in progress, ⊘ blocked, and ○ ready in lists. Panel rows and Load cells are buttons. Use the arrow keys to resize the panel edge. The page respects reduced-motion settings.
 
-The page opens at a readable zoom and scrolls large plans. Fit shows the whole plan. Clicking an item keeps it visible beside the panel. For plans over 250 items, Graph uses a faster layout and reuses layouts it has already computed.
+The page opens at a readable zoom and scrolls large plans. Fit shows the whole plan. A click on an item highlights its upstream and downstream items. A double-click opens its panel and keeps the item visible beside it. Graph wraps a long row of items into several lines. For plans over 250 items, Graph uses a faster layout and reuses layouts it has already computed.
 
 ## Export and print
 
