@@ -1,6 +1,6 @@
 """Tests for scripts/score.py. Detect, hotspots and ghfacts JSON are written inline.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import datetime
@@ -15,10 +15,10 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 SCRIPT = os.path.join(SCRIPTS, "score.py")
 sys.path.insert(0, SCRIPTS)
-_spec = importlib.util.spec_from_file_location("repo_health_score", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_score", SCRIPT)
 score = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(score)
 import detect  # noqa: E402

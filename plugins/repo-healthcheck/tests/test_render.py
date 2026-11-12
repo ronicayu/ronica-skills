@@ -1,6 +1,6 @@
 """Tests for scripts/render.py (findings schema 2 with a score.json). Inputs are built inline.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import contextlib
@@ -17,11 +17,11 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 SCRIPT = os.path.join(SCRIPTS, "render.py")
 
 sys.path.insert(0, SCRIPTS)
-_spec = importlib.util.spec_from_file_location("repo_health_render", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_render", SCRIPT)
 render = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(render)
 
@@ -93,7 +93,7 @@ def card_rows(text):
 class Layout(unittest.TestCase):
     def test_sections_come_in_order_conclusion_first(self):
         text = render.render(sample_findings(), sample_score())
-        marks = ["# Repo health report: demo", "**Tests run in CI", "## Do these first", "## Scorecard",
+        marks = ["# Repo healthcheck report: demo", "**Tests run in CI", "## Do these first", "## Scorecard",
                  "## More recommendations", "## Hotspots", "## Evidence", "## Not checked"]
         positions = [text.index(m) for m in marks]
         self.assertEqual(positions, sorted(positions))

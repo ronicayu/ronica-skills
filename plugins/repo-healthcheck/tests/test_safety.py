@@ -4,7 +4,7 @@ The fixture repository has a commit with a `gpgsig` header, `log.showSignature=t
 and `gpg.program` pointing at a marker script. A plain `git log` runs that script;
 the scripts must not.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -18,12 +18,12 @@ import unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 sys.path.insert(0, SCRIPTS)
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location("repo_health_safety_" + name, os.path.join(SCRIPTS, name + ".py"))
+    spec = importlib.util.spec_from_file_location("repo_healthcheck_safety_" + name, os.path.join(SCRIPTS, name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -50,8 +50,8 @@ def git(root, *args, **kwargs):
 
 class SignedCommitRepo(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-safety-")
-        self.outside = tempfile.mkdtemp(prefix="repo-health-safety-out-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-safety-")
+        self.outside = tempfile.mkdtemp(prefix="repo-healthcheck-safety-out-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.addCleanup(shutil.rmtree, self.outside, ignore_errors=True)
         self.marker = os.path.join(self.outside, "ran")

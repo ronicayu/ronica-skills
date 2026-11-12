@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hotspots, file sizes and co-change for the repo-health skill.
+"""Hotspots, file sizes and co-change for the repo-healthcheck skill.
 
     hotspots.py [REPO] [--months 12] [--top 15] [--pretty]
 

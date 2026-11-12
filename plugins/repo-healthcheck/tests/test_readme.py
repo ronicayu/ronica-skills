@@ -1,6 +1,6 @@
 """Tests for the README command checks (docs.commands) of detect.py.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -11,9 +11,9 @@ import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "detect.py")
+SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts", "detect.py")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect_readme", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect_readme", SCRIPT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
@@ -22,7 +22,7 @@ FENCE = "```"
 
 class ReadmeCommands(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-readme-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-readme-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.write("package.json", '{"scripts": {"dev": "vite", "lint": "eslint .", "test": "vitest"}}')
         self.write("web/package.json", '{"name": "web", "scripts": {"dev": "vite", "build": "vite build"}}')

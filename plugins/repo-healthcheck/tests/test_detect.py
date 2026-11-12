@@ -1,6 +1,6 @@
 """Tests for scripts/detect.py. Fixtures are built in temporary directories.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -14,9 +14,9 @@ import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "detect.py")
+SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts", "detect.py")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect", SCRIPT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
@@ -41,7 +41,7 @@ def git(root, *args):
 
 class Fixture(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-detect-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-detect-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, rel, text=""):
@@ -567,7 +567,7 @@ class GitRepo(Fixture):
 
     def test_a_command_in_the_repos_git_config_is_never_run(self):
         # `git ls-files --others` runs core.fsmonitor; a repo under review must not run code through it.
-        outside = tempfile.mkdtemp(prefix="repo-health-fsmonitor-")
+        outside = tempfile.mkdtemp(prefix="repo-healthcheck-fsmonitor-")
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         marker = os.path.join(outside, "ran")
         hook = os.path.join(outside, "hook.sh")
@@ -713,7 +713,7 @@ class Exclusions(Fixture):
         self.assertEqual(result["excluded"]["generated"]["count"], 0)
 
     def test_symlink_that_leaves_the_repository_is_not_read(self):
-        outside = tempfile.mkdtemp(prefix="repo-health-outside-")
+        outside = tempfile.mkdtemp(prefix="repo-healthcheck-outside-")
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         with open(os.path.join(outside, "secret.md"), "w") as handle:
             handle.write("# Secret heading\n")
@@ -729,7 +729,7 @@ class Exclusions(Fixture):
         self.assertEqual(result["languages"]["python"]["files"], 2)
 
     def test_tracked_symlink_that_leaves_the_repository_is_not_read(self):
-        outside = tempfile.mkdtemp(prefix="repo-health-outside-")
+        outside = tempfile.mkdtemp(prefix="repo-healthcheck-outside-")
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         with open(os.path.join(outside, "secret.md"), "w") as handle:
             handle.write("# Secret heading\n")

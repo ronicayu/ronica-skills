@@ -15,7 +15,7 @@ java, go, kotlin):
 
 A missing reference file fails the test; it is not skipped.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -27,12 +27,12 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
-SKILL = os.path.join(PLUGIN, "skills", "repo-health")
+SKILL = os.path.join(PLUGIN, "skills", "repo-healthcheck")
 REFERENCES = os.path.join(SKILL, "references")
 DETECT = os.path.join(SKILL, "scripts", "detect.py")
 LANGUAGES = ("python", "typescript", "rust", "java", "go", "kotlin")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect_for_consistency", DETECT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect_for_consistency", DETECT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
@@ -144,7 +144,7 @@ class TableParser(unittest.TestCase):
     """The parser and the comparison, on reference files built here."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="repo-health-refs-")
+        self.dir = tempfile.mkdtemp(prefix="repo-healthcheck-refs-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
 
     def parse(self, text):

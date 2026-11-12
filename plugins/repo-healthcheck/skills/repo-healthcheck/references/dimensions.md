@@ -117,6 +117,6 @@ Each finding cites `path:line`. See `tier2-prompts.md`.
 2. Times the hotspot factor: 2 when the gap covers one of the top 5 hotspots (a missing suite that holds a hotspot, a hotspot's language without a linter), 1.5 for the top 15, 1 otherwise.
 3. Times the effort factor: 1.5 when an existing tool only needs to move into CI or block (enforce, not add), 1 otherwise, 0.7 for a large change.
 4. Times 0 when the profile makes the advice moot (required reviews in a `solo` repo, a lockfile for a `library`), and the gap is listed under "Not applicable" instead.
-5. A gap whose id is `dismissed` in `.repo-health/decisions.json` drops out of the ranking and appears once, collapsed, with its reason.
+5. A gap whose id is `dismissed` in `.repo-healthcheck/decisions.json` drops out of the ranking and appears once, collapsed, with its reason.
 
 The model writes recommendations for the top gaps in this order. It may reorder only with a reason in the recommendation.

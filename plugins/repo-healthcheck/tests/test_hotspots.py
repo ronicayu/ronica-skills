@@ -1,6 +1,6 @@
 """Tests for scripts/hotspots.py. Fixture git repos are built in temporary directories.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import datetime
@@ -14,11 +14,11 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 SCRIPT = os.path.join(SCRIPTS, "hotspots.py")
 
 sys.path.insert(0, SCRIPTS)  # hotspots.py imports detect.py from its own directory
-_spec = importlib.util.spec_from_file_location("repo_health_hotspots", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_hotspots", SCRIPT)
 hotspots = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hotspots)
 
@@ -59,7 +59,7 @@ SMALL = "def h():\n    if 1:\n        return 1\n"  # complexity 3
 
 class Fixture(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-hotspots-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-hotspots-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, rel, text):
@@ -189,7 +189,7 @@ class NoUsableHistory(Fixture):
 
     def test_shallow_clone_with_few_commits(self):
         self.build_history()
-        clone = tempfile.mkdtemp(prefix="repo-health-clone-")
+        clone = tempfile.mkdtemp(prefix="repo-healthcheck-clone-")
         self.addCleanup(shutil.rmtree, clone, ignore_errors=True)
         target = os.path.join(clone, "c")
         git(clone, "clone", "-q", "--depth", "2", "file://" + self.root, target)

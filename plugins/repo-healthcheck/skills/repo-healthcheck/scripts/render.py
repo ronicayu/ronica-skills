@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a repo-health findings.json (schema 2) and its score.json as a Markdown report.
+"""Render a repo-healthcheck findings.json (schema 2) and its score.json as a Markdown report.
 
     render.py findings.json [-o report.md] [--share share.md] [--previous OLD.json | --no-previous]
 
@@ -61,7 +61,7 @@ LEVEL_NAMES = {0: "absent", 1: "present", 2: "enforced", 3: "effective"}
 
 TEXT = {
     "en": {
-        "title": "# Repo health report: %s", "commit": "Commit: `%s`", "date": "Date: %s",
+        "title": "# Repo healthcheck report: %s", "commit": "Commit: `%s`", "date": "Date: %s",
         "compared": "compared with %s", "first": "## Do these first", "no_recs": "No recommendations.",
         "why": "Why: %s", "verify": "Verify: `%s`", "touches": "Touches hotspots: %s",
         "since": "## Since last run", "closed": "Closed gaps (%d)", "new": "New gaps (%d)",
@@ -586,7 +586,7 @@ def default_name(path, findings, prefix):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Render a repo-health findings.json (schema 2) as Markdown.")
+    parser = argparse.ArgumentParser(description="Render a repo-healthcheck findings.json (schema 2) as Markdown.")
     parser.add_argument("findings")
     parser.add_argument("--previous", help="an earlier findings file to compare with")
     parser.add_argument("--no-previous", action="store_true", help="do not look for an earlier findings file")

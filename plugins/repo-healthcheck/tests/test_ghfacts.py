@@ -1,6 +1,6 @@
 """Tests for scripts/ghfacts.py with a fake `gh` on PATH that prints canned answers.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -14,11 +14,11 @@ import unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 SCRIPT = os.path.join(SCRIPTS, "ghfacts.py")
 
 sys.path.insert(0, SCRIPTS)
-_spec = importlib.util.spec_from_file_location("repo_health_ghfacts", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_ghfacts", SCRIPT)
 ghfacts = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ghfacts)
 
@@ -108,8 +108,8 @@ def git(root, *args):
 
 class FakeGh(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-gh-repo-")
-        self.fake = tempfile.mkdtemp(prefix="repo-health-gh-fake-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-gh-repo-")
+        self.fake = tempfile.mkdtemp(prefix="repo-healthcheck-gh-fake-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.addCleanup(shutil.rmtree, self.fake, ignore_errors=True)
         git(self.root, "init", "-q")
@@ -251,9 +251,9 @@ class Happy(FakeGh):
             self.assertEqual((prompt, color), ("1", "1"))
 
     def test_the_scratch_directory_is_removed(self):
-        before = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("repo-health-gh-") and "repo-" not in n[15:]}
+        before = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("repo-healthcheck-gh-") and "repo-" not in n[15:]}
         self.collect()
-        after = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("repo-health-gh-") and "repo-" not in n[15:]}
+        after = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("repo-healthcheck-gh-") and "repo-" not in n[15:]}
         self.assertEqual(before, after)
 
     def test_solo_skips_pull_request_facts(self):
@@ -423,7 +423,7 @@ class NotAvailable(FakeGh):
         self.assertEqual(self.calls(), [])
 
     def test_not_a_git_repository(self):
-        plain = tempfile.mkdtemp(prefix="repo-health-plain-")
+        plain = tempfile.mkdtemp(prefix="repo-healthcheck-plain-")
         self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
         result = ghfacts.collect(plain)
         self.assertFalse(result["available"])

@@ -1,6 +1,6 @@
 """Tests for workspace roots (one subproject with members) in detect.py.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -11,16 +11,16 @@ import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "detect.py")
+SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts", "detect.py")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect_ws", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect_ws", SCRIPT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
 
 class Workspaces(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-ws-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-ws-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, rel, text=""):

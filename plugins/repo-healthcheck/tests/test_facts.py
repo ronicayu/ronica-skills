@@ -1,6 +1,6 @@
 """Tests for the strictness, coverage threshold, locked install and toolchain facts of detect.py.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import datetime
@@ -13,9 +13,9 @@ import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "detect.py")
+SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts", "detect.py")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect_facts", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect_facts", SCRIPT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
@@ -36,7 +36,7 @@ def git(root, *args, **kwargs):
 
 class Facts(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-facts-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-facts-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, rel, text=""):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI outcomes and repository settings from GitHub, for the repo-health skill.
+"""CI outcomes and repository settings from GitHub, for the repo-healthcheck skill.
 
     ghfacts.py [REPO] [--runs 50] [--solo] [--pretty]
 
@@ -301,7 +301,7 @@ def collect(repo, runs=50, solo=False):
         return {"available": False, "why": "origin is not a GitHub remote (host: %s)" % (host or "unknown")}
     if shutil.which("gh") is None:
         return {"available": False, "why": "the gh CLI is not installed"}
-    cwd = tempfile.mkdtemp(prefix="repo-health-gh-")
+    cwd = tempfile.mkdtemp(prefix="repo-healthcheck-gh-")
     try:
         auth = run_gh(["auth", "status"], cwd)
         if auth.code != 0:

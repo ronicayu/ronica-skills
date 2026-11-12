@@ -3,7 +3,7 @@
 Real-shaped CI files are in tests/fixtures/. Each test builds a repository in a
 temporary directory.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import importlib.util
@@ -15,9 +15,9 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
-SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts", "detect.py")
+SCRIPT = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts", "detect.py")
 
-_spec = importlib.util.spec_from_file_location("repo_health_detect_ci", SCRIPT)
+_spec = importlib.util.spec_from_file_location("repo_healthcheck_detect_ci", SCRIPT)
 detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
@@ -26,7 +26,7 @@ WORKFLOW = ".github/workflows/ci.yml"
 
 class CiFixture(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="repo-health-ci-")
+        self.root = tempfile.mkdtemp(prefix="repo-healthcheck-ci-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, rel, text=""):
