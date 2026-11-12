@@ -1934,3 +1934,41 @@ def test_graph_keeps_a_narrow_rank_on_one_row(browser, tmp_path):
     assert len(steps) == 3 and len(set(steps)) == 1 and steps[0] != goal
     assert problems == []
     page.close()
+
+
+def test_graph_packs_disconnected_chains(browser, tmp_path):
+    tg = runner(tmp_path / "t.db")
+    for i in range(6):
+        tg("add", f"Head {i}")
+        tg("add", f"Tail {i}", "--blocks", str(2 * i + 1))
+    for i in range(10):
+        tg("add", f"Alone {i}")
+    out = tmp_path / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    page, problems = open_page(browser, out, "?view=graph")
+    box = page.evaluate("tasks().boundingBox()")
+    assert box["w"] / box["h"] <= 3
+    boxes = page.evaluate(BOXES)
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert a["x2"] <= b["x1"] or b["x2"] <= a["x1"] or a["y2"] <= b["y1"] or b["y2"] <= a["y1"]
+    assert problems == []
+    page.close()
+
+
+def test_packing_keeps_a_single_chain_as_dagre_made_it(browser, tmp_path):
+    tg = runner(tmp_path / "t.db")
+    tg("add", "Goal", "--type", "objective")
+    tg("add", "Middle", "--blocks", "1")
+    tg("add", "Start", "--blocks", "2")
+    out = tmp_path / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    page, problems = open_page(browser, out, "?view=graph")
+    same = page.evaluate("""() => {
+        const alone = dagreLayout(tasks(), links(), { ranker: 'network-simplex', nodesep: 40, ranksep: 80, edgesep: 20 }).pos;
+        const here = n => n.position();
+        const shift = { x: here(cy.getElementById('1')).x - alone['1'].x, y: here(cy.getElementById('1')).y - alone['1'].y };
+        return tasks().every(n => Math.abs(here(n).x - alone[n.id()].x - shift.x) < 0.01 && Math.abs(here(n).y - alone[n.id()].y - shift.y) < 0.01);
+    }""")
+    assert same and problems == []
+    page.close()

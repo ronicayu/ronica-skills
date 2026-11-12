@@ -1307,7 +1307,7 @@ function layoutGraph() {
   let seen = layoutMemo.get(key);
   if (seen) layoutMemo.delete(key);
   else {
-    seen = dagreLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
+    seen = packedLayout(nodes, edges, { ranker: nodes.length > BIG_GRAPH ? 'tight-tree' : 'network-simplex', nodesep: tight ? 10 : 40, ranksep: tight ? 44 : 80, edgesep: tight ? 10 : 20 });
     if (layoutMemo.size >= LAYOUTS_KEPT) layoutMemo.delete(layoutMemo.keys().next().value);
   }
   layoutMemo.set(key, seen);
@@ -1364,6 +1364,42 @@ function wrapRanks(g, nodes, opts) {
     const pts = g.edge(e).points || [];
     g.edge(e).points = pts.map((p, i) => i === 0 || i === pts.length - 1 ? p : { x: p.x, y: moved.has(Math.round(p.y)) ? moved.get(Math.round(p.y)) : NaN });
   });
+}
+
+// Dagre puts disconnected chains side by side in one row, so each component is laid out alone and
+// the boxes are shelf-packed toward GRAPH_ASPECT, largest first, tops aligned, each shelf centred.
+function packedLayout(nodes, edges, opts) {
+  const parts = nodes.union(edges).components().map(comp => {
+    const ns = comp.nodes(), res = dagreLayout(ns, comp.edges(), opts);
+    const box = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
+    const grow = (x, y) => { box.x1 = Math.min(box.x1, x); box.x2 = Math.max(box.x2, x); box.y1 = Math.min(box.y1, y); box.y2 = Math.max(box.y2, y); };
+    ns.forEach(n => {
+      const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
+      grow(p.x - d.w / 2, p.y - d.h / 2);
+      grow(p.x + d.w / 2, p.y + d.h / 2);
+    });
+    Object.values(res.routes).forEach(r => r.path.forEach(([x, y]) => grow(x, y)));
+    return { res, box, w: box.x2 - box.x1, h: box.y2 - box.y1, size: ns.length, id: Math.min(...ns.map(n => Number(n.id()))) };
+  }).sort((p, q) => q.size - p.size || p.id - q.id);
+  if (parts.length === 1) return parts[0].res;
+  const limit = Math.max(...parts.map(c => c.w), Math.sqrt(parts.reduce((sum, c) => sum + c.w * c.h, 0) * GRAPH_ASPECT));
+  const shelves = [];
+  parts.forEach(c => {
+    const last = shelves[shelves.length - 1];
+    if (last && last.w + opts.ranksep + c.w <= limit) { c.left = last.w + opts.ranksep; last.w = c.left + c.w; last.h = Math.max(last.h, c.h); last.items.push(c); }
+    else { c.left = 0; shelves.push({ w: c.w, h: c.h, items: [c] }); }
+  });
+  const pos = {}, routes = {};
+  let top = 0;
+  shelves.forEach(shelf => {
+    shelf.items.forEach(c => {
+      const dx = c.left - shelf.w / 2 - c.box.x1, dy = top - c.box.y1;
+      Object.entries(c.res.pos).forEach(([id, p]) => { pos[id] = { x: p.x + dx, y: p.y + dy }; });
+      Object.entries(c.res.routes).forEach(([id, r]) => { routes[id] = { ...r, path: r.path.map(([x, y]) => [x + dx, y + dy]) }; });
+    });
+    top += shelf.h + opts.ranksep;
+  });
+  return { pos, routes };
 }
 
 // Runs dagre directly, not through cytoscape-dagre, which throws away the edge routes. Each edge
