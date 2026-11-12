@@ -72,7 +72,7 @@ def test_page_renders_and_opens_panel(browser, page_file, view):
             return [b.left + p.x, b.top + p.y];
         }"""
     )
-    page.mouse.click(x, y)
+    page.mouse.dblclick(x, y)
     page.wait_for_function("document.getElementById('panel').style.display === 'block'")
     assert "Vendor key" in page.inner_text("#panel")
     assert problems == []
@@ -984,6 +984,10 @@ def test_conflict_line_explains_itself(browser, page_file):
     assert page.is_visible("#tip")
     assert story == "#3 waits for #5 · #5 is due 5 Nov but #3 needs it 20 Oct (16d short)"
     page.mouse.click(*box)
+    page.wait_for_function("lit === 5")
+    assert page.evaluate(PANEL_OPEN) is False
+    page.wait_for_timeout(400)
+    page.mouse.dblclick(*box)
     page.wait_for_function("pinned === 5")
     assert "#5 due 5 Nov after #3 needs it 20 Oct" in page.inner_text("#panel")
     page.mouse.move(5, 300)
@@ -1154,7 +1158,7 @@ def test_clicked_node_stays_in_view(browser, programme_file, view):
     page.wait_for_function("typeof cy !== 'undefined' && cy.nodes().length > 0")
     more(page, "expandAll")
     right = page.evaluate("""() => tasks().max(n => n.renderedBoundingBox({ includeLabels: view !== 'timeline' }).x2).ele.id()""")
-    page.mouse.click(*node_xy(page, right))
+    page.mouse.dblclick(*node_xy(page, right))
     page.wait_for_timeout(700)
     assert page.evaluate("pinned") == int(right)
     inside = page.evaluate("""id => {
@@ -1654,7 +1658,7 @@ def test_priority_badge_shows_in_the_panel(browser, priority_file):
             return [b.left + p.x, b.top + p.y];
         }"""
     )
-    page.mouse.click(x, y)
+    page.mouse.dblclick(x, y)
     page.wait_for_function("document.getElementById('panel').style.display === 'block'")
     assert page.inner_text("#panel .badge.priority") == "P0"
     assert "Priority" not in page.text_content("#details")  # the badge shows it; the details do not repeat it
@@ -1863,5 +1867,70 @@ def test_graph_edges_do_not_cross_node_labels(browser, fanin_file):
     )
     assert crossings[1] >= 2  # the milestones have labels under their shape
     assert crossings[0] == []
+    assert problems == []
+    page.close()
+
+
+def test_click_highlights_and_double_click_opens(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    page.wait_for_timeout(300)
+    page.mouse.click(*node_xy(page, "5"))
+    page.wait_for_function("lit === 5")
+    assert not page.evaluate(PANEL_OPEN)
+    assert page.evaluate("cy.nodes('.faded').length") > 0
+    assert page.evaluate("cy.nodes('#5, #3, #2').every(n => !n.hasClass('faded'))")
+    assert page.evaluate("cy.getElementById('6').hasClass('faded')")
+    page.wait_for_timeout(400)
+    page.mouse.dblclick(*node_xy(page, "5"))
+    page.wait_for_function(PANEL_OPEN)
+    assert page.evaluate("pinned") == 5
+    left, top = page.evaluate("(b => [b.left, b.top])(document.getElementById('cy').getBoundingClientRect())")
+    page.mouse.click(left + 5, top + 5)
+    page.wait_for_function("lit === null")
+    assert page.evaluate("cy.elements('.faded').length") == 0 and not page.evaluate(PANEL_OPEN)
+    assert problems == []
+    page.close()
+
+
+@pytest.fixture(scope="module")
+def wide_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("wide")
+    tg = runner(tmp / "t.db")
+    tg("add", "Goal", "--type", "objective")
+    for i in range(40):
+        tg("add", f"Step {i + 1}", "--blocks", "1")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+BOXES = """() => tasks().map(n => n.boundingBox({ includeLabels: false }))"""
+
+
+def test_graph_wraps_a_wide_rank(browser, wide_file):
+    page, problems = open_page(browser, wide_file, "?view=graph")
+    box = page.evaluate("tasks().filter(n => n.data('type') !== 'objective').boundingBox()")
+    assert box["w"] / box["h"] <= 3
+    ys = page.evaluate("[...new Set(tasks().filter(n => n.data('type') !== 'objective').map(n => Math.round(n.position('y'))))].length")
+    assert ys > 2
+    boxes = page.evaluate(BOXES)
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert a["x2"] <= b["x1"] or b["x2"] <= a["x1"] or a["y2"] <= b["y1"] or b["y2"] <= a["y1"]
+    assert problems == []
+    page.close()
+
+
+def test_graph_keeps_a_narrow_rank_on_one_row(browser, tmp_path):
+    tg = runner(tmp_path / "t.db")
+    tg("add", "Goal", "--type", "objective")
+    for i in range(3):
+        tg("add", f"Step {i + 1}", "--blocks", "1")
+    out = tmp_path / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    page, problems = open_page(browser, out, "?view=graph")
+    steps = page.evaluate("tasks().filter(n => n.data('type') !== 'objective').map(n => Math.round(n.position('y')))")
+    goal = page.evaluate("Math.round(cy.getElementById('1').position('y'))")
+    assert len(steps) == 3 and len(set(steps)) == 1 and steps[0] != goal
     assert problems == []
     page.close()
