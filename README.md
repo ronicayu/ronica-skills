@@ -13,7 +13,7 @@ A marketplace of Claude Code plugins.
 | [`telegram-send`](plugins/telegram-send) | Sends a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone. Ships a wrapper script that reads credentials from a mode-600 file, keeps the bot token out of argv and the transcript, guards the 4096-character limit, and reports what the API's errors actually mean. |
 | [`evidence-search`](plugins/evidence-search) | Finds and cites evidence in a project's code, requirements, design documents and configuration at low token cost. Searches in tiers (repo map, index pointers, line-range reads, bounded grep), makes a grep cross-check mandatory for enumeration and absence questions, and records an evidence ledger of `path:line` citations for design reviews, system design, and other skills that need evidence. Ships an optional local index: BM25 search with identifier-aware terms, tree-sitter method chunks for Java and JavaScript, heading sections for documents, related-chunk search across code and documents, and a fact table of SQL tables, URLs, JSP includes, queues, config keys and project ids; `/evidence-search:setup` builds it. Works on code that does not compile. |
 | [`statechart`](plugins/statechart) | Checks a TLA+ model of a system that moves between states with TLC, and draws it as a Mermaid statechart with the shortest path to each state that breaks a rule. Adapted from the statechart skill in poteto's pstack (Lauren Tan, MIT). Adds a setup script that needs no mise, a Pele render script, and a method for modelling code you maintain. Call it as `/statechart`, or let Claude or another agent pick it up when a change touches state logic. |
-| [`repo-health`](plugins/repo-health) | Measures how well an existing repository is guarded and where it needs work: lint, types, static analysis, tests, coverage, CI, setup, docs, dependencies, file sizes and git hotspots for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin. Each dimension gets a level from absent to effective. Cheap checks run at once; running tools or tests and LLM code reading wait for your consent. Writes a ranked Markdown report and changes no project file. |
+| [`repo-healthcheck`](plugins/repo-healthcheck) | Measures how well an existing repository is guarded and where it needs work: lint, types, static analysis, tests, coverage, CI, setup, docs, dependencies, file sizes and git hotspots for Python, TypeScript/JavaScript, Rust, Java, Go and Kotlin. Each dimension gets a level from absent to effective. Cheap checks run at once; running tools or tests and LLM code reading wait for your consent. Writes a ranked Markdown report and changes no project file. |
 
 ## Install
 
@@ -28,12 +28,12 @@ A marketplace of Claude Code plugins.
 /plugin install taskgraph@ronica-skills
 /plugin install evidence-search@ronica-skills
 /plugin install statechart@ronica-skills
-/plugin install repo-health@ronica-skills
+/plugin install repo-healthcheck@ronica-skills
 ```
 
 Skills then trigger on their own descriptions, or explicitly via
 `/writing-editor`, `/architecture-design`, `/telegram-send`, `/taskgraph`,
-`/evidence-search`, and `/repo-health`.
+`/evidence-search`, and `/repo-healthcheck`.
 `statechart` runs as `/statechart`, or when Claude or another agent picks it
 up for a change to state logic; its setup and attribution are in the [statechart README](plugins/statechart/README.md).
 After installing `agentic-team`, select `agentic-team:manager` in the agent

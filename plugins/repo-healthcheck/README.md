@@ -1,17 +1,21 @@
-# repo-health
+# repo-healthcheck
 
 Points at an existing code repository and answers "how do we make this better?".
 It measures the repository's engineering guardrails and code health, then writes
 a Markdown report with ranked recommendations and prints a short summary.
 It reports and recommends; it changes no project file.
 
-Run it with `/repo-health` (optionally a path or the dimensions to check). It
+Run it with `/repo-healthcheck` (optionally a path or the dimensions to check). It
 never starts on its own: Claude does not invoke it from a plain question.
+
+Renamed from `repo-health` in 0.2.0: uninstall `repo-health@ronica-skills`, install
+`repo-healthcheck@ronica-skills`, and rename an existing `.repo-health/` output folder to
+`.repo-healthcheck/` to keep its decisions and history.
 
 ## Levels per dimension
 
 "Is there a linter?" is the weak question. Each dimension gets a level, set by
-`scripts/score.py` from the rules in `skills/repo-health/references/dimensions.md`
+`scripts/score.py` from the rules in `skills/repo-healthcheck/references/dimensions.md`
 (every level names the rule that set it, so two runs on one repository agree):
 
 | Level | Name | Meaning |
@@ -63,7 +67,7 @@ signals and findings, not levels.
 
 ## Output
 
-Files go to `<repo>/.repo-health/`, named with a stamp `YYYY-MM-DDTHHMM` so two
+Files go to `<repo>/.repo-healthcheck/`, named with a stamp `YYYY-MM-DDTHHMM` so two
 runs on one day do not overwrite each other:
 
 - `detect-<stamp>.json`, `hotspots-<stamp>.json`, `ghfacts-<stamp>.json`: the facts
@@ -81,7 +85,7 @@ The skill does not edit `.gitignore`; ignore or commit the folder as you like.
 
 Every gap has a stable id, printed next to its recommendation, for example
 `tests:.:missing-suite:plugins/agentic-team/tests`. To drop a gap from the
-ranking, record a decision in `.repo-health/decisions.json`:
+ranking, record a decision in `.repo-healthcheck/decisions.json`:
 
 ```json
 {"tests:.:missing-suite:plugins/agentic-team/tests": {"status": "dismissed", "reason": "run by make ci", "date": "2026-11-10"}}
@@ -99,7 +103,7 @@ score.py decide 'tests:.:missing-suite:plugins/agentic-team/tests' --dismiss --r
 The scripts also run by hand:
 
 ```sh
-S=skills/repo-health/scripts
+S=skills/repo-healthcheck/scripts
 $S/detect.py REPO > detect.json                  # languages, tools, CI, setup, docs (JSON)
 $S/hotspots.py REPO > hotspots.json              # hotspots, largest files, co-change (JSON)
 $S/ghfacts.py REPO > ghfacts.json                # CI outcomes and repository settings (needs gh)
@@ -110,7 +114,7 @@ $S/render.py findings.json [-o report.md] [--share share.md]
 
 ## Safety
 
-- Read-only for project files. The only writes are the files in `.repo-health/` (and `decisions.json` when you run `score.py decide`).
+- Read-only for project files. The only writes are the files in `.repo-healthcheck/` (and `decisions.json` when you run `score.py decide`).
 - Tier 1 never installs into the project: no `npm install`, no `pip install`
   into the project environment, no lockfile change. It uses ephemeral runners
   (`uvx`, `pipx run`, `npx`, `go run`) with a timeout per command.
@@ -128,7 +132,7 @@ C/C++, Ruby, PHP, Swift, Scala) are counted by extension and listed under
 The scripts use only the standard library and run on Python 3.9 or newer.
 
 ```sh
-python3 -m unittest discover -s plugins/repo-health/tests
+python3 -m unittest discover -s plugins/repo-healthcheck/tests
 ```
 
 `test_consistency.py` checks that the tool names in `references/*.md` (the

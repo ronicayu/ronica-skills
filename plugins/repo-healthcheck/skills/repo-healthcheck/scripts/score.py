@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Levels, gaps and changes for the repo-health skill: the rules of references/dimensions.md as code.
+"""Levels, gaps and changes for the repo-healthcheck skill: the rules of references/dimensions.md as code.
 
     score.py --detect D.json --hotspots H.json [--ghfacts G.json] [--tier1 T.json]
              [--decisions decisions.json] [--previous OLD-score.json] [--now YYYY-MM-DD]
@@ -117,7 +117,7 @@ tests 10, ci 9, hotspots 8 (a hotspot gap), lint 7, types 6, secrets 6 (public) 
 counts as "enforce" (a quick fix), a missing one as "add".
 
 Decisions
-    .repo-health/decisions.json (in the scanned repository, or --decisions) maps a gap id to
+    .repo-healthcheck/decisions.json (in the scanned repository, or --decisions) maps a gap id to
     {"status": "dismissed" | "later" | "done", "reason": "...", "date": "YYYY-MM-DD"}.
     dismissed: the gap leaves `gaps` and appears under `dismissed`. later: it stays with
     priority x 0.5 and its id is listed under `deferred`. done: informational; a gap marked
@@ -1462,7 +1462,7 @@ def decide(argv):
     group.add_argument("--later", action="store_const", const="later", dest="status")
     group.add_argument("--done", action="store_const", const="done", dest="status")
     parser.add_argument("--reason", required=True)
-    parser.add_argument("--file", default=os.path.join(".repo-health", "decisions.json"))
+    parser.add_argument("--file", default=os.path.join(".repo-healthcheck", "decisions.json"))
     parser.add_argument("--date", default=datetime.date.today().isoformat())
     args = parser.parse_args(argv)
     data = {}
@@ -1486,7 +1486,7 @@ def main(argv=None):
         return decide(argv[1:])
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0] + " See the module docstring for the output.",
-        epilog="Decisions: .repo-health/decisions.json maps a gap id to "
+        epilog="Decisions: .repo-healthcheck/decisions.json maps a gap id to "
                '{"status": "dismissed"|"later"|"done", "reason": "...", "date": "YYYY-MM-DD"}. '
                "A dismissed gap leaves the ranking; later halves its priority; done is informational "
                "(listed under regressed when the gap is detected again). Gap ids are printed in the report "
@@ -1495,7 +1495,7 @@ def main(argv=None):
     parser.add_argument("--hotspots", required=True)
     parser.add_argument("--ghfacts")
     parser.add_argument("--tier1")
-    parser.add_argument("--decisions", help="default: .repo-health/decisions.json in the scanned repository")
+    parser.add_argument("--decisions", help="default: .repo-healthcheck/decisions.json in the scanned repository")
     parser.add_argument("--previous", help="an earlier score.json to compare with")
     parser.add_argument("--now", help="YYYY-MM-DD for the lockfile age (default: today)")
     parser.add_argument("-o", "--output")
@@ -1506,7 +1506,7 @@ def main(argv=None):
     tier1 = load_json(args.tier1, "tier1") if args.tier1 else None
     decisions_path = args.decisions
     if decisions_path is None and det.get("repo"):
-        candidate = os.path.join(det["repo"], ".repo-health", "decisions.json")
+        candidate = os.path.join(det["repo"], ".repo-healthcheck", "decisions.json")
         decisions_path = candidate if os.path.exists(candidate) else None
     decisions = load_json(decisions_path, "decisions") if decisions_path else None
     previous = load_json(args.previous, "previous score") if args.previous else None

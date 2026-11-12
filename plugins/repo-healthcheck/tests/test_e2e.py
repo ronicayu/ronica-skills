@@ -1,6 +1,6 @@
 """End to end: detect, hotspots, score and render on a small temporary git repository (no gh).
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import json
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-health", "scripts")
+SCRIPTS = os.path.join(os.path.dirname(HERE), "skills", "repo-healthcheck", "scripts")
 
 ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="T",
            GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="T", GIT_COMMITTER_EMAIL="t@example.com")

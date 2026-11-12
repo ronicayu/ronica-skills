@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tier 0 detection for the repo-health skill.
+"""Tier 0 detection for the repo-healthcheck skill.
 
     detect.py [REPO] [--max-subprojects 10] [--pretty]
 
@@ -344,7 +344,7 @@ SKIP_DIRS = {
     "node_modules", "vendor", ".venv", "venv", ".git",
     "third_party", "__pycache__", ".tox", ".nox", ".eggs", ".mypy_cache",
     ".ruff_cache", ".pytest_cache", ".gradle", ".idea", "site-packages",
-    "generated", "__generated__", ".next", ".nuxt", ".repo-health",
+    "generated", "__generated__", ".next", ".nuxt", ".repo-healthcheck",
 }
 
 # Build output folders: skipped only at the repo root or at a subproject root

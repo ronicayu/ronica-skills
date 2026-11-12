@@ -1,6 +1,6 @@
 """Tests for the facts detect.py adds for score.py: test suites, update bots, publishable.
 
-Run: python -m unittest discover -s plugins/repo-health/tests
+Run: python -m unittest discover -s plugins/repo-healthcheck/tests
 """
 
 import os
