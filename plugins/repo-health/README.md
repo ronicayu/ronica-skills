@@ -3,10 +3,10 @@
 Points at an existing code repository and answers "how do we make this better?".
 It measures the repository's engineering guardrails and code health, then writes
 a Markdown report with ranked recommendations and prints a short summary.
-Version 0.1.0 reports and recommends; it changes no project file.
+It reports and recommends; it changes no project file.
 
-Say it in plain words: "how can I improve this repo", "audit this project's
-engineering practice", "does this project have lint, tests and CI?".
+Run it with `/repo-health` (optionally a path or the dimensions to check). It
+never starts on its own: Claude does not invoke it from a plain question.
 
 ## Levels per dimension
 
