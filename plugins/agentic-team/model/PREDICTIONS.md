@@ -196,4 +196,21 @@ If `DoneOnlyWhenMerged` breaks in check.cfg, look for a step that sets `merged` 
 
 ## Results (0.19.0)
 
-Not run yet: TLC needed an approval that the session that wrote this change did not have. Run the configs above and record the counts here.
+Run on 2026-11-13 with tla2tools 1.7.4. Every prediction held.
+
+| Config | States | Result |
+|---|---|---|
+| check.cfg, check-pr.cfg | 15,566, 16,718 | every rule holds, `DoneOnlyWhenMerged` included, no dead end |
+| pause.cfg, pause-pr.cfg | 60,892, 64,780 | every rule holds |
+| peel-1.cfg, faults.cfg, faults-pr.cfg | 10,958, 43,832, 48,440 | every rule holds |
+| regress-97.cfg | 15,566 | only `DoneOnlyWhenMerged` breaks, in 6 steps, not 5: the verifier also ends (step 5) before the close |
+| regress-42 | 10,388 | VerdictNotLost and NoDeadlock break |
+| regress-54 | 41,332 | PauseFinishedFirst breaks |
+| regress-56, -58, -61, -62, -65 | 10,852, 10,953, 10,958, 13,070, 10,516 | NoDeadlock breaks |
+| regress-57 | 11,534 | NoSessionLeftAtEnd breaks |
+| regress-59 | 16,498 | AttemptCap breaks |
+| regress-65b | 11,798 | StoppedIdleNeverRefuses breaks |
+| regress-89 | 13,998 | FixRoundNeedsBlocking breaks |
+| overview.cfg, overview-pr.cfg | 110, 134 | every rule holds; `assets/diagrams/attempt-statechart.mmd` is the new overview chart |
+
+`DoneOnlyWhenMerged` holds in every regress config except regress-97.

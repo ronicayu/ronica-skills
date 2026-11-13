@@ -14,12 +14,13 @@ flowchart TD
   RETRY -->|"yes: run.py abandon"| DECIDE
   VERIFY --> CLOSE{run.py close}
   CLOSE -->|"verify-failed"| AGAIN
-  CLOSE -->|"artifact- or test-verified:<br/>tokens, tg done"| MODE{merge.mode?}
+  CLOSE -->|"artifact- or test-verified:<br/>tokens, phase awaiting_merge"| MODE{merge.mode?}
+  CLOSE -->|"no commit to merge:<br/>no change, or output outside git"| DONE
   MODE -->|"local"| MERGE{MERGE: line in<br/>standing orders?}
   MODE -->|"pr"| PUB[close: push task-id,<br/>open the request]
   PUB --> REC{record: request state}
   REC -->|"clean + MERGE: line"| HOSTMERGE[gh/glab merge]
-  HOSTMERGE --> DONE([Done])
+  HOSTMERGE --> DONE([Merged: tg done])
   REC -->|"behind"| CLOSE
   REC -->|"blocked / pending"| REC
   REC -->|"merged by someone"| DONE
@@ -27,8 +28,8 @@ flowchart TD
   RECORD -->|"verify_mode ci"| CI[verify: push, request, CI run]
   CI --> RECORD
   MERGE -->|"yes: merge,<br/>then claude rm"| DONE
-  MERGE -->|"no: ready to merge"| OPMERGE[Operator merges]
-  OPMERGE -->|"run.py merged,<br/>then claude rm"| DONE
+  MERGE -->|"no, or dirty, or conflict:<br/>waits in progress"| OPMERGE[Operator merges]
+  OPMERGE -->|"record sees it in HEAD,<br/>or run.py merged"| DONE
   AGAIN --> LAUNCH
   SPLIT --> READY
   DONE -->|"unblocks"| READY

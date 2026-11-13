@@ -26,11 +26,12 @@ sequenceDiagram
   M->>R: record
   R-->>M: verified #41 attempt 1: Verdict test-verified
   M->>R: close 41
-  R->>TG: meta verdict, verdict_ref, tokens, then done 41
-  R->>R: local mode: merge if a MERGE: line allows it, then claude rm
+  R->>TG: meta verdict, verdict_ref, tokens, phase awaiting_merge (41 stays in progress)
+  R->>R: local mode: merge if a MERGE: line allows it, then done 41 and claude rm
   R->>H: pr mode: push task-41, create request
   R-->>M: closed #41, then merged or ready-to-merge
   M->>R: record
   R->>H: request state, merge when clean
+  R->>TG: merged: merged_at, phase merged, done 41 (dependents become ready)
   R-->>M: merged #41, or the request state
   M->>OP: Status report, open decisions, branches ready to merge
