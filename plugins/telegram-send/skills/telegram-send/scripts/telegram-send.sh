@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Send a Telegram message through the Bot API.
+# Send a Telegram message, file, or image through the Bot API.
 #
 # Credentials live in a file, not in the environment or the command line:
 #
@@ -17,6 +17,8 @@
 # Usage:
 #   telegram-send.sh [options] 'message text'
 #   telegram-send.sh [options] -              # read text from stdin
+#   telegram-send.sh --file PATH ['caption']  # send a file as a document
+#   telegram-send.sh --photo PATH ['caption'] # send an image as a photo
 #   telegram-send.sh --chat-ids               # list chat ids the bot can see
 #   telegram-send.sh --wait N 'question?'     # send, then wait N seconds for a reply
 #   telegram-send.sh --wait N                 # wait for a reply without sending
@@ -28,6 +30,11 @@
 #   --silent        deliver with no push notification
 #   --thread ID     post into a forum topic (message_thread_id)
 #   --no-preview    suppress the link preview card
+#   --file PATH     attach PATH as a document (sendDocument, up to 50 MB). The
+#                   file arrives byte for byte. The text becomes its caption.
+#   --photo PATH    attach PATH as a photo (sendPhoto, up to 10 MB). Telegram
+#                   recompresses it and shows it inline. The text becomes its
+#                   caption. Use --file to keep the original quality.
 #   --dry-run       report what would be sent; send nothing
 #   --chat-ids      print the chat ids visible to the bot, for first-time setup
 #   --wait N        after sending, long-poll up to N seconds for a reply in the
@@ -59,6 +66,9 @@
 set -uo pipefail
 
 readonly max_chars=4096
+readonly max_caption=1024
+readonly max_document=$((50 * 1024 * 1024))
+readonly max_photo=$((10 * 1024 * 1024))
 readonly api=https://api.telegram.org
 
 token=${TELEGRAM_BOT_TOKEN:-}
@@ -72,6 +82,8 @@ preview=true
 dry_run=false
 list_chats=false
 wait_seconds=0
+attach=
+attach_kind=
 offset=
 sent_after=0
 
@@ -121,6 +133,11 @@ while [[ $# -gt 0 ]]; do
     --no-preview) preview=false; shift ;;
     --dry-run)    dry_run=true; shift ;;
     --chat-ids)   list_chats=true; shift ;;
+    --file|--photo)
+                  [[ -z $attach ]] || die 'one attachment per message; send each file separately'
+                  attach_kind=${1#--}; attach=${2:-}
+                  [[ -n $attach ]] || die "$1 needs a path"
+                  shift 2 ;;
     --wait)       wait_seconds=${2:-}
                   [[ $wait_seconds =~ ^[0-9]+$ ]] || die '--wait needs a number of seconds'
                   shift 2 ;;
@@ -237,8 +254,22 @@ if $list_chats; then
   exit 0
 fi
 
-if [[ -z $text && $wait_seconds -eq 0 ]]; then
+if [[ -z $text && -z $attach && $wait_seconds -eq 0 ]]; then
   die 'no message text (pass it as an argument, or - to read stdin)'
+fi
+
+bytes=0
+if [[ -n $attach ]]; then
+  [[ -f $attach ]] || die "no file at $attach"
+  [[ -r $attach ]] || die "$attach is not readable"
+  bytes=$(wc -c <"$attach" | tr -d '[:space:]')
+  [[ $bytes -gt 0 ]] || die "$attach is empty; Telegram rejects empty files"
+  if [[ $attach_kind == photo && $bytes -gt $max_photo ]]; then
+    die "$attach is $bytes bytes, over the 10 MB photo limit — send it with --file instead"
+  fi
+  if [[ $bytes -gt $max_document ]]; then
+    die "$attach is $bytes bytes, over the Bot API's 50 MB upload limit"
+  fi
 fi
 
 if [[ -z $chat ]]; then
@@ -255,6 +286,9 @@ if [[ -n $text ]]; then
   # LC_ALL=C, so a non-ASCII message can be refused slightly early. The API's own
   # "message is too long" is the backstop and is reported verbatim below.
   chars=$(printf '%s' "$text" | wc -m | tr -d '[:space:]')
+  if [[ -n $attach && $chars -gt $max_caption ]]; then
+    die "caption is $chars characters, over Telegram's $max_caption limit for captions — send the text as a separate message"
+  fi
   if [[ $chars -gt $max_chars ]]; then
     die "message is $chars characters, over Telegram's $max_chars limit — send the outcome and a pointer to the detail, not the whole log"
   fi
@@ -263,12 +297,28 @@ fi
 # ------------------------------------------------------------------- assemble
 
 curl_args=(--silent --show-error --request POST)
-curl_args+=(--data-urlencode "chat_id=${chat}")
-curl_args+=(--data-urlencode "text=${text}")
-[[ -n $parse_mode ]] && curl_args+=(--data-urlencode "parse_mode=${parse_mode}")
-[[ -n $thread ]] && curl_args+=(--data-urlencode "message_thread_id=${thread}")
-$silent && curl_args+=(--data-urlencode 'disable_notification=true')
-$preview || curl_args+=(--data-urlencode 'link_preview_options={"is_disabled":true}')
+if [[ -n $attach ]]; then
+  # Multipart upload. --form-string sends values literally; --form would read a
+  # caption starting with @ or < as a file name. Inside the quoted file name,
+  # curl needs \ and " escaped, which also makes , and ; in a path safe.
+  case $attach_kind in file) method=sendDocument ;; photo) method=sendPhoto ;; esac
+  quoted=${attach//\\/\\\\}
+  quoted=${quoted//\"/\\\"}
+  curl_args+=(--form-string "chat_id=${chat}")
+  curl_args+=(--form "${attach_kind/file/document}=@\"${quoted}\"")
+  [[ -n $text ]] && curl_args+=(--form-string "caption=${text}")
+  [[ -n $parse_mode ]] && curl_args+=(--form-string "parse_mode=${parse_mode}")
+  [[ -n $thread ]] && curl_args+=(--form-string "message_thread_id=${thread}")
+  $silent && curl_args+=(--form-string 'disable_notification=true')
+else
+  method=sendMessage
+  curl_args+=(--data-urlencode "chat_id=${chat}")
+  curl_args+=(--data-urlencode "text=${text}")
+  [[ -n $parse_mode ]] && curl_args+=(--data-urlencode "parse_mode=${parse_mode}")
+  [[ -n $thread ]] && curl_args+=(--data-urlencode "message_thread_id=${thread}")
+  $silent && curl_args+=(--data-urlencode 'disable_notification=true')
+  $preview || curl_args+=(--data-urlencode 'link_preview_options={"is_disabled":true}')
+fi
 
 if $dry_run; then
   printf 'dry run — nothing sent\n  credentials: %s\n  chat_id:     %s\n  parse_mode:  %s\n  chars:       %s\n' \
@@ -276,6 +326,7 @@ if $dry_run; then
   $silent && printf '  silent:      no push notification\n'
   $preview || printf '  preview:     link card suppressed\n'
   [[ -n $thread ]] && printf '  thread:      %s\n' "$thread"
+  [[ -n $attach ]] && printf '  %-12s %s (%s bytes)\n' "${attach_kind}:" "$attach" "$bytes"
   [[ $wait_seconds -gt 0 ]] && printf '  wait:        up to %ss for a reply\n' "$wait_seconds"
   printf '\n%s\n' "$text"
   exit 0
@@ -375,7 +426,7 @@ wait_for_reply() {
 # config file. Unquoted config values run to end of line, which sidesteps
 # curl's backslash-escaping rules; the token contains no spaces.
 send() {
-  printf 'url = %s/bot%s/sendMessage\n' "$api" "$token" |
+  printf 'url = %s/bot%s/%s\n' "$api" "$token" "$method" |
     curl "${curl_args[@]}" --config - \
       --output "$tmp/body" --write-out '%{http_code}' 2>"$tmp/err"
 }
@@ -385,7 +436,7 @@ if [[ $wait_seconds -gt 0 ]]; then
   baseline_offset
 fi
 
-if [[ -n $text ]]; then
+if [[ -n $text || -n $attach ]]; then
   attempt=1
   while :; do
     http=$(send)
@@ -430,6 +481,11 @@ if [[ -n $text ]]; then
       401) printf '  the token is wrong or revoked — this is not a chat problem\n' >&2 ;;
       400) printf '  check the chat id, and that the recipient has messaged the bot at least once\n' >&2 ;;
       403) printf '  the bot is blocked, or is not a member of that group or channel\n' >&2 ;;
+      413) printf '  the file is too large for the Bot API upload limit\n' >&2 ;;
+    esac
+    case $description in
+      *PHOTO_INVALID_DIMENSIONS*|*IMAGE_PROCESS_FAILED*)
+        printf '  Telegram cannot use this image as a photo — send it with --file instead\n' >&2 ;;
     esac
     exit 1
   fi

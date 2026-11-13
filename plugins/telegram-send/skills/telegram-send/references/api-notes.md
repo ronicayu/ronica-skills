@@ -27,6 +27,27 @@ Three details that are easy to get wrong:
   at the `#`.
 - **`curl` exits 0 on an HTTP 403.** Success is `"ok":true` in the body, nothing else.
 
+## Uploads
+
+`--file` and `--photo` call `sendDocument` and `sendPhoto` as `multipart/form-data`:
+
+```bash
+printf 'url = https://api.telegram.org/bot%s/sendDocument\n' "$token" |
+  curl -sS --config - --request POST \
+    --form-string "chat_id=${chat}" \
+    --form 'document=@"report.pdf"' \
+    --form-string 'caption=Q3 cost report'
+```
+
+- **Values go in `--form-string`, not `--form`.** `--form` reads a value that starts with `@` or `<`
+  as a file name, so a caption like `@alice see this` would upload a file instead.
+- **Quote the file name inside `--form`.** Unquoted, curl splits it at `,` and `;`. Inside the
+  double quotes, escape `\` and `"` with a backslash.
+- Limits: 50 MB for a document, 10 MB for a photo, 1024 characters for a caption. A photo's width
+  plus height must be at most 10000 and its aspect ratio at most 20; past that Telegram answers
+  `PHOTO_INVALID_DIMENSIONS`, and the fix is to send it as a document.
+- `sendPhoto` recompresses the image. `sendDocument` keeps it byte for byte.
+
 ## Errors
 
 | Response | What it means |
@@ -37,12 +58,15 @@ Three details that are easy to get wrong:
 | `403 bot is not a member of the ... chat` | Add the bot to the group, or as an admin for a channel. |
 | `400 message is too long` | Over 4096 characters. |
 | `400 can't parse entities` | Bad HTML markup, usually an unsupported tag or an unescaped `<`. |
+| `400 PHOTO_INVALID_DIMENSIONS` | Image too large or too narrow for a photo. Send it as a document. |
+| `413 Request Entity Too Large` | Upload over the 50 MB limit. |
 | `429` + `parameters.retry_after` | Rate limited. Sleep that many seconds; do not hammer. |
 
 ## Parameters the script exposes
 
 `chat_id`, `text`, `parse_mode`, `disable_notification`, `message_thread_id`,
-`link_preview_options`. It also calls `getUpdates` for `--chat-ids` and `--wait`.
+`link_preview_options`, and for uploads `document`, `photo`, and `caption`. It also calls
+`getUpdates` for `--chat-ids` and `--wait`.
 
 ## Reading replies with getUpdates
 
@@ -78,8 +102,9 @@ Worth knowing if you extend it:
 - `protect_content=true` — blocks forwarding and saving.
 - `entities` — explicit formatting offsets instead of `parse_mode`. Note the offsets are UTF-16 code
   units, so anything outside the BMP (most emoji) counts as 2.
-- Other methods on the same endpoint pattern: `sendPhoto`, `sendDocument`, `editMessageText`,
-  `deleteMessage`. All take the same `bot<token>/<method>` shape.
+- `sendMediaGroup` — two to ten photos or documents in one album.
+- Other methods on the same endpoint pattern: `editMessageText`, `deleteMessage`. All take the same
+  `bot<token>/<method>` shape.
 
 The 4096-character limit is on characters after entity parsing. The script's pre-flight count uses
 `wc -m`, which counts bytes rather than characters under `LC_ALL=C`, so a heavily non-ASCII message can
