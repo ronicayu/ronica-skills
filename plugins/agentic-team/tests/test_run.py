@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -37,7 +38,7 @@ import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, re, subprocess, sys
+import json, os, re, signal, subprocess, sys
 
 argv = sys.argv[1:]
 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")  # the Claude profile of this call; None is the default profile
@@ -152,6 +153,9 @@ elif cmd == "--bg":
                 % (name, name, name))
     sys.stdout.write(said)
 elif cmd == "stop":
+    if os.environ.get("FAKE_CLAUDE_STOP_KILLS_CALLER"):  # the command that runs `claude stop` dies there
+        os.kill(os.getppid(), signal.SIGKILL)
+        sys.exit(1)
     if os.environ.get("FAKE_CLAUDE_STOP_FAIL"):
         sys.stderr.write("boom\n")
         sys.exit(1)
@@ -623,6 +627,22 @@ class Base(unittest.TestCase):
         for block in re.split(r"(?m)^## ", out.stdout)[1:]:
             sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
         return sections
+
+    def hold_lock(self, name, seconds=2.5):
+        """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
+        lock = os.path.join(self.root, ".agentic-team", "locks", name)
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
+                                   "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
+                                   "fh = open(sys.argv[1], 'a+'); fcntl.flock(fh, fcntl.LOCK_EX)\n"
+                                   "print('locked', flush=True); time.sleep(float(sys.argv[2]))", lock, str(seconds)],
+                                  stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "locked")
+        return holder
+
+    @staticmethod
+    def release(holder):
+        holder.wait()
+        holder.stdout.close()
 
     def assert_awaiting(self, task):
         """Closed by run.py and not merged: in progress in Taskgraph, phase awaiting_merge."""
@@ -3663,6 +3683,7 @@ class RunTest(Base):
         self.assertIn("claude logs sess-task-1-1", stuck["next"])
         body = self.stuck_row(task)["body"]
         self.assertTrue(body.endswith("Last output:\n    claude logs failed: no such session"), body)
+        self.assertEqual(self.meta(task)["phase"], "stopped")  # the BLOCKED row ends the run in this record
         self.assertNotIn("try claude agents", body)
 
     def test_84_an_empty_log_says_so(self):
@@ -4751,6 +4772,7 @@ class RunTest(Base):
         events = self.events("record")
         self.assertEqual(self.one(events, "salvaged")["detail"], "ISSUES from report file report-task-1-1.md (result #1)")
         self.one(events, "arrived")
+        self.assertEqual(self.meta(task)["phase"], "reported")
         self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
 
     def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
@@ -4771,6 +4793,7 @@ class RunTest(Base):
         self.one(events, "died")
         self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
         self.assertEqual(self.results(task)[0]["status"], "DIED")
+        self.assertEqual(self.meta(task)["phase"], "stopped")
 
     def test_101_the_brief_names_the_report_file(self):
         task = self.add_task()
@@ -8759,22 +8782,6 @@ class DeliveryTest(Base):
         events = self.events("steer", str(parked), "--file", self.text_file("note"))
         self.assertIn("the session was resumed with the doorbell", self.one(events, "steered")["detail"])
 
-    def hold_lock(self, name, seconds=2.5):
-        """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
-        lock = os.path.join(self.root, ".agentic-team", "locks", name)
-        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
-                                   "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
-                                   "fh = open(sys.argv[1], 'a+'); fcntl.flock(fh, fcntl.LOCK_EX)\n"
-                                   "print('locked', flush=True); time.sleep(float(sys.argv[2]))", lock, str(seconds)],
-                                  stdout=subprocess.PIPE, text=True)
-        self.assertEqual(holder.stdout.readline().strip(), "locked")
-        return holder
-
-    @staticmethod
-    def release(holder):
-        holder.wait()
-        holder.stdout.close()
-
     def test_fix10_every_command_that_changes_a_task_waits_for_its_lock(self):
         task = self.worker(status="busy", state="working", pid=4242)
         text = self.text_file("x")
@@ -9889,6 +9896,120 @@ class PhaseTest(Base):
         self.tg("edit", str(closed), "--meta", "phase=awaiting_merge")
         events = self.events("record")
         self.assertEqual([e["event"] for e in events if e["task"] == closed], ["unmerged"])
+
+    # review of PR #102
+    def test_verify_again_after_a_failed_verdict_reports_the_new_verdict(self):
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "check-only")
+        self.assertEqual(self.meta(task)["phase"], "verdict_failed")
+        self.ok("verify", str(task), "--again")
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("Verdict test-verified by verify-1-1", self.one(events, "verified")["detail"])
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.one(self.events("close", str(task)), "closed")
+        self.assert_awaiting(task)
+
+    def test_stop_after_a_failed_verdict_is_no_phase_mismatch(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.ok("close", str(task), "--verdict", "verify-failed")
+        self.one(self.events("stop", str(task)), "stopped")
+        self.assertEqual(self.meta(task)["phase"], "stopped")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.one(events, "stopping")["task"], task)  # record still acts on the task
+
+    def test_ci_verify_again_after_a_blocked_verdict_reports_the_new_verdict(self):
+        task, wt, head = self.pr_task(verify_mode="ci:ci.yml")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}])
+        self.assertIn("Verdict verify-blocked by ci", self.one(self.events("record"), "verified")["detail"])
+        self.assertIn("verify-blocked; not closed", self.one(self.events("close", str(task)), "verdict")["detail"])
+        self.assertEqual(self.meta(task)["phase"], "verdict_failed")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}], dispatch="ok")
+        self.one(self.events("verify", str(task), "--again"), "ci-dispatched")
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 12, "state": "success"}, {"id": 11, "state": "cancelled"}])
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("Verdict test-verified by ci", self.one(events, "verified")["detail"])
+
+    def test_non_git_close_that_dies_in_the_stop_is_finished_by_record(self):
+        task = self.running_task()
+        later = self.add_task("Next", depends=(task,))
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFiles: sums.txt\n")
+        self.agents(self.row("task-1"))  # a live worker: close stops it, and dies in `claude stop`
+        out = self.run_cmd("close", str(task), "--verdict", "artifact-verified", "--ref", "abc123  out.txt",
+                           env=dict(self.env, FAKE_CLAUDE_STOP_KILLS_CALLER="1"))
+        self.assertEqual(out.returncode, -signal.SIGKILL)
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("in_progress", "merged"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("with nothing to merge, but the task was not done; marked it done", self.one(events, "merged")["detail"])
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("done", "merged"))
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_phase_backfill_reads_the_verify_kind_of_the_config(self):
+        self.write_config('[verify]\nkind = "schema"\n')
+        old = self.running_task(sessions=[], verdict="test-verified", verdict_ref=SHA_A)  # no phase, no stored kind
+        self.add_result(old, "PASS", f"Task: {old}\n")
+        new = self.running_task(sessions=[], verdict="test-verified", verdict_ref=SHA_A, phase="verdict_failed")
+        self.add_result(new, "PASS", f"Task: {new}\n")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.named(events, "unmerged"), [])
+        self.assertEqual(sorted(e["task"] for e in self.named(events, "unclosed")), [old, new])
+        self.assertEqual((self.meta(old)["phase"], self.meta(new)["phase"]), ("verdict_failed", "verdict_failed"))
+
+    def test_merged_command_makes_dependents_ready(self):
+        task, wt, head = self.closed_local()
+        later = self.add_task("Next", depends=(task,))
+        self.assertEqual(self.one(self.events("merged", str(task)), "ready")["detail"], f"#{later}")
+
+    def test_pr_closed_hint_names_abandon_then_launch(self):
+        task, head, _ = self.closed_pr()
+        self.fake_host(head=head, state="CLOSED")
+        hint = self.one(self.events("record"), "pr-closed")["next"]
+        self.assertIn(f"to redo, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", hint)
+        self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
+        self.ok("abandon", str(task), "unknown")
+        self.one(self.events("launch", str(task), "--attempt", "2"), "launched")
+
+    def test_adopt_with_an_awaiting_dependency_needs_its_commit(self):
+        dep, wt, head = self.closed_local()
+        task = self.add_task("Use it", "Why: needs it.\n- [ ] used", depends=(dep,))
+        tip = self.feature_branch("feat")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:10])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} depends on #{dep}, whose branch worktree-task-{dep} is not merged", out.stderr)
+        self.assertIn("or adopt a branch built on it", out.stderr)
+        self.assertEqual(self.status_of(task), "open")
+        self.git("branch", "stacked", f"worktree-task-{dep}")
+        self.one(self.events("adopt", str(task), "--branch", "stacked", "--head", head[:10]), "adopted")
+        self.assertEqual(self.meta(task)["phase"], "reported")
+        self.assert_awaiting(dep)
+
+    def test_record_skips_a_closed_task_merged_while_it_waited_for_the_lock(self):
+        task, wt, head = self.closed_local()
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")  # the old snapshot would record this merge
+        holder = self.hold_lock(f"task-{task}.lock", 3)  # `merged` holds the task
+        proc = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--tg", TG, "--json", "record"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.dir, env=self.env)
+        time.sleep(1)
+        self.tg("edit", str(task), "--meta", 'merged_at="2026-11-13 10:00 UTC"', "merged_by=manager", "phase=merged")
+        self.tg("done", str(task))
+        done_at = self.tg("show", str(task))["done_at"]
+        self.release(holder)
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual([e["event"] for e in json.loads(out) if e["task"] == task], [])
+        meta = self.meta(task)
+        self.assertEqual((meta["merged_at"], meta["merged_by"]), ("2026-11-13 10:00 UTC", "manager"))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
 
 
 if __name__ == "__main__":

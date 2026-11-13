@@ -212,8 +212,8 @@ writes, the next `record` finishes it. Two closes are done at once, with no
 merge: output that is not a git commit, and a branch with no commit beyond its
 base (`merged_by=no-change`). In `pr` mode `close` pushes the branch and opens a
 request instead (next section). A task that depends on one that waits for its
-merge is not ready; `launch --base <its branch>` builds on it anyway, and the
-Manager says so plainly in its replies and reports. A task that waits for its
+merge is not ready; `launch --base <its branch>` builds on it anyway (`adopt`
+takes only a branch that holds its commit), and the Manager says so plainly in its replies and reports. A task that waits for its
 merge refuses `launch`, `adopt`, `verify` and `stop`; `close` again resumes at
 the merge or the push, and `abandon` drops it. After the merge, `run.py` removes
 the worktrees of the task by default (`merge.remove_worktrees = true`). It
@@ -364,7 +364,8 @@ the operator's standing permission for `run.py` to push task branches to
    `phase=awaiting_merge`. A request closed without a merge is reported at every
    drain (`pr-closed`), and the task stays in progress: reopen the request, or
    `run.py abandon <id> <mode>` (the request stays open on the host, and
-   `record` no longer follows it).
+   `record` no longer follows it). To redo the task, abandon it, then
+   `run.py launch <id> --attempt <n+1>`.
 4. When the host reports the request behind its target, `run.py close <id>`
    catches it up. With `[merge] catch_up = "host"` (the default) it asks the
    host to rebase the request: GitHub `gh pr update-branch <n> --rebase`,

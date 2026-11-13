@@ -757,19 +757,20 @@ CLOSED = ("awaiting_merge", "merged")  # a passing close happened; the task wait
 
 
 def known_kind(task):
-    """The verify kind from the task alone (verify_kind meta, else the kind stored at launch, else code); no role file is
-    read, so derive_phase needs no Run."""
+    """The verify kind from the task alone (verify_kind meta, else the kind stored at launch), or None; no role file and
+    no config is read, so derive_phase needs no Run."""
     value = (task.get("meta") or {}).get("verify_kind")
     if value in VERIFY_KINDS:
         return value
     stored = stored_choice(task)
-    return stored["verify_kind"] if stored and stored.get("verify_kind") in VERIFY_KINDS else "code"
+    return stored["verify_kind"] if stored and stored.get("verify_kind") in VERIFY_KINDS else None
 
 
-def derive_phase(task, rows=None):
+def derive_phase(task, rows=None, kind=None):
     """The phase that the older fields say: abandoned, merged_at, status, verdict, verdict_ref, and for a task in flight
     the result rows of its attempt (None without `rows`). None for a task run.py does not manage. A 0.18.0 task closed
-    with a commit and not merged (done, verdict_ref, no merged_at) reads as awaiting_merge."""
+    with a commit and not merged (done, verdict_ref, no merged_at) reads as awaiting_merge. A verdict on a task in
+    progress needs the verify kind: `kind`, else known_kind; None when neither knows it."""
     meta = task.get("meta") or {}
     if meta.get("abandoned"):
         return "abandoned"
@@ -780,7 +781,12 @@ def derive_phase(task, rows=None):
     if task["status"] != "in_progress" or wanted_attempt(task) is None or is_legacy(task):
         return None
     if meta.get("verdict"):
-        if meta["verdict"] not in PASSING[known_kind(task)] or not meta.get("verdict_ref"):
+        if not meta.get("verdict_ref"):
+            return "verdict_failed"
+        kind = kind or known_kind(task)
+        if kind is None:
+            return None
+        if meta["verdict"] not in PASSING[kind]:
             return "verdict_failed"  # a verdict that did not close the task
         return "awaiting_merge" if is_sha(meta.get("verdict_ref")) else "merged"  # output outside git has nothing to merge
     if rows is None:
@@ -1842,9 +1848,24 @@ def check_cap(run):
         raise Refused(f"cap full: {live}/{cap} sessions live; run run.py record and refill after it")
 
 
+def refuse_unmerged_deps(run, task, holds, way):
+    """The stacked check of launch and adopt: refuse unless `holds` (the commit the work builds on) contains the commit
+    of each dependency that is closed and not merged. `way` is the last way out of the refusal."""
+    for dep in task.get("depends_on") or []:
+        if dep["derived_status"] == "done" or dep["status"] in ("done", "in_progress"):
+            found = run.show(dep["id"])
+            dmeta = found.get("meta") or {}
+            if unmerged(found):
+                if holds and run.git("merge-base", "--is-ancestor", str(dmeta["verdict_ref"]), holds, check=False).returncode == 0:
+                    continue  # the work builds on the dependency's branch
+                dep_branch = (dmeta.get("pr_branch") if run.pr_mode else None) or task_branch(dep["id"])
+                raise Refused(f"#{task['id']} depends on #{dep['id']}, whose branch {dep_branch} is not merged; merge it and run "
+                              f"run.py merged {dep['id']} --by operator, wait, or {way}")
+
+
 def waiting_for(run, task):
-    """The open dependencies that refuse a launch or adopt. A task that waits for its merge is left to the stacked check of
-    cmd_launch: a base that holds its commit passes."""
+    """The open dependencies that refuse a launch or adopt. A task that waits for its merge is left to the stacked check
+    (refuse_unmerged_deps): a base that holds its commit passes."""
     blockers = []
     for wid in task.get("waits_for") or []:
         node = run.show(wid)
@@ -2075,17 +2096,7 @@ def cmd_launch(run, args):
     wt_there = retry and os.path.lexists(wt)
     wt_head = (run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
                if wt_there and os.path.isdir(wt) else "")
-    holds = wt_head or given  # the commit the worker builds on
-    for dep in task.get("depends_on") or []:
-        if dep["derived_status"] == "done" or dep["status"] in ("done", "in_progress"):
-            found = run.show(dep["id"])
-            dmeta = found.get("meta") or {}
-            if unmerged(found):
-                if holds and run.git("merge-base", "--is-ancestor", str(dmeta["verdict_ref"]), holds, check=False).returncode == 0:
-                    continue  # the worker builds on the dependency's branch
-                dep_branch = (dmeta.get("pr_branch") if run.pr_mode else None) or task_branch(dep["id"])
-                raise Refused(f"#{tid} depends on #{dep['id']}, whose branch {dep_branch} is not merged; merge it and run "
-                              f"run.py merged {dep['id']} --by operator, wait, or pass --base <its branch>")
+    refuse_unmerged_deps(run, task, wt_head or given, "pass --base <its branch>")  # the commit the worker builds on
     live = [s for s in own_sessions(run, tid, "task") if s.live]
     if live and task["status"] == "open":
         # An earlier launch started the session but died before it recorded the start.
@@ -2313,6 +2324,7 @@ def cmd_adopt(run, args):
     if not tip.startswith(args.head):
         raise Refused(f"branch {branch} is at {tip}, not {args.head}; adopt takes the branch tip")
     head, extra, label = tip, {}, ""
+    refuse_unmerged_deps(run, task, head, "adopt a branch built on it")
     if args.pr is not None:
         if not run.pr_mode:
             raise Refused('--pr needs merge.mode = "pr"')
@@ -3628,11 +3640,14 @@ def settle_phase(run, snap, task):
     phase-mismatch and leaves the task alone: it never picks one. A merged_at on a task whose phase still says
     awaiting_merge is the merge: mark_merged writes both, so only a hand edit splits them."""
     tid, meta = task["id"], task.get("meta") or {}
-    stored, derived = meta.get("phase"), derive_phase(task, snap.rows(tid))
+    kind = verify_kind(run, task, strict=False) if task["status"] == "in_progress" and meta.get("verdict") else None
+    stored, derived = meta.get("phase"), derive_phase(task, snap.rows(tid), kind)
     if derived is None or stored == derived:
         return True
     if stored == "verifying" and derived == "reported":
         return True  # a verify that recorded no session, or a CI run not filed yet: the rows cannot show it
+    if stored in ("verifying", "stopped") and derived == "verdict_failed":
+        return True  # verify --again or stop after a failed verdict: the verdict stays until the next one replaces it
     if stored is None or (stored in FLIGHT and derived in FLIGHT) or (
             stored == "awaiting_merge" and derived == "merged" and meta.get("merged_at")):
         set_phase(run, task, derived)
@@ -3691,15 +3706,23 @@ def host_guard(run, task, fn, *args):
         run.emit("host-error", task["id"], None, None, str(exc), "fix it and run.py record")
 
 
+def record_lock(run, stack, task):
+    """Take the task's lock for record. False, with a locked event, when another run.py holds it past the wait: record
+    skips the task this time and drains the others."""
+    try:
+        stack.enter_context(task_lock(run, task["id"]))
+        return True
+    except Refused:
+        run.emit("locked", task["id"], None, None, "held by another run.py; record skips it this time", "run.py record again")
+        return False
+
+
 def cmd_record(run, args):
     snap = Snapshot(run)
     unmanaged = []
     for task in sorted(snap.in_progress, key=lambda t: t["id"]):
         with contextlib.ExitStack() as stack:
-            try:
-                stack.enter_context(task_lock(run, task["id"]))
-            except Refused:  # another run.py holds the task past the wait: skip it this time, drain the others
-                run.emit("locked", task["id"], None, None, "held by another run.py; record skips it this time", "run.py record again")
+            if not record_lock(run, stack, task):
                 continue
             # What this command read before the lock may be old: an operator's stop, close, resume, steer or ack can have
             # come since. Read this task's node and rows again, and the session rows, so that no DIED, stuck or salvage
@@ -3710,13 +3733,25 @@ def cmd_record(run, args):
             task["meta"] = node.get("meta") or {}
             snap.results[task["id"]] = run.results_for(task["id"])
             run._sessions = None
-            if settle_phase(run, snap, task):
+            if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
                 host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
     if unmanaged:
         run.emit("unmanaged", None, None, None, ids_text(unmanaged), "run.py adopt <id> --branch <b> --head <sha> [--pr <n>] "
                  "for work to bring under run.py; the others can stay")
     for task in snap.closed:
-        host_guard(run, task, record_closed, run, snap, task)
+        if task["status"] == "done" and not unmerged(task):  # merged, or nothing to merge: at most the backfill and the sweep
+            host_guard(run, task, record_closed, run, snap, task)
+            continue
+        with contextlib.ExitStack() as stack:
+            if not record_lock(run, stack, task):
+                continue
+            # As above: a merged, close or abandon may have come since the snapshot. A task it merged or dropped is
+            # skipped, so no merge is recorded twice.
+            node = run.show(task["id"])
+            if not (unmerged(node) or awaiting(node)):
+                continue
+            task["status"], task["meta"] = node["status"], node.get("meta") or {}
+            host_guard(run, task, record_closed, run, snap, task)
     if run.marked_done:  # a merge recorded here makes its dependents ready
         snap.ready = run.tg("ready") or []
     for d in sorted(snap.decisions, key=lambda t: t["id"]):
@@ -4690,7 +4725,8 @@ def pr_status(run, snap, task, p):
         cleanup(run, task)
     elif p.state == "CLOSED":
         run.emit("pr-closed", tid, None, None, f"{label} closed without a merge",
-                 f"reopen it on the host and run.py record, or " + decision_text(f"{label} for #{tid} was closed: redo or drop?", task, snap))
+                 f"reopen it on the host and run.py record, or " + decision_text(f"{label} for #{tid} was closed: redo or drop?", task, snap)
+                 + f"; to redo, run.py abandon {tid} <mode>, then run.py launch {tid} --attempt {(wanted_attempt(task) or 1) + 1}")
     elif p.head != pushed and meta.get("host_rebase") == pushed:
         run.emit("pr-rebased", tid, None, None, f"{label} head is {p.head[:7]}: the host rebased {pushed[:7]}; not checked yet",
                  f"run.py close {tid} (checks that the change is the same and records the new head)")
@@ -4991,7 +5027,8 @@ def cmd_close(run, args):
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
     passing = level in PASSING[kind]
-    run.edit_meta(tid, verdict=level, verdict_ref=ref, phase="awaiting_merge" if passing else "verdict_failed")
+    closed_phase = "awaiting_merge" if is_sha(ref) else "merged"  # output outside git has nothing to merge
+    run.edit_meta(tid, verdict=level, verdict_ref=ref, phase=closed_phase if passing else "verdict_failed")
     entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt
                   and e.get("id")), None)  # an adopted attempt has an entry with no id
     if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
@@ -5019,10 +5056,10 @@ def cmd_close(run, args):
     # tasks that depend on it do not get ready.
     stop_live(run, task, attempt, branch)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}")
-    meta.update(verdict=level, verdict_ref=ref, phase="awaiting_merge")
+    meta.update(verdict=level, verdict_ref=ref, phase=closed_phase)
     base = no_change(run, task, ref)
     if not is_sha(ref):
-        finish_merged(run, task)  # outside git: there is no branch to merge
+        finish_merged(run, task)
         cleanup(run, task)
     elif base:
         close_no_change(run, task, attempt, ref, base)
@@ -5080,6 +5117,7 @@ def cmd_merged(run, args):
     else:
         run.emit("merged", tid, None, None, f"recorded merged_by={args.by}")
     cleanup(run, task)
+    ready_events(run, Snapshot(run))
 
 
 def cmd_stop(run, args):
