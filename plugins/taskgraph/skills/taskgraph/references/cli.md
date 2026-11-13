@@ -16,10 +16,11 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 |---|---|
 | `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--promised D] [--priority P0\|P1\|P2\|P3] [--notes T] [--meta k=v ...]` | Create a task and its links. |
 | `dep add TASK DEPENDS_ON` / `dep rm TASK DEPENDS_ON` | Add or remove a dependency. Taskgraph rejects cycles. |
-| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--priority P0\|P1\|P2\|P3\|none ...] [--sort id\|due\|late\|priority] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
+| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--priority P0\|P1\|P2\|P3\|none ...] [--gated] [--sort id\|due\|late\|priority] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. A task with open gates shows `(waiting: LABEL)`; `--gated` lists only those tasks. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
 | `ready [--all-projects]` | List leaf tasks that can start now, by priority (P0 first, tasks without one last), then by id. |
 | `show ID` | Show details, dependencies, dependents, and conflicts. |
-| `start ID` / `done ID` / `reopen ID` | Change a task's status. |
+| `start ID` / `done ID [--require-gates]` / `reopen ID` | Change a task's status. `done` warns on stderr about unfinished dependencies and open gates, and still marks the task done. With `--require-gates`, or `TASKGRAPH_GATES=refuse` in the environment, `done` refuses a task with open gates (exit 1, nothing changed). |
+| `gate ID KEY [--label TEXT] [--ref URL] \| --clear` | Set, update, or clear one completion gate. See [Gates](#gates). |
 | `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates. |
 | `agenda [--within DAYS] [--type T ...] [--all-projects]` | List late, at-risk, conflicting, due-soon, and chase-due items. It also lists tasks whose start dates have passed and items without dates. |
 | `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--priority P0\|P1\|P2\|P3 \| --no-priority] [--meta k=v ...] [--unset-meta k ...]` | Edit fields. Metadata merges. Valid JSON values are parsed as JSON. |
@@ -44,6 +45,16 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 The result log is append-only. `result add` is one insert, so several writers can add to the same task at once. It does not change the task: not its status, notes, metadata, or `updated_at`, and it writes no history. Taskgraph has no command to edit or delete a single entry. Removing the task removes its entries. `show --json` lists the entries without bodies, `show --brief` leaves them out, and `result ls` reads them. Use this command as the one write that a background agent may make. A permission rule that allows it still lets the agent read any file it can open into the log through `--body-file PATH`, and create a database anywhere through `--db`. To narrow it, pin `--db` and allow only `--body` or `--body-file -`.
 
 Stored statuses are `open`, `in_progress`, and `done`. Taskgraph derives `blocked` and `ready`. Exit code 1 and an `error:` message on stderr indicate an error.
+
+### Gates
+
+A gate is a condition that blocks completion. Taskgraph does not know what it means: the owner of the gate sets and clears it (a pull request, a review, a release, a sign-off). Gates live in the task's metadata under `gates`, as `{"KEY": {"label": TEXT, "ref": URL or null, "since": ISO time}}`.
+
+- `gate ID KEY --label TEXT [--ref URL]` sets or updates the gate `KEY`. The label defaults to the key. An update keeps `since` and any field you leave out.
+- `gate ID KEY --clear` removes it. The `gates` key goes when the last gate goes. Clearing a gate that is not set is an error.
+- Each command changes one gate key in one write, so two writers that gate different keys do not lose each other's gates. Do not set `gates` with `edit --meta`, which replaces the whole object.
+- `show` lists the open gates, `ls` and the graph page show `waiting: LABEL`, and `changes` lists a gate change as `gates +KEY`, `~KEY` or `-KEY` under Re-scoped.
+- Gates change neither `derived_status` nor `ready`. They only affect `done` (above).
 
 ### Priority
 

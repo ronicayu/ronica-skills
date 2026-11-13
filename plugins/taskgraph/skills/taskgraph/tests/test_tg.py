@@ -2009,3 +2009,86 @@ def test_priority_reaches_the_graph_payload(tg, tmp_path):
     tg("graph", "--no-open", "--out", str(out))
     html = out.read_text()
     assert '"priority": "P0"' in html and '"priority": null' in html
+
+
+def test_gate_set_update_clear(tg, fail):
+    a = add(tg, "A")
+    g = tg("gate", str(a), "pr", "--label", "PR #95", "--ref", "https://example.com/pull/95")["meta"]["gates"]
+    assert set(g) == {"pr"} and g["pr"]["label"] == "PR #95" and g["pr"]["ref"] == "https://example.com/pull/95" and g["pr"]["since"]
+    since = g["pr"]["since"]
+    g = tg("gate", str(a), "pr", "--label", "PR #96")["meta"]["gates"]
+    assert g["pr"] == {"label": "PR #96", "ref": "https://example.com/pull/95", "since": since}
+    fail("gate", str(a), "pr", "--clear", "--label", "x")
+    fail("gate", str(a), "nope", "--clear")
+    assert "gates" not in tg("gate", str(a), "pr", "--clear")["meta"]
+    assert "gates" not in tg("show", str(a))["meta"]
+
+
+def test_two_gates_on_one_task(tg):
+    a = add(tg, "A", "--meta", "owner=x")
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    tg("gate", str(a), "review", "--label", "legal review")
+    meta = tg("show", str(a))["meta"]
+    assert set(meta["gates"]) == {"pr", "review"} and meta["owner"] == "x"
+    assert set(tg("gate", str(a), "pr", "--clear")["meta"]["gates"]) == {"review"}
+
+
+def test_done_with_open_gate_warns_and_completes(tg, raw):
+    a = add(tg, "A")
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    p = raw("--project", "demo", "--json", "done", str(a))
+    assert p.returncode == 0 and f"warning: #{a} has open gates: PR #95" in p.stderr
+    done = json.loads(p.stdout)
+    assert done["status"] == "done" and done["warnings"] == [f"#{a} has open gates: PR #95"]
+
+
+def test_done_refuses_open_gate_in_strict_mode(tg, fail, monkeypatch):
+    a = add(tg, "A")
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    assert "open gates: PR #95" in fail("done", str(a), "--require-gates").stderr
+    monkeypatch.setenv("TASKGRAPH_GATES", "refuse")
+    assert "open gates" in fail("done", str(a)).stderr
+    assert tg("show", str(a))["status"] == "open"
+    monkeypatch.delenv("TASKGRAPH_GATES")
+    tg("gate", str(a), "pr", "--clear")
+    assert tg("done", str(a), "--require-gates")["status"] == "done"
+
+
+def test_gates_leave_status_and_ready_alone(tg):
+    a = add(tg, "A")
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    assert tg("show", str(a))["derived_status"] == "ready"
+    assert [t["id"] for t in tg("ready")] == [a]
+
+
+def test_ls_gated_and_show_display(tg, raw):
+    a = add(tg, "A")
+    b = add(tg, "B")
+    tg("gate", str(a), "pr", "--label", "PR #95", "--ref", "https://example.com/pull/95")
+    assert [t["id"] for t in tg("ls", "--gated")] == [a]
+    assert [t["id"] for t in tg("ls")] == [a, b]
+    rows = text(raw, "ls")
+    assert "(waiting: PR #95)" in rows[0] and "waiting" not in rows[1]
+    shown = "\n".join(text(raw, "show", str(a)))
+    assert "waiting: PR #95 (https://example.com/pull/95)" in shown
+    assert text(raw, "ls", "--gated")[0].startswith(f"{a:>4}")
+
+
+def test_gates_reach_the_graph_payload(tg, tmp_path):
+    a = add(tg, "A")
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    assert '"gates"' in out.read_text() and "PR #95" in out.read_text() and "'waiting: '" in out.read_text()
+
+
+def test_gate_set_and_clear_show_in_changes(tg, raw, db):
+    a = add(tg, "A")
+    age_events(db)
+    tg("gate", str(a), "pr", "--label", "PR #95")
+    data = tg("changes", "--since", "2026-10-01")
+    assert [c["field"] for r in data["rescoped"] for c in r["changes"]] == ["meta.gates"]
+    assert f"#{a} A — gates +pr" in "\n".join(text(raw, "changes", "--since", "2026-10-01"))
+    tg("gate", str(a), "pr", "--clear")
+    gates = [(o, n) for _, f, o, n in events(db) if f == "meta.gates"]
+    assert len(gates) == 2 and gates[0][0] is None and gates[1][1] is None
