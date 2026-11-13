@@ -20,7 +20,7 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 | `ready [--all-projects]` | List leaf tasks that can start now, by priority (P0 first, tasks without one last), then by id. |
 | `show ID` | Show details, dependencies, dependents, and conflicts. |
 | `start ID` / `done ID [--require-gates]` / `reopen ID` | Change a task's status. `done` warns on stderr about unfinished dependencies and open gates, and still marks the task done. With `--require-gates`, or `TASKGRAPH_GATES=refuse` in the environment, `done` refuses a task with open gates (exit 1, nothing changed). |
-| `gate ID KEY [--label TEXT] [--ref URL] \| --clear` | Set, update, or clear one completion gate. See [Gates](#gates). |
+| `gate ID KEY [--label TEXT] [--ref URL \| --no-ref] \| --clear` | Set, update, or clear one completion gate. See [Gates](#gates). |
 | `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates. |
 | `agenda [--within DAYS] [--type T ...] [--all-projects]` | List late, at-risk, conflicting, due-soon, and chase-due items. It also lists tasks whose start dates have passed and items without dates. |
 | `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--priority P0\|P1\|P2\|P3 \| --no-priority] [--meta k=v ...] [--unset-meta k ...]` | Edit fields. Metadata merges. Valid JSON values are parsed as JSON. |
@@ -50,10 +50,10 @@ Stored statuses are `open`, `in_progress`, and `done`. Taskgraph derives `blocke
 
 A gate is a condition that blocks completion. Taskgraph does not know what it means: the owner of the gate sets and clears it (a pull request, a review, a release, a sign-off). Gates live in the task's metadata under `gates`, as `{"KEY": {"label": TEXT, "ref": URL or null, "since": ISO time}}`.
 
-- `gate ID KEY --label TEXT [--ref URL]` sets or updates the gate `KEY`. The label defaults to the key. An update keeps `since` and any field you leave out.
-- `gate ID KEY --clear` removes it. The `gates` key goes when the last gate goes. Clearing a gate that is not set is an error.
-- Each command changes one gate key in one write, so two writers that gate different keys do not lose each other's gates. Do not set `gates` with `edit --meta`, which replaces the whole object.
-- `show` lists the open gates, `ls` and the graph page show `waiting: LABEL`, and `changes` lists a gate change as `gates +KEY`, `~KEY` or `-KEY` under Re-scoped.
+- `gate ID KEY --label TEXT [--ref URL]` sets or updates the gate `KEY`. The label defaults to the key. An update keeps `since` and any field you leave out; `--no-ref` clears the ref. Setting a gate to the label and ref it already has writes nothing. A summary or milestone takes no gate, because its status is derived.
+- `gate ID KEY --clear` removes it. The `gates` key goes when the last gate goes. Clearing a gate that is not set prints `#ID gate KEY not set` and exits 0, so a caller can repeat it; the JSON result has `"cleared": false` (`true` when it removed one).
+- Each command changes one gate key. On one machine the write is atomic, so two writers that gate different keys do not lose each other's gates. On the GitHub backend a push merges the change key by key into the gates GitHub holds; a narrow window between reading the issue and writing it remains. `edit --meta gates=...` is refused; use `gate`. `edit --unset-meta gates` removes all gates.
+- `show` lists the open gates, `ls` and the graph page show `waiting: LABEL`, and `changes` lists a gate change as `gates +KEY`, `~KEY` or `-KEY` under Gated, not under Re-scoped.
 - Gates change neither `derived_status` nor `ready`. They only affect `done` (above).
 
 ### Priority

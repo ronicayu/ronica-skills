@@ -581,3 +581,24 @@ def test_a_full_pull_sends_deferred_rows_older_than_15_minutes(env, fake):
     env.age(31)
     env.ok("ls")
     assert '"tokens":"7"' in fake.issue(a)["body"] and env.sql("SELECT * FROM pending_meta") == []
+
+
+def test_a_gate_set_elsewhere_between_refresh_and_push_survives_a_local_gate(env, fake, monkeypatch):
+    a = env.ok("add", "A")["id"]
+    env.ok("gate", str(a), "mine", "--label", "M")
+    refresh = CachedRemoteStore.refresh
+    theirs = '\n\n<!-- taskgraph:meta v1\n{"gates":{"mine":{"label":"M","ref":null,"since":"t"},"theirs":{"label":"A","ref":null,"since":"t"}}}\ntaskgraph:end -->\n'
+
+    def refresh_then_another_machine_gates(self, *args, **kwargs):
+        done = refresh(self, *args, **kwargs)  # the other machine writes after this write read GitHub and before it pushes
+        fake.edit_issue(a, body=theirs)
+        return done
+
+    with monkeypatch.context() as patched:
+        patched.setattr(CachedRemoteStore, "refresh", refresh_then_another_machine_gates)
+        env.ok("gate", str(a), "ours", "--label", "B")
+    body = fake.issue(a)["body"]
+    assert all(f'"{k}"' in body for k in ("mine", "theirs", "ours"))
+    env.ok("gate", str(a), "mine", "--clear")  # a removal drops only its own key
+    gates = env.ok("--fresh", "show", str(a))["meta"]["gates"]
+    assert set(gates) == {"theirs", "ours"}

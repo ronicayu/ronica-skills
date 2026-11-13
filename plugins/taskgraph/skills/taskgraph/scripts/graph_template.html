@@ -190,6 +190,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 12px; }
 #panel .badge.late { background: #c81e1e; color: #fff; border: 1px solid #c81e1e; }
 #panel .badge.chase { background: #f59e0b; color: #1c1004; border: 1px solid #f59e0b; }
+#panel .badge.gate { background: #1e3a5f; color: #bfdbfe; border: 1px solid #3b6aa3; }
+:root[data-theme="light"] #panel .badge.gate, .theme-light #panel .badge.gate { background: #dbeafe; color: #1e3a8a; border-color: #93b4e6; }
 #panel button { margin-top: 10px; background: var(--control); color: var(--text); border: 1px solid var(--edge); border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #panel button:hover { background: var(--hover); }
 #panel #panelClose { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; margin-top: 0; padding: 0; font-size: 18px; line-height: 1; }
@@ -2427,7 +2429,7 @@ function openPanel(n) {
       atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
       conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
       n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null,
-      waitText(n) ? el('span', { className: 'badge priority', textContent: waitText(n) }) : null),
+      waitText(n) ? el('span', { className: 'badge gate', textContent: waitText(n) }) : null),
     el('table', { id: 'facts' }, ...facts(n)),
     el('div', { className: 'actions' },
       n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,

@@ -82,6 +82,8 @@ class Edit:
     priority: object = KEEP  # P0 to P3, None to clear the label, KEEP
     meta_set: dict = field(default_factory=dict)  # write-through keys
     meta_unset: list = field(default_factory=list)
+    gates_set: dict = field(default_factory=dict)  # gate keys set or changed; they merge key by key into the remote's gates
+    gates_unset: list = field(default_factory=list)
     pending: list = field(default_factory=list)  # deferred rows of this task: {"key", "op", "value", "base"}, all JSON text
     flush: bool = False  # send the pending rows even when nothing else changes
 
