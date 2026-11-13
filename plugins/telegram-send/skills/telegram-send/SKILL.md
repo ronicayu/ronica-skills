@@ -1,9 +1,9 @@
 ---
 name: telegram-send
-description: Send a Telegram message from the terminal — notifications, status updates, and completion summaries that reach a phone — through a bundled script that keeps the bot token out of argv and out of the transcript. Use when the user asks to send, post, or push a message to Telegram, to be notified or pinged on Telegram, or to be told there when something finishes — "telegram me when the build passes", "send that to my Telegram", "ping the team channel", "notify me on Telegram when done". Also use when a long-running or background job finishes and the user has asked to hear about it on Telegram, and when reporting a blocker they need to see away from the terminal. Covers bot setup, finding a chat id, HTML formatting, the 4096-character limit, and what the API's error responses actually mean. It can also wait for a reply, but only when blocked on an answer the user has to give — an approval or a choice — never to acknowledge a notification.
+description: Send a Telegram message, file, or image from the terminal — notifications, status updates, completion summaries, screenshots, and reports that reach a phone — through a bundled script that keeps the bot token out of argv and out of the transcript. Use when the user asks to send, post, or push a message to Telegram, to be notified or pinged on Telegram, or to be told there when something finishes — "telegram me when the build passes", "send that to my Telegram", "ping the team channel", "notify me on Telegram when done", "send me the screenshot". Also use when a long-running or background job finishes and the user has asked to hear about it on Telegram, and when reporting a blocker they need to see away from the terminal. Covers bot setup, finding a chat id, HTML formatting, the 4096-character limit, and what the API's error responses actually mean. It can also wait for a reply, but only when blocked on an answer the user has to give — an approval or a choice — never to acknowledge a notification.
 ---
 
-# Send a Telegram Message
+# Send a Telegram Message, File, or Image
 
 Use the bundled script. It is the whole interface:
 
@@ -65,6 +65,8 @@ wants to manage that.
 | `--silent` | Delivers with no push notification. Right for a routine FYI at 2am. |
 | `--no-preview` | Suppresses the link card, which otherwise dominates a short message. |
 | `--thread ID` | Posts into a forum topic in a supergroup. |
+| `--file PATH` | Sends PATH as a document, byte for byte, up to 50 MB. The text becomes its caption. |
+| `--photo PATH` | Sends an image as a photo, shown inline and recompressed by Telegram, up to 10 MB. The text becomes its caption. |
 | `--dry-run` | Prints what would be sent and sends nothing. Use it to check wording. |
 | `--wait N` | Sends, then waits up to N seconds for a reply. See below — this is for questions only. |
 | `-` | Reads the message from stdin instead of an argument. |
@@ -72,11 +74,29 @@ wants to manage that.
 The script also guards the 4096-character limit before spending a request, and retries once on a
 `429` when Telegram supplies a short `retry_after`.
 
+## Files and images
+
+```bash
+scripts/telegram-send.sh --photo out/after.png 'Login page after the fix — note the error banner is gone.'
+scripts/telegram-send.sh --file report.pdf 'Q3 cost report — 12 pages.'
+```
+
+- **`--photo` for something to look at, `--file` for something to keep.** A photo shows inline but
+  Telegram recompresses it, which blurs small text in screenshots. Send with `--file` when the exact
+  pixels matter, for any image over 10 MB, and when Telegram rejects the image as a photo — the
+  script says so.
+- The message text is optional and becomes the caption. Captions are capped at **1024 characters**,
+  not 4096; send a longer note as its own message first.
+- One attachment per call. For several files, call the script once per file.
+- The same rules as for text apply, and more strongly: a file leaves the machine whole. Never send
+  credentials, `.env` files, keys, customer data, or confidential documents. Look at what you are
+  sending before you send it.
+
 ## Formatting
 
 Plain text is the default and usually right. With `--html` a small tag set applies —
 `<b> <i> <u> <s> <code> <pre> <a href> <blockquote> <tg-spoiler>` and nothing else. An unknown tag
-rejects the whole message with `can't parse entities`; on that error resend as plain text rather than
+rejects the whole message (or caption) with `can't parse entities`; on that error resend as plain text rather than
 debugging markup.
 
 ```bash
@@ -96,7 +116,7 @@ A push notification shows the opening line and little else, and that is often al
 - Keep it to a few lines: what happened, where it lives (path, branch, PR, URL), and the next command
   if one is needed. Detail stays in the terminal.
 - Never dump a log or a file into a message — the API rejects over 4096 characters rather than
-  truncating. Send the verdict and a pointer to the detail.
+  truncating. Send the verdict and a pointer to the detail, or attach the file with `--file`.
 - No credentials, tokens, customer data, or contents of confidential documents. This leaves the
   machine and lands in a chat history you do not control.
 
@@ -162,5 +182,5 @@ record matches what landed on their phone.
 
 - `references/setup.md` — create the bot, find a chat id for a person, group, or channel, and store
   the credentials. Read it once, when the environment variables are missing.
-- `references/api-notes.md` — the raw `sendMessage` call and its error codes. Read it only when
+- `references/api-notes.md` — the raw `sendMessage` and upload calls and their error codes. Read it only when
   extending the script or diagnosing something it does not cover.
