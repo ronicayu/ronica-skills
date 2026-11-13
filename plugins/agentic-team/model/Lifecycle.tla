@@ -1,11 +1,11 @@
 ---- MODULE Lifecycle ----
-\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.18.0, commit ff2c8b0): one task, its attempts,
+\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.19.0, PR-1 of #97): one task, its attempts,
 \* one worker session and one verifier session at a time, the result rows of the current attempt, the meta that
-\* decides the next step, and the request in pr mode. Line numbers are of scripts/run.py at that commit.
+\* decides the next step, and the request in pr mode. Line numbers are of scripts/run.py at that version.
 \*
 \* The Manager's only moves are the command that `record` names in its `next:` hint, and `record` itself.
 \* A refused command (exit 2) is not enabled. A command that would change nothing is not enabled either.
-\* `Done` is the only self-loop: the task is merged or abandoned. So a state with no step out is a dead
+\* `Done` is the only self-loop: the task is merged (and done) or abandoned. So a state with no step out is a dead
 \* end for the Manager: the hinted command is refused or useless, and nothing in the world moves.
 \*
 \* Each REGRESS_* constant, when TRUE, restores a bug the code has fixed, so that the matching regress config
@@ -14,9 +14,9 @@
 
 EXTENDS Naturals
 
-CONSTANTS MAX_ATTEMPTS,  \* line 122: MAX_ATTEMPTS = 3; the configs use 2
+CONSTANTS MAX_ATTEMPTS,  \* line 124: MAX_ATTEMPTS = 3; the configs use 2
           MERGE_MODE,    \* "local" or "pr": merge.mode of .agentic-team.toml
-          HIGH_RISK,     \* TRUE: risk meta "high", so a PASS goes to a verifier session (line 3169)
+          HIGH_RISK,     \* TRUE: risk meta "high", so a PASS goes to a verifier session (line 3257)
           FULL_ENV,      \* FALSE: only the main environment steps (overview.cfg), see NOTES.md
           OPERATOR_PAUSES, \* TRUE: the operator may write or lift a STOP order and order a pause at any time
           FAULTS,        \* TRUE: once per run, the role file breaks or info/exclude turns read-only (0.18.0 refusals)
@@ -32,7 +32,8 @@ CONSTANTS MAX_ATTEMPTS,  \* line 122: MAX_ATTEMPTS = 3; the configs use 2
           REGRESS_62,    \* record files BLOCKED for a verifier that waits after its verdict; the row hides it (before 0.12.0, #62)
           REGRESS_65,    \* a ghost row never ends and cleanup skips it (before 0.12.1, #65)
           REGRESS_65B,   \* a row that run.py stopped is not noted: a stopped idle/working row is a young ghost (before part 3 of #65)
-          REGRESS_89     \* record and close read only the Verdict: line: an unlabelled ISSUES report opens a fix round (before 8006a3c)
+          REGRESS_89,    \* record and close read only the Verdict: line: an unlabelled ISSUES report opens a fix round (before 8006a3c)
+          REGRESS_97     \* a passing close runs `tg done` at once, before the merge (before 0.19.0, #97)
 
 ASSUME MERGE_MODE \in {"local", "pr"}
 
@@ -40,23 +41,23 @@ VARIABLES
   status,        \* Taskgraph status: "open", "in_progress", "done"
   attempt,       \* the attempt meta (0 before the first launch)
   abandoned,     \* the abandoned meta is set
-  verdict,       \* the verdict meta: "none" or a level
-  merged,        \* the merged_at meta is set
+  verdict,       \* the verdict meta: "none" or a level; a passing one is written only by a passing close (with phase)
+  merged,        \* the merged_at meta is set (with phase merged, then `tg done`: mark_merged)
   pr,            \* pr mode: the request and what the host says about it
   mainHas,       \* local mode: the main checkout already contains the verdict commit
   lastTask,      \* the newest result row of kind task for this attempt
-  stopReason,    \* the Reason: line of the newest STOPPED row (stop_reason, 717-721): "none", "pause", "recover", "close"
+  stopReason,    \* the Reason: line of the newest STOPPED row (stop_reason, 720-724): "none", "pause", "recover", "close"
   workerResult,  \* latest_worker(rows, attempt): the newest row that counts as a worker report
   vv,            \* the newest verify row by a verifier (its Verdict), or "none"
   vIssues,       \* the Issues: lines of that row: "none", "blocking" (every line labelled), "unlabelled" (0.18.0)
   vManager,      \* the newest verify row by the Manager: "none", "BLOCKED", or "manual" (close --verdict)
-  vNewer,        \* the verifier's row is newer than the Manager's newest row with a verdict (lines 3457-3461)
-  vfiled,        \* verifier_filed (3230): a verify row covers the newest verifier session
+  vNewer,        \* the verifier's row is newer than the Manager's newest row with a verdict (lines 3545-3549)
+  vfiled,        \* verifier_filed (3318): a verify row covers the newest verifier session
   worker,        \* the worker session row of this attempt
   verifier,      \* the newest verifier session row of this attempt
-  vreport,       \* the verifier wrote a passing report file it did not file (salvage, 3201)
+  vreport,       \* the verifier wrote a passing report file it did not file (salvage, 3289)
   wtDirty,       \* the task worktree has uncommitted changes
-  stopOrder,     \* the standing orders start with a STOP line (Orders.stop, lines 518-525)
+  stopOrder,     \* the standing orders start with a STOP line (Orders.stop, lines 521-528)
   fault,         \* 0.18.0: "none"; "role" (the attempt's role file is missing or broken); "exclude" (info/exclude is read-only)
   faulted        \* the one fault of this run has happened (FAULTS)
 
@@ -66,10 +67,10 @@ vars == <<status, attempt, abandoned, verdict, merged, pr, mainHas,
 
 \* ---------------------------------------------------------------- values
 
-\* VERDICTS (line 124) without test-verified (acts like artifact-verified for a code task) and without
+\* VERDICTS (line 126) without test-verified (acts like artifact-verified for a code task) and without
 \* verify-blocked (acts like check-only in every modelled decision).
 Levels == {"artifact-verified", "check-only", "verify-failed"}
-Passing == {"artifact-verified"}                      \* PASSING["code"], line 127
+Passing == {"artifact-verified"}                      \* PASSING["code"], line 129
 WorkerStatuses == {"PASS", "ISSUES", "BLOCKED"}
 \* Task rows: a worker's report, or a Manager row: BLOCKEDmgr (file_stuck), DIED, STOPPED without a Head
 \* line (cmd_stop, stop_live), STOPPEDhead (commit_stopped), ABANDONED.
@@ -78,20 +79,20 @@ StopReasons == {"none", "pause", "recover", "close"}
 ManagerVerify == {"none", "BLOCKED", "manual"}
 IssueKinds == {"none", "blocking", "unlabelled"}
 Faults == {"none", "role", "exclude"}
-\* One row of `claude agents --json --all`, as the Session class reads it (lines 527-572):
+\* One row of `claude agents --json --all`, as the Session class reads it (lines 530-575):
 \*   busy        status busy, state working
 \*   idle        status idle, state working ("it will check back")
-\*   idleQuiet   (verifier) idle, and 30 minutes passed with no activity (VERIFIER_QUIET_MINUTES, 194)
+\*   idleQuiet   (verifier) idle, and 30 minutes passed with no activity (VERIFIER_QUIET_MINUTES, 196)
 \*   idleBlocked state blocked, status idle, no waitingFor: its turn ended with a question
 \*   prompt      waitingFor set: a permission prompt
 \*   stopping    (worker) `claude stop` was sent, the process has not exited (status still busy)
 \*   finished    state done or stopped, status idle or none
-\*   failed      state failed, status idle (finished, line 553)
-\*   ghost       state working, no status, no pid: no process now; the CLI may start it again (Session.ghost, 557)
+\*   failed      state failed, status idle (finished, line 556)
+\*   ghost       state working, no status, no pid: no process now; the CLI may start it again (Session.ghost, 560)
 \*   ghostStopped (REGRESS_65B only) an idle/working row that a run.py stop left as a young ghost before part 3;
 \*               it does not come back (a stopped row was not seen to revive), and goes quiet like a ghost
 \*   ghostGone   a ghost quiet for 30 minutes (no transcript write, no start: quiet_for): it counts as ended
-\*               (Run.sessions, lines 467-476, sets finished and turn_over; quiet_for, lines 3244-3252; stop_session, 600-613)
+\*               (Run.sessions, lines 470-479, sets finished and turn_over; quiet_for, lines 3332-3340; stop_session, 603-616)
 WorkerStates == {"none", "busy", "idle", "idleBlocked", "prompt", "stopping", "finished", "failed", "ghost", "ghostStopped", "ghostGone"}
 VerifierStates == {"none", "busy", "idle", "idleQuiet", "idleBlocked", "prompt", "finished", "failed", "ghost", "ghostStopped", "ghostGone"}
 OpenPr == {"pending", "clean", "behind", "blocked", "dirty"}
@@ -100,8 +101,8 @@ Hints == {"launch", "verify", "verifyAgain", "close", "closeManual", "abandon", 
 
 PrMode == MERGE_MODE = "pr"
 
-\* Session class, lines 527-572. With REGRESS_42 a failed row is live and unknown, as before 0.10.3.
-\* A young ghost row (#65, line 557) is live and unknown. A ghost quiet for VERIFIER_QUIET_MINUTES is gone:
+\* Session class, lines 530-575. With REGRESS_42 a failed row is live and unknown, as before 0.10.3.
+\* A young ghost row (#65, line 560) is live and unknown. A ghost quiet for VERIFIER_QUIET_MINUTES is gone:
 \* Run.sessions makes it finished (quiet_for; part 2 of #65). Before that (REGRESS_65) a ghost never ended.
 \* `claude stop` keeps a row's state and removes its status and pid (a probe on CLI 2.1.318): a busy row becomes
 \* "stopped", a done/idle row "done" with no status, both finished; an idle/working row becomes working with no
@@ -115,14 +116,14 @@ Live(s) == s \in {"busy", "idle", "idleQuiet", "idleBlocked", "prompt", "stoppin
 Stuck(s) == s \in {"idleBlocked", "prompt"}
 Unknown(s) == s \in {"idle", "idleQuiet", "ghost", "ghostStopped"} \/ (s = "ghostGone" /\ REGRESS_65) \/ (s = "failed" /\ REGRESS_42)
 TurnOver(s) == Finished(s) \/ s = "idleBlocked"
-\* verifier_over, lines 3254-3268: a turn that is over, or an unknown row quiet for 30 minutes.
+\* verifier_over, lines 3342-3356: a turn that is over, or an unknown row quiet for 30 minutes.
 VerifierOver(s) == TurnOver(s) \/ s \in {"idleQuiet", "ghostGone"}
 \* The rule's words: the session ended, or its turn ended. Independent of the code's predicates. A gone ghost
 \* counts as ended (the owner's rule for #65).
 Over(s) == s \in {"finished", "failed", "idleBlocked", "ghostGone"}
-\* work_filed (731-738): a task row that is not STOPPED for a worker; verifier_filed for a verifier.
+\* work_filed (734-741): a task row that is not STOPPED for a worker; verifier_filed for a verifier.
 WorkerFiled == workerResult # "none" \/ lastTask \in {"BLOCKEDmgr", "DIED"}
-\* idle_and_filed (1966-1974): a worker that is idle or stuck with its work filed (#61; before: idle and not
+\* idle_and_filed (2034-2042): a worker that is idle or stuck with its work filed (#61; before: idle and not
 \* waiting); a verifier that is idle, waits on nothing, and the attempt has a verify row.
 IdleStatus(s) == s \in {"idle", "idleQuiet", "idleBlocked"} \/ (s = "failed" /\ REGRESS_42)   \* a failed row has status idle
 WorkerIdleFiled ==
@@ -131,27 +132,36 @@ VerifierIdleFiled == Live(verifier) /\ IdleStatus(verifier) /\ (vv # "none" \/ v
 
 End == (status = "done" /\ merged) \/ abandoned
 
+\* The phase meta (0.19.0, #97). A passing close writes the verdict with phase awaiting_merge in one edit (cmd_close),
+\* and nothing else writes a passing verdict, so Closed is the phase awaiting_merge or merged. Awaiting: closed and not
+\* merged; the task stays in progress (`awaiting`, `unmerged`), and only a merge record marks it done (mark_merged,
+\* finish_merged). With REGRESS_97 the close marks it done at once, as before 0.19.0.
+Closed == verdict \in Passing
+Awaiting == Closed /\ ~merged /\ ~abandoned
+\* The status a close or record leaves: done once the change is merged (mark_merged), else unchanged.
+StatusAfter(m) == IF m \/ REGRESS_97 THEN "done" ELSE status
+
 \* ---------------------------------------------------------------- record
 
-\* retry_next, lines 706-715: below the cap `run.py launch`; from MAX_ATTEMPTS on `run.py abandon <id> <mode>
+\* retry_next, lines 709-718: below the cap `run.py launch`; from MAX_ATTEMPTS on `run.py abandon <id> <mode>
 \* (the cap is 3 attempts), or run.py launch --attempt <n+1> to override`. The Manager never overrides (0.18.0
 \* rule 13: at the cap it abandons and re-plans; the override is for a bounded fix the operator names), so the
 \* hint is abandon. Before 0.12.0 (REGRESS_56) the stuck, BLOCKED, unclosed and unknown hints said launch at
 \* the cap; only ISSUES and died checked it.
 RetryNext == IF attempt < MAX_ATTEMPTS THEN "launch" ELSE "abandon"
 RetryNextOld == IF REGRESS_56 THEN "launch" ELSE RetryNext
-\* stopped_next, lines 724-729: after a pause the launch, at any attempt; after any other stop retry_next.
+\* stopped_next, lines 727-732: after a pause the launch, at any attempt; after any other stop retry_next.
 \* Before 0.12.0 (REGRESS_59) every STOPPED row read as a pause.
 StoppedNext == IF stopReason = "pause" \/ REGRESS_59 THEN "launch" ELSE RetryNext
-ArrivedNext(st) ==                                                      \* record_arrived, lines 3167-3179
-  IF st = "PASS" THEN (IF HIGH_RISK THEN "verify" ELSE "closeManual")   \* 3168-3172: ci, risk high, or a kind that is not code
-  ELSE IF st = "ISSUES" THEN RetryNext                                  \* line 3174
-  ELSE RetryNextOld                                                     \* line 3176: "answer it and ..."
-UnclosedNext(v) ==                                                      \* unclosed_next, lines 757-768
+ArrivedNext(st) ==                                                      \* record_arrived, lines 3255-3267
+  IF st = "PASS" THEN (IF HIGH_RISK THEN "verify" ELSE "closeManual")   \* 3256-3260: ci, risk high, or a kind that is not code
+  ELSE IF st = "ISSUES" THEN RetryNext                                  \* line 3262
+  ELSE RetryNextOld                                                     \* line 3264: "answer it and ..."
+UnclosedNext(v) ==                                                      \* unclosed_next, lines 820-831
   IF v = "verify-failed" THEN RetryNextOld                              \* "fix round: ..."
   ELSE IF v = "check-only" THEN "verifyAgain"                           \* "verify --again ..., or accept it"
   ELSE "close"
-\* The unknown hint, lines 3490-3494 (#58): `claude logs <sid>; if it has stopped working, run.py stop <id>,
+\* The unknown hint, lines 3579-3583 (#58): `claude logs <sid>; if it has stopped working, run.py stop <id>,
 \* then run.py record and run.py launch <id>`; at the cap `run.py abandon <id> unknown (...), or run.py stop <id>,
 \* then run.py record and run.py launch <id> --attempt <n+1> to override`, read as abandon. Before 0.12.0
 \* (REGRESS_58): `claude logs` only. REGRESS_59 takes the second alternative at the cap (the recovery stop),
@@ -162,69 +172,69 @@ UnknownNext ==
   ELSE "abandon"
 
 \* What one `record` would write and print: the new values plus the event and its hint. A record never changes
-\* vIssues (it reads the Verdict: line only, verdict_of 685-687), fault or faulted.
+\* vIssues (it reads the Verdict: line only, verdict_of 688-690), fault or faulted.
 Same == [lastTask |-> lastTask, stopReason |-> stopReason, workerResult |-> workerResult, vv |-> vv,
          vManager |-> vManager, vNewer |-> vNewer, vfiled |-> vfiled, worker |-> worker, verifier |-> verifier,
          vreport |-> vreport, wtDirty |-> wtDirty, merged |-> merged, pr |-> pr,
          ev |-> "none", nx |-> "none"]
 
-\* commit_stopped, lines 3305-3348: a STOPPED row without a Head line gets its WIP committed once the stopped
-\* worker has exited; the new row copies the Reason: line (3307-3309). record_in_progress runs it first, lines
-\* 3376-3378 (the #54 fix); before 0.11.2 it ran only after the verifier and verdict checks (REGRESS_54).
+\* commit_stopped, lines 3393-3436: a STOPPED row without a Head line gets its WIP committed once the stopped
+\* worker has exited; the new row copies the Reason: line (3395-3397). record_in_progress runs it first, lines
+\* 3464-3466 (the #54 fix); before 0.11.2 it ran only after the verifier and verdict checks (REGRESS_54).
 PauseOutOf(b) ==
-  IF worker = "stopping" THEN [b EXCEPT !.ev = "stopping", !.nx = "none"]           \* 3311-3313
-  ELSE [b EXCEPT !.lastTask = "STOPPEDhead", !.wtDirty = FALSE, !.ev = "stopped", !.nx = StoppedNext]  \* 3338-3348
+  IF worker = "stopping" THEN [b EXCEPT !.ev = "stopping", !.nx = "none"]           \* 3399-3401
+  ELSE [b EXCEPT !.lastTask = "STOPPEDhead", !.wtDirty = FALSE, !.ev = "stopped", !.nx = StoppedNext]  \* 3426-3436
 PauseOut == PauseOutOf(Same)
 
-\* record_in_progress from line 3476 on: the task rows of the attempt.
+\* record_in_progress from line 3564 on: the task rows of the attempt.
 TaskRowsOut(b) ==
   IF lastTask = "none" THEN
-     IF Stuck(worker) THEN                                              \* file_stuck, lines 3480-3487
+     IF Stuck(worker) THEN                                              \* file_stuck, lines 3568-3576
         [b EXCEPT !.worker = "finished", !.lastTask = "BLOCKEDmgr", !.ev = "stuck", !.nx = RetryNextOld]
-     ELSE IF worker \in {"busy", "stopping"} THEN [b EXCEPT !.ev = "running", !.nx = "none"]   \* 3488-3489
-     ELSE IF Unknown(worker) THEN [b EXCEPT !.ev = "unknown", !.nx = UnknownNext]   \* 3490-3494
-     ELSE [b EXCEPT !.lastTask = "DIED", !.ev = "died", !.nx = RetryNext]           \* lines 3513-3519
-  ELSE IF lastTask = "STOPPEDhead" THEN [b EXCEPT !.ev = "stopped", !.nx = StoppedNext]  \* lines 3522-3525
-  ELSE IF lastTask = "STOPPED" THEN PauseOutOf(b)                      \* 3526-3527: only reached with REGRESS_54
-  ELSE IF lastTask = "DIED" THEN [b EXCEPT !.ev = "died", !.nx = RetryNext]        \* lines 3528-3529
-  ELSE IF lastTask = "BLOCKEDmgr" THEN [b EXCEPT !.ev = "stuck", !.nx = RetryNextOld]   \* 3152-3160
+     ELSE IF worker \in {"busy", "stopping"} THEN [b EXCEPT !.ev = "running", !.nx = "none"]   \* 3577-3578
+     ELSE IF Unknown(worker) THEN [b EXCEPT !.ev = "unknown", !.nx = UnknownNext]   \* 3579-3583
+     ELSE [b EXCEPT !.lastTask = "DIED", !.ev = "died", !.nx = RetryNext]           \* lines 3603-3610
+  ELSE IF lastTask = "STOPPEDhead" THEN [b EXCEPT !.ev = "stopped", !.nx = StoppedNext]  \* lines 3613-3616
+  ELSE IF lastTask = "STOPPED" THEN PauseOutOf(b)                      \* 3617-3618: only reached with REGRESS_54
+  ELSE IF lastTask = "DIED" THEN [b EXCEPT !.ev = "died", !.nx = RetryNext]        \* lines 3619-3620
+  ELSE IF lastTask = "BLOCKEDmgr" THEN [b EXCEPT !.ev = "stuck", !.nx = RetryNextOld]   \* 3240-3248
   ELSE [b EXCEPT !.ev = "arrived", !.nx = ArrivedNext(lastTask)]
 
-\* record_in_progress lines 3455-3472: the verdict rows of the attempt. A Manager row with no verdict (the
-\* BLOCKED row of a stuck verifier) no longer hides an older verdict (3457-3461, #62). Since 8006a3c a verifier's
-\* verify-failed row whose Issues: lines fail verifier_problems (unlabelled_failure, 690-699) gets the hint
-\* `run.py verify <id> --again (the verifier's report has no blocking: line: ...)` (unlabelled_next, 702-703;
-\* emit_verified 2455-2467), at any attempt; close refuses it (choose_verdict 4768-4771). Before (REGRESS_89)
+\* record_in_progress lines 3543-3560: the verdict rows of the attempt. A Manager row with no verdict (the
+\* BLOCKED row of a stuck verifier) no longer hides an older verdict (3545-3549, #62). Since 8006a3c a verifier's
+\* verify-failed row whose Issues: lines fail verifier_problems (unlabelled_failure, 693-702) gets the hint
+\* `run.py verify <id> --again (the verifier's report has no blocking: line: ...)` (unlabelled_next, 705-706;
+\* emit_verified 2543-2555), at any attempt; close refuses it (choose_verdict 4891-4894). Before (REGRESS_89)
 \* only the Verdict: line was read, and the hint was close.
 Verdicts(b) ==
   IF b.vv # "none" /\ b.vNewer /\ (verdict = "none" \/ b.vv # verdict)
   THEN [b EXCEPT !.ev = "verified",
                  !.nx = IF vIssues = "unlabelled" /\ ~REGRESS_89 THEN "verifyAgain" ELSE "close"]
-  ELSE IF verdict # "none" THEN [b EXCEPT !.ev = "unclosed", !.nx = UnclosedNext(verdict)]   \* 3470-3472
+  ELSE IF verdict # "none" THEN [b EXCEPT !.ev = "unclosed", !.nx = UnclosedNext(verdict)]   \* 3558-3560
   ELSE TaskRowsOut(b)
 
-\* record_in_progress lines 3363-3532.
+\* record_in_progress lines 3451-3623.
 RecInProgress ==
-  LET vRunning == Live(verifier) /\ ~VerifierOver(verifier)             \* line 3413
-      lost == verifier # "none" /\ ~vfiled                               \* lost_verifier, lines 3270-3275
+  LET vRunning == Live(verifier) /\ ~VerifierOver(verifier)             \* line 3501
+      lost == verifier # "none" /\ ~vfiled                               \* lost_verifier, lines 3358-3363
       salvaged == [Same EXCEPT !.vv = "artifact-verified", !.vNewer = TRUE, !.vfiled = TRUE,
                    !.vreport = FALSE,
-                   !.verifier = IF Live(verifier) /\ ~Ghost(verifier) THEN "finished" ELSE verifier]   \* salvage_verifier, 3289-3302
-      \* #62, lines 3416-3422: a verifier that waits after its filed verdict is stopped, no row, record goes on.
+                   !.verifier = IF Live(verifier) /\ ~Ghost(verifier) THEN "finished" ELSE verifier]   \* salvage_verifier, 3377-3390
+      \* #62, lines 3504-3510: a verifier that waits after its filed verdict is stopped, no row, record goes on.
       stoppedIdle == [Same EXCEPT !.verifier = "finished"]
-      \* file_stuck, lines 3423-3429: BLOCKED by the Manager; before 0.12.0 that row outranked the verdict.
+      \* file_stuck, lines 3511-3517: BLOCKED by the Manager; before 0.12.0 that row outranked the verdict.
       stuckOut == [Same EXCEPT !.verifier = "finished", !.vManager = "BLOCKED",
                    !.vNewer = IF REGRESS_62 THEN FALSE ELSE vNewer,
                    !.vfiled = TRUE, !.ev = "stuck", !.nx = "verifyAgain"]
   IN IF lastTask = "STOPPED" /\ ~REGRESS_54 THEN PauseOut
      ELSE IF vRunning /\ Stuck(verifier) /\ vfiled /\ ~REGRESS_62 THEN Verdicts(stoppedIdle)
      ELSE IF vRunning /\ Stuck(verifier) THEN stuckOut
-     ELSE IF vRunning THEN [Same EXCEPT !.ev = "verifying", !.nx = "none"]          \* 3430-3432
-     ELSE IF lost /\ ~vreport THEN [Same EXCEPT !.ev = "no-verdict", !.nx = "verifyAgain"]  \* 3435-3444
+     ELSE IF vRunning THEN [Same EXCEPT !.ev = "verifying", !.nx = "none"]          \* 3518-3520
+     ELSE IF lost /\ ~vreport THEN [Same EXCEPT !.ev = "no-verdict", !.nx = "verifyAgain"]  \* 3523-3532
      ELSE Verdicts(IF lost THEN salvaged ELSE Same)
 
-\* pr_status, lines 4557-4610. The standing orders hold a MERGE: line, so a clean request is merged here,
-\* except during a pause (4595).
+\* pr_status, lines 4679-4732. The standing orders hold a MERGE: line, so a clean request is merged here,
+\* except during a pause (4717).
 PrStatus(b) ==
   IF pr = "merged" THEN [b EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]
   ELSE IF pr = "closed" THEN [b EXCEPT !.ev = "pr-closed", !.nx = "none"]      \* reopen it, or a decision
@@ -235,20 +245,20 @@ PrStatus(b) ==
   ELSE IF stopOrder THEN [b EXCEPT !.ev = "ready-to-merge", !.nx = "none"]
   ELSE [b EXCEPT !.pr = "merged", !.merged = TRUE, !.ev = "merged", !.nx = "none"]
 
-\* record_done, lines 3534-3554.
+\* record_closed, lines 3647-3673: a done task, or one in progress that waits for its merge.
 RecDone ==
   IF merged THEN [Same EXCEPT !.ev = "nothing", !.nx = "none"]
   ELSE IF PrMode THEN
-     IF pr = "none" THEN [Same EXCEPT !.ev = "unpublished", !.nx = "close"]   \* line 3540
-     ELSE PrStatus(Same)                                                 \* line 3542
-  ELSE IF mainHas THEN [Same EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]   \* merged_into, 3545
-  ELSE [Same EXCEPT !.ev = "unmerged", !.nx = "none"]                   \* line 3551: no next
+     IF pr = "none" THEN [Same EXCEPT !.ev = "unpublished", !.nx = "close"]   \* line 3659
+     ELSE PrStatus(Same)                                                 \* line 3661
+  ELSE IF mainHas THEN [Same EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]   \* merged_into, 3664
+  ELSE [Same EXCEPT !.ev = "unmerged", !.nx = "none"]                   \* line 3670: no next
 
 RecOut ==
   IF abandoned THEN [Same EXCEPT !.ev = "nothing", !.nx = "none"]
-  ELSE IF status = "open" THEN [Same EXCEPT !.ev = "ready", !.nx = "launch"]  \* ready_events, line 3557
-  ELSE IF status = "in_progress" THEN RecInProgress
-  ELSE RecDone
+  ELSE IF status = "open" THEN [Same EXCEPT !.ev = "ready", !.nx = "launch"]  \* ready_events, line 3676
+  ELSE IF status = "in_progress" /\ ~Closed THEN RecInProgress  \* Snapshot.in_progress: not a task that waits for its merge
+  ELSE RecDone                                                     \* record_closed: done, or in progress and awaiting_merge
 
 RecordHasEffect ==
   LET o == RecOut IN
@@ -267,19 +277,20 @@ Record ==
        /\ vNewer' = o.vNewer /\ vfiled' = o.vfiled /\ worker' = o.worker /\ verifier' = o.verifier
        /\ vreport' = o.vreport /\ wtDirty' = o.wtDirty /\ merged' = o.merged /\ pr' = o.pr
        /\ vIssues' = IF o.vv = vv THEN vIssues ELSE "none"             \* a salvaged report is a passing one
-  /\ UNCHANGED <<status, attempt, abandoned, verdict, mainHas, stopReason, stopOrder, fault, faulted>>
+       /\ status' = IF o.merged # merged THEN "done" ELSE status         \* a merge record runs `tg done` (mark_merged)
+  /\ UNCHANGED <<attempt, abandoned, verdict, mainHas, stopReason, stopOrder, fault, faulted>>
 
 \* ---------------------------------------------------------------- launch
 
-\* cmd_launch, lines 1976-2201, without --attempt, --base, --model. Lines 2024-2049: a live row refuses the
-\* launch, unless every live row is idle_and_filed; then launch stops them (stopped-idle, 2037-2046) and goes
-\* on. The checks after that can still refuse (2063: a pause not committed; 2064: the cap).
-\* The checks before the live-row scan: a STOP order (1978-1980, exit 3), info/exclude (ignore_reports and
-\* ignore_scratch, 1981-1983, since ff2c8b0: a read-only file refuses before anything is stopped or committed),
-\* a done task (1992), the role (choose, 1995: a role file that is missing or broken refuses, 0.18.0),
-\* abandoned (2001).
-EarlyChecks == ~stopOrder /\ fault = "none" /\ status # "done" /\ ~abandoned
-\* The checks after it: a pause not committed (2063); refuse_past_cap (2204-2212): past MAX_ATTEMPTS only a
+\* cmd_launch, lines 2044-2270, without --attempt, --base, --model. Lines 2093-2118: a live row refuses the
+\* launch, unless every live row is idle_and_filed; then launch stops them (stopped-idle, 2106-2115) and goes
+\* on. The checks after that can still refuse (2132: a pause not committed; 2133: the cap).
+\* The checks before the live-row scan: a STOP order (2046-2048, exit 3), info/exclude (ignore_reports and
+\* ignore_scratch, 2049-2051, since ff2c8b0: a read-only file refuses before anything is stopped or committed),
+\* a done task (2060), the role (choose, 2064: a role file that is missing or broken refuses, 0.18.0),
+\* abandoned (2070); a task that waits for its merge (refuse_closed, 0.19.0).
+EarlyChecks == ~stopOrder /\ fault = "none" /\ status # "done" /\ ~Awaiting /\ ~abandoned
+\* The checks after it: a pause not committed (2132); refuse_past_cap (2273-2281): past MAX_ATTEMPTS only a
 \* STOPPED row with Reason: pause is exempt (#59; before 0.12.0, REGRESS_59, any STOPPED row).
 Exempt == lastTask = "STOPPEDhead" /\ (stopReason = "pause" \/ REGRESS_59)
 LateChecks == lastTask # "STOPPED" /\ ((attempt + 1 <= MAX_ATTEMPTS) \/ Exempt)
@@ -289,7 +300,7 @@ LiveRowsAllowLaunch ==
 LaunchStopsIdle == (Live(worker) \/ Live(verifier)) /\ LiveRowsAllowLaunch /\ attempt >= 1
 
 \* Before part 3 of #65 (REGRESS_65B), the stop of an idle/working row left a young ghost, and the launch's second
-\* read of the live rows (2048) refused on it: the field's "None/working" refusal.
+\* read of the live rows (2117) refused on it: the field's "None/working" refusal.
 StoppedIdleGhosts == REGRESS_65B /\ ((Live(worker) /\ worker = "idle") \/ (Live(verifier) /\ verifier \in {"idle", "idleQuiet"}))
 
 Launch ==
@@ -298,14 +309,14 @@ Launch ==
   /\ LiveRowsAllowLaunch
   /\ LateChecks
   /\ ~StoppedIdleGhosts
-  /\ status' = "in_progress" /\ attempt' = attempt + 1 /\ verdict' = "none"   \* lines 2180-2193
+  /\ status' = "in_progress" /\ attempt' = attempt + 1 /\ verdict' = "none"   \* lines 2249-2262
   /\ lastTask' = "none" /\ stopReason' = "none" /\ workerResult' = "none"
   /\ vv' = "none" /\ vIssues' = "none" /\ vManager' = "none" /\ vNewer' = FALSE /\ vfiled' = TRUE
   /\ worker' = "busy" /\ verifier' = "none" /\ vreport' = FALSE
-  /\ wtDirty' = FALSE                                                   \* lines 2140-2150: WIP is committed
+  /\ wtDirty' = FALSE                                                   \* lines 2209-2219: WIP is committed
   /\ UNCHANGED <<abandoned, merged, pr, mainHas, stopOrder, fault, faulted>>
 
-\* The launch stopped the idle sessions (2037-2046) and then refused (2063 or 2064): the rows ended, nothing else.
+\* The launch stopped the idle sessions (2106-2115) and then refused (2132 or 2133): the rows ended, nothing else.
 LaunchStopsIdleThenRefuses ==
   /\ Hint = "launch"
   /\ EarlyChecks
@@ -318,14 +329,14 @@ LaunchStopsIdleThenRefuses ==
 
 \* ---------------------------------------------------------------- verify
 
-\* cmd_verify in session mode, lines 2307-2395. Shared checks of both forms. The role of the attempt is read
-\* from its file again (verify_role, 1049-1056, at 2316): a missing or broken file refuses, and so does a
-\* read-only info/exclude (2328-2330, since ff2c8b0), both before anything is stopped.
+\* cmd_verify in session mode, lines 2395-2482. Shared checks of both forms. The role of the attempt is read
+\* from its file again (verify_role, 1115-1122, at 2404): a missing or broken file refuses, and so does a
+\* read-only info/exclude (2416-2418, since ff2c8b0), both before anything is stopped.
 VerifyAccepted ==
-  /\ status = "in_progress" /\ ~abandoned                               \* refuse_unless_running, 2282-2289
+  /\ status = "in_progress" /\ ~abandoned /\ ~Closed                    \* refuse_unless_running, 2364-2372
   /\ fault = "none"
-  /\ workerResult = "PASS"                                              \* worker_for, lines 2292-2304
-  /\ ~(Live(verifier) /\ ~VerifierOver(verifier))                       \* lines 2332-2335
+  /\ workerResult = "PASS"                                              \* worker_for, lines 2380-2392
+  /\ ~(Live(verifier) /\ ~VerifierOver(verifier))                       \* lines 2420-2423
 VerifyUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vManager, vNewer, worker, wtDirty, stopOrder, fault, faulted>>
@@ -333,8 +344,8 @@ VerifyUnchanged ==
 VerifyPlain ==
   /\ Hint = "verify"
   /\ VerifyAccepted
-  /\ vv = "none"                                                        \* lines 2322-2327: else --again
-  /\ verifier' = "busy" /\ vfiled' = FALSE /\ vreport' = FALSE          \* 2336-2340 stop the old one; 2383 start
+  /\ vv = "none"                                                        \* lines 2410-2415: else --again
+  /\ verifier' = "busy" /\ vfiled' = FALSE /\ vreport' = FALSE          \* 2424-2428 stop the old one; 2471 start
   /\ UNCHANGED vIssues /\ VerifyUnchanged
 
 \* --again also after an unlabelled verify-failed row (its hint since 8006a3c): the row stays, with its Issues:
@@ -347,7 +358,7 @@ VerifyAgain ==
 
 \* ---------------------------------------------------------------- close
 
-\* stop_live, lines 4685-4705: stop the live worker (a STOPPED row with Reason: close, no Head line) and, since
+\* stop_live, lines 4807-4827: stop the live worker (a STOPPED row with Reason: close, no Head line) and, since
 \* 0.12.0 (#57), the live verifier (no row). Before (REGRESS_57) a verifier stayed live.
 StopLive ==
   /\ worker' = IF Live(worker) THEN AfterStop(worker) ELSE worker
@@ -355,9 +366,9 @@ StopLive ==
   /\ stopReason' = IF Live(worker) THEN "close" ELSE stopReason
   /\ verifier' = IF Live(verifier) /\ ~REGRESS_57 THEN AfterStop(verifier) ELSE verifier
 
-\* publish with catch_up (lines 4357-4413) once the host shows the request in state s:
+\* publish with catch_up (lines 4479-4535) once the host shows the request in state s:
 \* clean is merged (pr_status), unless a STOP order holds it; behind goes to the host's rebase (host_catch_up,
-\* 4440-4485), which ends rebased (the host recomputes the state), in a conflict (a decision), or not at all.
+\* 4562-4607), which ends rebased (the host recomputes the state), in a conflict (a decision), or not at all.
 PublishAfter(s) ==
   \/ s = "clean" /\ ~stopOrder /\ pr' = "merged" /\ merged' = TRUE
   \/ s = "clean" /\ stopOrder /\ pr' = s /\ merged' = merged            \* ready-to-merge: not merged during a pause
@@ -365,19 +376,19 @@ PublishAfter(s) ==
   \/ s \in {"pending", "blocked", "dirty", "closed"} /\ pr' = s /\ merged' = merged
   \/ s = "merged" /\ pr' = s /\ merged' = TRUE
 
-\* A first push creates the request and the host picks its state; or the push fails (push-failed, 4428: exit 1,
-\* after `tg done`), and record says unpublished until a later close pushes again.
+\* A first push creates the request and the host picks its state; or the push fails (push-failed, 4550: exit 1,
+\* the task in progress with phase awaiting_merge), and record says unpublished until a later close pushes again.
 PublishStep ==
   IF pr = "none" THEN (\E s \in OpenPr : PublishAfter(s)) \/ (pr' = "none" /\ merged' = merged)
   ELSE PublishAfter(pr)
 
-\* merge_branch, lines 4887-4916: a merge, or a conflict that becomes a decision, or a pause (4889-4892).
+\* merge_branch, lines 5037-5066: a merge, or a conflict that becomes a decision, or a pause (5039-5042).
 LocalMergeStep ==
   \/ (~stopOrder /\ merged' = TRUE /\ mainHas' = TRUE)
   \/ (merged' = FALSE /\ mainHas' = mainHas)
 
 \* 0.12.3 (#72): a verified head with no commit beyond its base is recorded merged at once, with no merge,
-\* push or request (no_change 4785-4797, close_no_change 4800-4809; at 4874-4878 and 4741-4743). A free
+\* push or request (no_change 4908-4920, close_no_change 4923-4930; at 5023-5028 and 4864-4866). A free
 \* choice: the model does not track the commits of the branch. Only before any request exists.
 NoChangeClose == pr = "none" /\ merged' = TRUE /\ UNCHANGED <<pr, mainHas>>
 
@@ -385,34 +396,35 @@ Finish ==
   \/ NoChangeClose
   \/ (IF PrMode THEN mainHas' = mainHas /\ PublishStep ELSE pr' = pr /\ LocalMergeStep)
 
-\* resume_close, lines 4726-4752: a close that stopped after `tg done`.
+\* resume_close, lines 4848-4875: a closed task that waits for its merge (unmerged: phase awaiting_merge).
 ResumeClose ==
-  /\ status = "done" /\ ~merged /\ ~abandoned                           \* cmd_close, lines 4816-4818
+  /\ Awaiting                                                          \* cmd_close, lines 4959-4960
   /\ StopLive
   /\ Finish
-  /\ UNCHANGED <<status, attempt, abandoned, verdict, workerResult, vv, vIssues, vManager, vNewer, vfiled,
+  /\ status' = StatusAfter(merged')
+  /\ UNCHANGED <<attempt, abandoned, verdict, workerResult, vv, vIssues, vManager, vNewer, vfiled,
                  vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_close lines 4870-4883: `tg done`, stop the sessions, publish or merge.
-CloseAsPassing == status' = "done" /\ StopLive /\ Finish
+\* cmd_close lines 5018-5033: stop the sessions, publish or merge; `tg done` only with the merge (mark_merged).
+CloseAsPassing == StopLive /\ Finish /\ status' = StatusAfter(merged')
 
-\* cmd_close lines 4866-4869: the verdict is recorded, the task is not closed.
+\* cmd_close lines 5014-5017: the verdict is recorded, the task is not closed.
 CloseNotPassing ==
   /\ status' = status
   /\ UNCHANGED <<worker, verifier, lastTask, stopReason, merged, pr, mainHas>>
 
-\* cmd_close, lines 4812-4884, with choose_verdict, lines 4755-4782. L is --verdict, or "auto" for none.
-\* close never refuses on a role: verify_kind (1804-1819) reads the kind stored at launch (0.18.0).
+\* cmd_close, lines 4955-5034, with choose_verdict, lines 4878-4905. L is --verdict, or "auto" for none.
+\* close never refuses on a role: verify_kind (1872-1887) reads the kind stored at launch (0.18.0).
 NormalClose(L) ==
-  /\ status = "in_progress" /\ ~abandoned                               \* refuse_unless_running
+  /\ status = "in_progress" /\ ~abandoned /\ ~Closed                    \* refuse_unless_running; else resume_close
   /\ workerResult = "PASS"                                              \* worker_for
-  /\ (vv = "none") => (L # "auto")                                      \* line 4764: no verdict at all
-  /\ (vv # "none") => (L = "auto" \/ L = vv)                            \* lines 4766-4779: no --override-verifier
-  /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)            \* 4768-4771: refused, `verify --again` (8006a3c)
+  /\ (vv = "none") => (L # "auto")                                      \* line 4887: no verdict at all
+  /\ (vv # "none") => (L = "auto" \/ L = vv)                            \* lines 4889-4902: no --override-verifier
+  /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)            \* 4891-4894: refused, `verify --again` (8006a3c)
   /\ LET level == IF vv = "none" THEN L ELSE vv
          manual == vv = "none"
-     IN /\ verdict' = level                                             \* line 4844
-        /\ vManager' = IF manual THEN "manual" ELSE vManager            \* lines 4831-4841
+     IN /\ verdict' = level                                             \* line 4991
+        /\ vManager' = IF manual THEN "manual" ELSE vManager            \* lines 4978-4988
         /\ vNewer' = IF manual THEN FALSE ELSE vNewer
         /\ vfiled' = vfiled \/ manual
         /\ IF level \in Passing THEN CloseAsPassing ELSE CloseNotPassing
@@ -430,21 +442,21 @@ CloseManual ==
 
 \* ---------------------------------------------------------------- stop, abandon, merged
 
-\* cmd_stop, lines 4933-4965: accepted for any live worker row of the attempt (4941, `s.live`). The row's
-\* Reason: is pause under a STOP order, else recover (4953). The Manager runs it where the `unknown` hint
+\* cmd_stop, lines 5085-5120: accepted for any live worker row of the attempt (5095, `s.live`). The row's
+\* Reason: is pause under a STOP order, else recover (5107). The Manager runs it where the `unknown` hint
 \* says so (#58); the operator runs it as a pause under a STOP order (OPERATOR_PAUSES).
 Stop ==
-  /\ status = "in_progress" /\ Live(worker)
+  /\ status = "in_progress" /\ ~Closed /\ Live(worker)                  \* cmd_stop refuses a task that waits for its merge
   /\ \/ Hint = "stop"
      \/ (OPERATOR_PAUSES /\ stopOrder /\ worker = "busy")
   /\ worker' = IF worker = "busy" THEN "stopping" ELSE AfterStop(worker)   \* stop_session: the row counts as ended
-  /\ lastTask' = "STOPPED"                                              \* lines 4959-4961: no Head line
+  /\ lastTask' = "STOPPED"                                              \* lines 5113-5115: no Head line
   /\ stopReason' = IF stopOrder THEN "pause" ELSE "recover"
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_abandon, lines 4968-5004: stops the task's live worker sessions (4975-4979) and, since 0.12.0 (#57),
-\* its live verifier (4980-4983). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
+\* cmd_abandon, lines 5123-5165: stops the task's live worker sessions (5132-5137) and, since 0.12.0 (#57),
+\* its live verifier (5138-5141). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
 \* is another instance of this model, so the model ends here.
 Abandon ==
   /\ Hint = "abandon"
@@ -456,12 +468,12 @@ Abandon ==
   /\ UNCHANGED <<status, attempt, verdict, merged, pr, mainHas, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_merged, lines 4919-4930. No modelled event names it, so it never fires (NOTES.md).
+\* cmd_merged, lines 5069-5082, through mark_merged. No modelled event names it, so it never fires (NOTES.md).
 Merged ==
   /\ Hint = "merged"
-  /\ status = "done" /\ ~merged
-  /\ merged' = TRUE
-  /\ UNCHANGED <<status, attempt, abandoned, verdict, pr, mainHas, lastTask, stopReason, workerResult,
+  /\ Awaiting
+  /\ merged' = TRUE /\ status' = "done"
+  /\ UNCHANGED <<attempt, abandoned, verdict, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
 
 Done == End /\ UNCHANGED vars
@@ -519,8 +531,8 @@ VerifierGhosts == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "ghost" /
 VerifierGhostReturns == ~End /\ FULL_ENV /\ verifier = "ghost" /\ verifier' = "idle" /\ UNCHANGED worker /\ UNCHANGED NotSessions
 VerifierGhostStays == ~End /\ FULL_ENV /\ verifier \in {"ghost", "ghostStopped"} /\ verifier' = "ghostGone" /\ UNCHANGED worker /\ UNCHANGED NotSessions
 
-\* The verifier files its one verify row (result_command, 1395-1400: a plain `tg result add`). Its brief runs
-\* `check-report --verifier` first (1436, 1450-1455; verifier_problems 5051-5067): an ISSUES report needs a
+\* The verifier files its one verify row (result_command, 1461-1466: a plain `tg result add`). Its brief runs
+\* `check-report --verifier` first (1502, 1516-1521; verifier_problems 5212-5228): an ISSUES report needs a
 \* `blocking:` line under Issues:, and findings that do not block go under Follow-ups: in a PASS report. A
 \* report that passes the check: verify-failed with blocking findings, or another level with none under Issues:.
 VerifierFilesUnchanged ==
@@ -558,9 +570,9 @@ SomeoneMerges == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "merged" /\ HostUnchan
 SomeoneCloses == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "closed" /\ HostUnchanged
 SomeoneReopens == ~End /\ PrMode /\ pr = "closed" /\ pr' = "pending" /\ HostUnchanged
 
-\* Local mode: the operator merges the branch by hand; record then finds it in HEAD (merged_into, 3545).
+\* Local mode: the operator merges the branch by hand; record then finds it in HEAD (merged_into, 3664).
 OperatorMerges ==
-  /\ ~End /\ ~PrMode /\ status = "done" /\ ~mainHas /\ mainHas' = TRUE
+  /\ ~End /\ ~PrMode /\ Awaiting /\ ~mainHas /\ mainHas' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
 
@@ -573,9 +585,9 @@ OperatorOrdersStop == ~End /\ OPERATOR_PAUSES /\ ~stopOrder /\ stopOrder' = TRUE
 OperatorLiftsStop == ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE /\ OrdersUnchanged
 
 \* 0.18.0 faults (FAULTS), once per run so that a broken-then-fixed copy of a dead end is still a dead end:
-\* the role file of the task (or of [roles] default) goes missing or breaks, which launch (choose, 1995) and
-\* verify (verify_role, 2316) refuse while close and record read the values stored at launch; or info/exclude
-\* turns read-only, which launch (1981-1983) and verify (2328-2330) refuse before they stop or commit anything
+\* the role file of the task (or of [roles] default) goes missing or breaks, which launch (choose, 2064) and
+\* verify (verify_role, 2404) refuse while close and record read the values stored at launch; or info/exclude
+\* turns read-only, which launch (2049-2051) and verify (2416-2418) refuse before they stop or commit anything
 \* (ff2c8b0). The operator's repair is the only way out of a broken state (each refusal says so), and it is
 \* enabled only there.
 FaultUnchanged ==
@@ -632,7 +644,7 @@ TypeOK ==
 
 \* Once the verifier's session ended or its turn ended, the attempt has a verify row that covers it, or
 \* record is about to write one, or record says that the verdict is missing (no-verdict). A pending pause
-\* (a STOPPED row without a Head line) is allowed: record finishes it first by design (3376-3378), and the lost
+\* (a STOPPED row without a Head line) is allowed: record finishes it first by design (3464-3466), and the lost
 \* verifier is found by the record that follows the commit. An invariant, not a liveness property: the model
 \* has no fairness, and a state is easier to read than a lasso.
 VerdictNotLost ==
@@ -649,34 +661,39 @@ NoMergeWithoutPassingVerdict ==
 AttemptCap ==
   [][(attempt' > MAX_ATTEMPTS /\ attempt' # attempt) => (lastTask = "STOPPEDhead" /\ stopReason = "pause")]_vars
 
-\* cmd_launch line 2140: "A dirty worktree never reaches a worker silently: commit what the last attempt left."
+\* cmd_launch line 2209: "A dirty worktree never reaches a worker silently: commit what the last attempt left."
 LaunchCommitsLeftovers == [][Launch => wtDirty' = FALSE]_vars
 
-\* commit_stopped line 3305: "Phase 2 of a pause: commit the WIP of a stopped worker that has exited."
+\* commit_stopped line 3393: "Phase 2 of a pause: commit the WIP of a stopped worker that has exited."
 PausedWipCommitted == (lastTask = "STOPPEDhead") => ~wtDirty
 
-\* record_in_progress line 3378: "finish the pause first: launch needs its Head line". Once the stopped worker
+\* record_in_progress line 3466: "finish the pause first: launch needs its Head line". Once the stopped worker
 \* has exited, the next step is record, which commits the WIP.
 PauseFinishedFirst ==
-  (status = "in_progress" /\ ~abandoned /\ lastTask = "STOPPED" /\ worker # "stopping") => Hint = "record"
+  (status = "in_progress" /\ ~abandoned /\ ~Closed /\ lastTask = "STOPPED" /\ worker # "stopping") => Hint = "record"
 
-\* cleanup line 4103: "Remove the sessions and worktrees of a merged task." stop_live and cmd_abandon stop the
+\* cleanup line 4225: "Remove the sessions and worktrees of a merged task." stop_live and cmd_abandon stop the
 \* task's live sessions (#57). So an end state leaves no live session of the task. A young ghost row is not one:
 \* `claude stop` cannot end it, it ends by itself after 30 quiet minutes, and cleanup removes it with `claude rm`
 \* once the task is done (#65). Before 0.12.1 (REGRESS_65) cleanup skipped it as live, so it was left.
 LeftAtEnd(s) == Live(s) /\ (~Ghost(s) \/ REGRESS_65)
 NoSessionLeftAtEnd == End => (~LeftAtEnd(worker) /\ ~LeftAtEnd(verifier))
 
-\* idle_and_filed (1966-1974): "launch stops such a session itself instead of refusing." A launch that stops the
+\* idle_and_filed (2034-2042): "launch stops such a session itself instead of refusing." A launch that stops the
 \* idle rows and passes every other check starts the next attempt; it does not refuse on the row it stopped.
 \* The step must be the launch itself (a STOP order written in that state exits launch before it stops anything,
 \* as pause.md says, and the environment's own steps do not start attempts). Since ff2c8b0 the exclude check is
-\* an early one (1981-1983, in EarlyChecks), so no refusal follows the stops but the pause and the cap.
+\* an early one (2049-2051, in EarlyChecks), so no refusal follows the stops but the pause and the cap.
 StoppedIdleNeverRefuses ==
   [][(Hint = "launch" /\ EarlyChecks /\ LaunchStopsIdle /\ LateChecks /\ (Launch \/ LaunchStopsIdleThenRefuses))
        => attempt' = attempt + 1]_vars
 
-\* cmd_launch line 2181: "Never unset pr, pr_branch, pushed or target: one request per task across attempts."
+\* 0.19.0 (#97): "A task is done only when its change is merged" (README, Task lifecycle). The other way round holds
+\* too: every merge record runs `tg done` (mark_merged), and record finishes one that stopped between the two writes.
+\* With REGRESS_97 a passing close marks the task done before the merge, and this breaks.
+DoneOnlyWhenMerged == (status = "done") <=> merged
+
+\* cmd_launch line 2250: "Never unset pr, pr_branch, pushed or target: one request per task across attempts."
 OneRequestPerTask == [][pr # "none" => pr' # "none"]_vars
 
 \* 0.18.0 (#89 rule 1, README "Blocking and non-blocking findings", manager.md "No follow-up dropped"): a fix

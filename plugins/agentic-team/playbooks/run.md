@@ -63,7 +63,12 @@ every report, and on every wake (step 6).
      `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your
      recommendation.
    - `unmerged` and `waits`: say plainly which branch the operator should
-     merge and which tasks wait on it.
+     merge and which tasks wait on it. A task that waits for its merge stays in progress (`phase=awaiting_merge`)
+     until the merge is recorded, and the tasks that depend on it are not ready until then. Add no title prefix or
+     meta of your own to mark it: `status` lists it under "Closed, awaiting merge".
+   - `phase-mismatch`: the task's `phase` meta and its other fields disagree, and `record` leaves the task alone.
+     Read the task (`tg show <id>`, its results, the branch or request), then set the right phase with
+     `tg edit <id> --meta phase=<phase>`; ask the operator when the state is not clear.
    - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
@@ -115,13 +120,17 @@ every report, and on every wake (step 6).
      person. A request a person must send is not done until they send it.
    - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is sorted the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
-     verdict and tokens, runs `tg done`, and then follows `merge.mode`. In
+     verdict and tokens, and then follows `merge.mode`. The task is done only
+     when its change is merged; until then it stays in progress with
+     `phase=awaiting_merge`, and its session slot is free. In
      `local` it merges only on a `MERGE:` line into a clean checkout, and
      otherwise lists the branch as ready to merge. In `pr` it pushes the branch,
      opens the request, and posts the verdict on it as one comment (a later verdict replaces it); `record` merges it under a `MERGE:` line when the
-     host reports it clean, and records a merge anyone did. When the operator
+     host reports it clean, and records a merge anyone did. Each recorded merge
+     marks the task done. When the operator
      says a branch is merged and `record` cannot see it, run
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`.
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`. A task that waits for its merge refuses
+     `launch` and `verify`; when its request is closed for good, `abandon` drops it.
      After a `kept` line about untracked files, delete only files your rerun
      created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete those files, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
 4. **Launch.** For each task `record` lists under `ready`, in the order it

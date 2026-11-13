@@ -178,3 +178,22 @@ Revised before the second run: the first run of check.cfg broke `FixRoundNeedsBl
 ## Results (round 2, 2026-11-11, code at ff2c8b0)
 
 Every prediction of the revised round held. check.cfg 15,566, check-pr.cfg 16,718, pause.cfg 60,892, pause-pr.cfg 64,780 (ALLOW_UNCHECKED_REPORT on), peel-1.cfg 10,958, faults.cfg 43,832 and faults-pr.cfg 48,440 (the same counts as round 1: the removed side-effect steps led to states the repair path reached anyway), overview.cfg 110 and overview-pr.cfg 134 hold every rule with no dead end. regress-89.cfg breaks FixRoundNeedsBlocking in 6 steps (13,998 states, the round-1 check.cfg path); regress-42 .. regress-65b break as in round 1. mailbox/impl-r3.cfg holds, 181,886.
+
+# agentic-team 0.19.0 (PR-1 of #97: a closed task is done only once its change is merged)
+
+Written from the model before any run. New in the model: `Closed` (a passing verdict: only a passing close writes one, with `phase=awaiting_merge`), `Awaiting` (closed, not merged, not abandoned), `StatusAfter` (a close or record leaves the task done only with the merge), the rule `DoneOnlyWhenMerged` (status done exactly when merged), and `REGRESS_97` (the old close: `tg done` at once). The closed states keep their other variables and only change `status` from done to in_progress, and `Stop`, `Launch`, the verify and the normal close were already disabled there by the done status, so the state counts should not move.
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg, pause.cfg, pause-pr.cfg | every rule holds, `DoneOnlyWhenMerged` included, no dead end. 15,566, 16,718, 60,892 and 64,780 states, as round 2. |
+| peel-1.cfg, faults.cfg, faults-pr.cfg | every rule holds; 10,958, 43,832 and 48,440 states. |
+| regress-97.cfg | `DoneOnlyWhenMerged` breaks in 5 steps: launch, the worker reports PASS, you start a verifier, the verifier files a passing verdict, you close and the local merge waits: the task is done and not merged. Nothing else breaks. 15,566 states (the round-2 check.cfg model). |
+| regress-42 .. regress-89 | as in round 2; `DoneOnlyWhenMerged` holds in each. |
+| overview.cfg, overview-pr.cfg | 110 and 134, every rule holds. The views now read a closed task from its verdict, so the chart keeps "Closed, waiting for the merge". |
+| mailbox/impl-r3.cfg | unchanged (the mailbox model did not change). |
+
+If `DoneOnlyWhenMerged` breaks in check.cfg, look for a step that sets `merged` without `status` (a `Record` path that `StatusAfter` does not cover) or a close that sets `status` from a stale `merged'`. If `PauseFinishedFirst` breaks, look for a closed task that `RecOut` sends to `RecInProgress`.
+
+## Results (0.19.0)
+
+Not run yet: TLC needed an approval that the session that wrote this change did not have. Run the configs above and record the counts here.

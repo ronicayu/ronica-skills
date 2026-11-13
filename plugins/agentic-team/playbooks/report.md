@@ -6,10 +6,10 @@ data, then add only the judgement the data cannot give.
 1. **Drain first.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record` so the data is current.
 2. **Generate the facts.** Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" status --mark`. It prints:
    - the overall status and plan changes since the last report;
-   - closed tasks, with the done time, tokens, verdict, and verifier;
+   - done tasks (a task is done once its change is merged), with the done time, tokens, verdict, and verifier;
    - work in flight, with each task's latest result status and checkpoint;
    - work waiting for verification, and verdicts not closed;
-   - done tasks whose branch is not merged;
+   - closed tasks that wait for their merge, with the commit and the request;
    - failed or abandoned tasks, open decisions, and ready tasks;
    - the `Follow-ups:` lines of the worker reports in the period, counted by
      label, and the mean attempts of the tasks done in the period.
@@ -19,7 +19,7 @@ data, then add only the judgement the data cannot give.
 3. **Add judgement.** Add only what the tables cannot say: why the plan
    changed, what is next on the critical path, and your advice on each decision.
 4. **Report in this order:**
-   1. what is done, with the time, tokens, and verdict of each closed task;
+   1. what is done, with the time, tokens, and verdict of each done task;
    2. what changed in the plan, and what is next on the critical path;
    3. what waits for the operator: open decisions with your recommendation,
       files to send, branches ready to merge and the tasks that wait on them,

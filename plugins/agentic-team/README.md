@@ -102,7 +102,7 @@ Three rules carry the rest:
 ### Task lifecycle
 
 Nothing is patched in place. A refused launch is fixed in Taskgraph, a retry
-or fix round renders a fresh brief, and a closed task unblocks the next. Only
+or fix round renders a fresh brief, and a merged task unblocks the next. Only
 calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 
 `run.py launch <id>` renders the brief and starts the worker in the task's one
@@ -194,16 +194,28 @@ inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
 verifier in a worktree of its own, created at the `Head` commit. A `schema` or
 `design-doc` task always goes to `run.py verify`, whatever its `risk`. The brief
 carries the method for the task's verify kind, names the base and head commits, and names the project verify skill (`.claude/skills/verify/SKILL.md` at the commit under review, else in the main checkout, else none). Only `artifact-verified` closes those two kinds. Then
-`run.py close` records the verdict and the token counts, runs `tg done`, and
-then follows `merge.mode`. In `local` mode it merges only when a standing-orders
-line starts with `MERGE:`, and only into the checked-out branch of a clean main
-checkout. Without that line, `close` lists the branch as ready to merge. On a
-conflict it aborts the merge and prints the decision to add, naming both
-branches. A confirmed merge is recorded as `merged_at` and `merged_by`. When the
-operator says a branch is merged, by any method including squash or rebase,
-`run.py merged <id>` records it. In `pr` mode `close` pushes the branch and
-opens a request instead (next section). A task that builds on a done but unmerged branch waits, and the Manager
-says so plainly in its replies and reports. After the merge, `run.py` removes
+`run.py close` records the verdict and the token counts, stops the task's
+sessions, and then follows `merge.mode`. A task is done only when its change is
+merged: until then it stays in progress in Taskgraph with the `phase`
+`awaiting_merge`, so the tasks that depend on it are not ready, and its session
+slot is free. In `local` mode `close` merges only when a standing-orders line
+starts with `MERGE:`, and only into the checked-out branch of a clean main
+checkout. Without that line, during a pause, on a dirty or detached main
+checkout, or on a conflict, the task waits: `close` lists the branch as ready
+to merge, and on a conflict it aborts the merge and prints the decision to add,
+naming both branches. Every merge record goes through one step: it writes
+`merged_at`, `merged_by` and `phase=merged`, then runs `tg done`. That happens
+when `close` merges, when `record` finds the branch in `HEAD` or the request
+merged, and when the operator says a branch is merged, by any method including
+squash or rebase, with `run.py merged <id>`. If a command stops between the two
+writes, the next `record` finishes it. Two closes are done at once, with no
+merge: output that is not a git commit, and a branch with no commit beyond its
+base (`merged_by=no-change`). In `pr` mode `close` pushes the branch and opens a
+request instead (next section). A task that depends on one that waits for its
+merge is not ready; `launch --base <its branch>` builds on it anyway, and the
+Manager says so plainly in its replies and reports. A task that waits for its
+merge refuses `launch`, `adopt`, `verify` and `stop`; `close` again resumes at
+the merge or the push, and `abandon` drops it. After the merge, `run.py` removes
 the worktrees of the task by default (`merge.remove_worktrees = true`). It
 works in two steps.
 
@@ -276,9 +288,8 @@ that may be data: <paths>`, `commit <short> is not merged`, or `pushed head
 <short> is not in this clone; fetch <remote>/<branch>`. If git refuses the removal (for example for a worktree with a
 submodule), the folder and its lock stay and the `kept` line quotes git's first
 line; `run.py` does not retry with force. `run.py` never deletes a file and
-never forces a worktree removal. A done task that is not merged yet (`local`
-mode, waiting for the operator) keeps its worktree, and so does an abandoned
-task. `run.py record` repeats this for every done task with `merged_at` that
+never forces a worktree removal. A closed task that waits for its merge keeps
+its worktree, and so does an abandoned task. `run.py record` repeats this for every done task with `merged_at` that
 still has a folder, so it also removes the leftovers of tasks closed under 0.4.0
 to 0.6.0. It prints a folder's `kept` line only when the reason differs from
 the last one (stored in the task's `cleanup_kept` meta); the merge and
@@ -314,7 +325,7 @@ or broke (`Reason: recover`), and the attempt counts toward the cap, as a
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
 
-The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
+The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, a task is done exactly when its change is merged, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
 
 ![The checked lifecycle of one task's attempts: launch, report, verify, verdict, close, merge, retry and abandon](assets/diagrams/attempt-statechart.svg)
 
@@ -326,8 +337,8 @@ the operator's standing permission for `run.py` to push task branches to
 `<remote>/task-<id>` and to open requests. Merging still needs a `MERGE:` line.
 `local` mode never pushes and never runs `gh` or `glab`.
 
-1. `run.py close` records the verdict, runs `tg done`, pushes the branch, and
-   opens a request against the target branch (`merge.base`, else the host's
+1. `run.py close` records the verdict, pushes the branch, and opens a request
+   against the target branch (`merge.base`, else the host's
    default branch). The task keeps one request across attempts: a fix round
    pushes `worktree-task-<id>` to the same `task-<id>`. Every push after the
    first carries a lease on the last pushed head (`--force-with-lease`), recorded
@@ -348,8 +359,12 @@ the operator's standing permission for `run.py` to push task branches to
    `host-error` for that task, goes on with the others, and exits 1 at the end.
 3. A merge that anyone did on the host is recorded at the next drain from the
    request state (`merged_by=operator`), squash and rebase merges included.
-   `run.py merged <id> --by operator` is for a merge the host cannot show. A
-   request closed without a merge is reported at every drain (`pr-closed`).
+   `run.py merged <id> --by operator` is for a merge the host cannot show. The
+   task is done from that merge on; until then it stays in progress with
+   `phase=awaiting_merge`. A request closed without a merge is reported at every
+   drain (`pr-closed`), and the task stays in progress: reopen the request, or
+   `run.py abandon <id> <mode>` (the request stays open on the host, and
+   `record` no longer follows it).
 4. When the host reports the request behind its target, `run.py close <id>`
    catches it up. With `[merge] catch_up = "host"` (the default) it asks the
    host to rebase the request: GitHub `gh pr update-branch <n> --rebase`,
@@ -465,11 +480,11 @@ session's message or the end of `wait` wakes it.
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
-| `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
+| `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
+| `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), marks the task done, then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
-| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
-| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
+| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. It also drops a task that waits for its merge: its branch stays unmerged, and in `pr` mode its request stays open on the host for the operator to close. |
+| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its merge is listed under "Closed, awaiting merge" (`awaiting_merge` in `--json`), not under "In flight"; it is listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
 | `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, or `project, overrides plugin`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
 | `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
@@ -1034,7 +1049,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 29 keys:
+skill. Metadata holds everything else, 30 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1056,7 +1071,8 @@ skill. Metadata holds everything else, 29 keys:
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
 | `caught_up_from` | `close` | The local branch's head when the host first rebased the request. The local branch and worktree stay there. `close` does not push it back over the host's head, and cleanup counts it as merged. |
-| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
+| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged, in the same write as `phase=merged`, before `tg done`. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. |
+| `phase` | `launch`, `adopt`, `verify`, `record`, `close`, `stop`, `merged`, `abandon` | Where the task is: `running` (a worker runs), `stopped` (the attempt ended with no report: `STOPPED`, `DIED`, or the Manager's `BLOCKED`), `reported` (the worker filed its result), `verifying` (a verifier or a CI run checks it), `verdict_failed` (a verdict that did not close it), `awaiting_merge` (closed, in progress until its change is merged), `merged` (merged, or closed with nothing to merge; done), `abandoned`. `record` writes it for a task that has none, from `abandoned`, `merged_at`, the status, `verdict`, `verdict_ref` and the result rows, and keeps the first four in step with the result rows. When the stored phase and those fields disagree on anything else, `record` prints `phase-mismatch` and leaves the task alone until you fix the meta. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
@@ -1070,6 +1086,17 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.18.0
+
+Version 0.19.0 (issue #97) marks a task done only when its change is merged. No migration.
+
+- **Done means merged.** A passing `close` that merges at once (a local merge under a `MERGE:` line, a branch with no commit beyond its base, output outside git) still ends with the task done. A close that opens a request, or a local merge that waits, leaves the task in progress with `phase=awaiting_merge`. `tg ready` no longer lists the tasks that depend on it, and the `tg done` comes from the merge record: `record` (the request merged, or the commit in `HEAD`), `close` (a merge), or `run.py merged`. `done_at` is the merge time, so "Done since last report" and the mean attempts count a task when it merges. On the Taskgraph GitHub backend the issue now closes at the merge, not when the request opens.
+- **Tasks closed by 0.18.0.** A task that 0.18.0 closed and that is not merged yet (done, a commit `verdict_ref`, no `merged_at`) reads as `awaiting_merge`. `record` writes its `phase`, follows its request or its branch as before, and records the merge; it stays done in Taskgraph meanwhile. Every task with no `phase` gets one at the next `record`.
+- **The Manager's workaround is gone.** The workaround from #97, a "待合并 #PR：" title prefix and an `awaiting_merge=<PR>` meta on a done task with an open request, is no longer needed: such a task is now in progress with `phase=awaiting_merge`, and `status` lists it under "Closed, awaiting merge". Remove the prefix and the `awaiting_merge` meta key from the tasks that still carry them (`run.py` reads neither).
+- **`status`.** The "Done, branch not merged" table is now "Closed, awaiting merge"; its `--json` key is `awaiting_merge` (was `unmerged`).
+- **Refusals.** `launch`, `adopt`, `verify`, `answer`, `steer` and `stop` refuse a task that waits for its merge. `abandon` accepts it and says what happens to its branch or request.
+- **`phase-mismatch`.** `record` prints it when a task's stored `phase` disagrees with its fields on whether it is closed, merged or abandoned, and does nothing else for that task. Fix the meta with `tg edit <id> --meta phase=<phase>`.
 
 ### Upgrading from 0.17.0
 

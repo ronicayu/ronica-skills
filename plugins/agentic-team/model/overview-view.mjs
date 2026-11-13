@@ -1,7 +1,10 @@
 // Overview of Lifecycle.tla for the README: the main flow in about a dozen states.
 // Use it with overview.cfg (FULL_ENV = FALSE, OPERATOR_PAUSES = TRUE).
 
-export const title = "Task attempt lifecycle (agentic-team 0.18.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.19.0)";
+
+// Closed: a passing close happened (Lifecycle.tla `Closed`). Since 0.19.0 the task stays in progress until the merge.
+const closed = (v) => v.verdict === "artifact-verified";
 
 const LEVEL = {
   "artifact-verified": "passes",
@@ -11,7 +14,8 @@ const LEVEL = {
 
 export const state = (v) => {
   if (v.abandoned) return "Abandoned";
-  if (v.status === "done") return v.merged ? "Merged" : "Closed, waiting for the merge";
+  if (v.merged) return "Merged";
+  if (closed(v)) return "Closed, waiting for the merge";
   if (v.status === "open") return "Not started";
   if (v.lastTask === "STOPPED" || v.lastTask === "STOPPEDhead") return "Paused";
   if (v.verdict !== "none") return "Verdict recorded, not closed";
@@ -37,7 +41,7 @@ export const step = (action, from, to) => {
   switch (action) {
     case "Launch": return from.attempt === 0 ? "you launch the first attempt" : "you launch the next attempt";
     case "VerifyPlain": case "VerifyAgain": return "you start a verifier";
-    case "CloseAuto": case "CloseManual": return to.status === "done" ? "you close" : "you close: the verdict does not pass";
+    case "CloseAuto": case "CloseManual": return closed(to) ? "you close" : "you close: the verdict does not pass";
     // The README chart draws the pause only from "Worker working", where it normally happens. A pause from a
     // verifying or verdict state also leads to "Paused"; hiding those arrows keeps the chart readable.
     case "Stop":
@@ -69,8 +73,8 @@ export const step = (action, from, to) => {
 };
 
 export const group = (v) => {
-  if (v.abandoned || (v.status === "done" && v.merged)) return "End";
-  if (v.status === "done") return "Closing";
+  if (v.abandoned || v.merged) return "End";
+  if (closed(v)) return "Closing";
   if (v.status === "open") return "Start";
   if (v.verdict !== "none") return "Verdict";
   if (v.verifier !== "none") return "Verifying";

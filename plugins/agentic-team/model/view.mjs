@@ -1,13 +1,15 @@
-// Full view of Lifecycle.tla (agentic-team 0.18.0): every state the Manager can tell apart in `record` and `status`.
+// Full view of Lifecycle.tla (agentic-team 0.19.0): every state the Manager can tell apart in `record` and `status`.
 // State labels are in the operator's words; step labels say what happens.
 
-export const title = "Task attempt lifecycle (agentic-team 0.18.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.19.0)";
 
 const LEVEL = {
   "artifact-verified": "passes",
   "check-only": "check-only",
   "verify-failed": "fails",
 };
+// Closed: a passing close happened (Lifecycle.tla `Closed`). Since 0.19.0 the task stays in progress until the merge.
+const closed = (v) => v.verdict === "artifact-verified";
 const STUCK = ["idleBlocked", "prompt"];
 const IDLE = ["idle", "idleQuiet"];
 
@@ -23,8 +25,8 @@ const sessionNote = (who, s) => {
 
 export const state = (v) => {
   if (v.abandoned) return "Abandoned";
-  if (v.status === "done") {
-    if (v.merged) return "Merged";
+  if (v.merged) return "Merged";
+  if (closed(v)) {
     if (v.pr === "none") return "Closed, branch waits for the merge";
     if (v.pr === "closed") return "Closed, request closed unmerged";
     if (v.pr === "dirty") return "Closed, request conflicts";
@@ -141,8 +143,8 @@ export const step = (action, from, to) => {
 };
 
 export const group = (v) => {
-  if (v.abandoned || (v.status === "done" && v.merged)) return "End";
-  if (v.status === "done") return "Closing";
+  if (v.abandoned || v.merged) return "End";
+  if (closed(v)) return "Closing";
   if (v.status === "open") return "Start";
   if (v.verdict !== "none") return "Verdict";
   if (v.verifier !== "none") return "Verifying";

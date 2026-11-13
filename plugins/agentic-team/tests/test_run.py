@@ -624,6 +624,10 @@ class Base(unittest.TestCase):
             sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
         return sections
 
+    def assert_awaiting(self, task):
+        """Closed by run.py and not merged: in progress in Taskgraph, phase awaiting_merge."""
+        self.assertEqual((self.status_of(task), self.meta(task).get("phase")), ("in_progress", "awaiting_merge"))
+
     def verified_by(self, verdict, task=None):
         task = task or self.running_task()
         self.pass_report(task)
@@ -1843,7 +1847,8 @@ class RunTest(Base):
                                      "--model", "opus", "--permission-mode", "auto", "--name", "verify-1-1"])
         with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-1-verify.md")) as fh:
             self.assertEqual(fh.read(), argv[-1])
-        self.assertEqual(self.meta(task), {**before, "sessions": before["sessions"] + [self.entry(task, 1, "verify")]})
+        self.assertEqual(self.meta(task), {**before, "sessions": before["sessions"] + [self.entry(task, 1, "verify")],
+                                           "phase": "verifying"})
         self.assertEqual(self.status_of(task), "in_progress")
 
     def test_25_verifier_model_choice(self):
@@ -2604,7 +2609,7 @@ class RunTest(Base):
         self.assertEqual((filed["status"], filed["author"]), ("PASS", "manager"))
         self.assertIn("Verdict: test-verified", filed["body"])
         self.assertIn("Ran: pytest ok", filed["body"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_45_failed_and_blocked_verdicts_map_to_statuses(self):
         task = self.running_task()
@@ -2681,7 +2686,7 @@ class RunTest(Base):
                 other = self.verified_by("artifact-verified", task=self.running_task(verify_kind=kind))
                 closed = self.events("close", str(other))
                 self.one(closed, "closed")
-                self.assertEqual(self.status_of(other), "done")
+                self.assert_awaiting(other)
 
     def test_48_a_manager_verdict_test_verified_does_not_close_a_schema_task(self):
         task = self.running_task(verify_kind="schema")
@@ -2697,14 +2702,14 @@ class RunTest(Base):
         self.assertIn("no verifier verdict to override; pass --verdict alone", out.stderr)
         events = self.events("close", str(task), "--verdict", "artifact-verified", "--ran", "recomputed 182 columns")
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
 
     def test_48_a_code_task_still_closes_on_test_verified(self):
         task = self.verified_by("test-verified")
         events = self.events("close", str(task))
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_90_an_unknown_verify_kind_is_refused_everywhere(self):
         for bad in ("Code", "doc", "design_doc"):
@@ -2827,17 +2832,18 @@ class RunTest(Base):
                                                    [("abc123.jsonl", {"folder": "/work/elsewhere"})])
         self.assertEqual((detail, tokens), (f"transcript folder {folder} not found; none recorded", None))
 
-    def test_50_close_marks_done_and_stops_the_session(self):
+    def test_50_close_stops_the_session_and_waits_for_the_merge(self):
         task = self.running_task()
         self.pass_report(task)
         self.agents(self.row("task-1"))
         later = self.add_task("Next", depends=(task,))
         events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
         closed = self.one(events, "closed")
-        self.assertEqual(self.one(events, "waits")["task"], later)
+        self.assertEqual(self.named(events, "waits"), [])
+        self.assertNotIn(later, [t["id"] for t in self.tg("ready")])
         self.assertIn("test-verified at", closed["detail"])
         self.assertIn("branch worktree-task-1", closed["detail"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         stopped = [r for r in self.results(task) if r["status"] == "STOPPED"]
         self.assertEqual(len(stopped), 1)
@@ -2895,7 +2901,7 @@ class RunTest(Base):
         events = self.events("close", str(task), "--verdict", "test-verified")
         self.assertIn("not merged during a pause", self.one(events, "ready-to-merge")["detail"])
         self.assertEqual(self.merges(), "")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_51_conflict_is_aborted(self):
         with open(os.path.join(self.root, "f.txt"), "w") as fh:
@@ -3065,7 +3071,7 @@ class RunTest(Base):
         env = dict(self.env, FAKE_CLAUDE_STOP_FAIL="1")
         events = self.events("close", str(task), "--verdict", "test-verified", env=env)
         self.assertIn("still live; claude stop said: boom", self.one(events, "kept")["detail"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertIn("main checkout is not clean", self.one(events, "ready-to-merge")["detail"])
         self.assertEqual([r for r in self.results(task) if r["status"] == "STOPPED"], [])
         os.remove(os.path.join(self.root, "dirty.txt"))
@@ -3074,6 +3080,7 @@ class RunTest(Base):
         self.assertEqual(self.one(again, "merged")["task"], task)
         self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
         self.assertEqual(self.meta(task)["merged_by"], "manager")
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("done", "merged"))
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         self.assertEqual(self.run_cmd("close", str(task)).returncode, 2)
 
@@ -3216,8 +3223,8 @@ class RunTest(Base):
         outside = self.add_task("Notes", attempt=1, verdict_ref='"abc123  out.txt"', verdict="artifact-verified")
         for task in (unmerged, merged, outside):
             self.tg("done", str(task))
-        section = self.status_sections("--since", "2099-01-01")["Done, branch not merged"]
-        self.assertEqual(section.splitlines()[0], "Done, branch not merged (1)")
+        section = self.status_sections("--since", "2099-01-01")["Closed, awaiting merge"]
+        self.assertEqual(section.splitlines()[0], "Closed, awaiting merge (1)")
         self.assertIn(f"#{unmerged} ", section)
         self.assertNotIn(f"#{merged} ", section)
         self.assertNotIn(f"#{outside} ", section)
@@ -3368,7 +3375,7 @@ class RunTest(Base):
         self.assertIn(rebased, self.one(events, "closed")["detail"])
         filed = [r for r in self.results(task) if r["kind"] == "verify"][-1]
         self.assertIn(f"Head: {rebased}", filed["body"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_70_a_rebased_branch_with_an_extra_commit_is_refused(self):
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
@@ -3473,7 +3480,7 @@ class RunTest(Base):
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
         self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
                                                         "tier": "implementation", "verify_kind": "code"}])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
     def test_74_adopt_refusals(self):
@@ -6226,7 +6233,7 @@ class PrTest(Base):
         self.assertEqual(self.remote_sha(), head)
         meta = self.meta(task)
         self.assertEqual((meta["pr"], meta["pr_branch"], meta["pushed"]), (1, "task-1", head))
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.merges(), "")
         self.assertEqual(self.checkout(), before)
         (create,) = self.create_calls()
@@ -6238,7 +6245,7 @@ class PrTest(Base):
             for field in ("source_branch=task-1", "target_branch=main", "remove_source_branch=false"):
                 self.assertIn(field, create)
         request = "#1" if self.host == "github" else "!1"
-        self.assertRegex(self.status_sections()["Done, branch not merged"], rf"{head}\s*\|\s*{re.escape(request)}\s*\|")
+        self.assertRegex(self.status_sections()["Closed, awaiting merge"], rf"{head}\s*\|\s*{re.escape(request)}\s*\|")
         self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
         blocked = self.one(self.events("record"), "pr-blocked")
         self.assertIn("1 fail" if self.host == "github" else "pipeline failed", blocked["detail"])
@@ -6259,6 +6266,7 @@ class PrTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "manager")
         self.assertIn("merged_at", meta)
+        self.assertEqual((self.status_of(task), meta["phase"]), ("done", "merged"))
         self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
         self.assertEqual(self.merges(), "")
 
@@ -6310,7 +6318,7 @@ class PrTest(Base):
             self.assertIn(want, body)
         self.assertNotIn("Branch: None", body)
         self.assertEqual(self.checkout(), before)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     @both_hosts
     def test_97_a_later_verdict_replaces_the_comment(self):
@@ -6343,7 +6351,7 @@ class PrTest(Base):
         for want in ("**Verdict: artifact-verified**", "by manager (verify result #3)", "The task is closed.",
                      "Overrides: verify-blocked (result #2 by ci)", "Reason: drove it", "Ran: https://ci.example/runs/11"):
             self.assertIn(want, last)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     @both_hosts
     def test_97_a_failed_comment_does_not_block_close(self):
@@ -6361,7 +6369,7 @@ class PrTest(Base):
         self.assertIn("HTTP 403", failed["detail"])
         self.assertEqual(failed["next"], f"fix the cause, then run.py close 1 (it posts the verdict again while the task is not merged); "
                                          f"else tell the operator to post it on {self.label()} by hand")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.remote_sha(), head)
         self.assertEqual(self.meta(task)["pr"], 1)
         self.fake_host(head=head, merge_state="UNKNOWN")
@@ -6693,7 +6701,7 @@ class PrTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("delete or rename it on the host", out.stderr)
         self.assertIn("run.py adopt 1 --branch", out.stderr)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.create_calls(), [])
         self.git("push", "-q", "-f", "origin", f"{head}:refs/heads/task-1")
         self.assertIn("published", [e["event"] for e in self.events("close", str(task))])
@@ -6904,7 +6912,8 @@ class PrTest(Base):
         else:
             self.assertEqual(call[-2:], ["-f", "ref=task-1"])
         self.assertEqual(self.remote_sha(), head)
-        self.assertEqual(set(self.meta(task)) - keys, {"pr", "pr_branch", "pushed"})
+        self.assertEqual(set(self.meta(task)) - keys, {"pr", "pr_branch", "pushed", "phase"})
+        self.assertEqual(self.meta(task)["phase"], "verifying")
         self.assertEqual(self.calls("--bg"), [])
         self.assertEqual(self.status_of(task), "in_progress")
         self.assertEqual(self.checkout(), before)
@@ -6965,7 +6974,7 @@ class PrTest(Base):
                              "CI recomputed the numbers", "--ran", "https://ci.example/runs/11")
         self.one(events, "override")
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
 
     @both_hosts
@@ -9517,6 +9526,369 @@ class DeliveryTest(Base):
 
 def transcript_text(tokens):
     return transcript(tokens)
+
+
+
+class PhaseTest(Base):
+    """0.19.0 (#97): a closed task is done only once its change is merged, and the `phase` meta says where a task is.
+    The test names follow the cases of the design review."""
+
+    def passed(self, row=None):
+        """A running task whose worker passed, local mode. Returns (task, worktree, head)."""
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        self.agents(row or self.finished("task-1"))
+        return task, wt, head
+
+    def closed_local(self):
+        """Closed with no MERGE order: it waits for the merge."""
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        return task, wt, head
+
+    def closed_pr(self, later=False):
+        """Closed in pr mode with an open request (state UNKNOWN). Returns (task, head, dependent task or None)."""
+        task, wt, head = self.pr_task()
+        dependent = self.add_task("Next", depends=(task,)) if later else None
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        return task, head, dependent
+
+    def ready_ids(self):
+        return [t["id"] for t in self.tg("ready")]
+
+    def assert_merged(self, task, by):
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"]), ("done", "merged", by))
+        self.assertTrue(meta["merged_at"])
+
+    # 1
+    def test_close_pr_keeps_in_progress_until_merge(self):
+        task, wt, head = self.pr_task()
+        later = self.add_task("Next", depends=(task,))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        for name in ("closed", "published", "pr-pending"):
+            self.one(events, name)
+        self.assertEqual(self.one(events, "ready")["detail"], "none")
+        self.assert_awaiting(task)
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["verdict"], meta["verdict_ref"]), (1, "test-verified", head))
+        self.assertNotIn("merged_at", meta)
+        self.assertNotIn(later, self.ready_ids())
+        self.assertEqual(self.named(self.events("record"), "waits"), [])
+
+    # 2
+    def test_record_pr_merged_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        events = self.events("record")
+        self.assertIn("recorded merged_by=operator", self.one(events, "merged")["detail"])
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.meta(task)["pushed"], head)
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_record_manager_merge_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+        events = self.events("record")
+        self.assertIn("merged (merge)", self.one(events, "merged")["detail"])
+        self.assertEqual(len(self.merge_calls()), 1)
+        self.assert_merged(task, "manager")
+        self.assertIn(later, self.ready_ids())
+
+    # 3
+    def test_merged_command_marks_done(self):
+        task, wt, head = self.closed_local()
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(self.events("merged", str(task)), "merged")["detail"], "recorded merged_by=operator")
+        self.assert_merged(task, "operator")
+        done_at = self.tg("show", str(task))["done_at"]
+        again = self.events("merged", str(task), "--by", "manager")
+        self.assertIn("already recorded", self.one(again, "merged")["detail"])
+        self.assertNotIn("marked it done", self.one(again, "merged")["detail"])
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
+        out = self.run_cmd("merged", str(self.running_task()))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("is not a closed task", out.stderr)
+
+    # 4
+    def test_close_twice_resumes_not_reverdicts(self):
+        task, wt, head = self.closed_local()
+        verify_rows = [r for r in self.results(task) if r["kind"] == "verify"]
+        events = self.events("close", str(task))
+        self.one(events, "resumed")
+        for name in ("closed", "tokens", "verdict"):
+            self.assertEqual(self.named(events, name), [])
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "verify"], verify_rows)
+        self.one(events, "ready-to-merge")
+        self.assert_awaiting(task)
+
+    # 5
+    def test_record_closed_task_not_died_or_wip_committed(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        (stopped,) = [r for r in self.results(task) if r["status"] == "STOPPED"]
+        self.assertIn("Reason: close", stopped["body"])
+        self.assertNotIn("Head:", stopped["body"])
+        self.agents(self.finished("task-1"))
+        with open(os.path.join(wt, "left.txt"), "w") as fh:
+            fh.write("x\n")
+        rows = self.results(task)
+        events = [e for e in self.events("record") if e["task"] == task]
+        self.assertEqual([e["event"] for e in events], ["unmerged"])
+        self.assertFalse(any("run.py close" in (e["next"] or "") for e in events))
+        self.assertEqual(self.results(task), rows)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertTrue(os.path.isfile(os.path.join(wt, "left.txt")))
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? left.txt")
+        self.assert_awaiting(task)
+
+    # 6
+    def test_local_merge_done_immediately(self):
+        task, wt, head = self.passed()
+        later = self.add_task("Next", depends=(task,))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.one(events, "merged")
+        self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
+        self.assert_merged(task, "manager")
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_local_no_merge_order_waits_then_record_detects(self):
+        task, wt, head = self.closed_local()
+        self.assert_awaiting(task)
+        unmerged = self.one(self.events("record"), "unmerged")
+        self.assertEqual(unmerged["task"], task)
+        self.assert_awaiting(task)
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["detail"], f"{head} is in HEAD; recorded merged_by=operator")
+        self.assert_merged(task, "operator")
+
+    def test_local_merge_that_waits_on_a_dirty_checkout_is_detected_by_record(self):
+        task, wt, head = self.passed()
+        later = self.add_task("Next", depends=(task,))
+        self.orders("MERGE: verified branches into main\n")
+        with open(os.path.join(self.root, "dirty.txt"), "w") as fh:
+            fh.write("x\n")
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertIn("main checkout is not clean", self.one(events, "ready-to-merge")["detail"])
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(events, "ready")["detail"], "none")
+        os.remove(os.path.join(self.root, "dirty.txt"))
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        events = self.events("record")
+        self.one(events, "merged")
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    # 7
+    def test_no_change_close_done_immediately(self):
+        base = self.git("rev-parse", "HEAD")
+        task = self.running_task(base=json.dumps(base))
+        self.pass_report(task, head=base)
+        self.agents(self.finished("task-1"))
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.one(events, "no-change")
+        self.assert_merged(task, "no-change")
+
+    def test_non_git_close_done_immediately(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFiles: sums.txt\n")
+        self.one(self.events("close", str(task), "--verdict", "artifact-verified", "--ref", "abc123  out.txt"), "closed")
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"]), ("done", "merged"))
+        self.assertNotIn("merged_at", meta)
+        self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
+
+    # 8
+    def test_failed_verdict_stays_unclosed(self):
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "verify-failed")
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["verdict_ref"]), ("in_progress", "verdict_failed", head))
+        self.assertIn("verdict verify-failed", self.one(self.events("record"), "unclosed")["detail"])
+        sections = self.status_sections()
+        self.assertIn(f"#{task} ", sections["Verdict recorded, not closed"])
+        self.assertIn("None.", sections["Closed, awaiting merge"])
+        self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
+
+    # 9
+    def test_launch_on_awaiting_merge_refused(self):
+        task, wt, head = self.closed_local()
+        for args in (("launch", str(task)), ("launch", str(task), "--attempt", "2"), ("verify", str(task))):
+            out = self.run_cmd(*args)
+            self.assertEqual(out.returncode, 2, args)
+            self.assertIn(f"#{task} is closed and waits for the merge of its change", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+        self.assert_awaiting(task)
+        self.assertEqual(self.meta(task)["verdict_ref"], head)
+
+    def test_adopt_on_awaiting_merge_refused(self):
+        task, wt, head = self.closed_local()
+        tip = self.feature_branch("feat")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:10])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} is closed and waits for the merge of its change", out.stderr)
+        self.assertEqual(self.meta(task)["attempt"], 1)
+
+    # 10
+    def test_launch_stacked_base_on_awaiting_dep_allowed(self):
+        dep, wt, head = self.closed_local()
+        task = self.add_task("Use it", "Why: needs it.\n- [ ] used", depends=(dep,))
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} depends on #{dep}, whose branch worktree-task-{dep} is not merged", out.stderr)
+        self.assertIn("pass --base <its branch>", out.stderr)
+        self.assertEqual(self.run_cmd("launch", str(task), "--base", "main").returncode, 2)
+        self.one(self.events("launch", str(task), "--base", f"worktree-task-{dep}"), "launched")
+        self.assertEqual((self.meta(task)["base"], self.meta(task)["phase"]), (head, "running"))
+        self.assert_awaiting(dep)
+
+    # 11
+    def test_wait_watches_awaiting_merge_request(self):
+        task, head, _ = self.closed_pr()
+        self.agents()
+        (event,) = self.events("wait", "--timeout", "1", "--interval", "0.2")
+        self.assertEqual(event["event"], "timeout")
+
+    # 12
+    def test_status_lists_awaiting_merge_separately(self):
+        task, wt, head = self.closed_local()
+        sections = self.status_sections("--since", "2000-01-01")
+        self.assertIn(f"#{task} ", sections["Closed, awaiting merge"])
+        self.assertIn(head, sections["Closed, awaiting merge"])
+        for name in ("In flight", "Verdict recorded, not closed", "Waiting for verification or triage", "Done since last report"):
+            self.assertIn("None.", sections[name], name)
+        before = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        self.ok("merged", str(task))
+        done_at = datetime.datetime.fromisoformat(self.tg("show", str(task))["done_at"].replace("Z", "+00:00"))
+        self.assertGreaterEqual(done_at, before)
+        sections = self.status_sections("--since", "2000-01-01")
+        self.assertIn(f"#{task} ", sections["Done since last report"])
+        self.assertIn("None.", sections["Closed, awaiting merge"])
+
+    # 13
+    def test_merge_recorded_under_stop_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.orders("STOP: paused\nMERGE: verified branches into main\n")
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.merge_calls(), [])
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual(self.run_cmd("launch", str(later)).returncode, 3)  # the pause still holds the launch
+
+    # 14
+    def test_pr_closed_unmerged_stays_in_progress_and_abandonable(self):
+        task, head, later = self.closed_pr(later=True)
+        self.fake_host(head=head, state="CLOSED")
+        self.assertEqual(self.one(self.events("record"), "pr-closed")["task"], task)
+        self.assert_awaiting(task)
+        self.assertNotIn(later, self.ready_ids())
+        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        self.assertIn(f"request {self.label()} stays open and record no longer follows it", abandoned["detail"])
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "unknown"))
+        self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
+        self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
+
+    def test_abandon_a_local_task_that_waits_for_its_merge(self):
+        task, wt, head = self.closed_local()
+        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        self.assertIn(f"branch worktree-task-1 at {head[:7]} is not merged and stays", abandoned["detail"])
+        self.assertEqual(self.git("rev-parse", "worktree-task-1"), head)
+
+    # 15
+    def test_legacy_done_unmerged_still_reconciled(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.tg("done", str(task))  # as 0.18.0 left it: done at close, not merged
+        self.assertEqual(self.one(self.events("record"), "unmerged")["task"], task)
+        self.assertIn(f"#{task} ", self.status_sections()["Closed, awaiting merge"])
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+
+    def test_legacy_done_unmerged_resumes_at_close_and_accepts_merged(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nBranch: worktree-task-1\nHead: {tip}\n")
+        self.tg("done", str(task))
+        self.one(self.events("close", str(task)), "resumed")
+        self.one(self.events("merged", str(task)), "merged")
+        self.assert_merged(task, "operator")
+
+    # 16
+    def test_crash_between_merged_at_and_done_healed(self):
+        for phase in ("merged", "awaiting_merge"):  # mark_merged writes both; a hand edit may write merged_at alone
+            with self.subTest(phase):
+                self.fresh()
+                task = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A,
+                                     phase=phase, merged_at='"2026-11-13 10:00 UTC"', merged_by="manager")
+                events = [e for e in self.events("record") if e["task"] == task]
+                self.assertEqual([e["event"] for e in events], ["merged"])
+                self.assertIn("but the task was not done; marked it done", events[0]["detail"])
+                self.assert_merged(task, "manager")
+                self.assertEqual(self.meta(task)["merged_at"], "2026-11-13 10:00 UTC")
+
+    # 17
+    def test_slots_free_after_close(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.write_config(sessions="max_parallel = 1\n")
+        events = self.events("close", str(task), "--verdict", "test-verified", env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.one(events, "closed")
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(self.events("record"), "slots")["detail"], "0/1 live")
+
+    # the phase meta
+    def test_phase_backfill_of_a_0_18_0_done_unmerged_task(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        unmerged = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        merged = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]",
+                               merged_at='"2026-10-26 10:00 UTC"', merged_by="operator")
+        outside = self.add_task(attempt=1, verdict_ref='"abc123  out.txt"', verdict="artifact-verified", sessions="[]")
+        by_hand = self.add_task()
+        for task in (unmerged, merged, outside, by_hand):
+            self.tg("done", str(task))
+        running = self.running_task()
+        self.agents(self.row("task-5"))
+        failed = self.running_task(verdict="verify-failed", verdict_ref=SHA_A)
+        self.add_result(failed, "PASS", "Task: 6\n")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.one(events, "unmerged")["task"], unmerged)
+        phases = {t: self.meta(t).get("phase") for t in (unmerged, merged, outside, by_hand, running, failed)}
+        self.assertEqual(phases, {unmerged: "awaiting_merge", merged: "merged", outside: "merged", by_hand: None,
+                                  running: "running", failed: "verdict_failed"})
+        self.assertEqual(self.status_of(unmerged), "done")  # backfill writes the phase only
+        self.add_result(running, "PASS", "Task: 5\n")
+        self.events("record")
+        self.assertEqual(self.meta(running)["phase"], "reported")  # the worker filed: the phase follows the rows
+
+    def test_phase_mismatch_reported_by_record(self):
+        closed = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A, phase="running")
+        self.add_result(closed, "PASS", "Task: 1\n")
+        done = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]", phase="running")
+        self.tg("done", str(done))
+        events = self.events("record")
+        found = {e["task"]: e for e in self.named(events, "phase-mismatch")}
+        self.assertEqual(sorted(found), [closed, done])
+        self.assertIn("stored phase running, but the fields say awaiting_merge (status in_progress", found[closed]["detail"])
+        self.assertIn("status done", found[done]["detail"])
+        self.assertEqual(found[closed]["next"], f"check #{closed}, then tg edit {closed} --meta phase=<the right phase>")
+        self.assertEqual([e["event"] for e in events if e["task"] in (closed, done)], ["phase-mismatch", "phase-mismatch"])
+        self.assertEqual((self.meta(closed)["phase"], self.meta(done)["phase"]), ("running", "running"))
+        self.tg("edit", str(closed), "--meta", "phase=awaiting_merge")
+        events = self.events("record")
+        self.assertEqual([e["event"] for e in events if e["task"] == closed], ["unmerged"])
 
 
 if __name__ == "__main__":
