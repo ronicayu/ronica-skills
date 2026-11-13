@@ -287,13 +287,22 @@ class GitHubRemote:
                         patch["state_reason"] = "completed"
             if set(labels) != set(f.labels):
                 patch["labels"] = labels
-            need_body = e.notes is not None or bool(e.meta_set) or bool(e.meta_unset)
+            need_body = e.notes is not None or bool(e.meta_set) or bool(e.meta_unset) or bool(e.gates_set) or bool(e.gates_unset)
             if "broken" in f.problems and need_body:
                 raise StoreError(f"meta block on #{e.id} is broken; fix or delete it on GitHub")
             new_meta, consumed = dict(f.meta), False
             new_meta.update(e.meta_set)
             for key in e.meta_unset:
                 new_meta.pop(key, None)
+            if e.gates_set or e.gates_unset:  # per key, over the gates just fetched: a gate set elsewhere meanwhile stays
+                gates = dict(new_meta["gates"]) if isinstance(new_meta.get("gates"), dict) else {}
+                gates.update(e.gates_set)
+                for key in e.gates_unset:
+                    gates.pop(key, None)
+                if gates:
+                    new_meta["gates"] = gates
+                else:
+                    new_meta.pop("gates", None)
             if e.pending and "broken" not in f.problems and (patch or need_body or e.flush):
                 consumed = True
                 for row in e.pending:

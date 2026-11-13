@@ -35,13 +35,13 @@ PERSON_KEYS = {"decision": "decider", "external": "party"}
 INHERITED = ("lane", "team")
 SORTS = ("id", "due", "late", "priority")
 DATE_FIELDS = ("due", "start", "promised")
-SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "priority", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team", "meta.gates")
+SCOPE_FIELDS = ("title", "type", "parent", "depends_on", "priority", "meta.owner", "meta.decider", "meta.party", "meta.lane", "meta.team")
 RAG = ("green", "amber", "red")
 MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 LEVELS = {"low": 1, "medium": 2, "high": 3}
 CHANGE_BUCKETS = {
     "new": "New", "started": "Started", "completed": "Completed", "reopened": "Reopened",
-    "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "removed": "Removed",
+    "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "gated": "Gated", "removed": "Removed",
 }
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
@@ -388,6 +388,8 @@ def rank(task):
 
 
 def check_meta(meta):
+    if "gates" in meta:
+        raise Fail("gates is not a plain meta key; use tg gate ID KEY [--label TEXT] [--ref URL] (--clear to remove one)")
     if "priority" in meta:
         raise Fail("priority is not a meta key; use --priority P0|P1|P2|P3 (edit: --no-priority to clear it)")
     if meta.get("type", "task") not in TYPES:
@@ -771,14 +773,17 @@ def set_status(store, conn, args, status):
     if status == "done" and unfinished:
         warnings.append(f"#{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}")
         print(f"warning: {warnings[0]}", file=sys.stderr)
+    strict = status == "done" and (args.require_gates or os.environ.get("TASKGRAPH_GATES") == "refuse")
     if status == "done" and open_gates(task):
         text = f"#{task['id']} has open gates: {waiting(task).removeprefix('waiting: ')}"
-        if args.require_gates or os.environ.get("TASKGRAPH_GATES") == "refuse":
+        if strict:
             raise Fail(text)
         warnings.append(text)
         print(f"warning: {text}", file=sys.stderr)
     ts = now()
     with store.write(conn):
+        if strict and open_gates(get(load(conn), args.id)):  # a gate set while this write waited for the lock
+            raise Fail(f"#{args.id} has open gates: {waiting(get(load(conn), args.id)).removeprefix('waiting: ')}")
         if status == "in_progress":
             store.claim(conn, args.id)
         conn.execute(
@@ -795,32 +800,41 @@ def set_status(store, conn, args, status):
 
 
 def cmd_gate(store, conn, args):
-    if args.clear and (args.label is not None or args.ref is not None):
-        raise Fail("--clear cannot be combined with --label or --ref")
+    if args.clear and (args.label is not None or args.ref is not None or args.no_ref):
+        raise Fail("--clear cannot be combined with --label, --ref or --no-ref")
+    if args.ref is not None and args.no_ref:
+        raise Fail("--ref and --no-ref cannot be combined")
+    cleared = False
     with store.write(conn):
         task = get(load(conn), args.id)  # read inside the write: only this one gate key changes
+        if computed(task):
+            raise Fail(f"#{args.id} is a {'summary' if is_summary(task) else 'milestone'}: its status is derived, so it takes no gate")
         meta = dict(task["meta"])
         gates = meta.get("gates", {})
         if not isinstance(gates, dict):
             raise Fail(f"meta key gates of #{args.id} is not an object")
         gates = dict(gates)
         if args.clear:
-            if args.key not in gates:
-                raise Fail(f"#{args.id} has no gate {args.key}")
-            del gates[args.key]
+            cleared = gates.pop(args.key, None) is not None
+            new = gates
         else:
             old = gates.get(args.key) if isinstance(gates.get(args.key), dict) else {}
-            gates[args.key] = {
+            new = dict(gates, **{args.key: {
                 "label": args.label if args.label is not None else old.get("label") or args.key,
-                "ref": args.ref if args.ref is not None else old.get("ref"),
+                "ref": None if args.no_ref else args.ref if args.ref is not None else old.get("ref"),
                 "since": old.get("since") or now(),
-            }
-        if gates:
-            meta["gates"] = gates
-        else:
-            meta.pop("gates", None)
-        conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
-    emit(args, load(conn)[args.id], f"#{args.id} gate {args.key} " + ("cleared" if args.clear else "set"))
+            }})
+        if new != task["meta"].get("gates", {}):  # a repeat of the same call writes nothing
+            if new:
+                meta["gates"] = new
+            else:
+                meta.pop("gates", None)
+            conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
+    data = load(conn)[args.id]
+    if args.clear:
+        emit(args, dict(data, cleared=cleared), f"#{args.id} gate {args.key} " + ("cleared" if cleared else "not set"))
+    else:
+        emit(args, data, f"#{args.id} gate {args.key} set")
 
 
 def cmd_start(store, conn, args):
@@ -1179,6 +1193,9 @@ def collect_changes(conn, tasks, args, since):
             else:
                 scope.append({"field": field, "from": old, "to": new})
         scope += [{"field": f, "from": net[f][0], "to": net[f][1]} for f in SCOPE_FIELDS if f in net]
+        if "meta.gates" in net:
+            found["gated"].append(dict(brief_task(task), changes=[{"field": "meta.gates", "from": net["meta.gates"][0], "to": net["meta.gates"][1]}]))
+            text["gated"].append(f"#{task_id} {marker(task)}{task['title']} — " + describe("meta.gates", *net["meta.gates"]))
         if scope:
             found["rescoped"].append(dict(brief_task(task), changes=scope))
             text["rescoped"].append(f"#{task_id} {marker(task)}{task['title']} — " + "; ".join(describe(c["field"], c["from"], c["to"]) for c in scope))
@@ -2091,6 +2108,7 @@ def build_parser():
     p.add_argument("key")
     p.add_argument("--label")
     p.add_argument("--ref")
+    p.add_argument("--no-ref", action="store_true", help="clear the gate's ref")
     p.add_argument("--clear", action="store_true")
 
     p = command("edit")

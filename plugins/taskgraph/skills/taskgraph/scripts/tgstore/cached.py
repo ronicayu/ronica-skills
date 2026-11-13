@@ -442,6 +442,10 @@ class CachedRemoteStore:
                 kind = self.kind_of(k)
                 if kind == "local":
                     local_rows.append((i, k, new))
+                elif kind == "through" and k == "gates" and all(isinstance(v, dict) or v is KEEP for v in (old, new)):
+                    og, ng = ({} if v is KEEP else v for v in (old, new))
+                    e.gates_set = {g: v for g, v in ng.items() if og.get(g) != v}
+                    e.gates_unset = sorted(og.keys() - ng.keys())
                 elif kind == "through":
                     if new is KEEP:
                         e.meta_unset.append(k)
@@ -452,7 +456,7 @@ class CachedRemoteStore:
                     rows[k] = {"task_id": i, "key": k, "op": "unset" if new is KEEP else "set", "value": None if new is KEEP else canon(new), "base": base, "at": now(), "old": old_rows.get(k)}
                     new_pending.setdefault(i, {})[k] = rows[k]
             e.pending = sorted(old_rows.values(), key=lambda r: r["key"])  # only rows queued earlier ride along; this edit's own stay queued
-            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.priority is not KEEP or e.parent is not KEEP or e.meta_set or e.meta_unset:
+            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.priority is not KEEP or e.parent is not KEEP or e.meta_set or e.meta_unset or e.gates_set or e.gates_unset:
                 plan.edits.append(e)
         plan.removed = sorted(before.keys() - after.keys())
         plan.edges_added, plan.edges_removed = list(cs.edges_added), list(cs.edges_removed)
