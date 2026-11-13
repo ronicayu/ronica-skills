@@ -69,6 +69,7 @@ Fix this layer first. In review mode, say plainly that the structure needs resha
 The reader learns each name and fact once:
 
 - **Nothing is used before it is defined.**
+- **Define a technical term by its purpose first.** Say what it does and why the reader needs it, then how it works. Implementation detail the argument does not need goes in an appendix.
 - **Expand every domain abbreviation on first use:** *Full Term (ABBR)*, then the abbreviation alone. Industry-universal terms are exempt. If it would belong in a glossary, expand it.
 - **One name per concept**, in the document and its neighbours. A synonym for variety reads as a second thing.
 - **Each fact is stated once, and the copies agree.** Elsewhere, point to it instead of restating it. Where a summary, table, glossary or log repeats the body, check counts, lists, statuses and scopes against the body. Copies drift apart, and a line edit does not see it. A percentage keeps one base wherever it appears, so a share of requests never turns into a share of users.
@@ -85,6 +86,7 @@ Everything sits where the reader needs it, in groups they can hold:
 
 - **Load-bearing claims show their source** (a document, a person, a measurement, a run), in line and brief. A source supports a claim. The draft or agent that first proposed an idea is not a source. Tag claims, not sections.
 - **Uncertainty is marked, with what would settle it.** "Unverified: no one has run the rollback end to end." A hedge that only lowers the temperature does not count.
+- **The finding comes first, and each limit is stated once.** A caveat goes after the claim it limits, not before it, and is not repeated in later sections. A limit that does not change what the reader does or believes is not material; cut it.
 - **Decided is distinguishable from proposed.**
 - **Numbers carry a basis:** measured, estimated or assumed, and as of when.
 

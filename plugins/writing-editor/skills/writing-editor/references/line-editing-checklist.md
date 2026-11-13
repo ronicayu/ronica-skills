@@ -197,6 +197,10 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 
 **25. False ranges.** "From X to Y" where X and Y sit on no real scale. List the items.
 
+**28. Meta-commentary.** A heading or sentence that tells the reader how to read the text instead of saying something: *Why this matters*, *Key takeaways*, *What this means for you*, *The evidence is strongest where…*. Put the implication into the sentence that carries the fact, and give the section a heading that states its message.
+
+**29. Telling the reader what to think.** Two forms. Addressing an audience about its own interest (*What this means for executives*, *Why engineers should care*): choose the content for that reader and leave the label out. Commenting on evidence (*This is a striking result*, *which shows how compelling…*): keep the fact or number and cut the comment.
+
 ## Swap tables
 
 ### Long for short
