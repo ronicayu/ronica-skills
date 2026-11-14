@@ -1,0 +1,25 @@
+{
+  "about": "Why run.py's TRANSITIONS and phase-edges.json differ. code: rows of the table that the model has no edge for; model: edges of the model that the table has no row for. Each edge is [from, event, to], with * patterns and \"none\" for None. The first entry that matches an edge explains it; tests/test_run.py fails on an edge no entry explains, and on an entry that explains no edge.",
+  "code": [
+    {"edge": ["none", "seen_*", "*"], "why": "record's backfill of a task with no phase (0.18.0 and older); the model starts at 0.19.0, where launch writes the phase"},
+    {"edge": ["*", "close_merged", "merged"], "why": "output outside git: close records phase merged with the verdict; the model's output is always a commit"},
+    {"edge": ["none", "*", "*"], "why": "a command on a 0.18.0 task that no record has backfilled yet"},
+    {"edge": ["*", "adopt", "reported"], "why": "adopt, a branch made outside run.py, is not in the model"},
+    {"edge": ["running", "worker_reported", "reported"], "why": "record salvages a worker's unfiled report; the model leaves that report out (it gives the hint a filed one gives)"},
+    {"edge": ["running", "seen_stopped", "stopped"], "why": "the DIED of a resume that failed (file_died); messages are in mailbox/Mailbox.tla, not here"},
+    {"edge": ["*", "seen_verifying", "verifying"], "why": "a verify row filed with no run.py verify; the model's verifier starts only by verify"},
+    {"edge": ["stopped", "seen_*", "*"], "why": "a worker's report filed after its stop, or a hand edit of the attempt; the model's stopped worker files nothing"},
+    {"edge": ["awaiting_merge", "seen_merged", "merged"], "why": "merged_at with phase awaiting_merge: mark_merged writes both in one edit, so only a hand edit splits them"},
+    {"edge": ["merged", "merged", "merged"], "why": "the crash heal: a command that stopped between the merge record and tg done, which record and close finish (finish_merged); the model's steps are atomic"},
+    {"edge": ["abandoned", "launch", "running"], "why": "launch --attempt after an abandon; the Manager never overrides, and the model ends at Abandon"},
+    {"edge": ["abandoned", "abandon", "abandoned"], "why": "abandon run again on an abandoned task (after a crash, say); the model's Abandon needs a task not abandoned"},
+    {"edge": ["*", "abandon", "abandoned"], "why": "the operator abandons where no hint says so: while a verifier runs, or a task that waits for its merge"},
+    {"edge": ["*", "stopped", "stopped"], "why": "the operator's pause after a report or a verdict (pause.cfg has it, the check configs do not), or a second stop while the stopped worker still runs"},
+    {"edge": ["verdict_failed", "verify", "verifying"], "why": "verify --again after a verdict: derive_phase reads verdict_failed while the verdict stands, so the model's step keeps the phase (settle_phase allows the code's verifying)"},
+    {"edge": ["verifying", "verify", "verifying"], "why": "verify --again while verifying keeps the phase, and the view drops such a step"},
+    {"edge": ["*", "launch", "running"], "why": "launch accepts a phase no hint names it from once every live session is idle with its work filed: a report not recorded yet (running), a verdict not closed (verifying)"},
+    {"edge": ["*", "verify", "verifying"], "why": "verify and close take the attempt's newest PASS row whatever the phase: before record saw it (running), or after a pause (stopped)"},
+    {"edge": ["*", "close_*", "*"], "why": "as verify; also close --verdict on a report no verifier saw (reported: HIGH_RISK = FALSE, not in the check configs); close_failed from verdict_failed keeps the phase"}
+  ],
+  "model": []
+}

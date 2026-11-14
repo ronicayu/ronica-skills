@@ -772,12 +772,14 @@ OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing clos
 #   abandon          abandon drops the task
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
+# model/phase-edges.json holds the edges of model/Lifecycle.tla; test_run.py checks that this table has the same ones,
+# apart from model/phase-edges-exclusions.json.
 TRANSITIONS: dict[tuple[str | None, str], str] = {
     **{(p, "launch"): "running" for p in OPEN + ("abandoned",)},
     **{(p, "adopt"): "reported" for p in OPEN},
-    **{(p, "worker_reported"): "reported" for p in (None, "running")},  # record has moved the phase to the rows
+    ("running", "worker_reported"): "reported",  # settle_phase moved the phase to the rows, which have no task row
     **{(p, "stopped"): "stopped" for p in OPEN},
-    **{(p, "died"): "stopped" for p in (None, "running")},
+    ("running", "died"): "stopped",  # as worker_reported
     **{(p, "verify"): "verifying" for p in OPEN},
     **{(p, "close_failed"): "verdict_failed" for p in OPEN},
     **{(p, "close_waits"): "awaiting_merge" for p in OPEN},
@@ -785,7 +787,17 @@ TRANSITIONS: dict[tuple[str | None, str], str] = {
     **{(p, "merged"): "merged" for p in (None, "awaiting_merge", "merged")},
     **{(p, "abandon"): "abandoned" for p in OPEN + ("awaiting_merge", "abandoned")},
     **{(None, f"seen_{p}"): p for p in PHASES},
-    **{(a, f"seen_{b}"): b for a in FLIGHT for b in FLIGHT if a != b},
+    # The rows move on without a phase write by a session's own row: the worker's report (also one filed after its stop),
+    # a verify row filed with no run.py verify, or the DIED of a resume that failed (file_died, before any task row); and
+    # by a hand edit of the attempt meta, which leaves a stopped task with no row of its new attempt. Rows are never
+    # removed, and every command that files a Manager row or starts an attempt writes the phase itself.
+    ("running", "seen_reported"): "reported",
+    ("running", "seen_verifying"): "verifying",
+    ("running", "seen_stopped"): "stopped",
+    ("stopped", "seen_running"): "running",
+    ("stopped", "seen_reported"): "reported",
+    ("stopped", "seen_verifying"): "verifying",
+    ("reported", "seen_verifying"): "verifying",
     ("awaiting_merge", "seen_merged"): "merged",
 }
 
