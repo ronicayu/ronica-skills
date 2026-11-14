@@ -65,7 +65,9 @@ every report, and on every wake (step 6).
    - `unmerged` and `waits`: say plainly which branch the operator should
      merge and which tasks wait on it. A task that waits for its merge stays in progress (`phase=awaiting_merge`)
      until the merge is recorded, and the tasks that depend on it are not ready until then. Add no title prefix or
-     meta of your own to mark it: `status` lists it under "Closed, awaiting merge".
+     meta of your own to mark it: `status` lists it under "Closed, awaiting merge", and `run.py` keeps its Taskgraph
+     gate `merge` (the branch, or the request and its URL), which `tg ls` shows as `(waiting: ...)`. Do not set or clear
+     that gate by hand.
    - `phase-mismatch`: the task's `phase` meta and its other fields disagree, and `record` leaves the task alone.
      Read the task (`tg show <id>`, its results, the branch or request), then set the right phase with
      `tg edit <id> --meta phase=<phase>`; ask the operator when the state is not clear.

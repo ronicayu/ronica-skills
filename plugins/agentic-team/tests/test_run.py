@@ -10011,6 +10011,168 @@ class PhaseTest(Base):
         self.assertEqual((meta["merged_at"], meta["merged_by"]), ("2026-11-13 10:00 UTC", "manager"))
         self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
 
+    # the merge gate (#100)
+    def gate(self, task):
+        """The merge gate as (label, ref), or None."""
+        found = (self.meta(task).get("gates") or {}).get("merge")
+        return (found["label"], found["ref"]) if found else None
+
+    def request_url(self, number=1):
+        return (f"https://github.com/o/r/pull/{number}" if self.host == "github"
+                else f"https://gitlab.example.com/g/p/-/merge_requests/{number}")
+
+    @both_hosts
+    def test_gate_close_in_pr_mode_sets_the_request_gate(self):
+        task, head, _ = self.closed_pr()
+        self.assertEqual(self.gate(task), (self.label(), self.request_url()))
+        self.assertEqual([t["id"] for t in self.tg("ls", "--gated")], [task])
+
+    def test_gate_local_wait_names_the_branch(self):
+        task, wt, head = self.closed_local()
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))
+
+    def test_gate_publish_after_a_failed_one_updates_the_same_gate(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN", extra={"pr create": {"stdout": "", "stderr": "HTTP 502\n", "exit": 1}})
+        self.assertNotEqual(self.run_cmd("close", str(task), "--verdict", "test-verified", "--ran", "make test").returncode, 0)
+        self.assert_awaiting(task)
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))  # no request yet
+        since = self.meta(task)["gates"]["merge"]["since"]
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.one(self.events("close", str(task)), "published")
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.assertEqual((list(self.meta(task)["gates"]), self.meta(task)["gates"]["merge"]["since"]), (["merge"], since))
+
+    def test_gate_cleared_on_every_merge_path(self):
+        def host_merged():
+            task, head, _ = self.closed_pr()
+            self.assertIsNotNone(self.gate(task))
+            self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+            self.one(self.events("record"), "merged")
+            return task
+
+        def manager_merges_the_request():
+            task, head, _ = self.closed_pr()
+            self.assertIsNotNone(self.gate(task))
+            self.orders("MERGE: verified branches into main\n")
+            self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+            self.one(self.events("record"), "merged")
+            return task
+
+        def manager_merges_the_branch():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.orders("MERGE: verified branches into main\n")
+            self.one(self.events("close", str(task)), "merged")
+            return task
+
+        def record_finds_the_commit_in_head():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+            self.one(self.events("record"), "merged")
+            return task
+
+        def merged_command():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.one(self.events("merged", str(task)), "merged")
+            return task
+
+        def no_change():
+            base = self.git("rev-parse", "HEAD")
+            task = self.running_task(base=json.dumps(base))
+            self.pass_report(task, head=base)
+            self.agents(self.finished("task-1"))
+            self.tg("gate", str(task), "merge", "--label", "merge of worktree-task-1")  # as a close that stopped after the gate
+            self.one(self.events("close", str(task), "--verdict", "test-verified"), "no-change")
+            return task
+
+        for path in (host_merged, manager_merges_the_request, manager_merges_the_branch, record_finds_the_commit_in_head,
+                     merged_command, no_change):
+            with self.subTest(path.__name__):
+                self.fresh()
+                task = path()
+                self.assertEqual((self.status_of(task), self.meta(task)["phase"], self.gate(task)), ("done", "merged", None))
+                self.assertEqual([t["id"] for t in self.tg("ls", "--gated")], [])
+
+    def test_gate_cleared_by_abandon_of_a_waiting_task(self):
+        for close in (self.closed_local, self.closed_pr):
+            with self.subTest(close.__name__):
+                self.fresh()
+                task = close()[0]
+                self.assertIsNotNone(self.gate(task))
+                self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+                self.assertEqual((self.meta(task)["phase"], self.gate(task)), ("abandoned", None))
+
+    def test_gate_crash_between_clear_and_done_heals(self):
+        for gated in (True, False):  # the command stopped before the clear, or between the clear and `tg done`
+            with self.subTest(gated=gated):
+                self.fresh()
+                task = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A,
+                                     phase="merged", merged_at='"2026-11-14 10:00 UTC"', merged_by="manager")
+                if gated:
+                    self.tg("gate", str(task), "merge", "--label", "PR #1", "--ref", "https://github.com/o/r/pull/1")
+                events = [e for e in self.events("record") if e["task"] == task]
+                self.assertEqual([e["event"] for e in events], ["merged"])
+                self.assert_merged(task, "manager")
+                self.assertIsNone(self.gate(task))
+
+    def test_gate_backfill_of_a_gateless_waiting_task_happens_once(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")  # as 0.18.0 or a close before the gate left it
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], ["unmerged"])
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))
+        node = self.tg("show", str(task))
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], ["unmerged"])
+        self.assertEqual(self.tg("show", str(task))["updated_at"], node["updated_at"])  # the second record writes nothing
+        self.assertEqual(self.meta(task)["gates"], node["meta"]["gates"])
+
+    def test_gate_backfill_of_a_request_and_of_a_0_18_0_task(self):
+        task, head, _ = self.closed_pr()
+        self.tg("gate", str(task), "merge", "--clear")
+        self.one(self.events("record"), "pr-pending")
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.fresh()
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        old = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.tg("done", str(old))  # closed by 0.18.0: done, not merged
+        self.one(self.events("record"), "unmerged")
+        self.assertEqual(self.gate(old), ("merge of worktree-task-1", None))
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        self.one(self.events("record"), "merged")
+        self.assert_merged(old, "operator")
+        self.assertIsNone(self.gate(old))
+
+    @both_hosts
+    def test_gate_the_host_closes_the_issue_before_record_sees_the_merge(self):
+        # On the taskgraph GitHub backend a request that says "Closes #N" closes the task's issue at the merge, so tg
+        # reads the task as done before run.py records the merge.
+        task, head, later = self.closed_pr(later=True)
+        self.assertEqual(self.gate(task), (self.label(), self.request_url()))
+        self.tg("done", str(task))
+        done_at = self.tg("show", str(task))["done_at"]
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        events = [e["event"] for e in self.events("record") if e["task"] == task]
+        self.assertEqual([e for e in events if e != "removed"], ["merged"])  # "removed": the cleanup of its worktree
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)  # done once
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task and e["event"] != "removed"], [])
+
+    def test_gate_done_recorded_before_the_host_merges(self):
+        task, head, _ = self.closed_pr()
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.one(self.events("merged", str(task)), "merged")  # the operator merged by hand and said so
+        done_at = self.tg("show", str(task))["done_at"]
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task and e["event"] != "removed"], [])
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
+
 
 if __name__ == "__main__":
     unittest.main()

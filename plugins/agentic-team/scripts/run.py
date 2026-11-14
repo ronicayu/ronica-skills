@@ -3659,6 +3659,12 @@ def settle_phase(run, snap, task):
     return False
 
 
+def closed_branch(snap, task):
+    """The branch of a closed task: the Branch: line of its worker's result, else the task branch."""
+    worker = latest_worker(snap.rows(task["id"]), wanted_attempt(task) or 1)
+    return (tail_or_none(BRANCH_LINE.search(worker["body"])) if worker else None) or task_branch(task["id"])
+
+
 def record_closed(run, snap, task):
     """A task closed by run.py: done, or in progress while it waits for its merge."""
     tid, meta = task["id"], task.get("meta") or {}
@@ -3671,9 +3677,14 @@ def record_closed(run, snap, task):
         cleanup(run, task)
     elif unmerged(task) and run.pr_mode:
         if not meta.get("pr"):
+            if not merge_gate(task):  # closed before 0.19.0 had the gate, or a close that stopped before it
+                branch_gate(run, task, closed_branch(snap, task))
             run.emit("unpublished", tid, None, None, f"closed at {str(meta['verdict_ref'])[:7]}, not pushed", f"run.py close {tid}")
         else:
-            pr_status(run, snap, task, run.host().pr(int(meta["pr"])))
+            p = run.host().pr(int(meta["pr"]))
+            pr_status(run, snap, task, p)
+            if unmerged(task):  # the request of a gate set earlier, or none yet: write it once
+                request_gate(run, task, p.number, p.url)
     elif unmerged(task):
         sha = str(meta["verdict_ref"])
         if merged_into(run, task, sha):
@@ -3681,6 +3692,8 @@ def record_closed(run, snap, task):
             run.emit("merged", tid, None, None, f"{sha} is in HEAD; recorded merged_by=operator")
             cleanup(run, task)
         else:
+            if not merge_gate(task):
+                branch_gate(run, task, closed_branch(snap, task))
             waits = [b for b in task.get("blocks") or [] if b in snap.by_id and snap.by_id[b]["status"] != "done"]
             run.emit("unmerged", tid, None, None,
                      f"branch {task_branch(tid)} at {sha} is ready to merge; blocks {ids_text(waits)}")
@@ -4555,8 +4568,11 @@ def publish(run, task, branch, head, catch_up=False):
         run.set_meta(task, pr=number, pr_branch=pr_branch)
         run.emit("published", tid, attempt, None, f"{host.label(number)} {request.url}; head {head[:7]} on "
                  f"{remote}/{pr_branch}, base {target}")
+        request_gate(run, task, number, request.url)
     if catch_up and not pushed_now:  # right after a push the host may still show the old head
         p = host.pr(int(number))
+        if p.state != "MERGED":
+            request_gate(run, task, number, p.url)
         if p.state == "OPEN" and p.head != meta["pushed"] and meta.get("host_rebase") == meta["pushed"]:
             take_host_head(run, task, branch, p.head, p)  # a host rebase that finished after the last close
         elif p.state == "OPEN" and p.merge_state == "BEHIND" and p.head == meta["pushed"]:
@@ -4566,6 +4582,8 @@ def publish(run, task, branch, head, catch_up=False):
                 rebase_branch(run, task, branch, head, p)
         else:
             pr_status(run, None, task, p)
+    else:
+        request_gate(run, task, number)
     return True
 
 
@@ -4966,6 +4984,70 @@ def close_no_change(run, task, attempt, ref, base):
     cleanup(run, task)
 
 
+# The merge gate: a Taskgraph gate (tg gate, Taskgraph 1.19.0) on a task that waits for its merge. It says what the task
+# waits for: the request (label and URL), or the merge of a branch.
+MERGE_GATE = "merge"
+
+
+def merge_gate(task):
+    gates = (task.get("meta") or {}).get("gates")
+    gate = gates.get(MERGE_GATE) if isinstance(gates, dict) else None
+    return gate if isinstance(gate, dict) else None
+
+
+def tg_gate(run, task, *args):
+    """`tg gate <id> merge <args>`; the task dict takes the gates Taskgraph holds afterwards. A Taskgraph without the
+    gate command gets one warn event per command, and the lifecycle goes on without the gate."""
+    try:
+        node = run.tg("gate", str(task["id"]), MERGE_GATE, *args)
+    except Refused as exc:
+        if not re.search(r"invalid choice: '?gate\b", str(exc)):
+            raise
+        if "tg gate" not in run.warned:
+            run.warned.add("tg gate")
+            run.emit("warn", task["id"], None, None, "this Taskgraph has no tg gate; the merge gate is not shown",
+                     "update the taskgraph plugin to 1.19.0 or later")
+        return
+    meta, gates = task.setdefault("meta", {}), ((node or {}).get("meta") or {}).get("gates")
+    if gates:
+        meta["gates"] = gates
+    else:
+        meta.pop("gates", None)
+
+
+def set_merge_gate(run, task, label, ref=None):
+    """Set the merge gate; nothing is written when it already has this label and ref."""
+    gate = merge_gate(task)
+    if gate and gate.get("label") == label and (gate.get("ref") or None) == (ref or None):
+        return
+    tg_gate(run, task, "--label", label, *(["--ref", ref] if ref else ["--no-ref"]))
+
+
+def branch_gate(run, task, branch):
+    """The merge gate of a task whose change waits as a branch: local mode, or pr mode before the request opens."""
+    set_merge_gate(run, task, f"merge of {branch}")
+
+
+def request_gate(run, task, number, url=None):
+    """The merge gate of a task that waits for its request: `PR #<n>` or `MR !<n>`, and the request URL. Only a closed
+    task waits for its merge: a request opened by a CI verify gets no gate. Without `url` the host is asked for it,
+    unless the gate already holds this request with a URL."""
+    if task_phase(task) != "awaiting_merge":
+        return
+    host = run.host()
+    label, gate = host.label(number), merge_gate(task)
+    if not url:
+        if gate and gate.get("label") == label and gate.get("ref"):
+            return
+        url = host.pr(int(number)).url
+    set_merge_gate(run, task, label, url)
+
+
+def clear_merge_gate(run, task):
+    """Clear the merge gate. `tg gate --clear` exits 0 when it is not set, so a repeat after a crash is fine."""
+    tg_gate(run, task, "--clear")
+
+
 def mark_merged(run, task, by, **extra):
     """Record that the task's change is in its target: merged_at, merged_by and phase merged in one write, then `tg done`.
     Every merge record goes through here. A merge recorded earlier keeps its merged_at and merged_by."""
@@ -4978,10 +5060,11 @@ def mark_merged(run, task, by, **extra):
 
 
 def finish_merged(run, task):
-    """phase merged, then `tg done`. A command that stops between the two leaves phase merged on a task in progress, and
-    record calls this again."""
+    """phase merged, clear the merge gate, then `tg done`. A command that stops between them leaves phase merged on a task
+    in progress, and record calls this again. The task may be done already: a code host can close its issue."""
     if not (task.get("meta") or {}).get("abandoned"):
         set_phase(run, task, "merged")
+    clear_merge_gate(run, task)
     if task["status"] != "done":
         run.tg("done", str(task["id"]))
         task["status"] = "done"
@@ -5064,6 +5147,8 @@ def cmd_close(run, args):
     elif base:
         close_no_change(run, task, attempt, ref, base)
     elif run.pr_mode:
+        if not task["meta"].get("pr"):
+            branch_gate(run, task, branch)  # until publish opens the request
         if publish(run, task, branch, ref, catch_up=True):
             post_verdict(run, task, attempt, level, str(task["meta"].get("verdict_ref") or ref), kind)
     else:
@@ -5073,19 +5158,19 @@ def cmd_close(run, args):
 
 def merge_branch(run, task, branch):
     tid = task["id"]
-    orders = run.orders()
+    orders, target, hint = run.orders(), "", None
     if orders.stop:
-        run.emit("ready-to-merge", tid, None, None, f"branch {branch}; not merged during a pause")
-        return
-    if not orders.merge:
-        run.emit("ready-to-merge", tid, None, None, f"branch {branch}", f"merge it, then run.py merged {tid} --by operator")
-        return
-    if run.git("status", "--porcelain", check=False).stdout.strip():
-        run.emit("ready-to-merge", tid, None, None, f"branch {branch}; main checkout is not clean")
-        return
-    target = run.git("branch", "--show-current").stdout.strip()
-    if not target:
-        run.emit("ready-to-merge", tid, None, None, f"branch {branch}; main checkout is detached")
+        why = "; not merged during a pause"
+    elif not orders.merge:
+        why, hint = "", f"merge it, then run.py merged {tid} --by operator"
+    elif run.git("status", "--porcelain", check=False).stdout.strip():
+        why = "; main checkout is not clean"
+    else:
+        target = run.git("branch", "--show-current").stdout.strip()
+        why = "; main checkout is detached"
+    if not target:  # the merge waits
+        branch_gate(run, task, branch)
+        run.emit("ready-to-merge", tid, None, None, f"branch {branch}{why}", hint)
         return
     out = run.git("merge", "--no-ff", "-m", f"Merge {branch} (task #{tid})", branch, check=False)
     if out.returncode == 0:
@@ -5095,6 +5180,7 @@ def merge_branch(run, task, branch):
         cleanup(run, task)
         return
     run.git("merge", "--abort", check=False)
+    branch_gate(run, task, branch)
     blocks = [str(b["id"]) for b in task.get("blocks") or [] if b["derived_status"] != "done"]
     run.emit("conflict", tid, None, None, f"merging {branch} into {target} conflicted; merge aborted",
              f'tg add "Resolve merge of {branch} into {target}" --type decision --meta decider=operator'
@@ -5185,6 +5271,8 @@ def cmd_abandon(run, args):
             # the attempt as stop does, so that `launch --attempt` is not refused for an ask nobody can answer
             run.add_result(tid, "task", attempt, "manager", "ABANDONED", f"Worktree: {task_worktree(run, tid)}\nAbandoned: {args.mode}")
         carry_thread(run, task, attempt)
+    if closed or merge_gate(task):  # first: a crash before the abandoned write leaves a waiting task, and record gates it again
+        clear_merge_gate(run, task)
     run.edit_meta(tid, abandoned=args.mode, phase="abandoned")
     drop_mailbox(run, task, history=False)
     names = {s.wtname for s in own_sessions(run, tid)}

@@ -208,7 +208,11 @@ naming both branches. Every merge record goes through one step: it writes
 when `close` merges, when `record` finds the branch in `HEAD` or the request
 merged, and when the operator says a branch is merged, by any method including
 squash or rebase, with `run.py merged <id>`. If a command stops between the two
-writes, the next `record` finishes it. Two closes are done at once, with no
+writes, the next `record` finishes it. While the task waits, it carries a
+Taskgraph gate `merge` that says what it waits for: `merge of <branch>` in
+`local` mode, the request (`PR #<n>` or `MR !<n>`, with its URL) in `pr` mode.
+`tg ls` shows it as `(waiting: ...)` and `tg ls --gated` lists those tasks. The
+merge record clears the gate before `tg done`, and `abandon` clears it too. Two closes are done at once, with no
 merge: output that is not a git commit, and a branch with no commit beyond its
 base (`merged_by=no-change`). In `pr` mode `close` pushes the branch and opens a
 request instead (next section). A task that depends on one that waits for its
@@ -346,7 +350,12 @@ the operator's standing permission for `run.py` to push task branches to
    With `[merge] draft = true` the request opens as a draft (GitHub
    `gh pr create --draft`, GitLab a `Draft: ` title), so it starts no full
    CI run until someone marks it ready. `record` then reports `pr-draft`
-   until it is ready. The default is `false`.
+   until it is ready. The default is `false`. The task's `merge` gate says
+   `merge of <branch>` until the request exists, then `PR #<n>` (GitHub) or
+   `MR !<n>` (GitLab) with the request URL as its ref; a later publish or
+   `record` updates the same gate when the request changes. On the Taskgraph
+   GitHub backend the issue body then shows `Waiting for: [PR #<n>](<url>)`, and
+   GitHub lists the issue on the pull request. A GitLab URL is a plain link.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
    `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
    `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
@@ -361,7 +370,12 @@ the operator's standing permission for `run.py` to push task branches to
    request state (`merged_by=operator`), squash and rebase merges included.
    `run.py merged <id> --by operator` is for a merge the host cannot show. The
    task is done from that merge on; until then it stays in progress with
-   `phase=awaiting_merge`. A request closed without a merge is reported at every
+   `phase=awaiting_merge`. On the Taskgraph GitHub backend the host may close
+   the task's issue at the merge first (a request or commit that says
+   `Closes #<n>`; `run.py`'s own request text does not). Taskgraph then reads
+   the task as done; `record` still records the merge, clears the gate and
+   does not run `tg done` again. The other order, `tg done` before the host
+   closes the issue, is a no-op on GitHub. A request closed without a merge is reported at every
    drain (`pr-closed`), and the task stays in progress: reopen the request, or
    `run.py abandon <id> <mode>` (the request stays open on the host, and
    `record` no longer follows it). To redo the task, abandon it, then
@@ -1050,7 +1064,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 30 keys:
+skill. Metadata holds everything else, 31 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1074,6 +1088,7 @@ skill. Metadata holds everything else, 30 keys:
 | `caught_up_from` | `close` | The local branch's head when the host first rebased the request. The local branch and worktree stay there. `close` does not push it back over the host's head, and cleanup counts it as merged. |
 | `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged, in the same write as `phase=merged`, before `tg done`. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. |
 | `phase` | `launch`, `adopt`, `verify`, `record`, `close`, `stop`, `merged`, `abandon` | Where the task is: `running` (a worker runs), `stopped` (the attempt ended with no report: `STOPPED`, `DIED`, or the Manager's `BLOCKED`), `reported` (the worker filed its result), `verifying` (a verifier or a CI run checks it), `verdict_failed` (a verdict that did not close it), `awaiting_merge` (closed, in progress until its change is merged), `merged` (merged, or closed with nothing to merge; done), `abandoned`. `record` writes it for a task that has none, from `abandoned`, `merged_at`, the status, `verdict`, `verdict_ref` and the result rows, and keeps the first four in step with the result rows. When the stored phase and those fields disagree on anything else, `record` prints `phase-mismatch` and leaves the task alone until you fix the meta. |
+| `gates` (key `merge`) | `close`, `record`, `merged`, `abandon` | Taskgraph's completion gates (`tg gate`, Taskgraph 1.19.0). `run.py` owns the gate `merge` and sets it while the task waits for its merge: label `merge of <branch>` with no ref (local mode, or pr mode before the request opens), else `PR #<n>` or `MR !<n>` with the request URL as ref. `run.py` clears it, with `tg gate <id> merge --clear`, in the merge record before `tg done`, and in `abandon`. Other gates on the task are not `run.py`'s. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
@@ -1095,6 +1110,7 @@ Version 0.19.0 (issue #97) marks a task done only when its change is merged. No 
 - **Done means merged.** A passing `close` that merges at once (a local merge under a `MERGE:` line, a branch with no commit beyond its base, output outside git) still ends with the task done. A close that opens a request, or a local merge that waits, leaves the task in progress with `phase=awaiting_merge`. `tg ready` no longer lists the tasks that depend on it, and the `tg done` comes from the merge record: `record` (the request merged, or the commit in `HEAD`), `close` (a merge), or `run.py merged`. `done_at` is the merge time, so "Done since last report" and the mean attempts count a task when it merges. On the Taskgraph GitHub backend the issue now closes at the merge, not when the request opens.
 - **Tasks closed by 0.18.0.** A task that 0.18.0 closed and that is not merged yet (done, a commit `verdict_ref`, no `merged_at`) reads as `awaiting_merge`. `record` writes its `phase`, follows its request or its branch as before, and records the merge; it stays done in Taskgraph meanwhile. Every task with no `phase` gets one at the next `record`.
 - **The Manager's workaround is gone.** The workaround from #97, a "待合并 #PR：" title prefix and an `awaiting_merge=<PR>` meta on a done task with an open request, is no longer needed: such a task is now in progress with `phase=awaiting_merge`, and `status` lists it under "Closed, awaiting merge". Remove the prefix and the `awaiting_merge` meta key from the tasks that still carry them (`run.py` reads neither).
+- **The merge gate.** A task that waits for its merge carries the Taskgraph gate `merge` (see [Task metadata](#task-metadata)). This needs Taskgraph 1.19.0 (`tg gate`); with an older Taskgraph `run.py` prints one `warn` line per command and goes on without the gate. A task that waits and has no gate (closed by 0.18.0, or before this gate existed) gets it at the next `record`, once: a later `record` writes nothing when the gate already says the same.
 - **`status`.** The "Done, branch not merged" table is now "Closed, awaiting merge"; its `--json` key is `awaiting_merge` (was `unmerged`).
 - **Refusals.** `launch`, `adopt`, `verify`, `answer`, `steer` and `stop` refuse a task that waits for its merge. `abandon` accepts it and says what happens to its branch or request.
 - **`phase-mismatch`.** `record` prints it when a task's stored `phase` disagrees with its fields on whether it is closed, merged or abandoned, and does nothing else for that task. Fix the meta with `tg edit <id> --meta phase=<phase>`.
