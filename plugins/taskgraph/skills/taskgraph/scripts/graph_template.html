@@ -85,6 +85,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #toolbar .menuWrap { position: relative; }
 @media (max-width: 640px) {
   #toolbar #optsWrap, #toolbar #optsWrap.open { display: contents; }
+  #toolbar #optsWrap.open #opts { display: block; }
   #toolbar #optsBtn { display: none; }
   #toolbar #optsWrap.open #opts { display: block; }
 }
@@ -155,7 +156,8 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
   #toolbar #projectBtn > span[aria-hidden] { flex: none; }
   #toolbar #projectLive { flex: none; }
   #toolbar #goalWrap, #toolbar #optsWrap, #toolbar .seg, #toolbar #goalInfo { display: none; }
-  #toolbar #optsWrap.open { display: block; position: static; }
+  #toolbar #optsWrap.open { display: block; position: fixed; inset: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+  #toolbar #optsWrap.open #opts { display: block; pointer-events: auto; }
   #toolbar #stamp { display: none; }
   #toolbar #projectLive .dot { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--live); }
   #toolbar #projectLive .dot.off { background: #ef4444; }
@@ -3005,9 +3007,10 @@ function setMenu(id, open) {
       control.dataset.popoverRole = control.getAttribute('role') || '';
       control.setAttribute('role', 'dialog');
       control.setAttribute('aria-label', MENU_NAMES[id]);
+      control.tabIndex = -1;
     }
     if (modal && !wasModal && !$(id).contains(document.activeElement)) {
-      (control.querySelector('button:not(:disabled), input:not(:disabled)') || $(id).querySelector('[aria-expanded]')).focus();
+      (control.querySelector('button:not(:disabled), input:not(:disabled)') || control).focus();
     }
   }
   MENUS.filter(m => !menuOpen(m)).forEach(m => {
@@ -3025,7 +3028,7 @@ function closeMenus() {
   if (!open) return false;
   const back = $(open).querySelector('[aria-expanded]');
   setMenu(null, false);
-  if (back && back !== document.activeElement) back.focus();
+  if (back && back !== document.activeElement) (back.offsetParent ? back : $('moreBtn')).focus();
   return true;
 }
 [['projectBtn', 'projectWrap'], ['viewBtn', 'viewWrap'], ['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
@@ -3039,7 +3042,7 @@ document.addEventListener('keydown', e => {
   if (e.key !== 'Tab') return;
   const open = MENUS.find(menuOpen);
   if (!open || !phoneChrome()) return;
-  const focus = [...$(open).querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]')].filter(x => x.offsetParent !== null);
+  const focus = [...$(open).querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"], .menu[role="dialog"]')].filter(x => x.offsetParent !== null);
   if (!focus.length) return;
   const first = focus[0], last = focus[focus.length - 1];
   if (!focus.includes(document.activeElement)) { e.preventDefault(); first.focus(); }
@@ -3051,7 +3054,7 @@ $('goalMore').onclick = () => {
   renderGoalList(false);
   goalBox.focus();
 };
-$('optsMore').onclick = () => { setMenu('optsWrap', true); $('opts').querySelector('input:not(:disabled)')?.focus(); };
+$('optsMore').onclick = () => { setMenu('optsWrap', true); ($('opts').querySelector('input:not(:disabled)') || $('opts')).focus(); };
 $('legendMore').onclick = () => {
   setLegend($('legend').classList.contains('closed'));
   setMenu('moreWrap', false);
@@ -3059,7 +3062,7 @@ $('legendMore').onclick = () => {
 };
 // The path, not the target: a click that re-renders a popover leaves its target detached.
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList && n.classList.contains('menuWrap'))) closeMenus(); });
-$('more').addEventListener('click', e => { if (e.target.closest('.item') && !e.target.closest('#goalMore, #optsMore, #legendMore')) setMenu('moreWrap', false); });
+$('more').addEventListener('click', e => { if (e.target.closest('.item:not(#goalMore):not(#optsMore):not(#legendMore)')) setMenu('moreWrap', false); });
 
 // View options: radios for lanes and dependencies; the ones that do nothing in this view say so.
 const LANE_NAMES = { lane: 'Lane', owner: 'Owner', tag: 'Tag', project: 'Project' };
