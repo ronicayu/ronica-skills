@@ -228,6 +228,7 @@ export function labelGraph(
     pathSteps,
     together,
     notes,
+    actionOf: graph.steps.map((t) => t.action),
   };
 }
 

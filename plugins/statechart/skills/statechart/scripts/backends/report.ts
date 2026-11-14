@@ -14,6 +14,7 @@ import {
   type Story,
   type Verdict,
 } from "../ir.ts";
+import { arrowRows, labelWarnings } from "../passes/label-warnings.ts";
 
 const stepsOf = (story: Story) => {
   const path: { step?: string; state: string }[] = [];
@@ -35,6 +36,8 @@ const forever = (loop: { state: string }[], stutters: boolean | undefined) => {
     ? `The run stays in ${runs[0]} forever.`
     : `The run loops through ${list(runs)} forever.`;
 };
+
+const cell = (s: string) => s.replaceAll("|", "\\|").replace(/\s+/g, " ");
 
 const fenced = (text: string) => ["```", text, "```"].join("\n");
 
@@ -103,6 +106,9 @@ export function report(
     out.push(
       `${excluded === 1 ? "1 step that the constraints exclude ends" : `${excluded} steps that the constraints exclude each end`} a rule's path${includes(excluded)}. TLC checks the rules after such a step, but it does not take the step.`,
     );
+  const warnings = chart ? labelWarnings(chart) : [];
+  if (chart)
+    out.push(`The chart has ${warnings.length} label warning${warnings.length === 1 ? "" : "s"}.`);
   if (chart?.inside)
     out.push(`The chart does not draw ${chart.inside} steps that stay in one chart state.`);
   if (chart?.quiet)
@@ -173,5 +179,18 @@ export function report(
       out.push(
         `TLC checked ${p.rule.name} only in the initial states, because it has no [], <>, or ~>. List it as an INVARIANT to check every state.`,
       );
+  if (chart) {
+    out.push("", "## Label warnings");
+    if (warnings.length) for (const w of warnings) out.push(`- ${w.text}`);
+    else out.push("No label has a warning.");
+    out.push("", "## Arrows");
+    if (chart.regions.some((r) => r.steps.length)) {
+      out.push("| Label | From | To | TLA+ actions | Steps |", "| --- | --- | --- | --- | --- |");
+      for (const a of arrowRows(chart))
+        out.push(
+          `| ${[a.label, a.from, a.to, a.actions].map(cell).join(" | ")} | ${a.steps} |`,
+        );
+    } else out.push("The chart has no arrows.");
+  }
   return out.join("\n");
 }
