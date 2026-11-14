@@ -63,6 +63,13 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
   worktree. Leave what you put there in place: `run` removes the folder with the worktree after the
   merge.
+  - A second copy of the tree (a base export, a mutation copy) goes in
+    `.agentic-team-scratch/<name>/`. Give tools its absolute path (`git -C`, `uv run --project`,
+    `pnpm -C`) and do not `cd` into it, so later commands still run in the worktree.
+  - For a run with a cold cache, point the tool at a new empty folder in
+    `.agentic-team-scratch/` (for example `--cache-location`, `VITEST_CACHE_DIR`,
+    `XDG_CACHE_HOME`). Do not delete a cache or scratch folder yourself, except a cache folder
+    in your own worktree that your own run made. Never delete a shared cache or anything else.
 - **One command per step.** Do not change directory: give the tool the path (`git -C <dir>`,
   `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
   worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
@@ -70,6 +77,9 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   Bash call: no `&&`, `||` or `;` chains, and never a deletion together with another command. A
   pipe into a filter (`| tail`, `| grep`) is fine. A permission prompt
   stalls a session that nobody watches for hours.
+- **No wait loops.** Do not use `sleep`, countdowns or polling loops in Bash. Run a long
+  command in the foreground with a timeout, or start it in the background and wait for its
+  completion notification.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside

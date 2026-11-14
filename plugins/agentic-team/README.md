@@ -1063,6 +1063,29 @@ disposable list too. No session deletes what it put there, because a deletion
 can stall an unattended session on a permission prompt; `run.py` removes the
 folder with the worktree after the merge.
 
+### Auto-mode allow rules for workers
+
+A worker uses scratch folders, cold-cache runs and temporary directories. In auto
+mode, a prompt on these steps stalls a session nobody watches. Add rules like these
+to `autoMode.allow` in the Claude Code settings of the operator (`~/.claude/settings.json`),
+and change the paths to your own:
+
+```json
+{
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Scratch and cache housekeeping in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating, copying into and deleting directories under that worktree's .agentic-team-scratch/, and the worktree's own build or test caches (node_modules/.cache, .pytest_cache, .ruff_cache, .vitest cache, test-results), is routine and allowed.",
+      "Temporary directories for worker tasks: creating directories under /tmp, $TMPDIR or the system temp folder, writing tree copies there (git archive, cp -R of the repo) and deleting those directories afterwards is routine and allowed."
+    ]
+  }
+}
+```
+
+A rule is free text that the auto-mode classifier reads. Keep `"$defaults"` first so the
+built-in rules stay. A rule must not allow deleting a shared cache or a path outside
+the worktrees and temporary directories.
+
 ## Results
 
 Worker reports live in the Taskgraph result log. A report file only carries the
@@ -1135,6 +1158,11 @@ then id, and the Manager launches them in that order.
 ### Upgrading from 0.19.0
 
 Version 0.20.0 (issue #104) makes the reports in a brief shorter. No migration.
+
+Version 0.20.0 (issue #106) also moves four generic rules into the plugin. No migration.
+
+- **Worker rules.** `agents/worker.md` now forbids wait loops (`sleep`, countdowns, polling) and sets the rules for scratch copies of the tree and for cold-cache runs. The `architect` role now requires a `stateDiagram-v2` and a transition table for each lifecycle, and its Review checks them. A project can remove its matching standing orders.
+- **Allow rules.** See "Auto-mode allow rules for workers". Add them to your settings if workers stop on a prompt for scratch folders, caches or temporary directories.
 
 - **Briefs get shorter.** The previous attempt, each upstream report and the worker report of a verify brief lose their `Ran:` section. An upstream report is a summary (`Status`, `Head`, `Branch`, `Files`, `Issues`, `Findings`, `Follow-ups`, `Deviations`). Each carried report is at most 3000 bytes and all of them 12000 bytes; a cut ends with the result id and a command. Decision notes are not cut.
 - **See a full report.** Run the command at the end of the cut report, `tg result ls <task id> --kind task --attempt <n>`; it prints every report of that attempt with its `Ran:` log. `tg result ls <task id>` lists them all.
