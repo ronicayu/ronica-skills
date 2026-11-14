@@ -10252,5 +10252,154 @@ class PhaseTest(Base):
         self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
 
 
+class TransitionTest(unittest.TestCase):
+    """#99: run.py changes the phase only through TRANSITIONS."""
+
+    def test_the_table_names_known_phases(self):
+        import run as runner
+        for (before, event), after in runner.TRANSITIONS.items():
+            self.assertIn(before, (None,) + runner.PHASES)
+            self.assertIn(after, runner.PHASES)
+            if event.startswith("seen_"):
+                self.assertEqual(event, f"seen_{after}")
+
+    def test_a_pair_not_in_the_table_raises(self):
+        import run as runner
+        with self.assertRaisesRegex(runner.TransitionError, "#7 has no transition for event launch from phase merged"):
+            runner.next_phase({"id": 7, "meta": {"phase": "merged"}}, "launch")
+        with self.assertRaisesRegex(runner.TransitionError, "event died from phase verdict_failed"):
+            runner.next_phase({"id": 7, "meta": {"phase": "verdict_failed"}}, "died")
+        with self.assertRaises(runner.TransitionError):
+            runner.next_phase({"id": 7, "meta": {}}, "no_such_event")
+
+    def test_no_phase_is_none(self):
+        import run as runner
+        self.assertEqual(runner.next_phase({"id": 7}, "launch"), "running")
+        self.assertEqual(runner.next_phase({"id": 7, "meta": {}}, "seen_awaiting_merge"), "awaiting_merge")  # backfill
+        self.assertEqual(runner.next_phase({"id": 7, "meta": {"phase": "odd"}}, "launch"), "running")
+        with self.assertRaises(runner.TransitionError):
+            runner.next_phase({"id": 7, "meta": {"phase": "odd"}}, "seen_odd")
+
+    def test_transition_writes_the_phase_with_its_meta_in_one_edit(self):
+        import run as runner
+        edits = []
+        fake = types.SimpleNamespace(set_meta=lambda task, **meta: (edits.append(meta), task["meta"].update(meta)))
+        task = {"id": 7, "meta": {"phase": "awaiting_merge"}}
+        runner.transition(fake, task, "merged", merged_at="t", merged_by="operator")
+        runner.transition(fake, task, "merged")  # the phase stays and there is no meta: nothing is written
+        self.assertEqual(edits, [{"merged_at": "t", "merged_by": "operator", "phase": "merged"}])
+        with self.assertRaises(runner.TransitionError):
+            runner.transition(fake, task, "launch")
+        self.assertEqual(len(edits), 1)
+
+    def test_every_phase_write_takes_its_value_from_the_table(self):
+        import ast
+        with open(RUN) as fh:
+            tree = ast.parse(fh.read())
+
+        def from_table(node):
+            return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "next_phase"
+
+        bad = []
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            names = set()  # the local names that hold a next_phase result
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    target, value = node.targets[0], node.value
+                    pairs = (zip(target.elts, value.elts) if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
+                             else [(target, value)])
+                    names |= {t.id for t, v in pairs if isinstance(t, ast.Name) and from_table(v)}
+            for node in ast.walk(fn):
+                values = []
+                if isinstance(node, ast.Call):
+                    values += [k.value for k in node.keywords if k.arg == "phase"]
+                    if isinstance(node.func, ast.Name) and node.func.id == "meta_arg" and \
+                            isinstance(node.args[0], ast.Constant) and node.args[0].value == "phase":
+                        values.append(node.args[1])
+                elif isinstance(node, ast.Dict):
+                    values += [v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == "phase"]
+                elif isinstance(node, ast.Assign):
+                    if any(isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and t.slice.value == "phase"
+                           for t in node.targets):
+                        values.append(node.value)
+                bad += [f"{fn.name}:{v.lineno}" for v in values
+                        if not (from_table(v) or isinstance(v, ast.Name) and v.id in names)]
+        self.assertEqual(bad, [])
+
+
+class LoggedTransitions:
+    """Runs run.py through a wrapper that logs each (phase, event, phase) that next_phase looks up, and checks at the end
+    of the test that each one is a row of TRANSITIONS. A pair the table lacks is logged with no phase after it."""
+
+    def setUp(self):
+        super().setUp()
+        folder = os.path.join(self.dir, "logged")
+        os.makedirs(folder)
+        self.transitions, self.logged_run = os.path.join(folder, "transitions.jsonl"), os.path.join(folder, "run.py")
+        with open(self.logged_run, "w") as fh:
+            fh.write(textwrap.dedent(f"""\
+                import json, sys
+                sys.path.insert(0, {os.path.dirname(RUN)!r})
+                import run
+                lookup = run.next_phase
+                def logged(task, event):
+                    stored = (task.get("meta") or {{}}).get("phase")
+                    step = [stored if stored in run.PHASES else None, event, None]
+                    try:
+                        step[2] = lookup(task, event)
+                        return step[2]
+                    finally:
+                        with open({self.transitions!r}, "a") as fh:
+                            fh.write(json.dumps(step) + "\\n")
+                run.next_phase = logged
+                run.main()
+                """))
+
+    def run_cmd(self, *args, pre=(), tg=TG, env=None, root=None):
+        cmd = [sys.executable, self.logged_run, "--root", root or self.root]
+        if tg:
+            cmd += ["--tg", tg]
+        return subprocess.run(cmd + list(pre) + list(args), capture_output=True, text=True,
+                              cwd=self.dir, env=env or self.env)
+
+    def tearDown(self):
+        import run as runner
+        steps = []
+        if os.path.isfile(self.transitions):
+            with open(self.transitions) as fh:
+                steps = [tuple(json.loads(line)) for line in fh]
+        super().tearDown()
+        self.assertEqual([s for s in steps if runner.TRANSITIONS.get((s[0], s[1])) != s[2] or s[2] is None], [])
+
+
+def logged(cls, *names):
+    """`cls` through LoggedTransitions, with only the tests `names`, or all of them when none is given."""
+    skip = {n: None for n in unittest.TestLoader().getTestCaseNames(cls) if names and n not in names}
+    return type(f"Logged{cls.__name__}", (LoggedTransitions, cls), {"__module__": __name__, **skip})
+
+
+LoggedPhaseTest = logged(PhaseTest)
+# The tests below send the (phase, event) pairs that PhaseTest does not.
+LoggedRunTest = logged(
+    RunTest, "test_105_an_old_ghost_worker_counts_as_ended", "test_78_a_stuck_session_gets_the_prompt_hint_not_a_model_change",
+    "test_36_stop_stops_the_live_session_of_a_shared_folder_only", "test_104_abandon_stops_a_live_verifier",
+    "test_101_verify_again_stops_an_idle_verifier", "test_62_repeating_a_close_files_one_manager_verdict",
+    "test_87_filed_earlier_reads_the_model_from_the_session_when_the_row_has_none",
+    "test_59_launch_repairs_an_open_task_with_a_live_session", "test_43_abandoned_tasks_are_skipped",
+    "test_34_finished_session_with_a_complete_report_is_salvaged",
+    "test_23_a_missing_worktree_and_branch_start_again_at_the_last_head",
+    "test_106_close_then_launch_after_a_verify_failed_verdict", "test_88_launch_and_verify_record_the_model_of_the_session",
+    "test_74_adopt_brings_a_branch_under_run_py", "test_101_status_shows_a_verifier_with_no_result",
+    "test_101_a_verifier_that_ended_is_salvaged_from_its_report_file",
+    "test_36_an_unrecorded_row_is_recorded_for_the_attempt_it_was_filed_for")
+LoggedRoleTest = logged(
+    RoleTest, "test_03_adopt_stores_the_role_and_close_still_finds_no_session",
+    "test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind",
+    "test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify")
+LoggedDeliveryTest = logged(
+    DeliveryTest, "test_b2_a_settled_ask_of_an_earlier_attempt_is_not_pasted_as_open",
+    "test_fix10_every_command_that_changes_a_task_waits_for_its_lock")
+
+
 if __name__ == "__main__":
     unittest.main()

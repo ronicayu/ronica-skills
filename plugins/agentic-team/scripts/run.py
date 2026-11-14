@@ -754,6 +754,61 @@ FLIGHT = ("running", "stopped", "reported", "verifying")
 SETTLED = ("verdict_failed", "awaiting_merge", "merged", "abandoned")
 PHASES = FLIGHT + SETTLED
 CLOSED = ("awaiting_merge", "merged")  # a passing close happened; the task waits for its merge, or has it
+OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing close settled; None is a task with no phase
+
+# The phase changes only through TRANSITIONS: (phase, event) -> phase. None is a task with no phase yet (not launched,
+# or from before 0.19.0); a stored value that is not a phase reads as None, as in task_phase. A command sends the event
+# that names what it did:
+#   launch           launch starts an attempt, or records the start an earlier launch left
+#   adopt            adopt files a branch done outside run.py as the attempt's result
+#   worker_reported  record files the result from the worker's report (salvage)
+#   stopped          stop, or record stopping a stuck session
+#   died             record files DIED
+#   verify           verify starts a verifier, or a CI verify pushes the branch
+#   close_failed     close records a verdict that does not close the task
+#   close_waits      close records a passing verdict on a commit: the task waits for its merge
+#   close_merged     close records a passing verdict on output outside git: nothing to merge
+#   merged           a merge is recorded (mark_merged), or a recorded one is finished (finish_merged)
+#   abandon          abandon drops the task
+# record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
+# backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
+TRANSITIONS: dict[tuple[str | None, str], str] = {
+    **{(p, "launch"): "running" for p in OPEN + ("abandoned",)},
+    **{(p, "adopt"): "reported" for p in OPEN},
+    **{(p, "worker_reported"): "reported" for p in (None, "running")},  # record has moved the phase to the rows
+    **{(p, "stopped"): "stopped" for p in OPEN},
+    **{(p, "died"): "stopped" for p in (None, "running")},
+    **{(p, "verify"): "verifying" for p in OPEN},
+    **{(p, "close_failed"): "verdict_failed" for p in OPEN},
+    **{(p, "close_waits"): "awaiting_merge" for p in OPEN},
+    **{(p, "close_merged"): "merged" for p in OPEN},
+    **{(p, "merged"): "merged" for p in (None, "awaiting_merge", "merged")},
+    **{(p, "abandon"): "abandoned" for p in OPEN + ("awaiting_merge", "abandoned")},
+    **{(None, f"seen_{p}"): p for p in PHASES},
+    **{(a, f"seen_{b}"): b for a in FLIGHT for b in FLIGHT if a != b},
+    ("awaiting_merge", "seen_merged"): "merged",
+}
+
+
+class TransitionError(RuntimeError):
+    """A command sent an event that the table has no row for in the task's phase: a bug in run.py."""
+
+
+def next_phase(task, event):
+    """The phase `event` moves the task to. Every phase that run.py writes comes from here."""
+    stored = (task.get("meta") or {}).get("phase")
+    key = (stored if stored in PHASES else None, event)
+    if key not in TRANSITIONS:
+        raise TransitionError(f"internal error: #{task['id']} has no transition for event {event} from phase {key[0]}")
+    return TRANSITIONS[key]
+
+
+def transition(run, task, event, **meta):
+    """Write the phase `event` moves the task to, with `meta` in the same edit, to Taskgraph and the task dict. Nothing
+    is written when the phase stays and there is no meta."""
+    phase = next_phase(task, event)
+    if meta or (task.get("meta") or {}).get("phase") != phase:
+        run.set_meta(task, **meta, phase=phase)
 
 
 def known_kind(task):
@@ -2089,6 +2144,7 @@ def cmd_launch(run, args):
     current = wanted_attempt(task) or 0
     if meta.get("abandoned") and not args.attempt:
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']}); pass --attempt {current + 1} to try again")
+    phase = next_phase(task, "launch")  # before anything starts
     given, given_target = resolve_base(run, args.base) if args.base else (None, None)
     retry = current >= 1  # the task has a worktree, or had one
     wt, branch = task_worktree(run, tid), task_branch(tid)
@@ -2108,7 +2164,7 @@ def cmd_launch(run, args):
                 sessions.append({"id": s.sid, "kind": "task", "attempt": 1, "name": s.name or s.wtname,
                                  "worktree": f"task-{tid}", **profile_field(s.profile)})
             run.tg("edit", str(tid), "--meta", meta_arg("session", s.name or s.wtname), meta_arg("attempt", s.attempt or 1),
-                   meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", "running"))
+                   meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase))
         run.emit("repaired", tid, s.attempt or 1, s.sid, f"live session {s.sid} found for an open task; "
                  f"recorded the start", "run.py record")
         return
@@ -2269,7 +2325,7 @@ def cmd_launch(run, args):
         keep.append(meta_arg("mailbox", left))
     lower_flag(run, tid)
     run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
-           meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", "running"),
+           meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase),
            *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *(["mailbox"] if table and not left else []))
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
@@ -2344,13 +2400,13 @@ def cmd_adopt(run, args):
         base = run.git("merge-base", head, run.target_ref(task, extra.get("target")), check=False).stdout.strip()
     if not base:
         raise Refused(f"cannot find a base for {head[:7]}; pass --base <sha>")
-    nxt, now = current + 1, run.now()
+    nxt, now, phase = current + 1, run.now(), next_phase(task, "adopt")
     if task["status"] == "open":
         run.tg("start", str(tid))
     # No session ran, so the entry has no id; it holds the attempt's role, tier and verify kind for later commands.
     sessions = recorded_sessions(task) + [{"kind": "task", "attempt": nxt, "name": "adopted", **chosen.stored}]
     run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in {"attempt": nxt, "session": "adopted", "started_at": now,
-           "base": base, "sessions": sessions, "phase": "reported", **extra}.items()],
+           "base": base, "sessions": sessions, "phase": phase, **extra}.items()],
            "--unset-meta", "verdict", "verdict_ref", "abandoned")
     run.add_result(tid, "task", nxt, "manager", "PASS",
                    f"Task: {tid}\nStatus: PASS\nBranch: {branch}\nHead: {head}\nWorktree: None\nRan: not stated (adopted)\n"
@@ -2384,11 +2440,6 @@ def refuse_unless_running(task):
     return wanted_attempt(task)
 
 
-def set_phase(run, task, phase):
-    if (task.get("meta") or {}).get("phase") != phase:
-        run.set_meta(task, phase=phase)
-
-
 def worker_for(run, tid, attempt, result_id=None):
     rows = run.results_for(tid)
     if result_id is not None:
@@ -2413,6 +2464,7 @@ def cmd_verify(run, args):
         verify_kind(run, task)
         return verify_ci(run, args, task, mode[3:])
     attempt = refuse_unless_running(task)
+    phase = next_phase(task, "verify")  # before the verifier starts
     role = verify_role(run, task)  # refused when the role of this attempt has no file or a broken one
     role_size_warning(run, task, role, attempt)
     kind = verify_kind(run, task)
@@ -2486,7 +2538,7 @@ def cmd_verify(run, args):
         raise
     drift = drift_warning(run, name, ref, branch=False) if is_sha(ref) else ""
     entry, id_note = session_entry(run, tid, "verify", attempt, name, name, said, model, profile)
-    run.edit_meta(tid, phase="verifying", **({"sessions": recorded_sessions(task) + [entry]} if entry else {}))
+    run.edit_meta(tid, phase=phase, **({"sessions": recorded_sessions(task) + [entry]} if entry else {}))
     notify = notify_target(run)
     run.emit("verifying", tid, attempt, name,
              f"{model}{' ' + profile_label(profile) if profile_label(profile) else ''} session {name} ref {ref} kind {kind} skill {where}"
@@ -2512,7 +2564,7 @@ def verify_ci(run, args, task, name):
     branch, head = branch_at(run, tid, attempt, worker, head)
     if not publish(run, task, branch, head):
         return
-    set_phase(run, task, "verifying")
+    transition(run, task, "verify")
     head, pr_branch = task["meta"]["pushed"], task["meta"]["pr_branch"]  # the full SHA
     runs = run.host().runs(pr_branch, head, name)
     if runs and not args.again:
@@ -3583,7 +3635,7 @@ def record_in_progress(run, snap, task, unmanaged):
             model = session_model(task, s.sid)
             reason = file_stuck(run, tid, attempt, "task", s, "Session", model)
             carry_thread(run, task, attempt)
-            set_phase(run, task, "stopped")
+            transition(run, task, "stopped")
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}{on_profile(s)}; filed BLOCKED ({reason})",
                      PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
         elif busy:
@@ -3606,7 +3658,7 @@ def record_in_progress(run, snap, task, unmanaged):
             if found:
                 added = run.add_result(tid, "task", attempt, "manager", found[0], found[1])
                 carry_thread(run, task, attempt)
-                set_phase(run, task, "reported")
+                transition(run, task, "worker_reported")
                 run.emit("salvaged", tid, attempt, s.sid if s else None,
                          f"{found[0]} from {found[2]} (result #{added['id']})")
                 record_arrived(run, snap, task, attempt, added)
@@ -3615,7 +3667,7 @@ def record_in_progress(run, snap, task, unmanaged):
                          else f"no session recorded for attempt {attempt}") + (f"; {where_steer}" if where_steer else "")
                 run.add_result(tid, "task", attempt, "manager", "DIED", f"{where}, no result")
                 carry_thread(run, task, attempt)
-                set_phase(run, task, "stopped")
+                transition(run, task, "died")
                 way_out = (f"; a failed session may be an account problem: the open thread goes into the next brief, so relaunch "
                            f"(run.py launch {tid} --profile <name> for another account) or abandon" if failed else "")
                 run.emit("died", tid, attempt, s.sid if s else None, "filed DIED" + (f" ({s.state})" if failed else ""),
@@ -3650,7 +3702,7 @@ def settle_phase(run, snap, task):
         return True  # verify --again or stop after a failed verdict: the verdict stays until the next one replaces it
     if stored is None or (stored in FLIGHT and derived in FLIGHT) or (
             stored == "awaiting_merge" and derived == "merged" and meta.get("merged_at")):
-        set_phase(run, task, derived)
+        transition(run, task, f"seen_{derived}")
         return True
     fields = ", ".join(f"{k} {meta.get(k) or 'none'}" for k in ("verdict", "verdict_ref", "merged_at", "abandoned"))
     run.emit("phase-mismatch", tid, wanted_attempt(task), None,
@@ -5057,7 +5109,11 @@ def mark_merged(run, task, by, **extra):
     Every merge record goes through here. A merge recorded earlier keeps its merged_at and merged_by."""
     meta = task.setdefault("meta", {})
     if not meta.get("merged_at"):
-        run.set_meta(task, merged_at=run.now(), merged_by=by, **({} if meta.get("abandoned") else {"phase": "merged"}), **extra)
+        fields = {"merged_at": run.now(), "merged_by": by, **extra}
+        if meta.get("abandoned"):
+            run.set_meta(task, **fields)  # an abandoned task keeps its phase
+        else:
+            transition(run, task, "merged", **fields)
     elif extra:
         run.set_meta(task, **extra)
     finish_merged(run, task)
@@ -5068,7 +5124,7 @@ def finish_merged(run, task):
     in progress or with its gate, and record calls this again. The task may be done already: a code host can close its
     issue, and `tg done` then keeps done_at and removes the tg:in-progress label the close left on the GitHub backend."""
     if not (task.get("meta") or {}).get("abandoned"):
-        set_phase(run, task, "merged")
+        transition(run, task, "merged")
     if merge_gate(task):
         clear_merge_gate(run, task)
     run.tg("done", str(task["id"]))
@@ -5103,6 +5159,8 @@ def cmd_close(run, args):
         if new != ref:
             run.emit("rebased", tid, attempt, None, f"same change at {new[:7]} (verified at {ref[:7]}); verdict_ref moves")
             ref = new
+    passing = level in PASSING[kind]
+    phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")
     if manual:
         status = {"verify-failed": "ISSUES", "verify-blocked": "BLOCKED"}.get(level, "PASS")
         body = f"Verdict: {level}\nRan: {args.ran or 'not stated'}\nHead: {ref}"
@@ -5115,9 +5173,7 @@ def cmd_close(run, args):
         if override:
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
-    passing = level in PASSING[kind]
-    closed_phase = "awaiting_merge" if is_sha(ref) else "merged"  # output outside git has nothing to merge
-    run.edit_meta(tid, verdict=level, verdict_ref=ref, phase=closed_phase if passing else "verdict_failed")
+    run.edit_meta(tid, verdict=level, verdict_ref=ref, phase=phase)
     entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt
                   and e.get("id")), None)  # an adopted attempt has an entry with no id
     if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
@@ -5145,7 +5201,7 @@ def cmd_close(run, args):
     # tasks that depend on it do not get ready.
     stop_live(run, task, attempt, branch)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}")
-    meta.update(verdict=level, verdict_ref=ref, phase=closed_phase)
+    meta.update(verdict=level, verdict_ref=ref, phase=phase)
     base = no_change(run, task, ref)
     if not is_sha(ref):
         finish_merged(run, task)
@@ -5244,7 +5300,7 @@ def cmd_stop(run, args):
                    f"Session: {s.sid}\nWorktree: {wt}\nBranch: {branch}\nStopped: {run.now()}\nReason: {reason}\n"
                    f"Files: {files or 'None'}")
     carry_thread(run, task, attempt)
-    set_phase(run, task, "stopped")
+    transition(run, task, "stopped")
     counts = ("a pause: the attempt does not count" if reason == "pause"
               else f"no STOP order: attempt {attempt} counts toward the cap of {MAX_ATTEMPTS}")
     run.emit("stopped", tid, attempt, s.sid, f"session {s.sid} ({counts}); run.py record commits its WIP once it has exited")
@@ -5258,6 +5314,7 @@ def cmd_abandon(run, args):
     if task_phase(task) == "merged":
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
     refuse_legacy(task)
+    phase = next_phase(task, "abandon")  # before any session stops
     meta = task.get("meta") or {}
     attempt = wanted_attempt(task)
     closed = unmerged(task)
@@ -5279,7 +5336,7 @@ def cmd_abandon(run, args):
         carry_thread(run, task, attempt)
     if closed or merge_gate(task):  # first: a crash before the abandoned write leaves a waiting task, and record gates it again
         clear_merge_gate(run, task)
-    run.edit_meta(tid, abandoned=args.mode, phase="abandoned")
+    run.edit_meta(tid, abandoned=args.mode, phase=phase)
     drop_mailbox(run, task, history=False)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
