@@ -1862,12 +1862,14 @@ def split_file(tmp_path_factory):
     return out
 
 
-def test_phone_shows_a_mid_sized_plan_whole(browser, split_file):
-    page, problems = open_phone(browser, split_file)
-    assert page.evaluate("cy.zoom()") >= 0.45 - 1e-9
-    assert page.evaluate(INSIDE)
-    assert problems == []
-    page.close()
+def test_phone_graph_shows_every_task_however_small(browser, split_file, tall_file):
+    for path in (split_file, tall_file):
+        page, problems = open_phone(browser, path)
+        assert page.evaluate(INSIDE), path
+        assert problems == []
+        page.close()
+    page, _ = open_phone(browser, tall_file)
+    assert page.evaluate("cy.zoom()") < 0.45
 
 
 def test_a_plan_too_big_to_fit_keeps_its_top_and_sides_on_screen(browser, split_file, tall_file):

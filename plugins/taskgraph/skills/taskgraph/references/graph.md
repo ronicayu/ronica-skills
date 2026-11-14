@@ -30,7 +30,7 @@ Swimlane and Timeline group rows by lane. A child nests under its parent only if
 
 The page supports keyboard and screen-reader use. Press Tab to reach **Skip to the plan**, then move through each control. The plan is one tab stop. Use the arrow keys to move between items (by row in Timeline), Home and End to jump, Enter to open a panel, Esc to return focus, Space to expand or collapse a summary, and plus/minus to zoom. Screen readers can read each item's status, dates, owner, and flags. Status uses text or a shape as well as colour: ✓ done, ◔ in progress, ⊘ blocked, and ○ ready in lists. Panel rows and Load cells are buttons. Use the arrow keys to resize the panel edge. The page respects reduced-motion settings.
 
-The page opens at a readable zoom and scrolls large plans. On a phone, Graph shows the whole plan when it still reads at half size; a larger plan opens at its top, around its goal. Fit shows the whole plan. A click on an item highlights its upstream and downstream items. A double-click opens its panel and keeps the item visible beside it. Graph wraps a long row of items into several lines. For plans over 250 items, Graph uses a faster layout and reuses layouts it has already computed.
+The page opens at a readable zoom and scrolls large plans. On a phone, Graph always opens with every task on screen, however small. Fit shows the whole plan. A click on an item highlights its upstream and downstream items. A double-click opens its panel and keeps the item visible beside it. Graph wraps a long row of items into several lines. For plans over 250 items, Graph uses a faster layout and reuses layouts it has already computed.
 
 ## Export and print
 
