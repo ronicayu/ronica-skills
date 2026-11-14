@@ -6006,7 +6006,9 @@ class RoleTest(Base):
                  ("a bad drop item", {}, dict(extends="mid", drop="[review]"), "'review' is not `method N` or `review N`"),
                  ("a dropped item the parent lacks", {}, dict(extends="software-engineer", drop="[review 8]"),
                   "the parent's Review has no item 8"),
-                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"))
+                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"),
+                 ("every method item dropped", dict(method="1. a\n2. b"), dict(extends="mid", method=None, drop="[method 1, method 2]"),
+                  "the merged ## Method is empty"))
         for label, mid, front, problem in cases:
             with self.subTest(label):
                 self.fresh()
@@ -6018,6 +6020,13 @@ class RoleTest(Base):
                 out = self.run_cmd("roles")
                 self.assertEqual(out.returncode, 1, out.stderr)
                 self.assertIn(problem, out.stdout)
+
+    def test_07b_items_count_by_position_and_an_empty_skills_line_clears_the_parents(self):
+        self.role_file("base", method="1. one\n   more of one\n\n1. two\n1. three", skills="[a:b]")
+        self.role_file("child", fits=None, extends="base", drop="[method 2]", skills="[]", method=None)
+        role = self.section(self.brief(self.add_task(role="child")), "ROLE")
+        self.assertTrue(role.endswith("1. one\n   more of one\n2. three"), role)
+        self.assertNotIn("Load these skills", role)
 
     def test_07b_the_size_warning_counts_the_merged_role(self):
         self.role_file("base", method=" ".join(["word"] * 400), review=None)

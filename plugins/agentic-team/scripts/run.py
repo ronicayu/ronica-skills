@@ -993,7 +993,7 @@ class Role:
     def __init__(self, name, path, source, overrides=False, hidden=None):
         self.name, self.path, self.source, self.overrides, self.hidden = name, path, source, overrides, hidden
         self.fits = self.tier = self.verify_kind = self.review = self.extends = self.parent = None
-        self.skills, self.drop, self.method, self.error = [], [], "", None
+        self.skills, self.drop, self.keys, self.method, self.error = [], [], set(), "", None
 
     @property
     def where(self):
@@ -1038,7 +1038,7 @@ def parse_role(run, role):
         role.error = str(exc)
         return
     role.fits, role.tier, role.verify_kind, role.skills, role.extends, role.drop = (fields.get(k) for k in ROLE_KEYS)
-    role.skills, role.drop = role.skills or [], role.drop or []
+    role.skills, role.drop, role.keys = role.skills or [], role.drop or [], set(fields)
     sections, current = {}, None
     for line in body:
         if line.startswith("## "):
@@ -1118,6 +1118,8 @@ def role_skills(value, number):
 
 def role_drops(value, number):
     """The parent items a `drop:` value removes, as [("method" | "review", n), ...], from `[method 4, review 5]`."""
+    if not value:
+        return []
     if not value.startswith("["):
         raise ValueError(f"line {number}: drop must be a list in brackets, as [method 4, review 5], not {value!r}")
     found = []
@@ -1130,8 +1132,9 @@ def role_drops(value, number):
 
 
 def role_items(text):
-    """(the text before the first numbered item, [(number, text of the item)]) of a Method or Review section. An item
-    runs from its `N. ` line to the next one, so its indented and blank lines go with it."""
+    """(the text before the first numbered item, [(position, text of the item)]) of a Method or Review section. An item
+    runs from its `N. ` line to the next one, so its indented and blank lines go with it. Items are counted by position,
+    as Markdown shows them, so a list written `1.`, `1.`, `1.` has items 1, 2 and 3."""
     lead, items = [], []
     for line in (text or "").splitlines():
         match = ROLE_ITEM.match(line)
@@ -1141,7 +1144,7 @@ def role_items(text):
             items[-1][1].append(line)
         else:
             lead.append(line)
-    return "\n".join(lead).strip(), [(n, "\n".join(lines).rstrip()) for n, lines in items]
+    return "\n".join(lead).strip(), [(i, "\n".join(lines).rstrip()) for i, (_, lines) in enumerate(items, 1)]
 
 
 def merge_section(kind, parent, child, drops):
@@ -1189,8 +1192,11 @@ def read_role(run, role, found):
     except ValueError as exc:
         role.error = str(exc)
         return
+    if not role.method:
+        role.error = "the merged ## Method is empty: drop leaves the parent's Method with nothing and the file adds none"
+        return
     for key in ROLE_INHERITED:
-        if not getattr(role, key):
+        if key not in role.keys:
             setattr(role, key, getattr(parent, key))
     role.parent = parent
 
