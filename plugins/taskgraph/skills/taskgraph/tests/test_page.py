@@ -1844,6 +1844,47 @@ def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
     page.close()
 
 
+@pytest.fixture(scope="module")
+def split_file(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("split")
+    tg = runner(tmp / "t.db")
+    tg("add", "Observability", "--type", "objective")  # 1
+    tg("add", "Tracing with tail sampling", "--blocks", "1")  # 2
+    tg("add", "Platform", "--type", "objective")  # 3
+    for i in range(4):
+        tg("add", f"Work unit {i + 1}", "--blocks", "3")
+    for i in range(3):
+        tg("add", f"Runner image step {i + 1}", *(["--depends", str(8 + i - 1)] if i else []))
+    for i in range(4):
+        tg("add", f"Flaky test {i + 1}")
+    out = tmp / "graph.html"
+    tg("graph", "--no-open", "--out", str(out))
+    return out
+
+
+def test_phone_shows_a_mid_sized_plan_whole(browser, split_file):
+    page, problems = open_phone(browser, split_file)
+    assert page.evaluate("cy.zoom()") >= 0.45 - 1e-9
+    assert page.evaluate(INSIDE)
+    assert problems == []
+    page.close()
+
+
+def test_a_plan_too_big_to_fit_keeps_its_top_and_sides_on_screen(browser, split_file, tall_file):
+    for opener in (open_phone, lambda b, f: open_page(b, f, "?view=graph", height=300)):
+        for path in (split_file, tall_file):
+            page, problems = opener(browser, path)
+            if page.evaluate(INSIDE):
+                page.close()
+                continue
+            b = page.evaluate("tasks().renderedBoundingBox()")
+            width = page.evaluate("document.getElementById('cy').getBoundingClientRect().width")
+            assert abs(b["y1"] - 40) < 1, (path, b)
+            assert b["x1"] >= 0 if b["w"] <= width - 80 else b["x1"] <= 40 + 1 and b["x2"] >= width - 40 - 1, (path, b)
+            assert problems == []
+            page.close()
+
+
 def test_graph_edges_do_not_cross_node_labels(browser, fanin_file):
     page, problems = open_page(browser, fanin_file, "?view=graph")
     crossings = page.evaluate(
