@@ -16,7 +16,9 @@ if (!files.length) {
   console.error("Usage: node phase-edges.mjs GRAPH.dot... > phase-edges.json");
   process.exit(2);
 }
-const view = checkView(phaseView, util.inspect);
+// The glossary is for the chart; leave it out, so that a statechart copy that does not read it accepts the view.
+const { glossary, ...read } = phaseView;
+const view = checkView(read, util.inspect);
 const edges = new Set();
 for (const file of files) {
   const graph = parseDot(fs.readFileSync(file, "utf8"));
