@@ -40,8 +40,7 @@ up).
    choice for each, then go on with your choices unless an item needs the
    operator. Do not wait for a reply otherwise.
 4. **Start.** Run the Start steps in `manager.md`: the config check, the
-   standing orders, the address (`run notify-to`), and the session id
-   (`.agentic-team/manager-session`, which the compaction hook reads).
+   standing orders, and the address (`run notify-to`).
 5. **Act on the list.** Now do the integration steps, create the tasks, and
    launch them.
 6. **Stay in the role.** It ends only when the operator says so.

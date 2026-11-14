@@ -9802,12 +9802,42 @@ class PhaseTest(Base):
         self.assertIn(f"#{task} ", sections["Done since last report"])
         self.assertIn("None.", sections["Closed, awaiting merge"])
 
-    def test_status_brief_shows_only_the_work_not_yet_closed(self):
+    def test_status_brief_shows_only_the_work_not_yet_closed_and_the_open_decisions(self):
         task, wt, head = self.closed_local()
+        self.tg("add", "Which cache?", "--type", "decision", "--meta", "decider=operator")
+        out = self.ok("status", "--brief", "--since", "2000-01-01").stdout
         sections = self.status_sections("--brief", "--since", "2000-01-01")
         self.assertEqual(list(sections), ["In flight", "Waiting for verification or triage", "Verdict recorded, not closed",
-                                          "Failed or abandoned", "Closed, awaiting merge"])
+                                          "Failed or abandoned", "Closed, awaiting merge", "Open decisions"])
         self.assertIn(f"#{task} ", sections["Closed, awaiting merge"])
+        self.assertIn("Which cache?", sections["Open decisions"])
+        self.assertNotIn("Overall:", out)  # the report is not computed
+
+    def manager_session_file(self):
+        return os.path.join(self.root, ".agentic-team", "manager-session")
+
+    def with_session(self, session=None):
+        env = {k: v for k, v in self.env.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        if session:
+            env["CLAUDE_CODE_SESSION_ID"] = session
+        return env
+
+    def test_record_and_notify_to_write_the_manager_session_id_only_when_it_is_set(self):
+        path = self.manager_session_file()
+        self.ok("record", env=self.with_session())
+        self.assertFalse(os.path.exists(path))
+        self.ok("record", env=self.with_session("sess-aaa"))
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-aaa\n")
+        self.ok("record", env=self.with_session())  # no variable: the file stays
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-aaa\n")
+        self.ok("notify-to", "mgr", env=self.with_session("sess-bbb"))  # a new Manager session replaces the id
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-bbb\n")
+        before = os.stat(path).st_mtime_ns
+        self.ok("record", env=self.with_session("sess-bbb"))  # the same id: the file is not rewritten
+        self.assertEqual(os.stat(path).st_mtime_ns, before)
 
     # 13
     def test_merge_recorded_under_stop_marks_done(self):

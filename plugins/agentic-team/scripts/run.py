@@ -204,6 +204,7 @@ SCRATCH_DIR = ".agentic-team-scratch"  # in a worktree, the one folder for a ses
 SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
+MANAGER_SESSION = "manager-session"  # in the run directory: the Manager's session id, for the compaction hook
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
 INBOX_DIR = "inbox"  # in the run directory: each attempt's context file and socket address, each task's pointer flag
 STOPPED_FILE = "stopped-sessions"  # in the run directory: the session ids that run.py stopped, one per line
@@ -903,7 +904,7 @@ def unclosed_next(task_id, verdict, attempt, kind="code"):
 class Snapshot:
     """Taskgraph state that `record` and `status` both read."""
 
-    def __init__(self, run):
+    def __init__(self, run, ready=True):
         everything = run.tg("ls", "--status", "open", "in_progress", "done") or []
         self.by_id = {t["id"]: t for t in everything}
         started = [t for t in everything if t["status"] == "in_progress" and t["type"] == "task"]
@@ -915,7 +916,7 @@ class Snapshot:
         for row in run.tg("result", "ls") or []:
             self.results.setdefault(row["task_id"], []).append(row)
         self.decisions = run.tg("ls", "--type", "decision", "--status", "open", "in_progress") or []
-        self.ready = run.tg("ready") or []
+        self.ready = (run.tg("ready") or []) if ready else []
 
     def rows(self, tid):
         return self.results.get(tid, [])
@@ -1465,6 +1466,28 @@ def refresh_manager_addr(run):
             mbx.write_addr(os.path.join(run.run_dir, MANAGER_ADDR), path)
         except OSError:
             pass  # the notify step then falls back to the session name
+
+
+def refresh_manager_session(run):
+    """Note the Manager's session id, from $CLAUDE_CODE_SESSION_ID, which only a Claude Code session's own Bash has. The
+    compaction hook gives the role and orders back only to the session this file names. A call without the variable
+    leaves the file as it is; a new Manager session (or a resume with a new id) rewrites it."""
+    session = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if not session or "\n" in session:
+        return
+    path = os.path.join(run.run_dir, MANAGER_SESSION)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            if fh.read().strip() == session:
+                return
+    except OSError:
+        pass
+    try:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(session + "\n")
+    except OSError:
+        pass  # the compaction hook then stays silent
 
 
 def notify_target(run):
@@ -5601,20 +5624,20 @@ def result_label(row):
     return row["status"] if row["kind"] == "task" else f"{row['kind']} {row['status']}"
 
 
-BRIEF_SECTIONS = ("in_flight", "waiting", "verdict_not_closed", "failed", "awaiting_merge")  # status --brief: work not yet closed
+BRIEF_SECTIONS = ("in_flight", "waiting", "verdict_not_closed", "failed", "awaiting_merge", "decisions")  # status --brief: work not yet closed, and open decisions
 
 
 def cmd_status(run, args):
     since = parse_since(args.since, run.run_dir)
-    snap = Snapshot(run)
+    snap = Snapshot(run, ready=not args.brief)
     if not snap.by_id:
         raise Refused(f"project '{run.project}' has no tasks (check the name with `tg projects`)")
-    summary = run.tg("report", "--since", since.date().isoformat()) or {}
+    summary = {} if args.brief else run.tg("report", "--since", since.date().isoformat()) or {}  # brief: no report
     done, in_flight, waiting, failed, closing, unmerged_rows, attempts = [], [], [], [], [], [], []
     flight_profiles = []  # the Claude profile of each in-flight row; the table shows the column when one is not default
     gitlab = (run.pr_mode and any(unmerged(t) and (t.get("meta") or {}).get("pr") for t in snap.closed)
               and run.host_class()[0].prefix == "!")
-    for task in snap.done:
+    for task in [] if args.brief else snap.done:  # brief: done work is not computed
         meta = task.get("meta") or {}
         tid = f"#{task['id']}"
         stamp = None
@@ -5667,7 +5690,7 @@ def cmd_status(run, args):
     ready = [(f"#{i}", snap.by_id[i]["title"] if i in snap.by_id else "") for i in free]
     ready += [(f"#{c}", f"waits: dependency #{d} not merged") for c, d in waits]
     counts = {}
-    for rows in snap.results.values():
+    for rows in [] if args.brief else snap.results.values():
         for row in rows:
             at = row.get("at")
             if not (at and is_worker_result(row)):
@@ -5694,14 +5717,16 @@ def cmd_status(run, args):
         ("follow_ups", "Follow-ups by label", ["Label", "Lines"], follow),
     ]
     overall = str(summary.get("overall", "unknown")).upper()
-    out = [f"# Status: {run.project}\n", f"Overall: {overall}. Since {since:%Y-%m-%d %H:%M} UTC: {change_text}.\n"]
+    out = [f"# Status: {run.project}\n"]
+    if not args.brief:
+        out.append(f"Overall: {overall}. Since {since:%Y-%m-%d %H:%M} UTC: {change_text}.\n")
     shown = [s for s in sections if s[0] in BRIEF_SECTIONS] if args.brief else sections
     for key, title, headers, rows in shown:
         out.append(f"## {title} ({len(rows)})\n")
         out.append(table(headers, rows, 10 if key == "ready" else limit))
     if args.brief:
         run.text = "\n".join(out) + "\n"
-        run.payload = {"project": run.project, "overall": overall,
+        run.payload = {"project": run.project,
                        **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in shown}}
         return
     out.append("Follow-ups by label counts the lines of the worker reports filed in the period. "
@@ -5859,6 +5884,8 @@ def main(argv=None):
         run = Run(args)
         if args.command in ADDR_COMMANDS and not getattr(args, "dry_run", False):  # a dry run writes nothing
             refresh_manager_addr(run)
+        if args.command in ("record", "notify-to") and not getattr(args, "dry_run", False):
+            refresh_manager_session(run)
         if args.command in LOCKED:  # one lock per task, so two run.py commands cannot interleave a stop with a resume
             with task_lock(run, args.id):
                 COMMANDS[args.command](run, args)

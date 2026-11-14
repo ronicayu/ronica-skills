@@ -44,16 +44,21 @@ prompt builds a command from a variable.
 After a context compaction, the Manager would have only a summary. The plugin
 ships a `SessionStart` hook with the matcher `compact` (`hooks/hooks.json`,
 `scripts/recompact`, `scripts/recompact.py`) that puts the role and the orders
-back, in the Manager session only. At Start the Manager writes its session id
-(`$CLAUDE_CODE_SESSION_ID`) to `.agentic-team/manager-session`. The hook finds
+back, in the Manager session only. `run.py` writes the Manager's session id
+(`$CLAUDE_CODE_SESSION_ID`) to `.agentic-team/manager-session` in `notify-to` and in every `record`. The hook finds
 the project from the session's working directory (the nearest directory upward
 with `.agentic-team.toml`) and prints nothing unless the session id equals that
-file's. In the Manager session it adds to the context: an instruction to read
-`agents/manager.md` in full first, `standing-orders.md` and `manager-orders.md`
-(when it exists) in full, a short `run status --brief` (work not yet closed),
-and an instruction to run `run record` and start `run wait` again. Workers
-and other sessions get nothing. On any error (no run directory, an unreadable
-file, bad input) the hook exits 0 with no output; it never blocks a session
+file's. In the Manager session it adds to the context, in this order: an
+instruction to read `agents/manager.md` in full first (the hook does not inline
+it), `standing-orders.md`, `manager-orders.md` (when it exists), a short
+`run status --brief` (work not yet closed, and open decisions), and an
+instruction to run `run record` and start `run wait` again. The context is at
+most 9000 characters, because Claude Code replaces a longer one with a preview.
+An orders file that does not fit is not inlined: the hook gives its absolute
+path, and the Manager reads it in full. The status has a 5 second limit; when it
+is slow, the hook gives the rest without it. Workers and other sessions get
+nothing. On any error (no run directory, an unreadable file, bad input) the
+hook exits 0 with no output; it never blocks a session
 start. If you wrote a user-level hook for this, delete it after the upgrade.
 
 The Manager keeps the plan, launches and verifies work, and reports. It does
@@ -1050,7 +1055,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 |------|---------|
 | `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout, or (in `pr` mode) lets `record` merge a clean request. |
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
-| `manager-session` | The Manager's session id, one line, written at Start; the compaction hook gives the role and orders back only to the session it names. |
+| `manager-session` | The Manager's session id, one line, written by `run.py` (`notify-to`, `record`) from `$CLAUDE_CODE_SESSION_ID`; the compaction hook gives the role and orders back only to the session it names. |
 | `manager-orders.md` | Optional. Orders for the Manager only (not pasted into briefs); the compaction hook shows it in full. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
@@ -1184,7 +1189,7 @@ Version 0.20.0 (issues #104, #106 and #107) makes the reports in a brief shorter
 
 - **Worker rules.** `agents/worker.md` now forbids wait loops (`sleep`, countdowns, polling) and sets the rules for scratch copies of the tree and for cold-cache runs. The `architect` role now requires a `stateDiagram-v2` and a transition table for each lifecycle, and its Review checks them. A project can remove its matching standing orders.
 - **Allow rules.** See "Auto-mode allow rules for workers". Add them to your settings if workers stop on a prompt for scratch folders or caches.
-- **Compaction hook.** The plugin now ships a `SessionStart` hook (matcher `compact`) that re-injects `agents/manager.md`, the standing orders, `manager-orders.md` and a short status into the Manager session, and only there (see "Start a Manager"). The Manager writes `.agentic-team/manager-session` at Start; a Manager that started before the upgrade needs one new Start (or `printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > .agentic-team/manager-session`). A user-level hook that does the same can be deleted. `run.py status --brief` is new.
+- **Compaction hook.** The plugin now ships a `SessionStart` hook (matcher `compact`). In the Manager session only, it tells the Manager to read `agents/manager.md` in full, then gives the standing orders, `manager-orders.md` and a short `run status --brief` (see "Start a Manager"). It shows at most 9000 characters; an orders file that does not fit is named by its path, to read in full. `run.py` writes `.agentic-team/manager-session` itself at `notify-to` and at every `record`, so a running Manager has it after its next `record`. A user-level hook that does the same can be deleted. `run.py status --brief` is new.
 - **Briefs get shorter.** The previous attempt, each upstream report and the worker report of a verify brief lose their `Ran:` section. An upstream report is a summary (`Status`, `Head`, `Branch`, `Files`, `Issues`, `Findings`, `Follow-ups`, `Deviations`). Each carried report is at most 3000 bytes and all of them 12000 bytes; a cut ends with the result id and a command. Decision notes are not cut.
 - **See a full report.** Run the command at the end of the cut report, `tg result ls <task id> --kind task --attempt <n>`; it prints every report of that attempt with its `Ran:` log. `tg result ls <task id>` lists them all.
 - **New keys.** `[brief] carried_report_bytes` and `carried_total_bytes` change the caps; `config.py check` validates them. Raise them to get longer reports back.
