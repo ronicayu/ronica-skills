@@ -43,20 +43,18 @@ adds what Taskgraph cannot decide.
      refers to no git-ignored scratch file; census scripts go into the repository.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
-   Record only a dependency that is real. Keep every slot busy within priority and
-   dependency order: split a task that is too large to finish in one attempt.
+   Record only a dependency that is real, and split a task that is too large to
+   finish in one attempt (every slot busy: the run playbook, step 4).
 4. **Relay context through dependencies.** A task that needs an upstream
    result depends on that task. The brief pastes the upstream result.
 5. **Ask through decisions.** A question only the operator can answer is a
-   `decision` node with `--blocks`, `--due`, and options and a default in its
-   notes.
+   `decision` node, written as Escalation in the Manager index says.
 6. **Size the plan.** Show the operator a short plan before you add more than
    three tasks. For work the operator already asked for, add one or two tasks
    without asking again.
 7. **Re-plan on evidence.** When a report changes scope, assumptions, or
-   dependencies, update Taskgraph first, then continue. Once a worker has started,
-   its task's SCOPE and ACCEPTANCE do not change: a requirement found later becomes a
-   new task.
+   dependencies, update Taskgraph first, then continue. A started task's brief stays
+   frozen (Task rules in the Manager index).
 
 **Reply:** tasks added or changed, the critical path, and the first tasks you
 will launch, with tier and risk for each.

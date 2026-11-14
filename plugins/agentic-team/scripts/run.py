@@ -707,9 +707,20 @@ def verifier_rows(rows, attempt):
     return [r for r in task_rows(rows, attempt, "verify") if r.get("author") != "manager"]
 
 
+STATUS_VERDICT = {"ISSUES": "verify-failed", "BLOCKED": "verify-blocked"}  # the only verdict each such Status allows
+
+
 def verdict_of(row):
-    match = VERDICT_LINE.search(row.get("body") or "")
-    return match.group(1) if match else None
+    """The Verdict line of a result. A report whose Status is ISSUES or BLOCKED reads as verify-failed or verify-blocked
+    whatever its Verdict line says: a verifier that reports blocking issues has not verified the work (#120)."""
+    body = row.get("body") or ""
+    match = VERDICT_LINE.search(body)
+    if not match:
+        return None
+    status = STATUS_LINE.search(body)
+    if status and status.group(1) in STATUS_VERDICT and match.group(1) in VERDICTS:
+        return STATUS_VERDICT[status.group(1)]
+    return match.group(1)
 
 
 def unlabelled_failure(row):
@@ -5951,6 +5962,11 @@ def cmd_check_report(args):
                             f"{', '.join(FOLLOW_UP_LABELS)}, as `<label>: <path or question>: <why>`")
     if args.verifier:
         problems += verifier_problems(body, status.group(1) if status else None)
+        verdict = VERDICT_LINE.search(body)
+        want = STATUS_VERDICT.get(status.group(1)) if status else None
+        if verdict and want and verdict.group(1) != want:
+            problems.append(f"Status {status.group(1)} needs `Verdict: {want}`, not {verdict.group(1)}; "
+                            "a report with blocking issues has not verified the work")
     elif status and status.group(1) != "BLOCKED":
         for field, token, line in missing_paths(body, os.getcwd()):
             problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
