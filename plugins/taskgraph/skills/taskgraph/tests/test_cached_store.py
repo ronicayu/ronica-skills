@@ -628,16 +628,19 @@ def test_a_gate_with_a_ref_shows_a_waiting_line_in_the_issue_body(env, fake):
 
 
 def test_the_host_closes_the_issue_before_the_gate_clear_and_done(env, fake):
-    # A merged request that says "Closes #N" closes the issue first; run.py then clears the gate and runs tg done.
+    # run.py's order: a merged request that says "Closes #N" closes the issue first; run.py then clears the gate and runs
+    # tg done, which removes the tg:in-progress label the close left.
     a = env.ok("add", "A")["id"]
     env.ok("start", str(a))
     env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
     fake.edit_issue(a, state="closed", state_reason="completed")
-    assert env.ok("--fresh", "show", str(a))["status"] == "done"
+    closed = env.ok("--fresh", "show", str(a))
+    assert closed["status"] == "done" and closed["done_at"]
     fake.clear_log()
     assert env.ok("gate", str(a), "merge", "--clear")["cleared"] is True
+    assert "tg:in-progress" in fake.issue(a)["labels"]  # the gate write leaves the status alone
     done = env.ok("done", str(a))
-    assert done["status"] == "done" and "warnings" not in done
+    assert done["status"] == "done" and "warnings" not in done and done["done_at"] == closed["done_at"]
     assert not any(c["method"] == "PATCH" and "state" in (c.get("body") or {}) for c in fake.calls())  # GitHub's close stands
     issue = fake.issue(a)
     assert (issue["state"], issue["labels"]) == ("closed", ["taskgraph"]) and "Waiting for" not in issue["body"]

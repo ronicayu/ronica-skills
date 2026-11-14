@@ -1198,6 +1198,18 @@ def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
     assert tg("show", str(m))["done_at"] == "2026-10-05T00:00:00Z"
 
 
+@pytest.mark.sqlite_only("sets done_at in the store; on GitHub a refresh reads the close time (test_cached_store covers it)")
+def test_done_again_keeps_done_at(tg, db):
+    a = add(tg, "A")
+    tg("done", str(a))
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET done_at='2026-10-01T00:00:00Z' WHERE id=?", (a,))
+    again = tg("done", str(a))
+    assert again["status"] == "done" and again["done_at"] == "2026-10-01T00:00:00Z"
+    tg("reopen", str(a))
+    assert tg("done", str(a))["done_at"] != "2026-10-01T00:00:00Z"
+
+
 def test_tree_roots_skip_isolated_leaves(tg):
     goal = add(tg, "goal")
     add(tg, "a", "--blocks", str(goal))

@@ -134,3 +134,58 @@ def test_two_gates_with_refs_share_one_line_and_labels_are_escaped():
     assert render("", meta).split("\n")[0] == ("Waiting for: [PR #95](https://github.com/o/r/pull/95), "
                                                "[legal \\[draft\\] \\<b\\>](https://x.example/a%20b%281%29) <!-- taskgraph:waiting -->")
     assert parse(render("n", meta)) == ("n", meta, [])
+
+
+def block_of(meta):
+    return render("", meta).split("\n", 2)[2]
+
+
+def test_text_typed_after_the_waiting_line_stays_notes_and_the_line_is_not_doubled():
+    meta = {"gates": {"merge": GATE}}
+    for typed, notes in ((f"Why.\n\n{LINE}\n\nmore\n\n", "Why.\n\nmore"), (f"Why.\n\n{LINE}\nmore\n\n", "Why.\n\nmore"),
+                         (f"{LINE}\n\nmore\n\n", "more"), (f"Why.\r\n\r\n{LINE} \r\n\r\nmore\r\n\r\n", "Why.\r\n\r\nmore")):
+        assert parse(typed + block_of(meta)) == (notes, meta, [])
+        assert render(notes, meta).count(LINE) == 1
+
+
+def test_an_extra_blank_line_before_the_block_does_not_move_the_waiting_line_into_the_notes():
+    meta = {"gates": {"merge": GATE}}
+    for extra in ("\n", "\n\n", "\r\n"):
+        body = render("Why.", meta).replace(f"{LINE}\n\n", f"{LINE}\n\n{extra}")
+        assert parse(body) == ("Why.", meta, [])
+        assert render(*parse(body)[:2]) == render("Why.", meta)
+    assert parse(render("Why.", meta).replace(f"\n\n{LINE}", f"\n{LINE}"))[0] == "Why."  # the blank line removed
+
+
+def test_two_gates_with_refs_and_copies_left_in_the_notes_are_dropped():
+    meta = {"gates": {"merge": GATE, "review": {"label": "Review", "ref": "https://x.example/r"}}}
+    line = render("", meta).split("\n")[0]
+    assert line.count("](") == 2 and line.endswith(" <!-- taskgraph:waiting -->")
+    assert parse(render("Why.", meta)) == ("Why.", meta, [])
+    moved = f"{line}\n\nWhy.\n\n{line}\n\n{LINE}\n\n" + block_of(meta)  # copies an older tg left in the notes
+    assert parse(moved) == ("Why.", meta, [])
+    assert render(*parse(moved)[:2]).count("Waiting for:") == 1
+
+
+def test_a_line_whose_marker_was_deleted_is_notes():
+    meta = {"gates": {"merge": GATE}}
+    body = render("Why.", meta).replace(" <!-- taskgraph:waiting -->", "")
+    assert parse(body)[0] == "Why.\n\n" + LINE.removesuffix(" <!-- taskgraph:waiting -->")
+
+
+def test_ordinary_notes_round_trip_exactly_next_to_the_waiting_line():
+    meta = {"gates": {"merge": GATE}}
+    for notes in ("", "a", "a\n", "a\n\n", "a\n\n\n", " a ", "\nb", "a\r\n\r\nb", "x <!-- other -->", "Waiting for: you"):
+        body = render(notes, meta)
+        assert parse(body) == (notes, meta, [])
+        assert render(*parse(body)[:2]) == body
+
+
+def test_only_a_web_ref_becomes_a_link_and_a_label_mentions_nobody():
+    meta = {"gates": {"merge": {"label": "PR #5 for @octocat", "ref": "notaurl"},
+                      "z": {"label": "@team/x", "ref": "HTTPS://x.example/a"}}}
+    line = render("", meta).split("\n")[0]
+    assert line == "Waiting for: PR #5 for @‍octocat, [@‍team/x](HTTPS://x.example/a) <!-- taskgraph:waiting -->"
+    assert "@o" not in line and "@t" not in line and "#5" in line  # a # stays as it is
+    assert parse(render("n", meta)) == ("n", meta, [])
+    assert "Waiting for" not in render("n", {"gates": {"merge": {"label": "x", "ref": "  "}}})
