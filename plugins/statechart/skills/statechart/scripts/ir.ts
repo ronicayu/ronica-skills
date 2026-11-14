@@ -144,6 +144,7 @@ export type View = {
   group?: (vars: Vars) => unknown;
   colors?: { [group: string]: string };
   title?: string;
+  glossary?: { [term: string]: string };
 };
 
 export const checked = Symbol("checked");
@@ -186,6 +187,7 @@ export type Labels = Answers & {
   pathSteps: Uint8Array;
   together: Set<string>;
   notes: string[];
+  actionOf: string[];
 };
 
 export type Story = { step?: string; state: Shape }[];
@@ -218,6 +220,9 @@ export type ChartStep = {
   to: string[];
   label: string;
   when: string | undefined;
+  parts: string[];
+  actions: string[];
+  steps: number;
 };
 
 export type Region = {
@@ -236,6 +241,7 @@ export type Chart = {
   colors: { [group: string]: string };
   paths: string[];
   loops: string[];
+  glossary: { [term: string]: string };
   lie?: string;
 };
 

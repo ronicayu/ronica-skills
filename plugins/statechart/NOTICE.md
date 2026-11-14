@@ -26,19 +26,42 @@ All paths are under `skills/statechart/`.
 | `SKILL.md` | Upstream, with additions (see below) |
 | `references/render.md` | Upstream, unchanged |
 | `scripts/statechart` (the runner) | Upstream, unchanged |
-| `scripts/statechart.ts`, `worker.ts`, `pipeline.ts`, `ir.ts` | Upstream, unchanged |
+| `scripts/statechart.ts`, `worker.ts` | Upstream, unchanged |
+| `scripts/pipeline.ts` | Upstream, unchanged |
+| `scripts/ir.ts` | Upstream, with additions (see below) |
 | `scripts/run.ts` | Upstream, one type annotation (see below) |
-| `scripts/frontends/`, `scripts/passes/`, `scripts/backends/` | Upstream, unchanged |
+| `scripts/frontends/`, `scripts/passes/`, `scripts/backends/` | Upstream, with the changes below and the new `passes/label-warnings.ts` |
+| `scripts/label-warnings.test.ts` | Ours |
 | `scripts/package.json` | Ours, replaces upstream's (see below) |
 | `scripts/tsconfig.json` | Upstream, unchanged |
 | `scripts/setup.sh` | Ours |
 | `scripts/render.mjs` | Ours |
 
 Left out: `scripts/test/`. It is a large test corpus, and it needs Java.
-Our `scripts/package.json` therefore has no `test` script and no `fast-check`
-dev dependency.
+Our `scripts/package.json` therefore has no `fast-check` dev dependency. Its
+`test` script runs only our `label-warnings.test.ts`, which needs no TLC and
+no Java.
 
 ## What we changed
+
+Changes for label quality (statechart 0.3.0, #108):
+
+- `scripts/frontends/view.ts`: the view may export `glossary`, a map from a
+  term to a definition. The command checks that each definition is a
+  non-empty string.
+- `scripts/ir.ts`: `View` and `Chart` carry `glossary`; `ChartStep` carries
+  `parts` (the labels that make up a joined label), `actions` (the TLA+
+  action names) and `steps` (the number of model steps); `Labels` carries
+  `actionOf`.
+- `scripts/passes/label.ts`, `regions.ts`, `lift.ts`: fill those fields. A
+  step that `lift.ts` merges adds its actions and steps to the arrow.
+- `scripts/passes/label-warnings.ts` (new): finds the label warnings and
+  lists the arrows.
+- `scripts/backends/mermaid.ts`: a "Terms" state inside the Legend lists the
+  glossary, one entry for each term.
+- `scripts/backends/report.ts`: the sections "Label warnings" and "Arrows",
+  and a count of label warnings in the first lines.
+- `scripts/package.json`: a `test` script (`node --test`).
 
 Two changes to upstream code, so that `tsc --noEmit` passes in CI:
 
@@ -71,7 +94,7 @@ Upstream's `SKILL.md` has additions:
   a condition, and the view exports `glossary`. "Read the report" and "Hand
   off" say how to use "Label warnings" and the "Arrows" table.
 
-Apart from the label paragraphs, no upstream line is removed or edited. To
+Apart from the label paragraphs, no upstream line of `SKILL.md` is removed or edited. To
 see our changes, diff our `SKILL.md` against the upstream file at the commit
 above.
 
@@ -110,7 +133,9 @@ Our two scripts:
    ```
 
    The first command must list only `setup.sh`, `render.mjs`,
-   `package.json` and `run.ts` (the one `exitClass` line). The second
+   `package.json`, `label-warnings.test.ts`, `passes/label-warnings.ts`, and
+   the files of "Changes for label quality" above, plus `run.ts` (the one
+   `exitClass` line). Make those changes again on top of the new upstream. The second
    must print nothing.
 5. Merge the upstream `SKILL.md` changes into ours. Keep our attribution and
    sections, and check them against the new upstream text.

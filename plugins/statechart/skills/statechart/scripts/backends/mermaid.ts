@@ -185,9 +185,16 @@ export function mermaidLines(chart: Chart) {
   if (title) lines.push("---", `title: ${JSON.stringify(title)}`, "---");
   lines.push("stateDiagram-v2");
   if (chart.regions.length > 1) lines.push("  direction LR");
-  if (legend.length) {
+  const terms = Object.entries(chart.glossary);
+  if (legend.length || terms.length) {
     lines.push(`  state "Legend" as legend {`);
     for (const [i, [text]] of legend.entries()) lines.push(`    lg${i}: ${esc(text)}`);
+    if (terms.length) {
+      lines.push(`    state "Terms" as terms {`);
+      for (const [i, [term, meaning]] of terms.entries())
+        lines.push(`      tm${i}: ${esc(`${term} = ${meaning}`)}`);
+      lines.push("    }");
+    }
     lines.push("  }");
     for (const [i, [, cls]] of legend.entries()) lines.push(`  class lg${i} ${cls}`);
   }

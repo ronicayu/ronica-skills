@@ -82,11 +82,26 @@ In `SKILL.md`:
 - **Run it from Claude Code**: the permission classifier, subagents, and one
   `--out` folder per run.
 
+- **Label checks (0.3.0)**: the view may export `glossary` (`{term:
+  definition}`), which the chart shows in its Legend under "Terms".
+  `report.md` has a "Label warnings" section and an "Arrows" table, and its
+  first lines say how many warnings the chart has.
+  - A warning names a label that starts with a pronoun (you, I, we, it, they,
+    he, she, or 你, 我, 我们, 它, 他, 她, 他们), a label of fewer than 3 words
+    (fewer than 4 characters for CJK text), arrows that leave one state with
+    the same label and go to different states, and a label that the tool
+    joined with " or ". Text in brackets counts as part of the label.
+  - The "Arrows" table has one row for each drawn arrow: label, from state,
+    to state, the TLA+ actions behind it, and the number of model steps.
+
 Scripts: `scripts/setup.sh` and `scripts/render.mjs`.
 
 Type check: `npm install && npm run typecheck` in `skills/statechart/scripts/`
 runs `tsc --noEmit`; CI runs it on every PR. `NOTICE.md` lists the two changes
 to upstream code that make it pass.
+
+Tests: `npm test` in the same folder runs the label checks with `node --test`.
+They build a small graph, so they need no TLC and no Java.
 
 ## License
 
