@@ -111,7 +111,15 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now, check the five most common, then scan the rest. On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 21 and 24.
 
-Then search the draft for these strings and rewrite each hit, unless an exception in the checklist covers it: *not yet*, *no results*, *has not been*, *was not recorded*, *does not include*, *not a*, *matters because*, *this matters*, *it is important*, *in this order*, *then apply*. The summary and the opening get the same search as the body.
+Then audit the draft sentence by sentence, the summary and the opening first. Name each sentence's job: a finding, evidence, context the reader needs, a limit, or an ask. Judge by the job, whatever the wording; the phrases below are examples, not a list to search for. Rewrite or cut a sentence when:
+
+- it has no job;
+- it is a limit stated as an absence ("not yet measured", "no data so far"). Write it forward: what is expected and when the evidence arrives;
+- it comments on the text or the evidence instead of stating something ("this matters because", "it is worth noting");
+- it explains a fact unasked (tell 29);
+- it puts parallel items in an order the subject does not need ("first … then").
+
+If you can start a subagent, give it the draft and this audit, without your reasoning. A fresh reader sees what the author has stopped seeing.
 
 ## Reporting a review
 
