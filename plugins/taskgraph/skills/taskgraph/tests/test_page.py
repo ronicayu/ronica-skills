@@ -849,7 +849,11 @@ GROW = """() => {
 @pytest.mark.parametrize("view", VIEWS)
 def test_refresh_and_resize_keep_the_plan_fitted(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}", height=700)
-    assert page.evaluate(INSIDE)
+    if view == "graph" and abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6:
+        # A taller fixed card needs scrolling at the preserved desktop readable floor.
+        assert abs(page.evaluate("cy.getElementById('1').renderedBoundingBox().y1") - 40) < 1
+    else:
+        assert page.evaluate(INSIDE)
     page.evaluate(GROW)
     assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
     assert page.evaluate("hiddenTasks()") is False or page.evaluate("cy.zoom() <= 0.9 + 1e-9")
@@ -931,10 +935,16 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     assert page.evaluate("expandedIds().has(1) && !expandedIds().has(3)")
     page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(1)")
-    assert "1 late inside" in label and late
+    assert late
+    if view != "graph":
+        assert "1 late inside" in label
+    else:
+        assert "0/2 done" in label
     page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(3)")
-    assert "1 late inside" in label and late
+    assert late
+    if view != "graph":
+        assert "1 late inside" in label
     more(page, "expandAll")
     label, late = page.evaluate(f"({marked})(3)")
     assert "late inside" not in label and not late
@@ -947,11 +957,16 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
 def test_external_label_names_who_to_chase(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}")
     calm = page.evaluate("cy.getElementById('5').data('label')")
-    if view != "timeline":
+    if view == "lanes":
         assert "Acme" in calm and ("needed by" not in calm or calm.index("Acme") < calm.index("needed by"))
+    elif view == "graph":
+        assert "Vendor key" in calm
     page.evaluate("applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 5 ? { ...n, chase_due: true, meta: { ...n.meta, chase: '2026-10-10' } } : n) })")
     label = page.evaluate("cy.getElementById('5').data('label')")
-    assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    if view != "graph":
+        assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    else:
+        assert "Vendor key" in label
     assert problems == []
     page.close()
 
@@ -1525,7 +1540,8 @@ def test_names_states_and_marks(browser, page_file):
         assert page.get_attribute(sel, "aria-label") == name
     assert page.evaluate("['viewGraph', 'viewLanes', 'viewTimeline', 'viewLoad'].map(b => document.getElementById(b).getAttribute('aria-pressed'))") == ["true", "false", "false", "false"]
     assert page.evaluate("document.querySelector('main').contains(document.getElementById('cy'))") and page.evaluate("document.querySelector('header h1').textContent") == "taskgraph · demo"
-    assert page.evaluate("cy.getElementById('2').data('label')").startswith("⊘ #2 Ship v1") and page.evaluate("cy.getElementById('4').data('label')").startswith("#4 ")
+    # #2 is a milestone and keeps its own label; #4 is a Graph card: meta line, then the title.
+    assert page.evaluate("cy.getElementById('2').data('label')").startswith("⊘ #2 Ship v1") and page.evaluate("cy.getElementById('4').data('label')").startswith("#4\nWrite docs")
     page.click("#goal")
     page.keyboard.press("ArrowDown")
     active = page.get_attribute("#goal", "aria-activedescendant")
@@ -1641,8 +1657,8 @@ def test_priority_badge_shows_on_nodes_that_have_one(browser, priority_file, vie
         names = page.evaluate("cy.nodes('.tl-name').map(n => n.data('name'))")
         assert any(n.startswith("P0 #1 ") for n in names) and any(n.startswith("#2 ") for n in names)
     else:
-        assert page.evaluate("cy.getElementById('1').data('label')").startswith("P0 #1 Urgent fix")
-        assert page.evaluate("cy.getElementById('2').data('label')").startswith("#2 Someday")
+        assert page.evaluate("cy.getElementById('1').data('label')").startswith("#1 P0\nUrgent fix" if view == "graph" else "P0 #1 Urgent fix")
+        assert page.evaluate("cy.getElementById('2').data('label')").startswith("#2\nSomeday" if view == "graph" else "#2 Someday")
     assert problems == []
     page.close()
 
@@ -1768,6 +1784,20 @@ def test_phone_sheet_drags_between_three_heights_and_closes(browser, page_file):
     page.mouse.move(150, 842, steps=10)
     page.mouse.up()
     assert not page.evaluate(PANEL_OPEN)
+    assert problems == []
+    page.close()
+
+
+def test_desktop_graph_fixed_cards_do_not_overlap(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    sizes = page.evaluate("tasks().filter(n => n.data('type') !== 'milestone').map(n => [n.width(), n.height()])")
+    assert sizes and all(w == 212 and h == 66 for w, h in sizes)
+    boxes = page.evaluate(BOXES)
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert a["x2"] <= b["x1"] or b["x2"] <= a["x1"] or a["y2"] <= b["y1"] or b["y2"] <= a["y1"]
+    assert page.evaluate("cy.minZoom()") == .1
+    assert page.evaluate("cy.getElementById('3').grabbable()") is True
     assert problems == []
     page.close()
 
@@ -1975,8 +2005,8 @@ def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
     page.close()
     page, _ = open_phone(browser, fanin_file)
     page.evaluate("document.getElementById('fit').click()")
-    assert page.evaluate(widest) <= 130 < wide
-    assert page.evaluate("cy.zoom()") > 0.4
+    assert page.evaluate(widest) == 164 and wide == 212
+    assert page.evaluate("cy.zoom()") > 0.25
     assert wide_zoom > 0
     page.close()
 

@@ -767,6 +767,18 @@ function cyStyle(p) {
     { selector: 'node.goal', style: { 'border-width': 3, 'border-color': p.goal, 'font-weight': 'bold' } },
     { selector: 'node.atrisk', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': p.amber, 'outline-opacity': 0.9 } },
     { selector: 'node.late, node.conflict', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': p.red, 'outline-opacity': 0.8 } },
+    { selector: 'node.graph.card', style: {
+      'width': 'data(cardW)', 'height': 'data(cardH)', 'padding': 0,
+      'text-halign': 'center', 'text-margin-x': 'data(cardDx)',
+      'text-justification': 'left', 'font-size': narrowScreen.matches ? 12 : 13, 'line-height': 1.12,
+      'text-max-width': narrowScreen.matches ? 148 : 192
+    } },
+    { selector: 'node.graph.card', style: { 'font-weight': 'normal' } },
+    // Semantic zoom: under 0.6 a card shows only its id, large; under 0.33 only its colour.
+    { selector: 'node.graph.id-only', style: {
+      'label': 'data(zoomId)', 'font-size': 20, 'font-weight': 'bold', 'text-halign': 'center', 'text-margin-x': 0, 'text-justification': 'center'
+    } },
+    { selector: 'node.graph.block-only', style: { 'label': '' } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lanes[type="milestone"]', style: {
       'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 11, 'font-weight': 'normal', 'color': ele => c(ele).fg
@@ -1017,12 +1029,35 @@ const troubleText = n => {
 const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
 
 // Open completion gates (meta.gates): "waiting: <label>", nothing when there are none.
+const gateLabels = n => n.meta.gates && typeof n.meta.gates === 'object'
+  ? Object.entries(n.meta.gates).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => v.label || k) : [];
 const waitText = n => {
-  const g = n.meta.gates && typeof n.meta.gates === 'object' ? Object.entries(n.meta.gates).filter(([, v]) => v && typeof v === 'object') : [];
-  return g.length ? 'waiting: ' + g.map(([k, v]) => v.label || k).join('; ') : null;
+  const g = gateLabels(n);
+  return g.length ? 'waiting: ' + g.join('; ') : null;
 };
+const graphMeta = n => {
+  if (n.rollup && n.rollup.total) return `${n.rollup.done}/${n.rollup.total} done`;
+  const gates = gateLabels(n);
+  return gates.length ? '⧗ ' + gates[0] : '';
+};
+// The text box inside a Graph card; a decision's hexagon loses its slanted ends as well.
+const graphTitleW = type => (narrowScreen.matches ? 164 - 16 : 212 - 20) - (type === 'decision' ? 40 : 0);
+const graphCardLabel = n => {
+  const meta = [nodeMark(n) + '#' + n.id, priorityMark(n).trim(), graphMeta(n)].filter(Boolean);
+  const metaLine = clampLabel(meta.join(' '), graphTitleW(n.type), 1);
+  const title = clampLabel(n.title, graphTitleW(n.type), 2);
+  return metaLine + '\n' + title;
+};
+// Cytoscape centres a left-justified label as a block; shift it so its lines start at the card's
+// inner left edge whatever the widest line is.
+const cardCtx = document.createElement('canvas').getContext('2d');
+function cardShift(label, type) {
+  cardCtx.font = (narrowScreen.matches ? 12 : 13) + 'px ' + FONT;
+  const widest = Math.max(...label.split('\n').map(s => cardCtx.measureText(s).width));
+  return Math.min(0, (widest - graphTitleW(type)) / 2);
+}
 
-// Graph nodes are narrower on a phone so a whole plan fits at a larger zoom.
+// Graph nodes have a compact summary and a two-line title; milestones keep their separate shape.
 const graphLabelW = () => view === 'graph' && narrowScreen.matches ? NARROW_LABEL_W : LABEL_W;
 
 function labelOf(n, open) {
@@ -1044,7 +1079,12 @@ function labelOf(n, open) {
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
 
-const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: view === 'timeline' ? dateText(n) : labelOf(n, open) });
+const nodeData = (n, open) => {
+  const card = view === 'graph' && n.type !== 'milestone';
+  const label = view === 'timeline' ? dateText(n) : card ? graphCardLabel(n) : labelOf(n, open);
+  return { id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label,
+    zoomId: '#' + n.id, cardW: narrowScreen.matches ? 164 : 212, cardH: narrowScreen.matches ? 60 : 66, cardDx: card ? cardShift(label, n.type) : 0 };
+};
 const flagsOf = (n, sources) => ({
   summary: isSummary(n),
   late: n.late_days != null || (collapsed(n) && trouble(n).late > 0),
@@ -1370,7 +1410,8 @@ function layout(fit = true) {
   cy.batch(() => {
     cy.elements('.bg').remove();
     cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
-    cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
+    cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline').toggleClass('graph', view === 'graph');
+    cy.nodes().forEach(n => n.toggleClass('card', view === 'graph' && n.data('type') !== 'milestone'));
     if (view === 'lanes') layoutLanes();
     else if (view === 'timeline') layoutTimeline();
   });
@@ -1458,7 +1499,8 @@ function packedLayout(nodes, edges, opts) {
     const box = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
     const grow = (x, y) => { box.x1 = Math.min(box.x1, x); box.x2 = Math.max(box.x2, x); box.y1 = Math.min(box.y1, y); box.y2 = Math.max(box.y2, y); };
     ns.forEach(n => {
-      const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
+      const card = view === 'graph' && n.data('type') !== 'milestone';
+      const d = card ? { w: n.data('cardW'), h: n.data('cardH') } : n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
       grow(p.x - d.w / 2, p.y - d.h / 2);
       grow(p.x + d.w / 2, p.y + d.h / 2);
     });
@@ -1495,7 +1537,12 @@ function dagreLayout(nodes, edges, opts) {
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: 'BT', ...opts });
   g.setDefaultEdgeLabel(() => ({}));
-  nodes.forEach(n => { const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }); g.setNode(n.id(), { width: d.w, height: d.h }); });
+  nodes.forEach(n => {
+    // The card's own box, not a label-sized approximation, determines dagre spacing.
+    const card = view === 'graph' && n.data('type') !== 'milestone';
+    const d = card ? { w: n.data('cardW'), h: n.data('cardH') } : n.layoutDimensions({ nodeDimensionsIncludeLabels: true });
+    g.setNode(n.id(), { width: d.w, height: d.h });
+  });
   edges.forEach(e => g.setEdge(e.source().id(), e.target().id(), { minlen: 1, weight: 1 }, e.id()));
   dagre.layout(g);
   wrapRanks(g, nodes, opts);
@@ -1590,8 +1637,9 @@ function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
-// On a phone, Graph shows every task, however small: seeing the whole plan matters more there than reading it unzoomed.
-const readable = () => view === 'graph' && narrowScreen.matches ? 0 : READABLE;
+// On a phone, Graph fits the whole plan however small; semantic zoom keeps it recognisable.
+// Other views and wider screens keep the readable floor and the anchored framing.
+const readable = () => view === 'graph' && phoneChrome() ? 0 : READABLE;
 
 // Too big to show whole at a readable zoom: show the top of the plan around its goal instead,
 // never pushing the plan's top or side edges off screen.
@@ -3605,8 +3653,10 @@ function drawSvg(paper) {
     const size = px(node, 'font-size') || 13, line = size * 1.2, lines = text.split('\n');
     const mx = px(node, 'text-margin-x'), my = px(node, 'text-margin-y');
     const halign = node.style('text-halign'), valign = node.style('text-valign');
-    const x = halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
-    const anchor = halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
+    // A Graph card's lines start at its inner left edge (see cardShift).
+    const card = halign === 'center' && node.style('text-justification') === 'left';
+    const x = card ? at.x - graphTitleW(node.data('type')) / 2 : halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
+    const anchor = card ? 'start' : halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
     const top = valign === 'top' ? at.y - h / 2 + my - lines.length * line : valign === 'bottom' ? at.y + h / 2 + my : at.y + my - lines.length * line / 2;
     return lines.map((t, i) => `<text x="${n2(x)}" y="${n2(top + (i + 0.5) * line)}" text-anchor="${anchor}" dominant-baseline="central" font-family="${esc(node.style('font-family'))}" font-size="${size}" font-weight="${node.style('font-weight')}" fill="${node.style('color')}" fill-opacity="${node.style('text-opacity')}">${esc(t)}</text>`).join('');
   };
