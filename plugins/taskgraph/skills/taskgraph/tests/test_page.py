@@ -1694,13 +1694,23 @@ def test_phone_toolbar_is_one_row_with_touch_targets(browser, page_file):
     page.close()
 
 
+# Peek: title, id and badges, and the Needs / Unlocks row are inside the sheet; the actions start below it.
+PEEK_FITS = """() => {
+    const p = document.getElementById('panel').getBoundingClientRect();
+    return [...document.querySelectorAll('#panelTitle, #panel .sub, #panel .sub .badge, #panel .peek, #needsCount, #unlocksCount')].every(e => {
+        const r = e.getBoundingClientRect();
+        return r.top >= p.top && r.bottom <= p.bottom && r.left >= p.left && r.right <= p.right;
+    }) && [...document.querySelectorAll('#panel .actions button')].every(b => b.getBoundingClientRect().top >= p.bottom);
+}"""
+
+
 def test_phone_details_peek_full_and_close_preserve_canvas(browser, page_file):
     page, problems = open_phone(browser, page_file, "?view=graph&task=3")
     page.wait_for_function(PANEL_OPEN)
     page.wait_for_timeout(350)
     before = page.evaluate("({ width: document.getElementById('cy').clientWidth, zoom: cy.zoom(), pan: cy.pan() })")
     panel = page.locator("#panel").bounding_box()
-    assert panel["height"] == 200 and panel["y"] == 644
+    assert panel["height"] == page.evaluate("sheetDetents().peek")
     assert page.evaluate("document.getElementById('cy').clientWidth") == 390
     assert page.evaluate("cy.zoom()") == before["zoom"] and page.evaluate("cy.pan()") == before["pan"]
     assert before["pan"]["y"] >= 0  # the sheet does not push the selected node underneath it
@@ -1710,15 +1720,54 @@ def test_phone_details_peek_full_and_close_preserve_canvas(browser, page_file):
     assert page.inner_text("#unlocksCount").startswith("Unlocks 1")
     close = page.locator("#panelClose").bounding_box()
     assert close["width"] == close["height"] == 44
+    handle = page.locator("#panelHandle")
+    assert handle.bounding_box()["height"] >= 44
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle'), '::before').height") == "4px"
+    assert page.evaluate("parseFloat(getComputedStyle(document.getElementById('panelHandle'), '::before').width)") == 36
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle')).borderTopStyle") == "none"
+    assert page.evaluate("document.getElementById('panel').dataset.detent") == "peek"
+    assert page.evaluate(PEEK_FITS)
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle')).backgroundColor") == "rgba(0, 0, 0, 0)"
+    assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).id", [close["x"] + 22, close["y"] + 22]) == "panelClose"
+    # A two-line title and a gate badge still fit the peek, measured rather than fixed.
+    page.evaluate("""() => {
+        applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 3 ? { ...n, title: '渲染管线重构 Render pipeline rewrite with GPU acceleration and resumable renders', meta: { ...n.meta, gates: { pr: { label: 'PR #1233' } } } } : n) });
+        select(3, false);
+    }""")
+    assert "waiting: PR #1233" in page.inner_text("#panel .sub")
+    page.wait_for_timeout(300)  # the sheet's height transition
+    assert page.evaluate(PEEK_FITS)
     page.click("#panelHandle")
-    full = page.locator("#panel").bounding_box()
-    assert full["height"] == 784 and full["y"] == 60
-    assert page.evaluate("document.getElementById('cy').clientWidth") == 390
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'half'")
+    assert page.locator("#panel").bounding_box()["height"] == page.evaluate("sheetDetents().half")
     page.click("#panelHandle")
-    assert page.locator("#panel").bounding_box()["height"] == 200
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'peek'")
     page.keyboard.press("Escape")
     assert not page.evaluate(PANEL_OPEN)
     assert page.evaluate("document.documentElement.scrollWidth") == 390
+    assert problems == []
+    page.close()
+
+
+def test_phone_sheet_drags_between_three_heights_and_closes(browser, page_file):
+    page, problems = open_phone(browser, page_file, "?view=graph&task=3")
+    page.wait_for_function(PANEL_OPEN)
+    handle = page.locator("#panelHandle").bounding_box()
+    page.mouse.move(150, handle["y"] + 22)
+    page.mouse.down()
+    page.mouse.move(150, handle["y"] - 220, steps=8)
+    page.mouse.up()
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'half'")
+    assert page.locator("#panel").bounding_box()["height"] == 473
+    page.evaluate("setDetent('full')")
+    assert page.locator("#panel").bounding_box()["height"] == 784
+    page.evaluate("setDetent('peek')")
+    handle = page.locator("#panelHandle").bounding_box()
+    page.mouse.move(150, handle["y"] + 22)
+    page.mouse.down()
+    page.mouse.move(150, 842, steps=10)
+    page.mouse.up()
+    assert not page.evaluate(PANEL_OPEN)
     assert problems == []
     page.close()
 

@@ -288,17 +288,18 @@ body.menu-open #toolbar { z-index: 8; }
 #panel .peek { display: none; }
 /* The details become an overlay under 700px; the canvas never narrows for them. */
 @media (max-width: 699px) {
-  #panel { top: auto; left: 0; right: 0; bottom: 0; width: 100%; min-width: 0; max-width: 100vw; height: 200px; padding: 0 14px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -6px 24px var(--shadow); z-index: 4; overflow-y: auto; overscroll-behavior: contain; }
-  #panel[data-detent="full"] { height: calc(100dvh - 60px); }
-  #panel[data-detent="peek"] { overflow: hidden; }
-  #panel h2 { padding-right: 0; }
+  #panel { top: auto; left: 0; right: 0; bottom: 0; width: 100%; min-width: 0; max-width: 100vw; height: var(--sheet-h, 200px); padding: 0 14px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -6px 24px var(--shadow); z-index: 4; overflow-y: auto; overscroll-behavior: contain; transition: height .2s ease; }
+  #panel.dragging { transition: none; }
+  #panel[data-detent="peek"] { overflow: hidden; padding-bottom: 0; }
+  #panel h2 { padding-right: 44px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
   #panel .sub { margin-bottom: 4px; }
   #panel .actions { display: flex; gap: 8px; margin: 0; }
   #panel .actions button { flex: 1 1 0; margin: 8px 0 0; min-width: 0; padding: 4px 8px; }
   #panel #panelBack { margin: 0 0 4px; }
-  #panel #panelClose { top: 8px; right: 8px; width: 44px; height: 44px; font-size: 24px; }
-  #panelHandle { display: block; position: sticky; top: 0; width: 100%; height: 44px; min-height: 44px; margin: 0; padding: 0 48px 0 0; border: 0; border-radius: 0; background: var(--surface); z-index: 1; cursor: pointer; }
-  #panelHandle::before { content: ''; display: block; width: 40px; height: 4px; margin: 0 auto; border-radius: 2px; background: var(--line-2); }
+  #panel #panelClose { top: 0; right: 6px; width: 44px; height: 44px; font-size: 24px; background: transparent; border-color: transparent; z-index: 2; }
+  #panel #panelClose:hover { background: var(--hover); }
+  #panel #panelHandle { display: block; position: sticky; top: 0; width: calc(100% + 28px); height: 44px; min-height: 44px; margin: 0 -14px; padding: 0; border: 0; border-radius: 0; background: transparent; z-index: 1; cursor: grab; touch-action: none; }
+  #panelHandle::before { content: ''; display: block; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--line-2); }
   #panelGrip { display: none; }
   #panel .peek { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   #panel .peek button { min-width: 0; margin-top: 8px; padding: 5px 8px; text-align: left; }
@@ -2439,13 +2440,34 @@ function setPanelWidth(w) {
   document.documentElement.style.setProperty('--panel-w', overlay ? '0px' : panelW + 'px');
   $('cy').style.right = overlay ? '0' : panelW + 'px';
 }
+function sheetDetents(panel = $('panel')) {
+  const half = Math.round(innerHeight * .56), full = Math.max(200, innerHeight - 60);
+  const last = panel.dataset.detent || 'peek';
+  // Measure just the title, badges and dependency buttons; actions start below the peek fold.
+  panel.dataset.detent = 'peek';
+  panel.style.height = 'auto';
+  const path = panel.querySelector('.peek');
+  const end = path ? path.getBoundingClientRect().bottom - panel.getBoundingClientRect().top : panel.scrollHeight;
+  const css = getComputedStyle(panel);
+  const bottom = parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth);
+  // Up to 12px below the buttons so their borders never sit on the screen's edge, but never
+  // so much that the first action or fact peeks in.
+  const next = [...panel.querySelectorAll('#facts tr, .actions button')].map(e => e.getBoundingClientRect().top - panel.getBoundingClientRect().top);
+  const peek = Math.max(Math.ceil(end), Math.min(half, Math.ceil(end + bottom + 12), ...next.filter(t => t >= end).map(Math.floor)));
+  panel.style.height = '';
+  panel.dataset.detent = last;
+  return { peek, half, full };
+}
+function sheetHeight(panel = $('panel')) {
+  return phoneSheet.matches && panel.style.display === 'block' ? panel.getBoundingClientRect().height : 0;
+}
 function setDetent(name) {
-  const panel = $('panel'), detent = name === 'full' ? 'full' : 'peek';
+  const panel = $('panel'), detent = ['peek', 'half', 'full'].includes(name) ? name : 'peek';
+  const d = sheetDetents(panel);
   panel.dataset.detent = detent;
-  const height = detent === 'full' ? Math.max(200, innerHeight - 60) : 200;
-  document.documentElement.style.setProperty('--sheet-h', phoneSheet.matches && panel.style.display === 'block' ? height + 'px' : '0px');
-  $('panelHandle').setAttribute('aria-expanded', String(detent === 'full'));
-  $('panelHandle').title = detent === 'full' ? 'Show a summary' : 'Show all details';
+  document.documentElement.style.setProperty('--sheet-h', phoneSheet.matches && panel.style.display === 'block' ? d[detent] + 'px' : '0px');
+  $('panelHandle').setAttribute('aria-expanded', String(detent !== 'peek'));
+  $('panelHandle').title = detent === 'peek' ? 'Show more details' : 'Show a summary';
   if (detent === 'peek') panel.scrollTop = 0;
 }
 phoneSheet.addEventListener('change', () => {
@@ -2518,7 +2540,9 @@ function openPanel(n) {
   const hasParent = n.parent != null && byId.has(n.parent);
   panel.replaceChildren(...[
     grip(),
-    el('button', { id: 'panelHandle', type: 'button', ariaLabel: 'Toggle details height', ariaExpanded: 'false', onclick: () => { setDetent(panel.dataset.detent === 'full' ? 'peek' : 'full'); keepInView(cy.getElementById(String(n.id))); } }),
+    // Pointer taps and drags are handled by the sheet's pointer listeners; this is the keyboard path.
+    el('button', { id: 'panelHandle', type: 'button', ariaLabel: 'Resize details', ariaExpanded: 'false',
+      onclick: e => { if (e.detail === 0) setDetent(panel.dataset.detent === 'peek' ? 'half' : 'peek'); } }),
     el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
     back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { id: 'panelTitle', tabIndex: -1, textContent: n.title }),
@@ -2629,7 +2653,7 @@ function select(id, center, how) {
 // least that shows it again. Timeline never pushes the name column off the left edge.
 function keepInView(node) {
   const box = $('cy').getBoundingClientRect(), m = 16;
-  const sheet = phoneSheet.matches && $('panel').style.display === 'block' ? $('panel').getBoundingClientRect().height : 0;
+  const sheet = sheetHeight($('panel'));
   const b = node.renderedBoundingBox({ includeLabels: view !== 'timeline' });
   let dx = 0, dy = 0;
   if (b.x2 > box.width - m) dx = box.width - m - b.x2;
@@ -2978,6 +3002,49 @@ const keepsIgnoringDone = n => {
   const project = projectSelect.value, scope = goalScope();
   return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id));
 };
+
+// The sheet's transparent 44px handle is the drag target; its small bar is only a visual cue.
+// Close remains a separate, higher control so a drag never lands on it.
+let sheetDrag = null;
+$('panel').addEventListener('pointerdown', e => {
+  if (!phoneSheet.matches || e.target.id !== 'panelHandle') return;
+  e.preventDefault();
+  const panel = $('panel');
+  sheetDrag = { y: e.clientY, at: performance.now(), height: panel.getBoundingClientRect().height, moved: false, full: sheetDetents(panel).full };
+  panel.classList.add('dragging');
+  $('panelHandle').setPointerCapture(e.pointerId);
+});
+$('panel').addEventListener('pointermove', e => {
+  if (!sheetDrag) return;
+  const dy = sheetDrag.y - e.clientY;
+  if (Math.abs(dy) > 5) sheetDrag.moved = true;
+  if (!sheetDrag.moved) return;
+  document.documentElement.style.setProperty('--sheet-h', Math.max(40, Math.min(sheetDrag.full, sheetDrag.height + dy)) + 'px');
+});
+function endSheetDrag(e) {
+  if (!sheetDrag) return;
+  const drag = sheetDrag;
+  sheetDrag = null;
+  const panel = $('panel'), d = sheetDetents(panel);
+  panel.classList.remove('dragging');
+  const h = panel.getBoundingClientRect().height, velocity = (drag.y - e.clientY) / Math.max(1, performance.now() - drag.at);
+  if (!drag.moved) {
+    setDetent(panel.dataset.detent === 'peek' ? 'half' : 'peek');
+  } else if (h < d.peek - 48 || (panel.dataset.detent === 'peek' && velocity < -.65)) {
+    return closePanel();
+  } else {
+    const name = Object.keys(d).reduce((a, b) => Math.abs(d[b] - h) < Math.abs(d[a] - h) ? b : a);
+    setDetent(name);
+  }
+  if (pinned) keepInView(cy.getElementById(String(pinned)));
+}
+$('panel').addEventListener('pointerup', endSheetDrag);
+$('panel').addEventListener('pointercancel', e => {
+  if (!sheetDrag) return;
+  sheetDrag = null;
+  $('panel').classList.remove('dragging');
+  setDetent($('panel').dataset.detent);
+});
 
 // Popovers: one open at a time, closed by a click elsewhere, the phone backdrop, or Esc.
 // On a phone they become bottom sheets. Menus of actions close after a choice; Filter and
