@@ -4314,6 +4314,38 @@ class RunTest(Base):
         self.assertEqual(len(self.named(removed, "removed")), 1)
         self.assertEqual(self.meta(task)["cleanup_kept"], {})
 
+    def test_117_record_reads_the_session_list_once_for_many_kept_folders(self):
+        for _ in range(3):
+            task = self.merged_task()
+            with open(os.path.join(self.worktree(f"task-{task}"), "a.txt"), "w") as fh:
+                fh.write("x\n")
+        self.agents()
+        self.events("record")
+        self.assertEqual(len(self.calls("agents")), 1)
+
+    def test_117_a_sweep_reuses_a_kept_reason_until_the_folder_changes_or_it_ages(self):
+        task = self.merged_task()
+        wt = self.worktree("task-1")
+        os.makedirs(os.path.join(wt, "sub"))
+        with open(os.path.join(wt, "sub", "a.txt"), "w") as fh:
+            fh.write("x\n")
+        self.agents()
+        self.events("record")
+        self.events("record")  # the sweep: kept, and the reason is stored
+        cache = os.path.join(self.root, ".agentic-team", "sweep-cache.json")
+        with open(cache) as fh:
+            self.assertEqual([v["why"] for v in json.load(fh).values()], ["uncommitted changes (?? sub/)"])
+        os.remove(os.path.join(wt, "sub", "a.txt"))  # a change below the top folder moves no stamp
+        self.assertEqual(self.named(self.events("record"), "removed"), [])
+        self.assertTrue(os.path.isdir(wt))
+        with open(cache) as fh:
+            aged = {k: dict(v, at=0) for k, v in json.load(fh).items()}
+        with open(cache, "w") as fh:
+            json.dump(aged, fh)
+        self.assertEqual(len(self.named(self.events("record"), "removed")), 1)
+        self.assertFalse(os.path.isdir(wt))
+        self.assertEqual(self.meta(task)["cleanup_kept"], {})
+
     def test_76_the_removed_line_counts_the_ignored_files_it_took_with_the_folder(self):
         self.commit_file(".gitignore", "*.pyc\nbuild/\n")
         task = self.merged_task()
