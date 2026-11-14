@@ -5283,6 +5283,22 @@ class RunTest(Base):
         self.one(self.events("record"), "stuck")
         self.assertEqual([e["id"] for e in self.meta(stuck_task)["sessions"]], ["sess-task-2-1"])
 
+    def test_99_a_transition_error_in_record_stays_with_its_task(self):
+        odd = self.running_task(phase="reported")  # a hand edit: the attempt has no row, so the rows say running
+        other = self.running_task()
+        self.agents(self.finished(f"task-{other}"))
+        out = self.run_cmd("record", pre=["--json"])
+        self.assertEqual(out.returncode, 1, out.stderr)
+        events = json.loads(out.stdout)
+        error = self.one(events, "transition-error")
+        self.assertEqual((error["task"], error["attempt"]), (odd, 1))
+        self.assertEqual(error["detail"], f"internal error: #{odd} has no transition for event seen_running from phase reported")
+        self.assertEqual(error["next"], f"check #{odd}; if its phase is wrong, tg edit {odd} --meta phase=<the right phase> "
+                         "and run.py record, else report the bug in run.py")
+        self.assertEqual(self.one(events, "died")["task"], other)  # the drain goes on with the next task
+        self.assertEqual((self.meta(odd)["phase"], self.meta(other)["phase"]), ("reported", "stopped"))
+        self.assertEqual([e["event"] for e in events if e["task"] == odd], ["transition-error"])
+
     def test_23_a_locked_stale_registration_gets_the_unlock_fix(self):
         task, wt, head = self.retry_ready()
         self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)

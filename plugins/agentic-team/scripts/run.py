@@ -3774,7 +3774,8 @@ def ready_events(run, snap):
 
 
 def host_guard(run, task, fn, *args):
-    """Run one task's part of the drain. A code host failure is that task's line, not the drain's end."""
+    """Run one task's part of the drain. A code host failure, or an event the transition table has no row for, is that
+    task's line, not the drain's end; record still exits 1."""
     try:
         fn(*args)
     except Refused:
@@ -3782,6 +3783,18 @@ def host_guard(run, task, fn, *args):
     except codehost.HostError as exc:
         run.host_failed = True
         run.emit("host-error", task["id"], None, None, str(exc), "fix it and run.py record")
+    except TransitionError as exc:
+        run.host_failed = True
+        tid = task["id"]
+        run.emit("transition-error", tid, wanted_attempt(task), None, str(exc),
+                 f"check #{tid}; if its phase is wrong, tg edit {tid} --meta phase=<the right phase> and run.py record, "
+                 "else report the bug in run.py")
+
+
+def record_task(run, snap, task, unmanaged):
+    """record's part for one task in progress: settle the phase, then follow the rows."""
+    if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
+        record_in_progress(run, snap, task, unmanaged)
 
 
 def record_lock(run, stack, task):
@@ -3811,8 +3824,7 @@ def cmd_record(run, args):
             task["meta"] = node.get("meta") or {}
             snap.results[task["id"]] = run.results_for(task["id"])
             run._sessions = None
-            if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
-                host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
+            host_guard(run, task, record_task, run, snap, task, unmanaged)
     if unmanaged:
         run.emit("unmanaged", None, None, None, ids_text(unmanaged), "run.py adopt <id> --branch <b> --head <sha> [--pr <n>] "
                  "for work to bring under run.py; the others can stay")
