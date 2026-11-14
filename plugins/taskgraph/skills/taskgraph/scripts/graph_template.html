@@ -499,7 +499,7 @@ const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
 const narrowScreen = matchMedia('(max-width: 640px)');
-const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, PHONE_READABLE = 0.45, MAX_FIT = 1.25;
+const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, NARROW_LABEL_W = 96, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
 const LANE_KEYS = {
@@ -1515,8 +1515,8 @@ function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
-// A phone graph has narrow nodes, so a smaller zoom still reads and shows far more of the plan.
-const readable = () => view === 'graph' && narrowScreen.matches ? PHONE_READABLE : READABLE;
+// On a phone, Graph shows every task, however small: seeing the whole plan matters more there than reading it unzoomed.
+const readable = () => view === 'graph' && narrowScreen.matches ? 0 : READABLE;
 
 // Too big to show whole at a readable zoom: show the top of the plan around its goal instead,
 // never pushing the plan's top or side edges off screen.

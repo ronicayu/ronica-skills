@@ -147,6 +147,10 @@ class Host:
         existing comment was edited. Raises HostError when the host refuses."""
         raise NotImplementedError
 
+    def close_pr(self, number, body):
+        """Close the open request with `body` as a comment. Raises HostError when the host refuses."""
+        raise NotImplementedError
+
 
 class GitHub(Host):
     name, cli, noun, prefix = "github", "gh", "PR", "#"
@@ -278,6 +282,10 @@ class GitHub(Host):
         made = made if isinstance(made, dict) else {}
         return made.get("html_url") or f"comment {made.get('id')}", bool(old)
 
+    def close_pr(self, number, body):
+        # `gh pr close <n> --comment <text>` posts the comment, then closes the request.
+        self.need(self.gh("pr", "close", str(number), "--comment", body), "pr close")
+
 
 class GitLab(Host):
     """GitLab through `glab api`, the REST v4 API. UNVERIFIED: glab is not installed on the machine
@@ -303,6 +311,7 @@ class GitLab(Host):
          endpoint. glab prints the message and exits non-zero on 403 and 409.
      12. `merge_requests/<iid>?include_rebase_in_progress=true` returns `rebase_in_progress`, and `merge_error`
          holds why a rebase failed. A `merge_error` left over from an earlier failed merge is not told apart.
+     13. PUT `merge_requests/<iid>` takes `state_event=close` as a form field and closes the merge request.
     """
 
     name, cli, noun, prefix = "gitlab", "glab", "MR", "!"
@@ -485,3 +494,12 @@ class GitLab(Host):
             raise HostError(f"glab api projects/<project>{path} failed: {self.message(out, made) or 'no answer'}")
         made = made if isinstance(made, dict) else {}
         return f"note {made.get('id')}", bool(old)
+
+    def close_pr(self, number, body):
+        # UNVERIFIED (13): POST merge_requests/<iid>/notes with -f body=, then PUT merge_requests/<iid> with
+        # -f state_event=close.
+        for path, flag, method in ((f"/merge_requests/{number}/notes", f"body={body}", "POST"),
+                                   (f"/merge_requests/{number}", "state_event=close", "PUT")):
+            out, made = self.api(path, "-f", flag, method=method)
+            if out.returncode != 0:
+                raise HostError(f"glab api projects/<project>{path} failed: {self.message(out, made) or 'no answer'}")

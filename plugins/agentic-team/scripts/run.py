@@ -16,6 +16,11 @@ Usage:
                    branch and open a request (pr); the task is done once its
                    change is merged, and waits as awaiting_merge until then
     merged <id>    record that the operator merged a task branch; marks it done
+    repoint <id> --pr <n>
+                   pr mode: a task that waits for its merge follows request
+                   <n>, which carries its change (the request of another
+                   task); closes the task's own request unless --keep-old;
+                   `record` marks it done once <n> is merged
     stop <id>      stop a worker for a pause and file a STOPPED result
     abandon <id>   mark a task abandoned after attempt 3 failed
     status         print the status report (tables), with the Follow-ups
@@ -786,6 +791,7 @@ OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing clos
 #   close_merged     close records a passing verdict on output outside git: nothing to merge
 #   merged           a merge is recorded (mark_merged), or a recorded one is finished (finish_merged)
 #   abandon          abandon drops the task
+# repoint (#111) sends no event: the task stays awaiting_merge and follows another request, so it has no row here.
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
 # model/phase-edges.json holds the edges of model/Lifecycle.tla; test_run.py checks that this table has the same ones,
@@ -970,9 +976,11 @@ def ids_text(ids):
 
 # ------------------------------------------------------------------- roles
 
-ROLE_KEYS = ("fits", "tier", "verify_kind", "skills")
+ROLE_KEYS = ("fits", "tier", "verify_kind", "skills", "extends")
+ROLE_INHERITED = ("fits", "tier", "verify_kind", "skills")
 ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
 ROLE_NAME = re.compile(r"[a-z0-9-]+")
+ROLE_ITEM = re.compile(r"([1-9][0-9]*)\. ")  # a numbered item of Method or Review starts at column 0
 ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
 STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
 
@@ -981,14 +989,20 @@ class Role:
     """One role file. `source` is "plugin" or "project"; `overrides` marks a project file that hides a plugin file of the
     same name. parse_role fills the rest, or sets `error` to one line that names the problem."""
 
-    def __init__(self, name, path, source, overrides=False):
-        self.name, self.path, self.source, self.overrides = name, path, source, overrides
-        self.fits = self.tier = self.verify_kind = self.review = None
-        self.skills, self.method, self.error = [], "", None
+    def __init__(self, name, path, source, overrides=False, hidden=None):
+        self.name, self.path, self.source, self.overrides, self.hidden = name, path, source, overrides, hidden
+        self.fits = self.tier = self.verify_kind = self.review = self.extends = self.parent = None
+        self.skills, self.keys, self.method, self.error = [], set(), "", None
 
     @property
     def where(self):
+        if self.parent:
+            return f"project, extends {self.parent.source}:{self.parent.name}"
         return "project, overrides plugin" if self.overrides else self.source
+
+    @property
+    def shown_path(self):
+        return f"{self.path}, extends {self.parent.path}" if self.parent else self.path
 
     @property
     def words(self):
@@ -1022,8 +1036,8 @@ def parse_role(run, role):
     except ValueError as exc:
         role.error = str(exc)
         return
-    role.fits, role.tier, role.verify_kind, role.skills = (fields.get(k) for k in ROLE_KEYS)
-    role.skills = role.skills or []
+    role.fits, role.tier, role.verify_kind, role.skills, role.extends = (fields.get(k) for k in ROLE_KEYS)
+    role.skills, role.keys = role.skills or [], set(fields)
     sections, current = {}, None
     for line in body:
         if line.startswith("## "):
@@ -1039,7 +1053,7 @@ def parse_role(run, role):
             sections[current].append(line)
     role.method = "\n".join(sections.get("Method", [])).strip()
     role.review = "\n".join(sections.get("Review", [])).strip() or None
-    if not role.method:
+    if not role.method and not role.extends:
         role.error = "no ## Method section, or it is empty"
 
 
@@ -1071,7 +1085,9 @@ def role_frontmatter(run, lines):
             fields[key] = role_skills(value, number)
         elif value:
             fields[key] = value
-    if not fields.get("fits"):
+    if fields.get("extends") and not ROLE_NAME.fullmatch(fields["extends"]):
+        raise ValueError(f"extends: {fields['extends']!r} is not a role name")
+    if not fields.get("fits") and not fields.get("extends"):
         raise ValueError("no `fits` line: say in one line which tasks the role is for")
     if tier := fields.get("tier"):
         try:
@@ -1097,6 +1113,62 @@ def role_skills(value, number):
     return names
 
 
+def role_items(text):
+    """(the text before the first numbered item, [text of each item]) of a Method or Review section. An item runs from its
+    `N. ` line to the next one, so its indented and blank lines go with it."""
+    lead, items = [], []
+    for line in (text or "").splitlines():
+        match = ROLE_ITEM.match(line)
+        if match:
+            items.append([int(match[1]), [line[match.end():]]])
+        elif items:
+            items[-1][1].append(line)
+        else:
+            lead.append(line)
+    return "\n".join(lead).strip(), ["\n".join(lines).rstrip() for _, lines in items]
+
+
+def merge_section(parent, child):
+    """The parent's section, then the child's, with the child's numbered items numbered on from the parent's."""
+    lead, items = role_items(parent)
+    child_lead, child_items = role_items(child)
+    numbered = lambda texts, start: "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start))  # noqa: E731
+    parts = [lead, numbered(items, 1), child_lead, numbered(child_items, len(items) + 1)]
+    return "\n\n".join(p for p in parts if p).strip() or None
+
+
+def read_role(run, role, found):
+    """Parse `role` and, when it extends a parent, merge the parent in. Any problem sets role.error."""
+    if not ROLE_NAME.fullmatch(role.name):
+        role.error = "the file name must be lowercase letters, digits and -"
+        return
+    parse_role(run, role)
+    if role.error or not role.extends:
+        return
+    if role.source != "project":
+        role.error = "extends: only a project role can extend another role"
+        return
+    name = role.extends
+    parent = role.hidden if name == role.name else found.get(name)
+    if parent is None or parent is role:
+        role.error = f"extends: no role named {name!r} to extend; available roles: {role_list(found)}"
+        return
+    parent = Role(parent.name, parent.path, parent.source)
+    parse_role(run, parent)
+    if parent.error:
+        role.error = f"extends: the parent role file {parent.path} is broken: {parent.error}"
+        return
+    if parent.extends:
+        role.error = f"extends: the parent role {name} extends {parent.extends} itself; a role extends one level only"
+        return
+    role.method = merge_section(parent.method, role.method)
+    role.review = merge_section(parent.review, role.review)
+    for key in ROLE_INHERITED:
+        if key not in role.keys:
+            setattr(role, key, getattr(parent, key))
+    role.parent = parent
+
+
 def role_files(run):
     """{name: Role} for every role file, not yet parsed. A project file hides the plugin file of the same name. A file
     whose name is not lowercase letters, digits and `-` is kept under its name, with its error set."""
@@ -1105,7 +1177,7 @@ def role_files(run):
                            ("project", os.path.join(run.root, ".claude", "agentic-team", "roles"))):
         for path in sorted(glob.glob(os.path.join(glob.escape(folder), "*.md"))):
             name = os.path.basename(path)[:-3]
-            found[name] = Role(name, path, source, overrides=name in found)
+            found[name] = Role(name, path, source, overrides=name in found, hidden=found.get(name))
     return found
 
 
@@ -1120,10 +1192,7 @@ def load_role(run, name, origin):
     role = found.get(name)
     if role is None:
         raise Refused(f"{origin}: no role named {name!r}; available roles: {role_list(found)}")
-    if not ROLE_NAME.fullmatch(name):
-        role.error = "the file name must be lowercase letters, digits and -"
-    else:
-        parse_role(run, role)
+    read_role(run, role, found)
     if role.error:
         raise Refused(f"{origin}: role file {role.path}: {role.error}; available roles: {role_list(found)}")
     return role
@@ -1133,7 +1202,7 @@ def role_size_warning(run, task, role, attempt=None):
     """One `warn` event when the role is longer than ROLE_WORDS_MAX words."""
     if role and role.words > ROLE_WORDS_MAX:
         run.emit("warn", task["id"], attempt, None,
-                 f"role {role.name} ({role.path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
+                 f"role {role.name} ({role.shown_path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
                  "closely; shorten Method and Review")
 
 
@@ -1226,9 +1295,9 @@ def role_section(role, kind):
     if kind == "verify":
         if not role.review:
             return f"Task role: {role.name}. No review checks."
-        return (f"Task role: {role.name} ({role.path}). Check these in addition to the method under VERIFY:\n\n"
+        return (f"Task role: {role.name} ({role.shown_path}). Check these in addition to the method under VERIFY:\n\n"
                 f"{role.review}")
-    parts = [f"Role: {role.name} ({role.path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
+    parts = [f"Role: {role.name} ({role.shown_path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
     if role.skills:
         parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
                      "load, say so under Deviations: and follow the method below.")
@@ -1240,10 +1309,7 @@ def cmd_roles(run, args):
     found, rows, broken = role_files(run), [], 0
     for name in sorted(found):
         role = found[name]
-        if ROLE_NAME.fullmatch(name):
-            parse_role(run, role)
-        else:
-            role.error = "the file name must be lowercase letters, digits and -"
+        read_role(run, role, found)
         broken += bool(role.error)
         rows.append({"name": name, "source": role.where, "path": role.path, "fits": role.fits, "tier": role.tier,
                      "verify_kind": role.verify_kind, "skills": role.skills, "words": None if role.error else role.words,
@@ -2521,9 +2587,11 @@ def cmd_launch(run, args):
     sessions = recorded_sessions(task) + [{**entry, **picked.stored}]
     if task["status"] == "open":
         run.tg("start", str(tid))
-    # Never unset pr, pr_branch, pushed or target: one request per task across attempts. `base` is the commit the
-    # task branch forked from: the first launch writes it, a retry keeps it.
-    keep = [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
+    # Never unset pr, pr_branch, pushed or target: one request per task across attempts. A repointed task (run.py
+    # repoint) gets its own request back: its pr meta is another task's request. `base` is the commit the task branch
+    # forked from: the first launch writes it, a retry keeps it.
+    keep, drop = own_request_meta(task)
+    keep += [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
     if not meta.get("base") and mode in ("first", "base", "head"):
         keep.append(meta_arg("base", base))
     table = mailbox_table(task)  # delivery state of earlier attempts goes; this attempt starts with none
@@ -2533,7 +2601,7 @@ def cmd_launch(run, args):
     lower_flag(run, tid)
     run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
            meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase),
-           *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *(["mailbox"] if table and not left else []))
+           *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *drop, *(["mailbox"] if table and not left else []))
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
@@ -3948,7 +4016,10 @@ def record_closed(run, snap, task):
             run.emit("unpublished", tid, None, None, f"closed at {str(meta['verdict_ref'])[:7]}, not pushed", f"run.py close {tid}")
         else:
             p = run.host().pr(int(meta["pr"]))
-            pr_status(run, snap, task, p)
+            if repointed(task):  # another task's request: information only, never pr_status's actions
+                follow_request(run, task, p)
+            else:
+                pr_status(run, snap, task, p)
             if unmerged(task):  # the request of a gate set earlier, or none yet: write it once
                 request_gate(run, task, p.number, p.url)
     elif unmerged(task):
@@ -4289,6 +4360,8 @@ def not_merged_reason(run, task, head):
     if run.pr_mode:
         if head == meta.get("caught_up_from"):
             return None  # the host rebased this commit into the pushed head, with the same change
+        if repointed(task) and is_sha(meta.get("verdict_ref")) and head == commit_of(run, str(meta["verdict_ref"])):
+            return None  # the merge of the request it follows completes it (merged_by=repoint), or the operator's word
         pushed = meta.get("pushed")
         if pushed and not commit_of(run, str(pushed)):
             branch = meta.get("pr_branch") or "task-" + str(task["id"])
@@ -5071,6 +5144,157 @@ def pr_status(run, snap, task, p):
                          "fix the cause (permission, protection, method) and run.py record")
 
 
+# ----------------------------------------------------------------- repoint
+#
+# A task that waits for its merge may follow another task's request when its change went into that request (#111).
+# repoint writes `pr` and `pr_branch` of that request and `repointed_at`; the first repoint keeps the task's own
+# request in `repointed_from`, `repointed_branch` and `repointed_pushed`, and unsets `pushed`: the followed request's
+# head is not pinned, since its own task may add commits. The phase stays awaiting_merge, so TRANSITIONS has no row
+# for it. The next attempt of the task (launch or adopt after abandon) gets its own request back.
+
+REPOINT_FIELDS = ("repointed_at", "repointed_from", "repointed_branch", "repointed_pushed")
+
+
+def repointed(task):
+    """True for a task that follows another task's request (run.py repoint): its `pr` is that request."""
+    return bool((task.get("meta") or {}).get("repointed_at"))
+
+
+def own_request(task):
+    """The number of the task's own request: `repointed_from` on a repointed task, else `pr`; None when it has none."""
+    meta = task.get("meta") or {}
+    number = meta.get("repointed_from") if repointed(task) else meta.get("pr")
+    return int(number) if number else None
+
+
+def own_request_meta(task):
+    """(`--meta` arguments, keys to unset) that give a repointed task its own request back, for its next launch: pr,
+    pr_branch and pushed from the repointed_* fields, which go. Nothing for a task that is not repointed. adopt needs
+    none: it refuses a task that waits for its merge and an abandoned one."""
+    meta = task.get("meta") or {}
+    if not repointed(task):
+        return [], []
+    back = {"pr": meta.get("repointed_from"), "pr_branch": meta.get("repointed_branch"), "pushed": meta.get("repointed_pushed")}
+    return [meta_arg(k, v) for k, v in back.items() if v], [k for k, v in back.items() if not v] + list(REPOINT_FIELDS)
+
+
+def in_target(run, task):
+    """(True, how) when the task's verified commit is in its target branch, else (False, why). For a repointed task
+    after the request it follows merged. First merged_into: the commit, or one with the same patch, is in the fetched
+    target (a merge commit, or a rebase merge of a one-commit change; `pushed` is unset on a repointed task, so only
+    the target counts). Else `git merge-tree --write-tree <target> <commit>`: when merging the commit into the target
+    gives the target's own tree, the target holds the change already (a squash merge, or a rebase merge of several
+    commits). A conflict, or a change the target does not have, is no proof. follow_request prints the answer and marks
+    the task merged either way."""
+    sha = str(task["meta"]["verdict_ref"])
+    ref = run.target_ref(task)
+    if not commit_of(run, sha):
+        return False, f"{sha[:7]} is not in this clone"
+    if merged_into(run, task, sha):
+        return True, f"{sha[:7]} is in {ref}"
+    out = run.git("merge-tree", "--write-tree", ref, sha, check=False)
+    if out.returncode not in (0, 1):
+        return False, f"git merge-tree failed: {first_line(out.stderr) or 'no output'}"
+    tree = out.stdout.split("\n", 1)[0].strip() if out.returncode == 0 else ""
+    if tree and tree == run.git("rev-parse", "--verify", "-q", f"{ref}^{{tree}}", check=False).stdout.strip():
+        return True, f"{ref} holds the change of {sha[:7]}"
+    return False, f"{ref} does not hold the change of {sha[:7]}"
+
+
+def follow_request(run, task, p):
+    """record for a repointed task. The request belongs to another task, which merges it: its state is information only.
+    No decision, rebase, push or merge, and its head is not compared with anything. Its merge completes the task
+    (#111, Decision): the repoint is the operator's word that the change goes in through it, like `run.py merged --by
+    operator`, so the task is merged with merged_by=repoint and merged_via=<n>. in_target is information only: the
+    request may have been redone and rebased, so the task's commits, even their content, need not be in the target."""
+    tid, meta = task["id"], task["meta"]
+    label = run.host().label(p.number)
+    origin = f" (repointed from {run.host().label(meta['repointed_from'])})" if meta.get("repointed_from") else " (repointed)"
+    target = run.target(task)
+    if p.state == "MERGED" and p.base_branch != target:  # repoint checked the base; someone changed it before the merge
+        run.emit("pr-retargeted", tid, None, None, f"{label}, which #{tid} follows{origin}, merged into "
+                 f"{p.base_branch}, not into {target}; #{tid} is not marked merged",
+                 f"run.py repoint {tid} --pr <n> to follow a request into {target}, or run.py merged {tid} --by operator "
+                 f"when the change is in {target}")
+    elif p.state == "MERGED":
+        sha = str(meta["verdict_ref"])[:7]
+        try:
+            ok, how = in_target(run, task)
+        except Refused as exc:  # a failed fetch: the check is information, so it is not a host-error
+            ok, how = False, str(exc)
+        run.emit("target-check", tid, None, None, f"{sha} in target: {how}" if ok else
+                 f"{sha} not proven in target ({how}): its content may have been redone in {label}")
+        mark_merged(run, task, "repoint", merged_via=p.number)
+        run.emit("merged", tid, None, None, f"{label}, which #{tid} follows, merged at "
+                 f"{p.merge_commit or 'unknown commit'}; recorded merged_by=repoint")
+        cleanup(run, task)
+    elif p.state == "CLOSED":
+        run.emit("pr-closed", tid, None, None, f"{label}, which #{tid} follows{origin}, closed without a merge",
+                 f"run.py repoint {tid} --pr <n> to follow another request, run.py merged {tid} --by operator when "
+                 f"the change is in {target} another way, or {redo_text(task)}")
+    else:
+        run.emit("follows", tid, None, None, f"{label}{origin} is open ({p.raw_state}); #{tid} waits for its merge, "
+                 "which the task that owns it does")
+
+
+def cmd_repoint(run, args):
+    """Let a task that waits for its merge follow another request, which carries its change. Writes the request meta and
+    the merge gate, and closes the task's own request unless --keep-old. The phase does not change. A repeat with the
+    same request does the steps that are still missing."""
+    tid = args.id
+    task = run.show(tid)
+    meta = task.setdefault("meta", {})
+    if not run.pr_mode:
+        raise Refused(f'repoint needs merge.mode = "pr"; #{tid} merges as a branch here')
+    if task["status"] != "in_progress" or stored_phase(task) != "awaiting_merge" or not unmerged(task):
+        raise Refused(f"#{tid} does not wait for its merge (status {task['status']}, phase {task_phase(task) or 'none'}); "
+                      "repoint takes a task that run.py closed, with phase awaiting_merge")
+    host = run.host()
+    p = host.pr(args.pr)
+    label, own = host.label(p.number), own_request(task)
+    if own == p.number:
+        raise Refused(f"{label} is the request of #{tid} itself; repoint follows the request of another task")
+    if p.state == "CLOSED":
+        raise Refused(f"{label} is closed without a merge; repoint follows an open or merged request")
+    target = run.target(task)
+    if p.base_branch != target:
+        raise Refused(f"{label} merges into {p.base_branch}, but #{tid} merges into {target}")
+    old = host.pr(own) if own else None
+    old_label = host.label(own) if own else None
+    if old and old.state == "MERGED" and not repointed(task):
+        raise Refused(f"{old_label} of #{tid} is merged; run.py record records it")
+    fields = {"pr": p.number, "pr_branch": p.head_branch, "repointed_at": run.now()}
+    if not repointed(task):  # the first repoint keeps the task's own request; a later one only changes what it follows
+        kept = {"repointed_from": own, "repointed_branch": meta.get("pr_branch"), "repointed_pushed": meta.get("pushed")}
+        fields.update({k: v for k, v in kept.items() if v})
+    run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in fields.items()], "--unset-meta", "pushed", "host_rebase")
+    meta.update(fields)
+    for key in ("pushed", "host_rebase"):
+        meta.pop(key, None)
+    request_gate(run, task, p.number, p.url)
+    was = f"its own request {old_label}" if own else "no request of its own"
+    run.emit("repointed", tid, wanted_attempt(task), None,
+             f"#{tid} follows {label} {p.url} ({p.state.lower()}, into {target}); it had {was}; the head of {label} is not "
+             "pinned", f"run.py record marks #{tid} merged (merged_by=repoint), since {label} is merged"
+             if p.state == "MERGED" else f"run.py record follows {label}; the task that owns it merges it")
+    if old and old.state == "OPEN":
+        others = [t["id"] for t in Snapshot(run, ready=False).awaiting  # tasks repointed to it earlier still follow it
+                  if t["id"] != tid and unmerged(t) and str((t.get("meta") or {}).get("pr")) == str(own)]
+        if args.keep_old or others:
+            why = "--keep-old" if args.keep_old else f"{ids_text(others)} {'follows' if len(others) == 1 else 'follow'} it"
+            run.emit("kept-open", tid, None, None, f"{old_label} stays open ({why}); record no longer follows it for #{tid}",
+                     "close it on the host when it is no longer needed")
+            return
+        try:
+            host.close_pr(own, f"Closed by run.py repoint: the change of task #{tid} goes in through {label} ({p.url}).")
+        except codehost.HostError as exc:
+            run.host_failed = True
+            run.emit("host-error", tid, None, None, f"closing {old_label}: {exc}",
+                     f"close {old_label} on the host by hand, or run.py repoint {tid} --pr {p.number} again")
+            return
+        run.emit("superseded", tid, None, None, f"{old_label} closed with a comment that names {label}")
+
+
 # ------------------------------------------------------------------- close
 
 def transcript_usage(path):
@@ -5372,6 +5596,10 @@ def cmd_close(run, args):
     tid = args.id
     task = run.show(tid)
     meta = task.get("meta") or {}
+    if unmerged(task) and repointed(task) and run.pr_mode:  # publish would push to the request of another task
+        label = run.label(int(meta["pr"]))
+        raise Refused(f"#{tid} follows {label} (run.py repoint), which another task merges; run.py record follows it, "
+                      f"run.py repoint {tid} --pr <n> follows another one; {redo_text(task)}")
     if unmerged(task):
         return resume_close(run, task)
     if awaiting(task) and not meta.get("abandoned"):  # merged, or closed outside git, and not done yet
@@ -5577,9 +5805,14 @@ def cmd_abandon(run, args):
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
                   ((m := LEGACY_WT.match(e)) and int(m.group(1)) == tid)}
-    request = (f"; request {run.label(int(meta['pr']))} stays open"
-               + (" and record no longer follows it" if closed else "") + ", close it on the host by hand"
-               if run.pr_mode and meta.get("pr") else "")
+    if run.pr_mode and meta.get("pr") and repointed(task):  # the request is another task's: it is not ours to close
+        request = (f"; record no longer follows {run.label(int(meta['pr']))}, which another task merges; the next attempt "
+                   "goes back to " + (f"the task's own request {run.label(int(meta['repointed_from']))}"
+                                      if meta.get("repointed_from") else "a request of its own"))
+    else:
+        request = (f"; request {run.label(int(meta['pr']))} stays open"
+                   + (" and record no longer follows it" if closed else "") + ", close it on the host by hand"
+                   if run.pr_mode and meta.get("pr") else "")
     if closed and not request:  # it was closed and waited for its merge
         request = f"; branch {task_branch(tid)} at {str(meta['verdict_ref'])[:7]} is not merged and stays"
     run.emit("abandoned", tid, attempt, None,
@@ -5737,7 +5970,10 @@ def cmd_status(run, args):
     for task in snap.closed:
         meta = task.get("meta") or {}
         if unmerged(task):
-            request = f"{'!' if gitlab else '#'}{meta['pr']}" if meta.get("pr") else None
+            mark = "!" if gitlab else "#"
+            request = f"{mark}{meta['pr']}" if meta.get("pr") else None
+            if request and repointed(task):  # it follows another task's request
+                request += f" (repointed from {mark}{meta['repointed_from']})" if meta.get("repointed_from") else " (repointed)"
             unmerged_rows.append((f"#{task['id']}", task["title"], meta.get("verdict_ref"), request, meta.get("verdict")))
     for task in snap.in_progress:
         meta = task.get("meta") or {}
@@ -5840,7 +6076,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -5882,6 +6118,13 @@ def build_parser():
     p = sub.add_parser("merged", help="record that a task branch is merged")
     p.add_argument("id", type=int)
     p.add_argument("--by", choices=("operator", "manager"), default="operator")
+
+    p = sub.add_parser("repoint", help="pr mode: let a task that waits for its merge follow another request that "
+                                       "carries its change")
+    p.add_argument("id", type=int)
+    p.add_argument("--pr", type=int, required=True, help="the number of the request to follow (another task's)")
+    p.add_argument("--keep-old", action="store_true", help="leave the task's own request open (default: close it with "
+                   "a comment that names the new one)")
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
     p.add_argument("id", type=int)
@@ -5948,13 +6191,13 @@ def build_parser():
 
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
-            "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
+            "merged": cmd_merged, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
             "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
 # `status`, `inbox`, `steer --by operator` and the like may run in another Claude session, whose socket must not replace it
-LOCKED = ("launch", "adopt", "verify", "close", "merged", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
+LOCKED = ("launch", "adopt", "verify", "close", "merged", "repoint", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
 
 
 def main(argv=None):

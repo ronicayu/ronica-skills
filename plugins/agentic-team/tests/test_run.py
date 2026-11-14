@@ -5960,6 +5960,74 @@ class RoleTest(Base):
         row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "tidy")
         self.assertEqual((row["fits"], row["tier"], row["skills"]), ("code: features, fixes", "judgement", ["a:b"]))
 
+    # --- extends (#114)
+
+    def test_07b_a_project_role_extends_the_shipped_role_of_its_own_name(self):
+        path = self.role_file("software-engineer", fits=None, extends="software-engineer",
+                              method="1. Paste the red line at base.\n2. Deflake: reproduce first.",
+                              review="1. Mutation check: delete each new guard.")
+        plugin = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles", "software-engineer.md")
+        role = self.section(self.brief(self.add_task(role="software-engineer")), "ROLE")
+        self.assertIn(f"Role: software-engineer ({path}, extends {plugin}).", role)
+        self.assertIn("1. Read the code you will change", role)
+        self.assertIn("13. Commit in logical steps.", role)
+        self.assertTrue(role.endswith("13. Commit in logical steps. Each message says what changed and why.\n\n"
+                                      "14. Paste the red line at base.\n15. Deflake: reproduce first."), role)
+        review = self.section(self.verify_text(self.running_task(role="software-engineer")), "ROLE")
+        self.assertIn("5. Leftovers: no debug output", review)
+        self.assertTrue(review.endswith("7. Staleness: docs, config and examples that describe the changed behaviour are updated."
+                                        "\n\n8. Mutation check: delete each new guard."), review)
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "software-engineer")
+        self.assertEqual((row["source"], row["tier"], row["verify_kind"], row["error"]),
+                         ("project, extends plugin:software-engineer", "implementation", "code", None))
+        self.assertTrue(row["fits"].startswith("code changes"))
+        self.assertIn("role: software-engineer (project, extends plugin:software-engineer); fits: code changes",
+                      self.ok("roles").stdout)
+
+    def test_07b_a_role_extends_another_project_role_and_its_own_keys_win(self):
+        self.role_file("base", tier="judgement", verify_kind="schema", skills="[a:b]")
+        self.role_file("child", fits=None, extends="base", verify_kind="design-doc", review=None)
+        role = self.section(self.brief(self.add_task(role="child")), "ROLE")
+        self.assertIn("Load these skills with the Skill tool before you start: a:b.", role)
+        self.assertTrue(role.endswith("Method text of base.\n\nMethod text of child."), role)
+        self.assertEqual(self.section(self.verify_text(self.running_task(role="child")), "ROLE").split("\n\n", 1)[1],
+                         "Review text of base.")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "child")
+        self.assertEqual((row["source"], row["fits"], row["tier"], row["verify_kind"]),
+                         ("project, extends project:base", "tasks for the base tests", "judgement", "design-doc"))
+
+    def test_07b_a_broken_extends_is_refused(self):
+        cases = (("an unknown parent", {}, dict(extends="nosuch"), "extends: no role named 'nosuch' to extend"),
+                 ("its own name with no shipped file", {}, dict(extends="bad"), "extends: no role named 'bad' to extend"),
+                 ("a parent that extends", dict(extends="architect"), dict(extends="mid"), "a role extends one level only"),
+                 ("a broken parent", dict(fits=None), dict(extends="mid"), "the parent role file"),
+                 ("a drop line", {}, dict(extends="mid", drop="[review 1]"), "unknown key 'drop'"),
+                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"))
+        for label, mid, front, problem in cases:
+            with self.subTest(label):
+                self.fresh()
+                self.role_file("mid", **mid)
+                path = self.role_file("bad", **front)
+                err = self.refused("launch", str(self.add_task(role="bad")))
+                self.assertIn(f"role file {path}: ", err)
+                self.assertIn(problem, err)
+                out = self.run_cmd("roles")
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertIn(problem, out.stdout)
+
+    def test_07b_continuation_lines_stay_with_their_item_and_an_empty_skills_line_clears_the_parents(self):
+        self.role_file("base", method="1. one\n   more of one\n\n2. two", skills="[a:b]")
+        self.role_file("child", fits=None, extends="base", skills="[]", method="Lead of child.\n\n1. three")
+        role = self.section(self.brief(self.add_task(role="child")), "ROLE")
+        self.assertTrue(role.endswith("1. one\n   more of one\n2. two\n\nLead of child.\n\n3. three"), role)
+        self.assertNotIn("Load these skills", role)
+
+    def test_07b_the_size_warning_counts_the_merged_role(self):
+        self.role_file("base", method=" ".join(["word"] * 400), review=None)
+        self.role_file("child", fits=None, extends="base", method=" ".join(["word"] * 201), review=None)
+        (warn,) = self.named(self.events("launch", str(self.add_task(role="child")), "--dry-run"), "warn")
+        self.assertIn("is 601 words", warn["detail"])
+
     # --- [roles] default
 
     def test_08_the_default_role_applies_to_a_task_with_no_role_and_the_meta_beats_it(self):
@@ -10749,6 +10817,370 @@ class BriefSizeTest(Base):
         self.assertIn("- criterion: `make test` printed OK", out)
         self.assertNotIn("WT9", out)
         self.assertTrue(out.endswith("[cut]"))
+
+
+class RepointTest(Base):
+    """agentic-team 0.21.0 (issue #111): `run.py repoint <id> --pr <n>` lets a task that waits for its merge follow another
+    task's request, which carries its change. The tasks' own requests are 1, 2, 3; the request they follow is 9."""
+
+    FOLLOWED = 9
+
+    def waiting(self, own=None):
+        """A task closed in pr mode that waits for its merge, on its own commit (file t<id>.txt), with its own request
+        `own` (pushed at that commit, gated) or none. Returns (task, head)."""
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt = self.task_wt(task)
+        head = self.wt_commit(wt, f"t{task}.txt", f"{task}\n")
+        self.pass_report(task, wt=wt, head=head)
+        meta = ["phase=awaiting_merge", "verdict=test-verified", f"verdict_ref={json.dumps(head)}"]
+        if own:
+            meta += [f"pr={own}", f"pr_branch={json.dumps(f'task-{task}')}", f"pushed={json.dumps(head)}"]
+        self.tg("edit", str(task), "--meta", *meta)
+        if own:
+            self.tg("gate", str(task), "merge", "--label", self.label(own), "--ref", self.url(own))
+        return task, head
+
+    def url(self, number):
+        return (f"https://github.com/o/r/pull/{number}" if self.host == "github"
+                else f"https://gitlab.example.com/g/p/-/merge_requests/{number}")
+
+    def gate(self, task):
+        found = (self.meta(task).get("gates") or {}).get("merge")
+        return (found["label"], found["ref"]) if found else None
+
+    def requests(self, own=(), own_state="OPEN", close="ok", **followed):
+        """The fake host: request 9 in the fake_host state `followed` (base main, branch combined), and each number in
+        `own` as a task's own request in `own_state` (a conflict when open), with an answer to its close."""
+        s = {"number": self.FOLLOWED, "branch": "combined", "head": "e" * 40, "merge_state": "UNKNOWN", **followed}
+        failed = {"stdout": json.dumps({"message": close}), "stderr": close + "\n", "exit": 1}
+        extra = {"repo view": {"stdout": "main\n"}} if self.host == "github" else {  # the tasks' target, whatever 9's base
+            f"api projects/{self.project}": {"stdout": json.dumps({"default_branch": "main"})}}
+        for n in own:
+            if self.host == "github":
+                extra[f"pr view {n}"] = {"stdout": json.dumps({
+                    "number": n, "url": self.url(n), "state": own_state, "headRefOid": "d" * 40, "headRefName": f"task-{n}",
+                    "baseRefName": "main", "mergedAt": None, "mergeCommit": None, "mergeStateStatus": "DIRTY"})}
+                extra[f"pr close {n}"] = {"stdout": ""} if close == "ok" else failed
+            else:
+                proj = f"projects/{self.project}"
+                extra[f"api {proj}/merge_requests/{n}"] = {"stdout": json.dumps({
+                    "iid": n, "web_url": self.url(n), "state": {"OPEN": "opened", "MERGED": "merged", "CLOSED": "closed"}[own_state],
+                    "sha": "d" * 40, "source_branch": f"task-{n}", "target_branch": "main", "merged_at": None,
+                    "merge_commit_sha": None, "squash_commit_sha": None, "detailed_merge_status": "conflict",
+                    "has_conflicts": True})}
+                extra[f"api -X POST {proj}/merge_requests/{n}/notes"] = {"stdout": json.dumps({"id": 70 + n})}
+                extra[f"api -X PUT {proj}/merge_requests/{n}"] = {"stdout": "{}"} if close == "ok" else failed
+        self.fake_host(**s, extra={**extra, **s.pop("extra", {})})
+
+    def close_calls(self, number):
+        if self.host == "github":
+            return self.host_calls("pr", "close", str(number))
+        return [c for c in self.host_log() if c[:3] == ["api", "-X", "PUT"] and c[3].endswith(f"/merge_requests/{number}")]
+
+    def repointed(self, *own, **followed):
+        """Tasks with their own requests `own` (None: no request), each repointed to request 9 (open). Returns
+        [(task, head)]."""
+        self.pr_config()
+        tasks = [self.waiting(n) for n in own]
+        self.requests(own=[n for n in own if n], **followed)
+        for task, _ in tasks:
+            self.one(self.events("repoint", str(task), "--pr", str(self.FOLLOWED)), "repointed")
+        return tasks
+
+    def push_main(self):
+        self.git("push", "-q", "origin", "main")
+
+    def task_events(self, events, task):
+        return [e["event"] for e in events if e["task"] == task and e["event"] not in ("removed", "kept")]
+
+    # 1: refusals
+    def test_111_repoint_refuses_a_task_that_does_not_wait_for_its_merge(self):
+        task, _ = self.waiting()  # local mode
+        out = self.run_cmd("repoint", str(task), "--pr", "9")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn('repoint needs merge.mode = "pr"', out.stderr)
+        self.fresh()
+        self.pr_config()
+        running = self.running_task()
+        self.pass_report(running)
+        abandoned, _ = self.waiting(1)
+        self.tg("edit", str(abandoned), "--meta", "abandoned=unknown", "phase=abandoned")
+        merged, _ = self.waiting(2)
+        self.tg("edit", str(merged), "--meta", 'merged_at="2026-11-14 10:00 UTC"', "merged_by=operator", "phase=merged")
+        self.tg("done", str(merged))
+        self.requests(own=(1, 2))
+        for task in (running, abandoned, merged):
+            with self.subTest(task=task):
+                before = self.meta(task)
+                out = self.run_cmd("repoint", str(task), "--pr", "9")
+                self.assertEqual(out.returncode, 2, out.stderr)
+                self.assertIn(f"#{task} does not wait for its merge", out.stderr)
+                self.assertIn("repoint takes a task that run.py closed, with phase awaiting_merge", out.stderr)
+                self.assertEqual(self.meta(task), before)
+
+    @both_hosts
+    def test_111_repoint_refuses_a_closed_request_another_target_and_the_own_request(self):
+        self.pr_config()
+        task, _ = self.waiting(1)
+        before = self.meta(task)
+        for followed, number, words in (({"state": "CLOSED"}, "9", f"{self.label(9)} is closed without a merge"),
+                                        ({"base": "release"}, "9", f"{self.label(9)} merges into release, but #{task} merges into main"),
+                                        ({}, "1", f"{self.label(1)} is the request of #{task} itself")):
+            with self.subTest(words):
+                self.requests(own=(1,), **followed)
+                out = self.run_cmd("repoint", str(task), "--pr", number)
+                self.assertEqual(out.returncode, 2, out.stderr)
+                self.assertIn(words, out.stderr)
+                self.assertEqual(self.meta(task), before)
+                self.assertEqual(self.close_calls(1), [])
+        self.requests(own=(1,), own_state="MERGED")
+        out = self.run_cmd("repoint", str(task), "--pr", "9")
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn(f"{self.label(1)} of #{task} is merged; run.py record records it", out.stderr)
+        self.assertEqual(self.meta(task), before)
+
+    # 2, 3, 4, 6: the meta, the gate, the old request, the phase
+    @both_hosts
+    def test_111_repoint_records_the_request_keeps_the_old_one_and_sets_the_gate(self):
+        self.pr_config()
+        task, head = self.waiting(1)
+        self.requests(own=(1,))
+        events = self.events("repoint", str(task), "--pr", "9")
+        detail = self.one(events, "repointed")["detail"]
+        self.assertIn(f"follows {self.label(9)} {self.url(9)}", detail)
+        self.assertIn(f"its own request {self.label(1)}", detail)
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["pr_branch"], meta["repointed_from"], meta["repointed_branch"], meta["repointed_pushed"]),
+                         (9, "combined", 1, f"task-{task}", head))
+        self.assertTrue(meta["repointed_at"])
+        self.assertNotIn("pushed", meta)  # the head of request 9 is not pinned
+        self.assertEqual((self.status_of(task), meta["phase"], meta["verdict_ref"]), ("in_progress", "awaiting_merge", head))
+        self.assertEqual(self.gate(task), (self.label(9), self.url(9)))
+        self.assertIn(self.label(9), self.one(events, "superseded")["detail"])
+        self.assertEqual(len(self.close_calls(1)), 1)
+        comment = (self.close_calls(1)[0][self.close_calls(1)[0].index("--comment") + 1] if self.host == "github" else
+                   next(a for c in self.host_log() if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/1/notes")
+                        for a in c if a.startswith("body=")))
+        self.assertIn(f"task #{task} goes in through {self.label(9)} ({self.url(9)})", comment)
+        self.assertEqual(self.merge_calls(), [])
+        self.assertEqual(self.host_calls("pr", "close", "9") if self.host == "github" else self.close_calls(9), [])
+
+    @both_hosts
+    def test_111_repoint_keep_old_leaves_the_old_request_open(self):
+        self.pr_config()
+        task, _ = self.waiting(1)
+        self.requests(own=(1,))
+        events = self.events("repoint", str(task), "--pr", "9", "--keep-old")
+        self.one(events, "repointed")
+        self.assertIn("--keep-old", self.one(events, "kept-open")["detail"])
+        self.assertEqual(self.named(events, "superseded"), [])
+        self.assertEqual(self.close_calls(1), [])
+        self.assertEqual(self.meta(task)["repointed_from"], 1)
+
+    @both_hosts
+    def test_111_repoint_keeps_the_old_request_open_while_another_task_follows_it(self):
+        self.pr_config()
+        (first, _), (second, _) = self.waiting(1), self.waiting(2)
+        self.requests(own=(2,), number=1, branch=f"task-{first}")  # the change of `second` went into 1, the request of `first`
+        self.one(self.events("repoint", str(second), "--pr", "1"), "superseded")
+        self.assertEqual(self.meta(second)["pr"], 1)
+        self.requests(own=(1,))  # then the change of `first` went into 9
+        events = self.events("repoint", str(first), "--pr", "9")
+        self.one(events, "repointed")
+        self.assertIn(f"{self.label(1)} stays open (#{second} follows it)", self.one(events, "kept-open")["detail"])
+        self.assertEqual(self.named(events, "superseded"), [])
+        self.assertEqual(self.close_calls(1), [])
+
+    def test_111_repoint_reports_a_failed_close_and_a_repeat_finishes_it(self):
+        self.pr_config()
+        task, _ = self.waiting(1)
+        self.requests(own=(1,), close="HTTP 403: forbidden")
+        out = self.run_cmd("--json", "repoint", str(task), "--pr", "9")
+        self.assertEqual(out.returncode, 1)
+        events = json.loads(out.stdout)
+        self.one(events, "repointed")
+        self.assertIn(f"run.py repoint {task} --pr 9 again", self.one(events, "host-error")["next"])
+        self.assertEqual(self.meta(task)["pr"], 9)
+        self.requests(own=(1,))
+        self.one(self.events("repoint", str(task), "--pr", "9"), "superseded")
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["repointed_from"], meta["repointed_branch"]), (9, 1, f"task-{task}"))
+
+    def test_111_repoint_of_a_task_with_no_request_and_a_second_repoint(self):
+        self.pr_config()
+        task, head = self.waiting()
+        self.tg("gate", str(task), "merge", "--label", "merge of worktree-task-1")
+        self.requests()
+        self.assertIn("no request of its own", self.one(self.events("repoint", str(task), "--pr", "9"), "repointed")["detail"])
+        meta = self.meta(task)
+        self.assertEqual(meta["pr"], 9)
+        self.assertFalse({"repointed_from", "repointed_branch", "repointed_pushed"} & set(meta))
+        self.assertEqual(self.gate(task), ("PR #9", self.url(9)))
+        self.fresh()
+        task, head = self.repointed(1)[0]
+        self.requests(own=(1,), own_state="CLOSED", number=8, branch="other")
+        self.one(self.events("repoint", str(task), "--pr", "8"), "repointed")
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["pr_branch"], meta["repointed_from"], meta["repointed_pushed"]), (8, "other", 1, head))
+        self.assertEqual(self.gate(task), ("PR #8", self.url(8)))
+
+    # 5: record follows the request
+    @both_hosts
+    def test_111_record_reports_the_followed_request_and_never_acts_on_it(self):
+        (task, _), = self.repointed(1)
+        self.orders("MERGE: verified branches into main\n")
+        for state in ("DIRTY", "BEHIND", "CLEAN", "BLOCKED"):
+            with self.subTest(state):
+                self.requests(own=(1,), merge_state=state, head="a" * 40)
+                events = self.events("record")
+                self.assertEqual(self.task_events(events, task), ["follows"])
+                detail = self.one(events, "follows")["detail"]
+                self.assertIn(f"{self.label(9)} (repointed from {self.label(1)}) is open", detail)
+                self.assertEqual(self.merge_calls(), [])
+                self.assertEqual(self.tg("ls", "--type", "decision"), [])
+                self.assert_awaiting(task)
+        self.assertEqual([c for c in self.host_log() if "update-branch" in c or "/rebase" in " ".join(c)], [])  # no host rebase
+        self.assertIsNone(self.remote_sha(f"task-{task}"))  # nothing pushed
+
+    def squash(self, *heads):
+        """Request 9 merged as one squash commit on origin main that holds the change of each head."""
+        for head in heads:
+            self.git("cherry-pick", "-n", head)
+        self.git("commit", "-q", "-m", "combined (squash)")
+        self.push_main()
+        return self.git("rev-parse", "HEAD")
+
+    @both_hosts
+    def test_111_record_marks_several_tasks_done_when_the_request_merged_as_a_squash(self):
+        tasks = self.repointed(1, 2, 3)
+        later = self.add_task("Next", depends=tuple(t for t, _ in tasks))
+        merge_commit = self.squash(*[h for _, h in tasks])
+        self.requests(own=(1, 2, 3), state="MERGED", merge_commit=merge_commit)
+        events = self.events("record")
+        for task, head in tasks:
+            with self.subTest(task=task):
+                self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+                check = next(e["detail"] for e in events if e["event"] == "target-check" and e["task"] == task)
+                self.assertEqual(check, f"{head[:7]} in target: origin/main holds the change of {head[:7]}")
+                self.assertIn("recorded merged_by=repoint", next(e["detail"] for e in events
+                                                                if e["event"] == "merged" and e["task"] == task))
+                meta = self.meta(task)
+                self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"], meta["merged_via"]),
+                                 ("done", "merged", "repoint", 9))
+                self.assertIsNone(self.gate(task))
+        self.assertIn(later, [t["id"] for t in self.tg("ready")])
+        self.assertEqual(self.merge_calls(), [])
+
+    def test_111_record_marks_done_after_a_rebase_merge_or_a_merge_commit(self):
+        def rebase(head):
+            self.commit_file("other.txt", "moved on\n")  # the target moved, so the rebased commit has another SHA
+            self.git("cherry-pick", head)
+            self.assertNotEqual(self.git("rev-parse", "HEAD"), head)
+
+        def merge_commit(head):
+            self.git("merge", "-q", "--no-ff", "-m", "merge 9", head)
+
+        for how in (rebase, merge_commit):
+            with self.subTest(how.__name__):
+                self.fresh()
+                (task, head), = self.repointed(1)
+                how(head)
+                self.push_main()
+                self.requests(own=(1,), state="MERGED", merge_commit=self.git("rev-parse", "HEAD"))
+                events = self.events("record")
+                self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+                self.assertEqual(self.one(events, "target-check")["detail"], f"{head[:7]} in target: {head[:7]} is in origin/main")
+                self.assertEqual((self.status_of(task), self.meta(task)["phase"], self.meta(task)["merged_by"]),
+                                 ("done", "merged", "repoint"))
+
+    @both_hosts
+    def test_111_record_marks_done_a_task_whose_commit_the_request_left_out(self):
+        # #111 Decision: the request was redone and rebased, so the task's commit is not provably in the target; the
+        # repoint is the operator's word, and the merge of the request completes the task all the same
+        tasks = self.repointed(1, 2, 3)
+        later = self.add_task("Next", depends=tuple(t for t, _ in tasks))
+        (one, h1), (two, h2), (left, h3) = tasks
+        merge_commit = self.squash(h1, h2)
+        self.requests(own=(1, 2, 3), state="MERGED", merge_commit=merge_commit)
+        events = self.events("record")
+        for task in (one, two, left):
+            self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+            meta = self.meta(task)
+            self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"], meta["merged_via"]),
+                             ("done", "merged", "repoint", 9))
+            self.assertIsNone(self.gate(task))
+        check = next(e for e in events if e["event"] == "target-check" and e["task"] == left)
+        self.assertEqual(check["detail"], f"{h3[:7]} not proven in target (origin/main does not hold the change of "
+                                          f"{h3[:7]}): its content may have been redone in {self.label(9)}")
+        self.assertIsNone(check["next"])
+        self.assertNotIn("not-in-target", [e["event"] for e in events])
+        self.assertIn(later, [t["id"] for t in self.tg("ready")])
+        # cleanup removes the worktree of the task left out too (its commit stays on the host on repointed_branch)
+        removed = [e["detail"] for e in events if e["event"] == "removed" and e["task"] == left]
+        self.assertEqual(len(removed), 1, events)
+        self.assertIn(f"merged at {h3[:7]}", removed[0])
+        self.assertFalse(os.path.isdir(self.wt_path(f"task-{left}")))
+        self.assertEqual([e for e in events if e["event"] == "kept" and e["task"] == left], [])
+        self.assertEqual(self.task_events(self.events("record"), left), [])  # done: record has nothing more to say
+
+    @both_hosts
+    def test_111_record_keeps_waiting_when_the_request_merged_into_another_branch(self):
+        (task, head), = self.repointed(1)  # repoint checked that 9 merges into main
+        self.git("checkout", "-q", "-b", "release")
+        self.git("cherry-pick", head)
+        self.git("push", "-q", "origin", "release")
+        self.git("checkout", "-q", "main")
+        self.requests(own=(1,), state="MERGED", base="release", merge_commit=self.git("rev-parse", "release"))
+        events = self.events("record")
+        self.assertEqual(self.task_events(events, task), ["pr-retargeted"])
+        line = self.one(events, "pr-retargeted")
+        self.assertIn(f"{self.label(9)}, which #{task} follows (repointed from {self.label(1)}), merged into release, "
+                      f"not into main; #{task} is not marked merged", line["detail"])
+        self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow a request into main, or "
+                                       f"run.py merged {task} --by operator when the change is in main")
+        self.assert_awaiting(task)
+        self.assertNotIn("merged_by", self.meta(task))
+        self.assertEqual(self.gate(task), (self.label(9), self.url(9)))
+
+    @both_hosts
+    def test_111_record_hints_repoint_or_redo_when_the_request_closed(self):
+        (task, _), = self.repointed(1)
+        self.requests(own=(1,), state="CLOSED")
+        events = self.events("record")
+        self.assertEqual(self.task_events(events, task), ["pr-closed"])
+        line = self.one(events, "pr-closed")
+        self.assertIn(f"{self.label(9)}, which #{task} follows (repointed from {self.label(1)}), closed without a merge",
+                      line["detail"])
+        self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow another request, run.py merged {task} "
+                                       "--by operator when the change is in main another way, or to redo it, "
+                                       f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+        self.assertEqual(self.tg("ls", "--type", "decision"), [])
+        self.assert_awaiting(task)
+
+    # the commands around it
+    def test_111_close_refuses_a_repointed_task(self):
+        (task, _), = self.repointed(1)
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} follows PR #9 (run.py repoint), which another task merges", out.stderr)
+        self.assertEqual(self.host_calls("pr", "view", "9")[1:], [])  # repoint read it once; close reads nothing
+        self.assertEqual(self.remote_sha(f"task-{task}"), None)
+
+    def test_111_status_shows_the_followed_request(self):
+        (task, head), = self.repointed(1)
+        rows = self.events("status")["awaiting_merge"]
+        self.assertEqual([(r["Task"], r["Request"]) for r in rows], [(f"#{task}", "#9 (repointed from #1)")])
+
+    def test_111_abandon_and_the_next_attempt_go_back_to_the_own_request(self):
+        (task, head), = self.repointed(1)
+        detail = self.one(self.events("abandon", str(task), "unknown"), "abandoned")["detail"]
+        self.assertIn("record no longer follows PR #9, which another task merges", detail)
+        self.assertIn("the next attempt goes back to the task's own request PR #1", detail)
+        self.assertEqual(self.close_calls(9), [])
+        self.ok("launch", str(task), "--attempt", "2")
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["pr_branch"], meta["pushed"]), (1, f"task-{task}", head))
+        self.assertFalse({"repointed_at", "repointed_from", "repointed_branch", "repointed_pushed"} & set(meta))
 
 
 class TransitionTest(unittest.TestCase):

@@ -428,7 +428,59 @@ the operator's standing permission for `run.py` to push task branches to
    someone else moved the remote branch while our head stayed, `record` prints
    `pr-changed`; `push-refused` appears when our head moved too, with where the
    remote branch is and git's line.
-5. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
+5. **Repoint.** When the changes of several tasks go into one request (the
+   operator combined their requests to resolve a conflict), each task follows
+   that request: `run.py repoint <id> --pr <n>`. It takes only a task with
+   `phase=awaiting_merge` in `pr` mode, and refuses a request that is closed,
+   that merges into another branch than the task's target, or that is the task's
+   own. It writes `pr` and `pr_branch` of request `<n>` and `repointed_at`; the
+   first repoint keeps the task's own request in `repointed_from`,
+   `repointed_branch` and `repointed_pushed`, and unsets `pushed`: the head of
+   `<n>` is not pinned, because the task that owns `<n>` may add commits to it.
+   The merge gate becomes `PR #<n>` or `MR !<n>` with its URL (`tg gate`). By
+   default it closes the task's own request with a comment that names `<n>`
+   (`superseded`; GitHub `gh pr close --comment`, GitLab a note, then
+   `state_event=close`); `--keep-old` leaves it open. It also leaves it open, with
+   `kept-open` naming them, while another task that waits for its merge follows
+   that request (it was repointed to it before). The phase does not change,
+   so the transition table has no row for it. A repeat with the same request does
+   the steps a failed run left (`host-error` when the close failed). When the
+   comment was posted but the close failed, the repeat posts the comment again,
+   so the old request can show it twice.
+   `record` then reads `<n>` for the task as information only: `follows` while
+   it is open, whatever its merge state; it opens no decision and never rebases,
+   pushes or merges `<n>` for this task. The task that owns `<n>` does that.
+   When `<n>` is merged, the merge completes the task: the repoint is your word
+   that the task's change goes in through `<n>`, as `run.py merged <id> --by
+   operator` is. `record` records the merge with `merged_by=repoint` and
+   `merged_via=<n>`: the task is done, the gate is cleared, and its dependents
+   become ready. The cleanup of the merged task then removes its worktree and
+   its local branch, even when the task's commit is not in the target; the
+   commit stays on the host on the branch of the task's own request
+   (`repointed_branch`). Before the merge record it prints one `target-check` line, for information
+   only: `in target` when the task's `verdict_ref` is in the fetched target
+   branch (the commit or one with the same patch, `git merge-base
+   --is-ancestor` and `git cherry`: a merge commit, or a rebase merge of one
+   commit; else `git merge-tree --write-tree <target> <verdict_ref>` gives the
+   target's own tree: a squash merge, or a rebase merge of several commits, git
+   2.38 or later), else `not proven in target (<why>): its content may have been
+   redone in <n>`. A combined request that another task redid and rebased often
+   holds neither the task's commits nor their exact content, so the check does
+   not hold the task back; read the line when you want to look. When `<n>` was
+   merged into another branch than the task's target (its base changed after the
+   repoint), `record` prints `pr-retargeted` and does not mark the task merged:
+   repoint it to a request into the target, or run `run.py merged <id> --by
+   operator` when the change is in the target. When `<n>` is
+   closed without a merge, `record` prints `pr-closed`: repoint the task again,
+   run `run.py merged <id> --by operator` when the change is in the target
+   another way, or abandon it and launch the next attempt.
+   `close` refuses a repointed task (its publish would push to another task's
+   branch). `abandon` leaves `<n>` alone, and the next `launch` gives the task its
+   own request back (`pr`, `pr_branch` and `pushed` from the `repointed_*`
+   keys); if repoint closed that request, the next `close` reports it as
+   `pr-closed` until you reopen it on the host. `status` shows the request as
+   `#<n> (repointed from #<own>)`.
+6. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
 **Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
 and the push accept a branch at a new head when the change is the same. The
@@ -521,10 +573,11 @@ session's message or the end of `wait` wakes it.
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
 | `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), marks the task done, then removes its sessions and worktrees. |
+| `repoint <id> --pr <n>` | `pr` mode: a task that waits for its merge follows request `<n>`, which carries its change (another task's request). Writes `pr`, `pr_branch` and the `repointed_*` keys, unsets `pushed`, sets the merge gate to `<n>`, and closes the task's own request with a comment that names `<n>` (`--keep-old` leaves it open). The phase stays `awaiting_merge`. `record` then only reports `<n>`, and marks the task merged (`merged_by=repoint`, `merged_via=<n>`) once `<n>` is merged; a `target-check` line says, for information, whether the task's commit is in the target. See "Repoint" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests). |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. It also drops a task that waits for its merge: its branch stays unmerged, and in `pr` mode its request stays open on the host for the operator to close. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its merge is listed under "Closed, awaiting merge" (`awaiting_merge` in `--json`), not under "In flight"; it is listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
-| `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, or `project, overrides plugin`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
+| `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, or `project, extends plugin:<name>`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
 | `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
@@ -1018,7 +1071,7 @@ A role has a name of lowercase letters, digits and `-`, and a file `<name>.md`. 
 1. The project: `.claude/agentic-team/roles/<name>.md` in the main checkout. Track it in git. It is not `.agentic-team/`, which is run state and is git-ignored.
 2. The plugin: `templates/roles/<name>.md`.
 
-The roles a project has are the union of both folders. A project file with the name of a shipped role replaces it completely; nothing is merged.
+The roles a project has are the union of both folders. A project file with the name of a shipped role replaces it completely, unless it sets `extends` (see [Extending a role](#extending-a-role)).
 
 ### The file format
 
@@ -1037,11 +1090,34 @@ skills: [plugin:skill, ...]  # optional; [] or absent means none
 ...text pasted into the verifier brief...
 ```
 
-The frontmatter is the lines between the first two `---` lines. Each line is `key: value`, split at the first colon, so a `fits` value may hold colons. A `#` that starts a value or follows a space starts a comment, except inside a list. There is no YAML library: only these four keys, one per line, and `skills` as `[a, b]` or empty. A section's text runs to the next `## ` heading or the end of the file. `## Method` is required and may not be empty; `## Review` is optional.
+The frontmatter is the lines between the first two `---` lines. Each line is `key: value`, split at the first colon, so a `fits` value may hold colons. A `#` that starts a value or follows a space starts a comment, except inside a list. There is no YAML library: only these keys (and `extends`, below), one per line, and `skills` as `[a, b]` or empty. A section's text runs to the next `## ` heading or the end of the file. `## Method` is required and may not be empty; `## Review` is optional.
 
 A file with no `fits`, no `## Method`, an unknown key, a `tier` that the config does not know (or a tier with no model), a `verify_kind` that is not `code`, `schema` or `design-doc`, or a `skills` value that is not a list of names is broken. `launch`, `adopt` and `verify` refuse a task whose role is broken or has no file, and name the file, the problem and the roles there are. `run.py roles` lists a broken file with its error and exits 1. No other command fails because of a role: see "What a role fixes at launch".
 
 When Method plus Review is over 600 words, `launch` and `verify` print a `warn` line (an event in `--json`) and go on. A long role is followed less closely; keep it short. The shipped roles are under 600 words.
+
+### Extending a role
+
+A project role can add to another role instead of replacing it, so it keeps the changes that later plugin versions make to the shipped role (#114):
+
+```markdown
+---
+extends: software-engineer   # the parent role
+---
+
+## Method
+1. Paste the red line of each new test at base; it fails for the right reason.
+
+## Review
+1. Mutation check: delete each new guard; its named test goes red.
+```
+
+- **The parent.** When `extends` names the file's own role (`software-engineer.md` with `extends: software-engineer`), the parent is the shipped file of that name, and tasks with `role=software-engineer` get the merged role. Any other name is the role `run.py` finds for it, project first. The parent must not set `extends` itself: a role extends one level only, so there is no chain and no cycle.
+- **The text.** The merged Method is the parent's Method, then the child's Method; the same for Review. A numbered item is a line at column 0 that starts with `N. `, with the lines under it up to the next one. The child's items are numbered on from the parent's, so the child's `1.` above becomes `14.` after the 13 shipped items. Text before the first numbered item stays in place. A child may leave out `## Method` or `## Review`; the parent's section is then used as it is.
+- **Only adds.** An extending role cannot remove or change a parent item. When a project rule contradicts one, such as a project that bans every TODO while Review item 5 of `software-engineer` allows a TODO with a task id, write the project rule as a standing order: STANDING ORDERS win over ROLE, and the brief says so. To change many parent items, replace the role instead (a file of the same name with no `extends`).
+- **The keys.** `fits`, `tier`, `verify_kind` and `skills` come from the parent when the child has no line for them, so an extending role needs no `fits` line. `skills: []` is a line: it clears the parent's skills.
+- **What shows.** `run.py roles` shows the source as `project, extends plugin:software-engineer` (or `project:<name>`). The ROLE line of a brief names both files. The 600-word warning counts the merged text.
+- **Broken.** An `extends` that names no role, and a parent that is broken or extends another role, make the role broken, with the same refusals as any broken role.
 
 ### Tier and verify kind
 
@@ -1157,7 +1233,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 31 keys:
+skill. Metadata holds everything else, 36 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1171,21 +1247,23 @@ skill. Metadata holds everything else, 31 keys:
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
-| `pr` | publish, `adopt` | The request number (GitHub PR number, GitLab MR `iid`). |
-| `pr_branch` | publish, `adopt` | The branch on the remote that the request's head is. Default `task-<id>`. |
+| `pr` | publish, `adopt`, `repoint` | The request number (GitHub PR number, GitLab MR `iid`). On a repointed task, the request it follows. |
+| `pr_branch` | publish, `adopt`, `repoint` | The branch on the remote that the request's head is. Default `task-<id>`. |
+| `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | `repoint` | `repointed_at` marks a task that follows another task's request: when it was last repointed. The other three keep the task's own request (number, branch, pushed head) from the first repoint; a key the task had no value for is not written. The next `launch` moves them back to `pr`, `pr_branch` and `pushed` and removes all four. |
 | `mailbox` | `answer`, `steer`, `record` | A JSON object `{"<row id>": {"kind", "attempt", "via" (socket, resume or pending), "filed", "at", "tries", ...}}` for each `answer` and `steer` row that `run.py` filed, plus `{"kind": "ask", "seen": true}` for an ask that `record` printed. The delivery state of a message is meta, not a row, so a retry adds no row. `launch` drops the entries of earlier attempts; `cleanup` of a merged task and `abandon` remove the key. |
 | `mailbox_ids` | `answer`, `steer` | `{"<attempt>": [row ids]}`: the answer and steer rows that `run.py` filed, which nothing prunes. A later brief pastes only these from an earlier attempt, so a row that a worker filed `--by manager` is never carried as the Manager's. `abandon` keeps it; the cleanup of a merged task removes it. |
 | `cleanup_kept` | `cleanup` | A JSON object `{folder: reason}` for the worktree folders of a merged task that `run.py` kept, so `record` repeats a `kept` line only when its reason changes. |
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
 | `caught_up_from` | `close` | The local branch's head when the host first rebased the request. The local branch and worktree stay there. `close` does not push it back over the host's head, and cleanup counts it as merged. |
-| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged, in the same write as `phase=merged`, before `tg done`. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. |
+| `merged_at`, `merged_by`, `merged_via` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged, in the same write as `phase=merged`, before `tg done`. `merged_by` is `manager`, `operator`, `no-change` or `repoint` (a repointed task whose followed request merged; `merged_via` then holds that request's number). In `pr` mode `record` sets them from the request state. |
 | `phase` | `launch`, `adopt`, `verify`, `record`, `close`, `stop`, `merged`, `abandon` | Where the task is: `running` (a worker runs), `stopped` (the attempt ended with no report: `STOPPED`, `DIED`, or the Manager's `BLOCKED`), `reported` (the worker filed its result), `verifying` (a verifier or a CI run checks it), `verdict_failed` (a verdict that did not close it), `awaiting_merge` (closed, in progress until its change is merged), `merged` (merged, or closed with nothing to merge; done), `abandoned`. `record` writes it for a task that has none, from `abandoned`, `merged_at`, the status, `verdict`, `verdict_ref` and the result rows, and keeps the first four in step with the result rows. A done task that is merged (or closed with nothing to merge) and has no phase gets none written: `run.py` derives `merged` when it reads it. A done task whose stored phase is one of the first four (an older `run.py` closed it after a newer `record` wrote the phase) is derived again from those fields, as if it had none. When the stored phase and those fields disagree on anything else, `record` prints `phase-mismatch` and leaves the task alone until you fix the meta. Every change goes through the table `TRANSITIONS` in `run.py`; an event with no row for the task's phase stops the command with an internal error, except in `record`, which prints `transition-error` for that task, goes on with the others, and exits 1. |
 | `gates` (key `merge`) | `close`, `record`, `merged`, `abandon` | Taskgraph's completion gates (`tg gate`, Taskgraph 1.19.0). `run.py` owns the gate `merge` and sets it while the task waits for its merge: label `merge of <branch>` with no ref (local mode, or pr mode before the request opens), else `PR #<n>` or `MR !<n>` with the request URL as ref. `run.py` clears it, with `tg gate <id> merge --clear`, in the merge record before `tg done`, and in `abandon`. A task that is done in Taskgraph (closed by 0.18.0) gets no gate. Other gates on the task are not `run.py`'s. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
-request across attempts.
+request across attempts. The one exception is a repointed task: its `pr` is
+another task's request, so `launch` puts the task's own request back.
 
 On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state that
 `run.py` writes often on this machine, so that a delivery retry never edits the issue:
@@ -1195,6 +1273,21 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.21.0
+
+Version 0.22.0 (issue #114) adds `extends` to role files: a project role can add to a shipped role instead of replacing it (see [Extending a role](#extending-a-role)). Nothing changes for an existing role file. A project that keeps a full copy of a shipped role can replace the copy with `extends` and only its own lines, and then gets the shipped role's later changes.
+
+### Upgrading from 0.20.0
+
+Version 0.21.0 (issue #111) adds `run.py repoint <id> --pr <n>`: a task that waits for its merge follows another task's request when its change went into that request. No data migration and no Taskgraph change: repoint uses the `tg gate` of Taskgraph 1.19.0.
+
+- **Combined requests.** Before, a task whose change went into another request kept its own request, which stayed open with a conflict: every `record` printed `conflict` with a decision, closing it gave the `abandon` hint, and the only way out was `run.py merged <id> --by operator` after the combined request merged, which `run.py` did not check. Now run `run.py repoint <id> --pr <n>` for each such task (it closes the old request; `--keep-old` keeps it open). If you already closed the old requests by hand, repoint still works: it closes only a request that is open.
+- **New event names.** `repointed`, `superseded`, `kept-open` (repoint), `follows`, `target-check` and `pr-retargeted` (record). `pr-closed` also comes for a repointed task, with a repoint hint instead of a decision.
+- **New meta keys.** `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed`, and `merged_via` on a repointed task once it is merged (see [Task metadata](#task-metadata)). On the Taskgraph GitHub backend they are written once per repoint or merge, so they need no `local` entry.
+- **GitLab.** The close is two `glab api` calls (a note, then `PUT merge_requests/<iid>` with `state_event=close`), unverified like the other GitLab calls (`host.py`, note 13).
+- **The followed request's merge completes the task** (the Decision in #111). `record` marks a repointed task merged with `merged_by=repoint` and `merged_via=<n>` as soon as `<n>` is merged, whether or not the task's commit is provably in the target: a combined request that another task redid and rebased often holds neither the commits nor their exact content. The `target-check` line before it is information only (`in target`, or `not proven in target ... may have been redone in <n>`). Its squash case uses `git merge-tree --write-tree` (git 2.38 or later); with an older git that case reads as not proven, which changes nothing else.
+- **`merged_by=repoint`.** A new value, with the new key `merged_via`. A report or script that lists the `merged_by` values should add it.
 
 ### Upgrading from 0.19.0
 

@@ -243,6 +243,15 @@ class GitHubTest(unittest.TestCase):
             client.comment(1, marker, "body")
         self.assertEqual(str(caught.exception), "gh api issues/<number>/comments failed: HTTP 403: Resource not accessible by integration")
 
+    def test_111_close_pr_comments_and_closes(self):
+        client, sh = gh((["pr", "close"], ok("")))
+        client.close_pr(3, "Closed by run.py repoint: see PR #9.")
+        self.assertEqual(sh.calls[0]["cmd"], ["gh", "pr", "close", "3", "--comment", "Closed by run.py repoint: see PR #9."])
+        client, _ = gh((["pr", "close"], {"exit": 1, "stderr": "GraphQL: Could not close the pull request\n"}))
+        with self.assertRaises(host.HostError) as caught:
+            client.close_pr(3, "x")
+        self.assertEqual(str(caught.exception), "gh pr close failed: GraphQL: Could not close the pull request")
+
     def test_other_failures_raise_with_the_first_stderr_line(self):
         with self.assertRaises(host.HostError) as caught:
             gh((["pr", "view"], {"exit": 4, "stderr": "To get started with GitHub CLI, please run: gh auth login\nmore\n"}))[0].pr(1)
@@ -359,6 +368,19 @@ class GitLabTest(unittest.TestCase):
         with self.assertRaises(host.HostError) as caught:
             client.comment(7, marker, "text")
         self.assertEqual(str(caught.exception), "glab api projects/<project>/merge_requests/7/notes failed: 403 Forbidden")
+
+    def test_111_close_pr_posts_a_note_then_closes(self):
+        client, sh = gl((["-X", "POST", "merge_requests/7/notes"], ok({"id": 302})),
+                        (["-X", "PUT", "merge_requests/7"], ok(self.mr(state="closed"))))
+        client.close_pr(7, "Closed by run.py repoint: see MR !9.")
+        self.assertEqual([c["cmd"] for c in sh.calls], [
+            ["glab", "api", "-X", "POST", "projects/g%2Fp/merge_requests/7/notes", "-f", "body=Closed by run.py repoint: see MR !9."],
+            ["glab", "api", "-X", "PUT", "projects/g%2Fp/merge_requests/7", "-f", "state_event=close"]])
+        client, sh = gl((["-X", "POST", "merge_requests/7/notes"], ok({"id": 302})),
+                        (["-X", "PUT"], {"exit": 1, "stdout": json.dumps({"message": "403 Forbidden"})}))
+        with self.assertRaises(host.HostError) as caught:
+            client.close_pr(7, "x")
+        self.assertEqual(str(caught.exception), "glab api projects/<project>/merge_requests/7 failed: 403 Forbidden")
 
     def test_103_rebase_outcomes(self):
         put = ["api", "-X", "PUT", "projects/g%2Fp/merge_requests/7/rebase"]
