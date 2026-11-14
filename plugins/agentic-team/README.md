@@ -1093,7 +1093,7 @@ and change the paths to your own:
   "autoMode": {
     "allow": [
       "$defaults",
-      "Scratch and cache housekeeping in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating, copying into and deleting directories under that worktree's .agentic-team-scratch/, and the worktree's own build or test caches (node_modules/.cache, .pytest_cache, .ruff_cache, .vitest cache, test-results), is routine and allowed."
+      "Scratch folders in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating folders under that worktree's .agentic-team-scratch/ and writing or copying files into them is routine and allowed. A worker may also delete a cache folder inside its own worktree that its own test or build run created, such as node_modules/.cache, .pytest_cache, .ruff_cache or a .vitest cache. Deleting scratch folders is not allowed."
     ]
   }
 }
@@ -1101,7 +1101,13 @@ and change the paths to your own:
 
 A rule is free text that the auto-mode classifier reads. Keep `"$defaults"` first so the
 built-in rules stay. A rule must not allow deleting a shared cache or a path outside
-the worktrees.
+the worktrees. The rule allows what `agents/worker.md` needs and no more: a worker
+creates and writes scratch folders and leaves them in place (`run.py` removes them with
+the worktree), and deletes only a cache folder of its own run.
+
+A worker that runs under another Claude profile (a `CLAUDE_CONFIG_DIR`, see "Workers on
+more than one Claude profile") reads the settings of that profile, not
+`~/.claude/settings.json`. Put the rule in each such profile's `settings.json` too.
 
 ## Results
 

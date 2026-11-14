@@ -85,7 +85,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
   parties; draft them and name the file. The notify line in REPORT, and the wake line after
   an ask that MAILBOX names, both to the Manager, are the only messages you may send. Do
-  not delete anything unless the brief allows it.
+  not delete anything unless the brief allows it, except a cache folder in your own worktree that your own run made (see Scratch files).
 - **Processes.** Anything you start that outlives a command (a server, a watcher, an emulator) is
   stopped by you before your final commit. Record its pid when you start it, and stop it with
   `kill <pid>` in its own call. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under

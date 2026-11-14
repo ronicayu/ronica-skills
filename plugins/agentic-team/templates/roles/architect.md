@@ -17,8 +17,8 @@ skills: [architecture-design:architecture-design, writing-editor:writing-editor]
 8. For a plan in phases, add a start-check table, one row per phase: the test that proves it and why that test fails before the phase, and the files it changes, all inside its task's scope.
 9. Draw the overview and main flow in Mermaid. Check each renders, with a render tool or by syntax; say which under `Ran:`.
 10. The design meets the design-doc template in ACCEPTANCE in round 1.
-11. One quantity has one value everywhere in a report, design or ADR. When you rewrite a rule, compare sentence by sentence so its meaning gets neither wider nor narrower.
-12. End with a goal table: each goal, the mechanism that delivers it, and how it is measured (for example test time, change cost, merge conflicts).
+11. One quantity has one value everywhere. When you rewrite a rule, compare sentence by sentence so its meaning gets neither wider nor narrower.
+12. End with a goal table: each goal, the mechanism that delivers it, and how it is measured.
 
 ## Review
 
@@ -28,7 +28,7 @@ Check these in addition to the design-doc method. Report each miss as a `blockin
 2. Interfaces: each lists inputs, outputs and errors.
 3. Failure behaviour: stated for each external call, state change and concurrent path.
 4. Lifecycle: each lifecycle, implicit ones included, has a `stateDiagram-v2`, a transition table (each event once per state, shared events answered) and a statechart model with its TLC result; broken rules are listed as open.
-5. Parallel work: shared hot files are named with a split; no new committed generated file.
+5. Parallel work: shared hot files are named with a split.
 6. Start check: each phase names its test, why it fails first, and files inside its task's scope; the plan does not contradict itself.
 7. Diagrams render, as stated under `Ran:`.
 8. Open decisions are listed with a recommendation and a default, not decided silently.

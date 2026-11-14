@@ -5962,6 +5962,29 @@ class RoleTest(Base):
 
     # --- size
 
+    def test_09b_every_shipped_role_is_within_the_word_limit(self):
+        rows = [r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["source"] == "plugin"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertIsNone(row["error"], row["name"])
+            self.assertLessEqual(row["words"], 580, f"{row['name']} leaves no room under the 600 word limit")
+
+    def test_09c_the_architect_role_has_the_lifecycle_rule_in_its_method_and_review(self):
+        folder = os.path.join(os.path.dirname(HERE), "templates", "roles")
+        with open(os.path.join(folder, "architect.md"), encoding="utf-8") as fh:
+            method, review = fh.read().split("## Review")
+        self.assertIn("stateDiagram-v2", method)
+        self.assertIn("transition table", method)
+        self.assertIn("stateDiagram-v2", review)
+
+    def test_09d_the_worker_instructions_forbid_wait_loops_and_scratch_deletion(self):
+        with open(os.path.join(os.path.dirname(HERE), "agents", "worker.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("**No wait loops.**", text)
+        self.assertIn("`sleep`", text)
+        self.assertIn("Do not delete a cache or scratch folder yourself, except a cache folder", text)
+        self.assertIn("unless the brief allows it, except a cache folder in your own worktree", text)
+
     def test_09_a_long_project_role_warns_and_the_shipped_roles_do_not(self):
         words = lambda n: " ".join(["word"] * n)  # noqa: E731
         self.role_file("long", method=words(400), review=words(201))
