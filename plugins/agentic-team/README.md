@@ -41,6 +41,21 @@ prompt builds a command from a variable.
   the session had started, as Taskgraph tasks or integration steps, and then
   runs the Manager's Start steps. The role ends when you say so.
 
+After a context compaction, the Manager would have only a summary. The plugin
+ships a `SessionStart` hook with the matcher `compact` (`hooks/hooks.json`,
+`scripts/recompact`, `scripts/recompact.py`) that puts the role and the orders
+back, in the Manager session only. At Start the Manager writes its session id
+(`$CLAUDE_CODE_SESSION_ID`) to `.agentic-team/manager-session`. The hook finds
+the project from the session's working directory (the nearest directory upward
+with `.agentic-team.toml`) and prints nothing unless the session id equals that
+file's. In the Manager session it adds to the context: an instruction to read
+`agents/manager.md` in full first, `standing-orders.md` and `manager-orders.md`
+(when it exists) in full, a short `run status --brief` (work not yet closed),
+and an instruction to run `run record` and start `run wait` again. Workers
+and other sessions get nothing. On any error (no run directory, an unreadable
+file, bad input) the hook exits 0 with no output; it never blocks a session
+start. If you wrote a user-level hook for this, delete it after the upgrade.
+
 The Manager keeps the plan, launches and verifies work, and reports. It does
 not diagnose failures, edit the repository, review diffs, or run tests itself;
 each of those becomes a Taskgraph task for a worker or a verifier.
@@ -1035,6 +1050,8 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 |------|---------|
 | `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout, or (in `pr` mode) lets `record` merge a clean request. |
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
+| `manager-session` | The Manager's session id, one line, written at Start; the compaction hook gives the role and orders back only to the session it names. |
+| `manager-orders.md` | Optional. Orders for the Manager only (not pasted into briefs); the compaction hook shows it in full. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
 | `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
@@ -1157,13 +1174,11 @@ then id, and the Manager launches them in that order.
 
 ### Upgrading from 0.19.0
 
-Version 0.20.0 (issue #104) makes the reports in a brief shorter. No migration.
-
-Version 0.20.0 (issue #106) also moves four generic rules into the plugin. No migration.
+Version 0.20.0 (issues #104, #106 and #107) makes the reports in a brief shorter, moves four generic worker rules into the plugin, and gives the Manager its role and orders again after a compaction. No migration.
 
 - **Worker rules.** `agents/worker.md` now forbids wait loops (`sleep`, countdowns, polling) and sets the rules for scratch copies of the tree and for cold-cache runs. The `architect` role now requires a `stateDiagram-v2` and a transition table for each lifecycle, and its Review checks them. A project can remove its matching standing orders.
-- **Allow rules.** See "Auto-mode allow rules for workers". Add them to your settings if workers stop on a prompt for scratch folders, caches or temporary directories.
-
+- **Allow rules.** See "Auto-mode allow rules for workers". Add them to your settings if workers stop on a prompt for scratch folders or caches.
+- **Compaction hook.** The plugin now ships a `SessionStart` hook (matcher `compact`) that re-injects `agents/manager.md`, the standing orders, `manager-orders.md` and a short status into the Manager session, and only there (see "Start a Manager"). The Manager writes `.agentic-team/manager-session` at Start; a Manager that started before the upgrade needs one new Start (or `printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > .agentic-team/manager-session`). A user-level hook that does the same can be deleted. `run.py status --brief` is new.
 - **Briefs get shorter.** The previous attempt, each upstream report and the worker report of a verify brief lose their `Ran:` section. An upstream report is a summary (`Status`, `Head`, `Branch`, `Files`, `Issues`, `Findings`, `Follow-ups`, `Deviations`). Each carried report is at most 3000 bytes and all of them 12000 bytes; a cut ends with the result id and a command. Decision notes are not cut.
 - **See a full report.** Run the command at the end of the cut report, `tg result ls <task id> --kind task --attempt <n>`; it prints every report of that attempt with its `Ran:` log. `tg result ls <task id>` lists them all.
 - **New keys.** `[brief] carried_report_bytes` and `carried_total_bytes` change the caps; `config.py check` validates them. Raise them to get longer reports back.
@@ -1300,6 +1315,7 @@ other safe folder.
 | `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), the task roles (`roles/<name>.md`), the project verify skill skeletons (`project-verify-skill-{code,document}.md`), and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
 | `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
+| `hooks/hooks.json`, `scripts/recompact`, `scripts/recompact.py` | The `SessionStart` (`compact`) hook that gives the Manager its role and orders again after a compaction |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
 | `scripts/python-path.sh` | Finds a Python 3.11 or later. `AGENTIC_TEAM_PYTHON` overrides it. |
 | `scripts/config.py` | Reads, merges, and validates the project config; holds every default |

@@ -9779,6 +9779,13 @@ class PhaseTest(Base):
         self.assertIn(f"#{task} ", sections["Done since last report"])
         self.assertIn("None.", sections["Closed, awaiting merge"])
 
+    def test_status_brief_shows_only_the_work_not_yet_closed(self):
+        task, wt, head = self.closed_local()
+        sections = self.status_sections("--brief", "--since", "2000-01-01")
+        self.assertEqual(list(sections), ["In flight", "Waiting for verification or triage", "Verdict recorded, not closed",
+                                          "Failed or abandoned", "Closed, awaiting merge"])
+        self.assertIn(f"#{task} ", sections["Closed, awaiting merge"])
+
     # 13
     def test_merge_recorded_under_stop_marks_done(self):
         task, head, later = self.closed_pr(later=True)

@@ -5601,6 +5601,9 @@ def result_label(row):
     return row["status"] if row["kind"] == "task" else f"{row['kind']} {row['status']}"
 
 
+BRIEF_SECTIONS = ("in_flight", "waiting", "verdict_not_closed", "failed", "awaiting_merge")  # status --brief: work not yet closed
+
+
 def cmd_status(run, args):
     since = parse_since(args.since, run.run_dir)
     snap = Snapshot(run)
@@ -5692,9 +5695,15 @@ def cmd_status(run, args):
     ]
     overall = str(summary.get("overall", "unknown")).upper()
     out = [f"# Status: {run.project}\n", f"Overall: {overall}. Since {since:%Y-%m-%d %H:%M} UTC: {change_text}.\n"]
-    for key, title, headers, rows in sections:
+    shown = [s for s in sections if s[0] in BRIEF_SECTIONS] if args.brief else sections
+    for key, title, headers, rows in shown:
         out.append(f"## {title} ({len(rows)})\n")
         out.append(table(headers, rows, 10 if key == "ready" else limit))
+    if args.brief:
+        run.text = "\n".join(out) + "\n"
+        run.payload = {"project": run.project, "overall": overall,
+                       **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in shown}}
+        return
     out.append("Follow-ups by label counts the lines of the worker reports filed in the period. "
                + (f"Attempts per task done in the period: mean {mean:.2f} over {len(attempts)} "
                   f"task{'' if len(attempts) == 1 else 's'}." if attempts else
@@ -5777,6 +5786,8 @@ def build_parser():
     p.add_argument("--since", help="7d, 2w, or an ISO date (default: last --mark, else 7d)")
     p.add_argument("--limit", type=int, default=25, help="max rows per table (default 25)")
     p.add_argument("--mark", action="store_true", help="save now as the start of the next report")
+    p.add_argument("--brief", action="store_true", help="only the work not yet closed: in flight, waiting, verdict "
+                   "not closed, failed, awaiting merge")
 
     sub.add_parser("roles", help="list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken")
 
