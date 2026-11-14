@@ -71,3 +71,7 @@ always_pause = []           # decisions that always need the operator
 
 [roles]
 # default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (README: Roles)
+
+[brief]
+# carried_report_bytes = 3000   # most UTF-8 bytes of one carried report (previous attempt, upstream, worker report in a verify brief)
+# carried_total_bytes = 12000   # most UTF-8 bytes of all carried reports of one brief; at least carried_report_bytes

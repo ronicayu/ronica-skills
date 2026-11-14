@@ -163,7 +163,12 @@ OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "arti
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
 REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
-SECTION_LINE = re.compile(r"^([A-Z][\w-]*(?: [\w-]+){0,2}):(?:[ \t]|$)")  # a report section label, at column 0
+# The labels that start a report section at column 0: those of REPORT_LABEL, those of the verifier and the project's own
+# `Needs CI`. Any other `Word:` line, such as `Note:` or `Changed:`, continues the section above it.
+SECTION_LINE = re.compile(r"^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Findings|"
+                          r"Deviations|Follow-ups|Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason|Needs CI):"
+                          r"(?:[ \t]|$)")
+PRIORITY = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations")  # kept first when a report is cut
 UPSTREAM_FIELDS = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations")
 SCOPE_TOKEN = re.compile(r"[A-Za-z0-9_./@+~-]+")  # ASCII only: a path in Chinese text must not take its neighbours
 OMIT_ROOM = 300  # bytes of a report that must fit before a report is cut to the room left; else it is left out
@@ -1256,46 +1261,58 @@ def utf8(text):
 
 
 def report_sections(body):
-    """[(label, text)] of a report. A section runs from its `Label:` line at column 0 to the next one, so a section of
-    many lines is one section. Text before the first label has the label None. Every label is kept, known or not."""
-    sections = []
+    """[(label, text)] of a report. A section runs from its `Label:` line (SECTION_LINE) at column 0 to the next one, so a
+    section of many lines is one section. A line inside a ``` fence never starts a section. Text before the first label
+    has the label None. Every section is kept, whatever its label."""
+    sections, fenced = [], False
     for line in body.splitlines():
-        match = SECTION_LINE.match(line)
+        match = None if fenced else SECTION_LINE.match(line)
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
         if match or not sections:
             sections.append((match.group(1) if match else None, []))
         sections[-1][1].append(line)
     return [(label, "\n".join(lines)) for label, lines in sections]
 
 
-def carried_body(body, pointer, cap, keep=(), only=None, always=False):
-    """The text of a carried report: no `Ran:` section, and with `only` just those sections. Over `cap` UTF-8 bytes it is
-    cut at a line boundary and ends with `pointer`. The sections named in `keep` are never cut, so the text may pass
-    the cap. `always` adds the pointer to a text that was not cut. None when the cut leaves no line but the pointer."""
-    sections = [(label, text) for label, text in report_sections(strip_comments(body or "").strip())
+def carried_body(body, pointers, cap, keep=(), only=None, always=False, hard=None):
+    """The text of a carried report: no `Ran:` section, and with `only` just those sections. `pointers` is (the line that
+    ends a cut report, the line that ends a whole one). Over `cap` UTF-8 bytes the report is cut at a line boundary: the
+    sections of PRIORITY come first, then the others in order. The sections named in `keep` are cut only at `hard` bytes,
+    so the text may pass the cap. `always` ends a whole text with the second line. None when a cut leaves nothing but
+    the pointer."""
+    cut_line, full_line = pointers
+    sections = [(label, text.splitlines()) for label, text in report_sections(strip_comments(body or "").strip())
                 if label != "Ran" and (only is None or label in only)]
-    lines = [(line, label in keep) for label, text in sections for line in text.splitlines()]
-    kept, size = [], sum(utf8(line) + 1 for line, fixed in lines)
-    if size - 1 <= cap:
-        kept = [line for line, _ in lines]
+    if sum(utf8(line) + 1 for _, lines in sections for line in lines) - 1 <= cap:
+        kept = [lines for _, lines in sections]
+        tail = [full_line] if always else []
     else:
-        room = cap - sum(utf8(line) + 1 for line, fixed in lines if fixed) - utf8(pointer) - 1
-        cut = False
-        for line, fixed in lines:
-            if fixed:
-                kept.append(line)
-            elif not cut and room - utf8(line) - 1 >= 0:
-                kept.append(line)
+        kept, tail = [[] for _ in sections], [cut_line]
+        fixed = (hard if hard is not None else 10**12) - utf8(cut_line) - 1
+        for i, (label, lines) in enumerate(sections):
+            if label in keep:
+                for line in lines:
+                    if fixed - utf8(line) - 1 < 0:
+                        break
+                    kept[i].append(line)
+                    fixed -= utf8(line) + 1
+        room = cap - sum(utf8(line) + 1 for lines in kept for line in lines) - utf8(cut_line) - 1
+        rest = [i for i, (label, _) in enumerate(sections) if label not in keep]
+        for i in sorted(rest, key=lambda i: (PRIORITY.index(sections[i][0]) if sections[i][0] in PRIORITY else len(PRIORITY), i)):
+            for line in sections[i][1]:
+                if room - utf8(line) - 1 < 0:
+                    break
+                kept[i].append(line)
                 room -= utf8(line) + 1
-            else:
-                cut = True
-        always = True
-        if not any(line.strip() for line in kept):
+        if not any(line.strip() for lines in kept for line in lines):
             return None
-    while kept and not kept[0].strip():
-        kept.pop(0)
-    while kept and not kept[-1].strip():
-        kept.pop()
-    return "\n".join(kept + ([pointer] if always else []))
+    out = [line for lines in kept for line in lines]
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out + tail)
 
 
 def scope_files(text):
@@ -1306,15 +1323,17 @@ def scope_files(text):
 
 def shares_scope(report, scope):
     """True when a file named under `Files:` of the report is, or lies inside or above, a path that SCOPE names."""
-    files = scope_files(report_field(strip_comments(report or ""), "Files"))
+    sections = report_sections(strip_comments(report or ""))
+    files = scope_files("\n".join(text.partition(":")[2] for label, text in sections if label == "Files"))
     return any(f == s or f.startswith(s + "/") or s.startswith(f + "/") for f in files for s in scope_files(scope))
 
 
 def result_pointer(tg_cmd, tid, row):
-    """(the command that prints the result's attempt, the line that ends a cut report)."""
+    """(the command that prints the result's attempt, the line that ends a cut report, the line that ends a whole one)."""
     attempt = f" --attempt {row['attempt']}" if row.get("attempt") is not None else ""
     command = f"{tg_cmd} result ls {tid} --kind {row['kind']}{attempt}"
-    return command, f"[cut: the full report is result #{row['id']}; print it with `{command}`]"
+    return (command, f"[cut: the full report is result #{row['id']}; print it with `{command}`]",
+            f"[full report: result #{row['id']}; print it with `{command}`]")
 
 
 def fit_carried(parts, per_report, total, tg_cmd):
@@ -1327,11 +1346,11 @@ def fit_carried(parts, per_report, total, tg_cmd):
     omitted = []
     for i in order:
         part = parts[i]
-        _, pointer = result_pointer(tg_cmd, part["task"], part["row"])
+        _, *pointers = result_pointer(tg_cmd, part["task"], part["row"])
         head = part["head"] + "\n\n"
 
         def make(cap):
-            body = carried_body(part["row"]["body"], pointer, cap, part["keep"], part["only"], part["always"])
+            body = carried_body(part["row"]["body"], pointers, cap, part["keep"], part["only"], part["always"], total)
             return None if body is None else head + body
         text = make(per_report)
         if part["rank"] and (text is None or utf8(text) > left):
@@ -1339,8 +1358,8 @@ def fit_carried(parts, per_report, total, tg_cmd):
             if text is None or utf8(text) > left or left - utf8(head) < OMIT_ROOM:
                 omitted.append(i)
                 continue
-        done[i] = text or head + pointer
-        left -= utf8(done[i])
+        done[i] = text or head + pointers[0]
+        left -= utf8(done[i]) + 2  # and the blank line that joins it
     if omitted:
         lines = [f"- {parts[i]['label']}: result #{parts[i]['row']['id']}, {parts[i]['row']['status']}"
                  + (f", attempt {parts[i]['row']['attempt']}" if parts[i]["row"].get("attempt") is not None else "")

@@ -10285,10 +10285,12 @@ class BriefSizeTest(Base):
         for kept in ("result #1, PASS, attempt 1", "Status: PASS", f"Head: {SHA_A}", "Branch: worktree-task-1",
                      "Files: base.txt", "Issues: blocking: slow", "Follow-ups: none"):
             self.assertIn(kept, upstream)
-        for left in ("Task: 1", "criterion", "UNKNOWN-NOTE", f"Checkpoint: {CHECKPOINT}"):
+        self.assertIn("Notes: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
+        for left in ("Task: 1", "criterion", f"Checkpoint: {CHECKPOINT}"):
             self.assertNotIn(left, upstream)
         self.assertIn(f"result ls {up} --kind task --attempt 1", upstream)
-        self.assertIn("the full report is result #1", upstream)
+        self.assertIn(f"[full report: result #1; print it with `", upstream)
+        self.assertNotIn("[cut:", upstream)
 
     def test_i104_a_decision_note_stays_whole(self):
         note = "Options: REST or RPC.\n" + "\n".join(f"Line {i} of the answer." for i in range(400))
@@ -10320,17 +10322,17 @@ class BriefSizeTest(Base):
     def test_i104_a_section_of_many_lines_runs_to_the_next_label(self):
         import run as runner
         body = ("Task: 1\nStatus: PASS\nRan:\n- first `cmd`\n  - nested line\n\nStill the log, after a blank line\n"
-                "Acceptance evidence:\n- one\n- two\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept\n")
+                "Acceptance evidence:\n- one\n- two\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept in Issues\n")
         self.assertEqual([label for label, _ in runner.report_sections(body)],
-                         ["Task", "Status", "Ran", "Acceptance evidence", "Issues", "Odd label"])
-        out = runner.carried_body(body, "[cut]", 10_000)
+                         ["Task", "Status", "Ran", "Acceptance evidence", "Issues"])
+        out = runner.carried_body(body, ("[cut]", "[full]"), 10_000)
         for gone in ("first", "nested", "Still the log", "Ran:"):
             self.assertNotIn(gone, out)
-        for kept in ("Acceptance evidence:\n- one\n- two", "Issues: blocking: a\n  continues here\n- and here", "Odd label: kept"):
+        for kept in ("Acceptance evidence:\n- one\n- two", "Issues: blocking: a\n  continues here\n- and here", "Odd label: kept in Issues"):
             self.assertIn(kept, out)
         self.assertNotIn("[cut]", out)
-        only = runner.carried_body(body, "[full]", 10_000, only=("Status", "Issues"), always=True)
-        self.assertEqual(only, "Status: PASS\nIssues: blocking: a\n  continues here\n- and here\n[full]")
+        only = runner.carried_body(body, ("[cut]", "[full]"), 10_000, only=("Status", "Issues"), always=True)
+        self.assertEqual(only, "Status: PASS\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept in Issues\n[full]")
 
     def test_i104_a_report_over_the_per_report_cap_is_cut_at_a_line_and_ends_with_the_pointer(self):
         self.write_config("[brief]\ncarried_report_bytes = 600\n")
@@ -10379,6 +10381,74 @@ class BriefSizeTest(Base):
         self.assertNotIn("EVID-", previous)  # the other sections are cut: the three kept ones left no room
         self.assertIn("[cut: the full report is result #", previous)
 
+    CUT = ("[cut]", "[full]")
+
+    def test_i104_a_word_and_colon_line_in_a_section_does_not_start_a_section(self):
+        import run as runner
+        issues = "Issues:\n- test_a fails\nNote: flaky\n- test_b fails\n- test_c fails\n"
+        out = runner.carried_body("Status: ISSUES\n" + issues + "Checkpoint: c\n", self.CUT, 120, keep=("Issues", "Checkpoint"))
+        self.assertIn("- test_c fails", out)
+        self.assertIn("Note: flaky", out)
+        files = "Status: PASS\nFiles:\nNew: a/b.py\nChanged: apps/x/y.py\nIssues: None\n"
+        summary = runner.carried_body(files, self.CUT, 10_000, only=runner.UPSTREAM_FIELDS)
+        self.assertIn("Changed: apps/x/y.py", summary)
+        self.assertTrue(runner.shares_scope(files, "Write apps/x/."))  # the same parser finds the files
+        self.assertFalse(runner.shares_scope(files, "Write docs/."))
+
+    def test_i104_a_verify_briefs_deviations_with_a_sub_heading_keep_their_adjacent_lines(self):
+        worker = self.running_task()
+        lines = "".join(f"- adjacent: own-lint: src/f{i}.py\n" for i in range(150))
+        self.add_result(worker, "PASS", self.body(worker) + f"Deviations:\nOther changes:\n{lines}", attempt=1)
+        self.write_config("[brief]\ncarried_report_bytes = 600\n")
+        verify = self.section(self.ok("verify", str(worker), "--dry-run").stdout, "CONTEXT")
+        self.assertIn("- adjacent: own-lint: src/f149.py", verify)
+        self.assertIn("Other changes:", verify)
+
+    def test_i104_a_ran_block_with_a_label_like_line_and_a_fence_is_dropped_whole(self):
+        import run as runner
+        body = ("Status: PASS\nRan:\nmake test\nExit code: 0\n```\nStatus: 200\nbody\n```\nafter fence\nFiles: a.py\n")
+        self.assertEqual([label for label, _ in runner.report_sections(body)], ["Status", "Ran", "Files"])
+        out = runner.carried_body(body, self.CUT, 10_000)
+        self.assertEqual(out, "Status: PASS\nFiles: a.py")
+        for text in out.splitlines():
+            self.assertNotIn("```", text)
+
+    def test_i104_the_never_cut_sections_have_a_hard_cap(self):
+        import run as runner
+        body = "Status: ISSUES\nIssues:\n" + "\n".join(f"- issue {i:04d} " + "x" * 20 for i in range(3000)) + "\nCheckpoint: c\n"
+        out = runner.carried_body(body, self.CUT, 300, keep=("Issues", "Findings", "Checkpoint"), hard=2000)
+        self.assertLessEqual(runner.utf8(out), 2000)
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertIn("- issue 0000", out)
+        self.assertNotIn("- issue 2999", out)
+        self.write_config("[brief]\ncarried_report_bytes = 300\ncarried_total_bytes = 2000\n")
+        task, _ = self.with_upstreams([self.body(1)], prev=body)
+        context = self.context(task)
+        previous = context[context.index("### Previous attempt"):].split("\n### ")[0]
+        self.assertLess(runner.utf8(previous), 2400)
+        self.assertIn("[cut: the full report is result #", previous)
+
+    def test_i104_a_cut_keeps_status_files_and_issues_before_evidence(self):
+        import run as runner
+        body = ("Status: PASS\nEvidence:\n" + "\n".join(f"- evidence line {i} " + "e" * 40 for i in range(40))
+                + "\nFiles: a.py\nIssues: blocking: real\nFollow-ups: none\n")
+        out = runner.carried_body(body, self.CUT, 400)
+        for kept in ("Status: PASS", "Files: a.py", "Issues: blocking: real", "Follow-ups: none"):
+            self.assertIn(kept, out)
+        self.assertLess(out.index("Status:"), out.index("Evidence:"))
+        self.assertLess(out.index("Evidence:"), out.index("Files:"))  # the original order is kept
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertLess(out.count("evidence line"), 40)
+
+    def test_i104_the_pointer_of_a_result_without_an_attempt_has_no_attempt_option(self):
+        import run as runner
+        command, cut, full = runner.result_pointer("TG", 7, {"id": 12, "kind": "task", "attempt": None})
+        self.assertEqual(command, "TG result ls 7 --kind task")
+        self.assertIn("result #12", cut)
+        self.assertTrue(full.startswith("[full report: result #12;"))
+        self.assertEqual(runner.result_pointer("TG", 7, {"id": 12, "kind": "task", "attempt": 2})[0],
+                         "TG result ls 7 --kind task --attempt 2")
+
     def test_i104_the_caps_count_utf8_bytes(self):
         import run as runner
         line = "这是一个中文检查行的内容"  # 12 characters, 36 bytes
@@ -10386,8 +10456,8 @@ class BriefSizeTest(Base):
         self.assertLess(len(body), 3000)
         self.assertGreater(len(body.encode()), 3000)
         self.assertEqual(runner.utf8(line), 36)
-        out = runner.carried_body(body, "[cut]", 3000)
-        self.assertEqual(runner.carried_body(body, "[cut]", 10_000).count("\n"), body.count("\n"))
+        out = runner.carried_body(body, ("[cut]", "[full]"), 3000)
+        self.assertEqual(runner.carried_body(body, ("[cut]", "[full]"), 10_000).count("\n"), body.count("\n"))
         self.assertTrue(out.endswith("[cut]"))
         self.assertLessEqual(len(out.encode()), 3000)
         self.assertGreater(len(out), 1000)  # characters would let it hold about 3 times as much
