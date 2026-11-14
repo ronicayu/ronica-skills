@@ -1090,7 +1090,7 @@ skills: [plugin:skill, ...]  # optional; [] or absent means none
 ...text pasted into the verifier brief...
 ```
 
-The frontmatter is the lines between the first two `---` lines. Each line is `key: value`, split at the first colon, so a `fits` value may hold colons. A `#` that starts a value or follows a space starts a comment, except inside a list. There is no YAML library: only these keys (and `extends` and `drop`, below), one per line, and `skills` as `[a, b]` or empty. A section's text runs to the next `## ` heading or the end of the file. `## Method` is required and may not be empty; `## Review` is optional.
+The frontmatter is the lines between the first two `---` lines. Each line is `key: value`, split at the first colon, so a `fits` value may hold colons. A `#` that starts a value or follows a space starts a comment, except inside a list. There is no YAML library: only these keys (and `extends`, below), one per line, and `skills` as `[a, b]` or empty. A section's text runs to the next `## ` heading or the end of the file. `## Method` is required and may not be empty; `## Review` is optional.
 
 A file with no `fits`, no `## Method`, an unknown key, a `tier` that the config does not know (or a tier with no model), a `verify_kind` that is not `code`, `schema` or `design-doc`, or a `skills` value that is not a list of names is broken. `launch`, `adopt` and `verify` refuse a task whose role is broken or has no file, and name the file, the problem and the roles there are. `run.py roles` lists a broken file with its error and exits 1. No other command fails because of a role: see "What a role fixes at launch".
 
@@ -1103,7 +1103,6 @@ A project role can add to another role instead of replacing it, so it keeps the 
 ```markdown
 ---
 extends: software-engineer   # the parent role
-drop: [review 5]             # optional; parent items to remove, by the parent's numbers
 ---
 
 ## Method
@@ -1114,11 +1113,11 @@ drop: [review 5]             # optional; parent items to remove, by the parent's
 ```
 
 - **The parent.** When `extends` names the file's own role (`software-engineer.md` with `extends: software-engineer`), the parent is the shipped file of that name, and tasks with `role=software-engineer` get the merged role. Any other name is the role `run.py` finds for it, project first. The parent must not set `extends` itself: a role extends one level only, so there is no chain and no cycle.
-- **The text.** The merged Method is the parent's Method without its dropped items, then the child's Method; the same for Review. A numbered item is a line at column 0 that starts with `N. `, with the lines under it up to the next one. The merged items are numbered again from 1, so the child's `1.` above becomes `14.` after the 13 shipped items. Text before the first numbered item stays in place. A child may leave out `## Method` or `## Review`; the parent's section is then used as it is.
-- **`drop`.** `[method N, review N, ...]` removes the parent's item N from that section, counting items by position as Markdown shows them. A number the parent does not have, or a drop that leaves the merged Method empty, makes the role broken. Use it for a parent rule the project forbids, such as Review item 5 of `software-engineer` in a project that bans every TODO; a standing order also wins over a role, so `drop` only keeps the two from disagreeing in one brief.
+- **The text.** The merged Method is the parent's Method, then the child's Method; the same for Review. A numbered item is a line at column 0 that starts with `N. `, with the lines under it up to the next one. The child's items are numbered on from the parent's, so the child's `1.` above becomes `14.` after the 13 shipped items. Text before the first numbered item stays in place. A child may leave out `## Method` or `## Review`; the parent's section is then used as it is.
+- **Only adds.** An extending role cannot remove or change a parent item. When a project rule contradicts one, such as a project that bans every TODO while Review item 5 of `software-engineer` allows a TODO with a task id, write the project rule as a standing order: STANDING ORDERS win over ROLE, and the brief says so. To change many parent items, replace the role instead (a file of the same name with no `extends`).
 - **The keys.** `fits`, `tier`, `verify_kind` and `skills` come from the parent when the child has no line for them, so an extending role needs no `fits` line. `skills: []` is a line: it clears the parent's skills.
 - **What shows.** `run.py roles` shows the source as `project, extends plugin:software-engineer` (or `project:<name>`). The ROLE line of a brief names both files. The 600-word warning counts the merged text.
-- **Broken.** An `extends` that names no role, a parent that is broken or extends another role, a `drop` with no `extends`, and a bad `drop` item make the role broken, with the same refusals as any broken role.
+- **Broken.** An `extends` that names no role, and a parent that is broken or extends another role, make the role broken, with the same refusals as any broken role.
 
 ### Tier and verify kind
 
@@ -1277,7 +1276,7 @@ then id, and the Manager launches them in that order.
 
 ### Upgrading from 0.21.0
 
-Version 0.22.0 (issue #114) adds `extends` and `drop` to role files: a project role can add to a shipped role instead of replacing it (see [Extending a role](#extending-a-role)). Nothing changes for an existing role file. A project that keeps a full copy of a shipped role can replace the copy with `extends` and only its own lines, and then gets the shipped role's later changes.
+Version 0.22.0 (issue #114) adds `extends` to role files: a project role can add to a shipped role instead of replacing it (see [Extending a role](#extending-a-role)). Nothing changes for an existing role file. A project that keeps a full copy of a shipped role can replace the copy with `extends` and only its own lines, and then gets the shipped role's later changes.
 
 ### Upgrading from 0.20.0
 

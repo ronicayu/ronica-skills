@@ -976,11 +976,10 @@ def ids_text(ids):
 
 # ------------------------------------------------------------------- roles
 
-ROLE_KEYS = ("fits", "tier", "verify_kind", "skills", "extends", "drop")
+ROLE_KEYS = ("fits", "tier", "verify_kind", "skills", "extends")
 ROLE_INHERITED = ("fits", "tier", "verify_kind", "skills")
 ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
 ROLE_NAME = re.compile(r"[a-z0-9-]+")
-ROLE_DROP = re.compile(r"(method|review) ([1-9][0-9]*)")
 ROLE_ITEM = re.compile(r"([1-9][0-9]*)\. ")  # a numbered item of Method or Review starts at column 0
 ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
 STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
@@ -993,7 +992,7 @@ class Role:
     def __init__(self, name, path, source, overrides=False, hidden=None):
         self.name, self.path, self.source, self.overrides, self.hidden = name, path, source, overrides, hidden
         self.fits = self.tier = self.verify_kind = self.review = self.extends = self.parent = None
-        self.skills, self.drop, self.keys, self.method, self.error = [], [], set(), "", None
+        self.skills, self.keys, self.method, self.error = [], set(), "", None
 
     @property
     def where(self):
@@ -1037,8 +1036,8 @@ def parse_role(run, role):
     except ValueError as exc:
         role.error = str(exc)
         return
-    role.fits, role.tier, role.verify_kind, role.skills, role.extends, role.drop = (fields.get(k) for k in ROLE_KEYS)
-    role.skills, role.drop, role.keys = role.skills or [], role.drop or [], set(fields)
+    role.fits, role.tier, role.verify_kind, role.skills, role.extends = (fields.get(k) for k in ROLE_KEYS)
+    role.skills, role.keys = role.skills or [], set(fields)
     sections, current = {}, None
     for line in body:
         if line.startswith("## "):
@@ -1082,14 +1081,12 @@ def role_frontmatter(run, lines):
             value = role_value(raw)
         except ValueError as exc:
             raise ValueError(f"line {number}: {key}: {exc}")
-        if key in ("skills", "drop"):
-            fields[key] = role_skills(value, number) if key == "skills" else role_drops(value, number)
+        if key == "skills":
+            fields[key] = role_skills(value, number)
         elif value:
             fields[key] = value
     if fields.get("extends") and not ROLE_NAME.fullmatch(fields["extends"]):
         raise ValueError(f"extends: {fields['extends']!r} is not a role name")
-    if fields.get("drop") and not fields.get("extends"):
-        raise ValueError("drop removes items of the parent role; it needs an extends line")
     if not fields.get("fits") and not fields.get("extends"):
         raise ValueError("no `fits` line: say in one line which tasks the role is for")
     if tier := fields.get("tier"):
@@ -1116,25 +1113,9 @@ def role_skills(value, number):
     return names
 
 
-def role_drops(value, number):
-    """The parent items a `drop:` value removes, as [("method" | "review", n), ...], from `[method 4, review 5]`."""
-    if not value:
-        return []
-    if not value.startswith("["):
-        raise ValueError(f"line {number}: drop must be a list in brackets, as [method 4, review 5], not {value!r}")
-    found = []
-    for item in (i.strip() for i in value[1:-1].split(",") if i.strip()):
-        match = ROLE_DROP.fullmatch(item)
-        if not match:
-            raise ValueError(f"line {number}: drop: {item!r} is not `method N` or `review N`")
-        found.append((match[1], int(match[2])))
-    return found
-
-
 def role_items(text):
-    """(the text before the first numbered item, [(position, text of the item)]) of a Method or Review section. An item
-    runs from its `N. ` line to the next one, so its indented and blank lines go with it. Items are counted by position,
-    as Markdown shows them, so a list written `1.`, `1.`, `1.` has items 1, 2 and 3."""
+    """(the text before the first numbered item, [text of each item]) of a Method or Review section. An item runs from its
+    `N. ` line to the next one, so its indented and blank lines go with it."""
     lead, items = [], []
     for line in (text or "").splitlines():
         match = ROLE_ITEM.match(line)
@@ -1144,21 +1125,15 @@ def role_items(text):
             items[-1][1].append(line)
         else:
             lead.append(line)
-    return "\n".join(lead).strip(), [(i, "\n".join(lines).rstrip()) for i, (_, lines) in enumerate(items, 1)]
+    return "\n".join(lead).strip(), ["\n".join(lines).rstrip() for _, lines in items]
 
 
-def merge_section(kind, parent, child, drops):
-    """The parent's section without its dropped items, then the child's, with the numbered items numbered again from 1.
-    ValueError names a dropped number the parent does not have."""
+def merge_section(parent, child):
+    """The parent's section, then the child's, with the child's numbered items numbered on from the parent's."""
     lead, items = role_items(parent)
-    gone = {n for k, n in drops if k == kind}
-    missing = sorted(gone - {n for n, _ in items})
-    if missing:
-        raise ValueError(f"drop: the parent's {kind.title()} has no item {', '.join(map(str, missing))}")
     child_lead, child_items = role_items(child)
-    kept = [t for n, t in items if n not in gone]
     numbered = lambda texts, start: "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start))  # noqa: E731
-    parts = [lead, numbered(kept, 1), child_lead, numbered([t for _, t in child_items], len(kept) + 1)]
+    parts = [lead, numbered(items, 1), child_lead, numbered(child_items, len(items) + 1)]
     return "\n\n".join(p for p in parts if p).strip() or None
 
 
@@ -1186,15 +1161,8 @@ def read_role(run, role, found):
     if parent.extends:
         role.error = f"extends: the parent role {name} extends {parent.extends} itself; a role extends one level only"
         return
-    try:
-        role.method = merge_section("method", parent.method, role.method, role.drop)
-        role.review = merge_section("review", parent.review, role.review, role.drop)
-    except ValueError as exc:
-        role.error = str(exc)
-        return
-    if not role.method:
-        role.error = "the merged ## Method is empty: drop leaves the parent's Method with nothing and the file adds none"
-        return
+    role.method = merge_section(parent.method, role.method)
+    role.review = merge_section(parent.review, role.review)
     for key in ROLE_INHERITED:
         if key not in role.keys:
             setattr(role, key, getattr(parent, key))

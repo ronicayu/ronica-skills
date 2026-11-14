@@ -5963,7 +5963,7 @@ class RoleTest(Base):
     # --- extends (#114)
 
     def test_07b_a_project_role_extends_the_shipped_role_of_its_own_name(self):
-        path = self.role_file("software-engineer", fits=None, extends="software-engineer", drop="[review 5]",
+        path = self.role_file("software-engineer", fits=None, extends="software-engineer",
                               method="1. Paste the red line at base.\n2. Deflake: reproduce first.",
                               review="1. Mutation check: delete each new guard.")
         plugin = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles", "software-engineer.md")
@@ -5974,10 +5974,9 @@ class RoleTest(Base):
         self.assertTrue(role.endswith("13. Commit in logical steps. Each message says what changed and why.\n\n"
                                       "14. Paste the red line at base.\n15. Deflake: reproduce first."), role)
         review = self.section(self.verify_text(self.running_task(role="software-engineer")), "ROLE")
-        self.assertNotIn("TODO without a task id", review)
-        self.assertIn("5. Comments: a comment that restates", review)
-        self.assertTrue(review.endswith("6. Staleness: docs, config and examples that describe the changed behaviour are updated."
-                                        "\n\n7. Mutation check: delete each new guard."), review)
+        self.assertIn("5. Leftovers: no debug output", review)
+        self.assertTrue(review.endswith("7. Staleness: docs, config and examples that describe the changed behaviour are updated."
+                                        "\n\n8. Mutation check: delete each new guard."), review)
         row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "software-engineer")
         self.assertEqual((row["source"], row["tier"], row["verify_kind"], row["error"]),
                          ("project, extends plugin:software-engineer", "implementation", "code", None))
@@ -6002,13 +6001,8 @@ class RoleTest(Base):
                  ("its own name with no shipped file", {}, dict(extends="bad"), "extends: no role named 'bad' to extend"),
                  ("a parent that extends", dict(extends="architect"), dict(extends="mid"), "a role extends one level only"),
                  ("a broken parent", dict(fits=None), dict(extends="mid"), "the parent role file"),
-                 ("drop with no extends", {}, dict(drop="[review 1]"), "it needs an extends line"),
-                 ("a bad drop item", {}, dict(extends="mid", drop="[review]"), "'review' is not `method N` or `review N`"),
-                 ("a dropped item the parent lacks", {}, dict(extends="software-engineer", drop="[review 8]"),
-                  "the parent's Review has no item 8"),
-                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"),
-                 ("every method item dropped", dict(method="1. a\n2. b"), dict(extends="mid", method=None, drop="[method 1, method 2]"),
-                  "the merged ## Method is empty"))
+                 ("a drop line", {}, dict(extends="mid", drop="[review 1]"), "unknown key 'drop'"),
+                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"))
         for label, mid, front, problem in cases:
             with self.subTest(label):
                 self.fresh()
@@ -6021,11 +6015,11 @@ class RoleTest(Base):
                 self.assertEqual(out.returncode, 1, out.stderr)
                 self.assertIn(problem, out.stdout)
 
-    def test_07b_items_count_by_position_and_an_empty_skills_line_clears_the_parents(self):
-        self.role_file("base", method="1. one\n   more of one\n\n1. two\n1. three", skills="[a:b]")
-        self.role_file("child", fits=None, extends="base", drop="[method 2]", skills="[]", method=None)
+    def test_07b_continuation_lines_stay_with_their_item_and_an_empty_skills_line_clears_the_parents(self):
+        self.role_file("base", method="1. one\n   more of one\n\n2. two", skills="[a:b]")
+        self.role_file("child", fits=None, extends="base", skills="[]", method="Lead of child.\n\n1. three")
         role = self.section(self.brief(self.add_task(role="child")), "ROLE")
-        self.assertTrue(role.endswith("1. one\n   more of one\n2. three"), role)
+        self.assertTrue(role.endswith("1. one\n   more of one\n2. two\n\nLead of child.\n\n3. three"), role)
         self.assertNotIn("Load these skills", role)
 
     def test_07b_the_size_warning_counts_the_merged_role(self):
