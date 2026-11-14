@@ -216,6 +216,27 @@ test("the glossary shows in the Legend", () => {
   assert.match(chart, /state "Terms" as terms \{\n\s+tm0: Manager = the person who plans the work\n\s+\}/);
 });
 
+test("more than four terms go in columns of four", () => {
+  const glossary = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [`term ${n}`, `meaning ${n}`]));
+  const { chart } = run(
+    ["Task session open", "Task session closed"],
+    [["Task session open", "Close", "Task session closed"]],
+    view({ Close: "the Manager closes the task" }, { glossary }),
+  );
+  assert.match(chart, /state " " as tc0 \{\n\s+direction LR(\n\s+tm[0-3]: term [1-4] = meaning [1-4]){4}\n\s+\}/);
+  assert.match(chart, /state " " as tc1 \{\n\s+direction LR(\n\s+tm[45]: term [56] = meaning [56]){2}\n\s+\}/);
+});
+
+test("a colon inside a label or a term is encoded for mermaid.js", () => {
+  const { chart } = run(
+    ["Task session open", "Task session closed"],
+    [["Task session open", "Close", "Task session closed"]],
+    view({ Close: "the Manager closes the task: it fails" }, { glossary: { record: "the check: it reads" } }),
+  );
+  assert.match(chart, /: the Manager closes the task#58; it fails/);
+  assert.match(chart, /tm0: record = the check#58; it reads/);
+});
+
 test("a chart without a glossary has no Legend", () => {
   const { chart } = run(
     ["Task session open", "Task session closed"],
