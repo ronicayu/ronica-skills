@@ -849,7 +849,11 @@ GROW = """() => {
 @pytest.mark.parametrize("view", VIEWS)
 def test_refresh_and_resize_keep_the_plan_fitted(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}", height=700)
-    assert page.evaluate(INSIDE)
+    if view == "graph" and abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6:
+        # A taller fixed card needs scrolling at the preserved desktop readable floor.
+        assert abs(page.evaluate("cy.getElementById('1').renderedBoundingBox().y1") - 40) < 1
+    else:
+        assert page.evaluate(INSIDE)
     page.evaluate(GROW)
     assert page.evaluate(INSIDE) or abs(page.evaluate("cy.zoom()") - 0.9) < 1e-6
     assert page.evaluate("hiddenTasks()") is False or page.evaluate("cy.zoom() <= 0.9 + 1e-9")
@@ -931,10 +935,16 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
     assert page.evaluate("expandedIds().has(1) && !expandedIds().has(3)")
     page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(1)")
-    assert "1 late inside" in label and late
+    assert late
+    if view != "graph":
+        assert "1 late inside" in label
+    else:
+        assert "0/2 done" in label
     page.evaluate("toggleExpand(1)")
     label, late = page.evaluate(f"({marked})(3)")
-    assert "1 late inside" in label and late
+    assert late
+    if view != "graph":
+        assert "1 late inside" in label
     more(page, "expandAll")
     label, late = page.evaluate(f"({marked})(3)")
     assert "late inside" not in label and not late
@@ -947,11 +957,16 @@ def test_collapsed_summary_shows_late_work_inside(browser, programme_file, view)
 def test_external_label_names_who_to_chase(browser, page_file, view):
     page, problems = open_page(browser, page_file, f"?view={view}")
     calm = page.evaluate("cy.getElementById('5').data('label')")
-    if view != "timeline":
+    if view == "lanes":
         assert "Acme" in calm and ("needed by" not in calm or calm.index("Acme") < calm.index("needed by"))
+    elif view == "graph":
+        assert "Vendor key" in calm
     page.evaluate("applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 5 ? { ...n, chase_due: true, meta: { ...n.meta, chase: '2026-10-10' } } : n) })")
     label = page.evaluate("cy.getElementById('5').data('label')")
-    assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    if view != "graph":
+        assert "chase Acme" in label and "chase due" not in label and label.count("Acme") == 1
+    else:
+        assert "Vendor key" in label
     assert problems == []
     page.close()
 
@@ -1525,7 +1540,8 @@ def test_names_states_and_marks(browser, page_file):
         assert page.get_attribute(sel, "aria-label") == name
     assert page.evaluate("['viewGraph', 'viewLanes', 'viewTimeline', 'viewLoad'].map(b => document.getElementById(b).getAttribute('aria-pressed'))") == ["true", "false", "false", "false"]
     assert page.evaluate("document.querySelector('main').contains(document.getElementById('cy'))") and page.evaluate("document.querySelector('header h1').textContent") == "taskgraph · demo"
-    assert page.evaluate("cy.getElementById('2').data('label')").startswith("⊘ #2 Ship v1") and page.evaluate("cy.getElementById('4').data('label')").startswith("#4 ")
+    # #2 is a milestone and keeps its own label; #4 is a Graph card: meta line, then the title.
+    assert page.evaluate("cy.getElementById('2').data('label')").startswith("⊘ #2 Ship v1") and page.evaluate("cy.getElementById('4').data('label')").startswith("#4\nWrite docs")
     page.click("#goal")
     page.keyboard.press("ArrowDown")
     active = page.get_attribute("#goal", "aria-activedescendant")
@@ -1641,8 +1657,8 @@ def test_priority_badge_shows_on_nodes_that_have_one(browser, priority_file, vie
         names = page.evaluate("cy.nodes('.tl-name').map(n => n.data('name'))")
         assert any(n.startswith("P0 #1 ") for n in names) and any(n.startswith("#2 ") for n in names)
     else:
-        assert page.evaluate("cy.getElementById('1').data('label')").startswith("P0 #1 Urgent fix")
-        assert page.evaluate("cy.getElementById('2').data('label')").startswith("#2 Someday")
+        assert page.evaluate("cy.getElementById('1').data('label')").startswith("#1 P0\nUrgent fix" if view == "graph" else "P0 #1 Urgent fix")
+        assert page.evaluate("cy.getElementById('2').data('label')").startswith("#2\nSomeday" if view == "graph" else "#2 Someday")
     assert problems == []
     page.close()
 
@@ -1666,7 +1682,8 @@ def test_priority_badge_shows_in_the_panel(browser, priority_file):
 
 
 def open_phone(browser, path, query="?view=graph"):
-    page = browser.new_page(viewport={"width": 390, "height": 844})
+    context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True, device_scale_factor=1)
+    page = context.new_page()
     problems = []
     page.on("pageerror", lambda e: problems.append(str(e)))
     page.goto(f"{path.as_uri()}{query}")
@@ -1674,31 +1691,226 @@ def open_phone(browser, path, query="?view=graph"):
     return page, problems
 
 
-def test_phone_toolbar_is_two_short_rows_without_overflow(browser, page_file):
+def test_phone_toolbar_is_one_row_with_touch_targets(browser, page_file):
     page, problems = open_phone(browser, page_file)
-    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
-    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 56
+    assert page.evaluate("document.documentElement.scrollWidth") == 390
     assert page.evaluate("document.getElementById('toolbar').scrollWidth") <= 390
     seen = page.evaluate(
         """() => [...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
             .filter(e => e.offsetParent && e.closest('.menu') === null && getComputedStyle(e).visibility !== 'hidden')
-            .map(e => { const r = e.getBoundingClientRect(); return [e.id, r.left, r.right, r.height]; })"""
+            .map(e => { const r = e.getBoundingClientRect(); return [e.id, r.left, r.right, r.top, r.width, r.height]; })"""
     )
-    assert {"project", "goal", "optsBtn", "viewGraph", "filterBtn", "moreBtn", "searchBtn"} <= {row[0] for row in seen}
-    assert all(left >= -0.5 and right <= 390.5 for _, left, right, _ in seen)
-    assert all(height >= 32 for _, _, _, height in seen)
+    assert {"projectBtn", "viewBtn", "filterBtn", "moreBtn", "searchBtn"} == {row[0] for row in seen}
+    assert all(left >= 0 and right <= 390 for _, left, right, _, _, _ in seen)
+    assert all(width >= 44 and height >= 44 for _, _, _, _, width, height in seen)
+    assert len({round(row[3]) for row in seen}) == 1
+    assert page.evaluate("matchMedia('(pointer: coarse)').matches")
     assert problems == []
     page.close()
 
 
-def test_phone_toolbar_rows_are_two(browser, page_file):
-    page, _ = open_phone(browser, page_file)
-    rows = page.evaluate(
-        """() => new Set([...document.querySelectorAll('#toolbar button, #toolbar select, #toolbar input[type=text]')]
-            .filter(e => e.offsetParent && e.closest('.menu') === null)
-            .map(e => Math.round(e.getBoundingClientRect().top))).size"""
-    )
-    assert rows == 2
+# Peek: title, id and badges, and the Needs / Unlocks row are inside the sheet; the actions start below it.
+PEEK_FITS = """() => {
+    const p = document.getElementById('panel').getBoundingClientRect();
+    return [...document.querySelectorAll('#panelTitle, #panel .sub, #panel .sub .badge, #panel .peek, #needsCount, #unlocksCount')].every(e => {
+        const r = e.getBoundingClientRect();
+        return r.top >= p.top && r.bottom <= p.bottom && r.left >= p.left && r.right <= p.right;
+    }) && [...document.querySelectorAll('#panel .actions button')].every(b => b.getBoundingClientRect().top >= p.bottom);
+}"""
+
+
+def test_phone_details_peek_full_and_close_preserve_canvas(browser, page_file):
+    page, problems = open_phone(browser, page_file, "?view=graph&task=3")
+    page.wait_for_function(PANEL_OPEN)
+    page.wait_for_timeout(350)
+    before = page.evaluate("({ width: document.getElementById('cy').clientWidth, zoom: cy.zoom(), pan: cy.pan() })")
+    panel = page.locator("#panel").bounding_box()
+    assert panel["height"] == page.evaluate("sheetDetents().peek")
+    assert page.evaluate("document.getElementById('cy').clientWidth") == 390
+    assert page.evaluate("cy.zoom()") == before["zoom"] and page.evaluate("cy.pan()") == before["pan"]
+    assert before["pan"]["y"] >= 0  # the sheet does not push the selected node underneath it
+    assert "Build feature" in page.inner_text("#panelTitle")
+    assert "#3" in page.inner_text("#panel .sub") and "Blocked" in page.inner_text("#panel .sub")
+    assert page.inner_text("#needsCount").startswith("← Needs 1")
+    assert page.inner_text("#unlocksCount").startswith("Unlocks 1")
+    close = page.locator("#panelClose").bounding_box()
+    assert close["width"] == close["height"] == 44
+    handle = page.locator("#panelHandle")
+    assert handle.bounding_box()["height"] >= 44
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle'), '::before').height") == "4px"
+    assert page.evaluate("parseFloat(getComputedStyle(document.getElementById('panelHandle'), '::before').width)") == 36
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle')).borderTopStyle") == "none"
+    assert page.evaluate("document.getElementById('panel').dataset.detent") == "peek"
+    assert page.evaluate(PEEK_FITS)
+    assert page.evaluate("getComputedStyle(document.getElementById('panelHandle')).backgroundColor") == "rgba(0, 0, 0, 0)"
+    assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).id", [close["x"] + 22, close["y"] + 22]) == "panelClose"
+    # A two-line title and a gate badge still fit the peek, measured rather than fixed.
+    page.evaluate("""() => {
+        applyData({ ...DATA, nodes: DATA.nodes.map(n => n.id === 3 ? { ...n, title: '渲染管线重构 Render pipeline rewrite with GPU acceleration and resumable renders', meta: { ...n.meta, gates: { pr: { label: 'PR #1233' } } } } : n) });
+        select(3, false);
+    }""")
+    assert "waiting: PR #1233" in page.inner_text("#panel .sub")
+    page.wait_for_timeout(300)  # the sheet's height transition
+    assert page.evaluate(PEEK_FITS)
+    page.click("#panelHandle")
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'half'")
+    assert page.locator("#panel").bounding_box()["height"] == page.evaluate("sheetDetents().half")
+    page.click("#panelHandle")
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'peek'")
+    page.keyboard.press("Escape")
+    assert not page.evaluate(PANEL_OPEN)
+    assert page.evaluate("document.documentElement.scrollWidth") == 390
+    assert problems == []
+    page.close()
+
+
+def test_phone_sheet_drags_between_three_heights_and_closes(browser, page_file):
+    page, problems = open_phone(browser, page_file, "?view=graph&task=3")
+    page.wait_for_function(PANEL_OPEN)
+    handle = page.locator("#panelHandle").bounding_box()
+    page.mouse.move(150, handle["y"] + 22)
+    page.mouse.down()
+    page.mouse.move(150, handle["y"] - 220, steps=8)
+    page.mouse.up()
+    page.wait_for_function("document.getElementById('panel').dataset.detent === 'half'")
+    assert page.locator("#panel").bounding_box()["height"] == 473
+    page.evaluate("setDetent('full')")
+    assert page.locator("#panel").bounding_box()["height"] == 784
+    page.evaluate("setDetent('peek')")
+    handle = page.locator("#panelHandle").bounding_box()
+    page.mouse.move(150, handle["y"] + 22)
+    page.mouse.down()
+    page.mouse.move(150, 842, steps=10)
+    page.mouse.up()
+    assert not page.evaluate(PANEL_OPEN)
+    assert problems == []
+    page.close()
+
+
+def test_desktop_graph_fixed_cards_do_not_overlap(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    sizes = page.evaluate("tasks().filter(n => n.data('type') !== 'milestone').map(n => [n.width(), n.height()])")
+    assert sizes and all(w == 212 and h == 66 for w, h in sizes)
+    boxes = page.evaluate(BOXES)
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert a["x2"] <= b["x1"] or b["x2"] <= a["x1"] or a["y2"] <= b["y1"] or b["y2"] <= a["y1"]
+    assert page.evaluate("cy.minZoom()") == .1
+    assert page.evaluate("cy.getElementById('3').grabbable()") is True
+    assert problems == []
+    page.close()
+
+
+def test_phone_graph_cards_zoom_and_touch_selection(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    sizes = page.evaluate("tasks().filter(n => n.data('type') !== 'milestone').map(n => [n.width(), n.height(), n.data('label').split('\\n').length])")
+    assert sizes and all(w == 164 and h == 60 and lines <= 3 for w, h, lines in sizes)
+    # Evaluate to a number: returning cy itself makes Playwright serialise the whole graph.
+    page.evaluate("cy.zoom(.5); 0")
+    page.wait_for_timeout(200)
+    assert page.evaluate("tasks().every(n => !n.hasClass('id-only'))")  # a phone keeps full cards down to 0.45
+    page.evaluate("cy.zoom(.4); 0")
+    page.wait_for_function("tasks().every(n => n.hasClass('id-only') && !n.hasClass('block-only'))")
+    assert page.evaluate("tasks().map(n => n.style('label'))") == page.evaluate("tasks().map(n => '#' + n.id())")
+    page.evaluate("cy.zoom(.2); 0")
+    page.wait_for_function("tasks().every(n => n.hasClass('block-only'))")
+    assert set(page.evaluate("tasks().map(n => n.style('label'))")) == {""}
+    page.evaluate("cy.zoom(.8); 0")
+    page.wait_for_function("tasks().every(n => !n.hasClass('id-only'))")
+    assert page.evaluate("cy.getElementById('3').grabbable()") is False
+    # A real touch drag that starts on a node pans the view and leaves the node where it was.
+    page.evaluate("cy.center(cy.getElementById('3')); 0")
+    before, pan = page.evaluate("[cy.getElementById('3').position(), cy.pan()]")
+    x, y = page.evaluate("""() => { const p = cy.getElementById('3').renderedPosition(), b = document.getElementById('cy').getBoundingClientRect(); return [b.left + p.x, b.top + p.y]; }""")
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+    for k in range(1, 9):
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": x + 10 * k, "y": y + 8 * k}]})
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    page.wait_for_timeout(100)
+    assert page.evaluate("cy.getElementById('3').position()") == before
+    moved = page.evaluate("cy.pan()")
+    assert moved["x"] - pan["x"] > 40 and moved["y"] - pan["y"] > 30
+    # A single tap selects at once, with no wait for a possible second tap.
+    page.evaluate("cy.getElementById('3').emit({ type: 'tap', position: cy.getElementById('3').position() }); 0")
+    assert page.evaluate("pinned") == 3 and page.evaluate(PANEL_OPEN)
+    assert page.evaluate("getComputedStyle(document.getElementById('cy')).touchAction") == "none"
+    assert page.evaluate("getComputedStyle(document.body).overscrollBehavior") == "none"
+    assert problems == []
+    page.close()
+
+
+def test_phone_empty_search_shows_now_groups_and_opens_a_readable_card(browser, priority_file):
+    page, problems = open_phone(browser, priority_file)
+    page.evaluate("""() => {
+        const base = DATA.nodes.find(n => n.id === 2);
+        applyData({ ...DATA, nodes: [...DATA.nodes, { ...base, id: 10, title: 'Summary', children: [2], parent: null, derived_status: 'in_progress', rollup: { done: 0, total: 1 } }] });
+    }""")
+    page.click("#searchBtn")
+    page.wait_for_function("document.querySelectorAll('#results .group').length === 2")
+    groups = page.evaluate("[...document.querySelectorAll('#results .group')].map(g => g.textContent)")
+    assert groups == ["In progress", "Ready"]
+    assert page.evaluate("[...document.querySelectorAll('#results .hit')].map(r => r.dataset.id)") == ["10", "1", "2"]
+    page.click('#results .hit[data-id="1"]')
+    assert page.evaluate("pinned") == 1 and not page.is_visible("#search")
+    page.wait_for_function("!cy.animated()")
+    assert page.evaluate("cy.zoom()") >= .85
+    assert page.evaluate("document.getElementById('panel').dataset.detent") == "peek"
+    # Centred in the canvas left above the sheet.
+    x, y = page.evaluate("[cy.getElementById('1').renderedPosition('x'), cy.getElementById('1').renderedPosition('y')]")
+    h = page.evaluate("document.getElementById('cy').clientHeight - sheetHeight()")
+    assert abs(x - 195) < 2 and abs(y - h / 2) < 2
+    assert problems == []
+    page.close()
+
+
+def test_phone_menus_are_bottom_sheets_inside_viewport(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    for button, menu in (("projectBtn", "projectMenu"), ("viewBtn", "viewMenu"), ("filterBtn", "filters"), ("moreBtn", "more")):
+        page.click(f"#{button}")
+        assert page.is_visible(f"#{menu}") and page.is_visible("#menuBackdrop")
+        rect = page.locator(f"#{menu}").bounding_box()
+        assert rect["x"] >= 0 and rect["x"] + rect["width"] <= 390
+        assert rect["y"] + rect["height"] == 824
+        rows = page.evaluate(f"""() => [...document.querySelectorAll('#{menu} .choice')]
+            .filter(e => e.offsetParent).map(e => e.getBoundingClientRect().height)""")
+        assert all(height >= 44 for height in rows)
+        page.keyboard.press("Escape")
+        assert page.is_hidden(f"#{menu}") and page.is_hidden("#menuBackdrop")
+    page.click("#moreBtn")
+    page.click("#optsMore")
+    assert page.is_visible("#opts") and page.locator("#opts").bounding_box()["width"] <= 390
+    page.mouse.click(195, page.locator("#opts").bounding_box()["y"] - 20)
+    assert page.is_hidden("#opts") and page.is_hidden("#menuBackdrop")
+    assert page.evaluate("document.activeElement.id") == "moreBtn"
+    page.click("#moreBtn")
+    page.click("#goalMore")
+    assert page.is_visible("#goal") and page.is_visible("#goalList")
+    assert page.evaluate("parseFloat(getComputedStyle(document.getElementById('goal')).fontSize)") >= 16
+    page.click('#goalList .choice[data-id="2"]')
+    assert page.evaluate("goal") == 2 and page.is_hidden("#goalList") and page.is_hidden("#menuBackdrop")
+    assert problems == []
+    page.close()
+
+
+def test_desktop_toolbar_panel_and_menus_stay_desktop(browser, page_file):
+    page, problems = open_page(browser, page_file)
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") == 79
+    assert page.is_visible("#project") and page.is_visible("#goal") and page.is_visible("#search")
+    assert page.is_visible(".seg") and not page.is_visible("#projectBtn") and not page.is_visible("#viewBtn")
+    assert page.evaluate("getComputedStyle(document.getElementById('toolbar')).flexDirection") == "column"
+    page.click("#optsBtn")
+    rect = page.locator("#opts").bounding_box()
+    assert rect["y"] < 200 and page.is_hidden("#menuBackdrop")
+    page.keyboard.press("Escape")
+    page.evaluate("select(3, false)")
+    panel = page.locator("#panel").bounding_box()
+    assert panel["width"] == 340 and panel["x"] == 1060 and panel["y"] == 79
+    assert page.evaluate("document.getElementById('cy').clientWidth") == 1060
+    assert page.evaluate("document.getElementById('panelHandle').getBoundingClientRect().height") == 0
+    assert not page.is_visible(".peek")
+    assert problems == []
     page.close()
 
 
@@ -1709,30 +1921,48 @@ def test_phone_search_opens_types_and_closes(browser, page_file):
     assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
     page.keyboard.type("docs")
     page.wait_for_function("document.querySelectorAll('#results .hit').length > 0")
-    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 90
+    assert page.evaluate("document.getElementById('toolbar').getBoundingClientRect().height") <= 56
+    assert page.evaluate("parseFloat(getComputedStyle(document.getElementById('search')).fontSize)") >= 16
+    assert page.is_visible("#menuBackdrop")
+    rect = page.locator("#results").bounding_box()
+    assert rect["x"] >= 0 and rect["x"] + rect["width"] <= 390
+    assert page.locator("#results .hit").first.bounding_box()["height"] >= 44
     page.keyboard.press("Escape")
     page.keyboard.press("Escape")
     assert not page.is_visible("#search")
+    assert page.is_hidden("#menuBackdrop")
     page.click("#cy")
     page.keyboard.press("/")
     assert page.is_visible("#search") and page.evaluate("document.activeElement.id") == "search"
     page.evaluate("document.activeElement.blur()")
     page.wait_for_function("!document.getElementById('toolbar').classList.contains('searching')")
+    page.click("#searchBtn")
+    page.fill("#search", "vendor")
+    page.wait_for_function("document.querySelectorAll('#results .hit').length > 0")
+    page.keyboard.press("Enter")
+    assert page.evaluate("pinned") == 5 and page.is_hidden("#menuBackdrop")
+    assert page.evaluate("document.getElementById('cy').clientWidth") == 390
+    assert page.evaluate("document.getElementById('panel').getBoundingClientRect().width") == 390
     assert problems == []
     page.close()
 
 
 def test_phone_every_view_and_fit_are_reachable(browser, page_file):
     page, problems = open_phone(browser, page_file)
-    for button, name in (("viewLanes", "lanes"), ("viewTimeline", "timeline"), ("viewLoad", "load"), ("viewGraph", "graph")):
-        page.click(f"#{button}")
+    for name in ("lanes", "timeline", "load", "graph"):
+        page.click("#viewBtn")
+        page.click(f"#viewMenu .choice:text-is('{dict(lanes='Swimlane', timeline='Timeline', load='Load', graph='Graph')[name]}')")
         assert page.evaluate("view") == name
-        assert page.evaluate("document.documentElement.scrollWidth") <= 390
+        assert page.evaluate("document.documentElement.scrollWidth") == 390
+    fit = page.locator("#fit").bounding_box()
+    assert fit["x"] + fit["width"] <= 390 and fit["y"] + fit["height"] <= 844
+    assert fit["width"] >= 44 and fit["height"] >= 44
+    page.click("#fit")
+    assert page.evaluate("keepWhole")
     page.click("#moreBtn")
-    assert page.is_visible("#fitMore")
-    page.click("#fitMore")
-    assert not page.evaluate("document.getElementById('moreWrap').classList.contains('open')")
-    page.click("#optsBtn")
+    assert page.evaluate("document.getElementById('moreWrap').classList.contains('open')")
+    assert not page.is_visible("#fitMore")
+    page.click("#optsMore")
     assert page.is_visible("#opts")
     right = page.evaluate("document.getElementById('opts').getBoundingClientRect().right")
     assert right <= 390
@@ -1838,8 +2068,8 @@ def test_phone_graph_nodes_are_narrower_and_fit_larger(browser, fanin_file):
     page.close()
     page, _ = open_phone(browser, fanin_file)
     page.evaluate("document.getElementById('fit').click()")
-    assert page.evaluate(widest) <= 130 < wide
-    assert page.evaluate("cy.zoom()") > 0.4
+    assert page.evaluate(widest) == 164 and wide == 212
+    assert page.evaluate("cy.zoom()") > 0.25
     assert wide_zoom > 0
     page.close()
 
