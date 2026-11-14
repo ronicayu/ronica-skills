@@ -15,11 +15,11 @@ const startsWithPronoun = (label: string) => {
   return ENGLISH_PRONOUN.test(s) || CHINESE_PRONOUN.test(s);
 };
 
-const isShort = (label: string) => {
+const isShort = (label: string, words: number) => {
   const letters = [...label].filter((c) => LETTER.test(c));
   const cjk = letters.filter((c) => CJK.test(c)).length;
   if (cjk * 2 > letters.length) return [...label].filter((c) => !/\p{White_Space}/u.test(c)).length < 4;
-  return label.split(/\p{White_Space}+/u).filter((w) => LETTER.test(w)).length < 3;
+  return label.split(/\p{White_Space}+/u).filter((w) => LETTER.test(w)).length < words;
 };
 
 export const stateName = (region: Region, path: string[]) =>
@@ -39,7 +39,7 @@ export function labelWarnings(chart: Chart): LabelWarning[] {
       const where = r.name ? ` in ${r.name}` : "";
       if (startsWithPronoun(name))
         add("pronoun", `The state label ${quoted(name)}${where} starts with a pronoun.`);
-      if (isShort(name))
+      if (isShort(name, 2))
         add("short", `The state label ${quoted(name)}${where} is too short to name its subject.`);
     }
     const leaving = new Map<string, ChartStep[]>();
@@ -51,7 +51,7 @@ export function labelWarnings(chart: Chart): LabelWarning[] {
         const text = part + suffix;
         if (startsWithPronoun(text))
           add("pronoun", `The arrow label ${quoted(text)} ${at} starts with a pronoun.`);
-        if (isShort(text))
+        if (isShort(text, 3))
           add("short", `The arrow label ${quoted(text)} ${at} is too short to name its actor.`);
       }
       if (s.parts.length > 1)

@@ -87,8 +87,8 @@ In `SKILL.md`:
   `report.md` has a "Label warnings" section and an "Arrows" table, and its
   first lines say how many warnings the chart has.
   - A warning names a label that starts with a pronoun (you, I, we, it, they,
-    he, she, or 你, 我, 我们, 它, 他, 她, 他们), a label of fewer than 3 words
-    (fewer than 4 characters for CJK text), arrows that leave one state with
+    he, she, or 你, 我, 我们, 它, 他, 她, 他们), a state label of fewer than 2 words or an arrow label
+    of fewer than 3 (fewer than 4 characters for CJK text), arrows that leave one state with
     the same label and go to different states, and a label that the tool
     joined with " or ". Text in brackets counts as part of the label.
   - The "Arrows" table has one row for each drawn arrow: label, from state,

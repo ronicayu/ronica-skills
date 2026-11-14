@@ -107,15 +107,16 @@ test("a state label that starts with a pronoun is flagged", () => {
   assert.match(section(report, "Label warnings"), /The state label "It is open" starts with a pronoun/);
 });
 
-test("a label of fewer than 3 words, or fewer than 4 CJK characters, is flagged", () => {
+test("a state label of fewer than 2 words, an arrow label of fewer than 3, or fewer than 4 CJK characters, is flagged", () => {
   const { report } = run(
-    ["Open", "Task session closed"],
-    [["Open", "Close", "Task session closed"]],
+    ["Open", "Task closed"],
+    [["Open", "Close", "Task closed"]],
     view({ Close: "Manager closes" }),
   );
   const text = section(report, "Label warnings");
   assert.match(text, /The state label "Open".*too short/);
   assert.match(text, /The arrow label "Manager closes".*too short/);
+  assert.doesNotMatch(text, /The state label "Task closed"/);
   const cjk = run(
     ["任务会话已打开", "任务会话已关闭"],
     [["任务会话已打开", "Close", "任务会话已关闭"]],
