@@ -75,6 +75,8 @@ class Store(Protocol):
 
     def claim(self, conn, task_id: int) -> None: ...
 
+    def restate(self, conn, task_id: int) -> None: ...  # write the status even when it does not change (GitHub: the labels follow it)
+
     def claimant_of(self, conn, task_id: int) -> str | None: ...  # who holds an in-progress task (GitHub); None for the local store
 
     def sync(self, *, full: bool = False) -> dict: ...

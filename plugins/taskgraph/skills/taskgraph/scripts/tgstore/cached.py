@@ -93,6 +93,7 @@ class CachedRemoteStore:
         self.idmap = {}
         self.before = None
         self.claimed = {}  # task id -> ClaimOutcome of this command
+        self.restated = set()  # task ids whose status this write sends although the cache already has it
         self.warnings = []
 
     # -- opening and refreshing -------------------------------------------------------------------------------------
@@ -376,7 +377,7 @@ class CachedRemoteStore:
 
     @contextmanager
     def write(self, conn, *, journal=True):
-        self.claimed = {}
+        self.claimed, self.restated = {}, set()
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             before = self.before = self.load(conn)  # inside the lock: a write that committed while this one waited is part of the baseline
@@ -432,7 +433,7 @@ class CachedRemoteStore:
             b, a, e = before[i], after[i], Edit(i)
             e.title = a["title"] if a["title"] != b["title"] else None
             e.notes = a["notes"] if a["notes"] != b["notes"] else None
-            e.status = a["status"] if (a["status"] != b["status"] or i in self.claimed) else None
+            e.status = a["status"] if (a["status"] != b["status"] or i in self.claimed or i in self.restated) else None
             e.type = a["type"] if a["type"] != b["type"] else None
             e.priority = a["priority"] if a["priority"] != b["priority"] else KEEP
             e.parent = a["parent"] if a["parent"] != b["parent"] else KEEP
@@ -644,6 +645,10 @@ class CachedRemoteStore:
     def claim(self, conn, task_id):
         # Reads GitHub, never the cache. Raises ClaimLost; the label goes out with the write that follows (commit).
         self.claimed[task_id] = self.remote.claim(task_id, self.claimant(conn))
+
+    def restate(self, conn, task_id):
+        # A person or the code host closed the issue and left tg:in-progress on it: tg done still removes the label.
+        self.restated.add(task_id)
 
     def claimant_of(self, conn, task_id):
         mine = self.unvoided(conn, task_id)

@@ -55,6 +55,7 @@ A gate is a condition that blocks completion. Taskgraph does not know what it me
 - Each command changes one gate key. On one machine the write is atomic, so two writers that gate different keys do not lose each other's gates. On the GitHub backend a push merges the change key by key into the gates GitHub holds; a narrow window between reading the issue and writing it remains. `edit --meta gates=...` is refused; use `gate`. `edit --unset-meta gates` removes all gates.
 - `show` lists the open gates, `ls` and the graph page show `waiting: LABEL`, and `changes` lists a gate change as `gates +KEY`, `~KEY` or `-KEY` under Gated, not under Re-scoped.
 - Gates change neither `derived_status` nor `ready`. They only affect `done` (above).
+- On the GitHub backend an open gate with a ref is also a visible `Waiting for: [LABEL](REF)` line in the issue body, which links the issue and the request. See [The GitHub backend](#the-github-backend).
 
 ### Priority
 
@@ -86,6 +87,10 @@ deferred = ["tokens", "model", "started_at"]                      # sent with th
 The file is found through `$TASKGRAPH_CONFIG` (a path; an empty value turns it off), else the first `.taskgraph.toml` in the current folder or a parent, else the main checkout of a git worktree. `--db` does not apply to a GitHub project.
 
 A task is an issue with the label `taskgraph`; its id is the issue number. A dependency is GitHub's "blocked by", a parent is a sub-issue, the status is open or closed plus the label `tg:in-progress`, the type is a label `tg:type:<type>`, the priority is a label `tg:priority:<P>`, notes are the issue body, and other meta is a hidden JSON block at the end of the body. A result is a comment with a hidden marker. `rm` closes the issue as not planned with the label `tg:removed`. The priority is written through, never into the body: the label is the source of truth on a pull, the cached `priority` key mirrors it, and a person can set it by changing the label. A task holds at most one `tg:priority:` label; if a person adds a second, the highest counts, `show` lists a conflict, and the next `tg edit --priority` leaves one. The first write creates the four labels `tg:priority:P0` to `tg:priority:P3`.
+
+An open gate with a ref is also shown as one visible line between the notes and the meta block, for example `Waiting for: [PR #95](https://github.com/o/r/pull/95)`, followed by a hidden `<!-- taskgraph:waiting -->` marker. GitHub reads a link to an issue or a pull request in the body as a cross-reference, so the request lists the task. tg writes the line from the `gates` meta on each body write and drops it when it reads the body, so it never becomes part of the notes; clearing the last gate with a ref removes it. A gate without a ref adds no line.
+
+A person or the code host can close the issue (a merged pull request that says `Closes #N`). tg then reads the task as done. A later `tg done` on it changes nothing on GitHub except that it removes a `tg:in-progress` label the close left behind; `tg gate --clear` works on a closed issue too. Closing an issue that `tg done` already closed is a no-op on GitHub. So the two orders end the same: done once, gate gone.
 
 ```mermaid
 flowchart LR

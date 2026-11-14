@@ -146,6 +146,9 @@ class SqliteStore:
     def claim(self, conn, task_id):
         pass
 
+    def restate(self, conn, task_id):
+        pass
+
     def claimant_of(self, conn, task_id):
         return None
 

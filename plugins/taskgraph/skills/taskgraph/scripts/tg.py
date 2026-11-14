@@ -786,6 +786,8 @@ def set_status(store, conn, args, status):
             raise Fail(f"#{args.id} has open gates: {waiting(get(load(conn), args.id)).removeprefix('waiting: ')}")
         if status == "in_progress":
             store.claim(conn, args.id)
+        else:
+            store.restate(conn, args.id)
         conn.execute(
             "UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?",
             (status, ts if status == "done" else None, ts, args.id),

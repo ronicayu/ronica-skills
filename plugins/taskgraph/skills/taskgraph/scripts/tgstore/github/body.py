@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 
 from tgstore.base import StoreError
 
@@ -10,6 +11,11 @@ END = "taskgraph:end -->"
 LIMIT = 260_000  # tg refuses above this; GitHub truncates silently above 262,144 bytes
 START_LINE = re.compile(r"^<!-- taskgraph:meta v1[ \t]*\r?$", re.M)
 END_LINE = re.compile(r"^taskgraph:end -->[ \t]*\r?$", re.M)
+WAITING_MARK = "<!-- taskgraph:waiting -->"
+# The visible line of the open gates that have a ref, between the notes and the block. parse drops it; render writes it again from the meta.
+WAITING_LINE = re.compile(r"(?:\A|\r?\n\r?\n)Waiting for: [^\r\n]* " + re.escape(WAITING_MARK) + r"[ \t]*\Z")
+MARKDOWN = re.compile(r"([\\\[\]<>`*_])")  # escaped in a label
+URL_SAFE = ":/?#@!$&'*+,;=%~"  # kept in a ref; a space, a parenthesis or a newline is percent-encoded
 
 
 def dumps(value):
@@ -18,12 +24,28 @@ def dumps(value):
     return text.replace("-->", "--\\u003e").replace("<!--", "\\u003c!--")
 
 
+def waiting(meta):
+    """The visible line for the open gates that have a ref, as Markdown links; "" when none has one. GitHub reads a link to an issue
+    or a pull request in the body as a cross-reference, so the request shows the task that waits for it."""
+    gates = meta.get("gates")
+    if not isinstance(gates, dict):
+        return ""
+    links = []
+    for key, gate in sorted(gates.items()):
+        ref = gate.get("ref") if isinstance(gate, dict) else None
+        if isinstance(ref, str) and ref.strip():
+            label = MARKDOWN.sub(r"\\\1", " ".join(str(gate.get("label") or key).split()))
+            links.append(f"[{label}]({quote(ref.strip(), safe=URL_SAFE)})")
+    return f"Waiting for: {', '.join(links)} {WAITING_MARK}" if links else ""
+
+
 def render(notes, meta, keep=False):
     # keep: the issue already had a block, so an empty meta is written as {} instead of removing it
     if not meta and not keep:
         return notes
     block = f"{START}\n{dumps(meta)}\n{END}\n"
-    return f"{notes}\n\n{block}" if notes else block
+    head = "\n\n".join(part for part in (notes, waiting(meta)) if part)
+    return f"{head}\n\n{block}" if head else block
 
 
 def trim(text):
@@ -41,6 +63,9 @@ def parse(body):
         return body, {}, []
     start = starts[-1]
     notes = trim(body[: start.start()])
+    line = WAITING_LINE.search(notes)
+    if line:
+        notes = notes[: line.start()]
     end = END_LINE.search(body, start.end())
     if end is None or body[end.end():].strip():
         return notes, {}, ["broken"]

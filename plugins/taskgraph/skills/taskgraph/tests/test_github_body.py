@@ -95,3 +95,42 @@ def test_meta_is_json_for_anything_tg_stores():
     meta = {"sessions": [{"id": "x", "n": 1.5}], "ok": True, "none": None, "text": "line\nbreak \"quoted\""}
     assert json.loads(render("", meta).split("\n")[1].replace("\\u003c", "<").replace("--\\u003e", "-->")) == meta
     assert parse(render("", meta))[1] == meta
+
+
+GATE = {"label": "PR #95", "ref": "https://github.com/o/r/pull/95", "since": "2026-11-14T10:00:00Z"}
+LINE = "Waiting for: [PR #95](https://github.com/o/r/pull/95) <!-- taskgraph:waiting -->"
+
+
+def test_a_gate_with_a_ref_shows_a_visible_waiting_line_outside_the_block():
+    meta = {"lane": "a", "gates": {"merge": GATE}}
+    body = render("Why.", meta)
+    assert body.startswith(f"Why.\n\n{LINE}\n\n<!-- taskgraph:meta v1\n")
+    assert parse(body) == ("Why.", meta, [])
+    assert render("", meta).startswith(f"{LINE}\n\n<!-- taskgraph:meta v1\n")
+    assert parse(render("", meta)) == ("", meta, [])
+
+
+def test_the_waiting_line_is_not_read_back_as_notes_and_is_never_doubled():
+    meta = {"gates": {"merge": GATE}}
+    for notes in ("", "a", "a\n", "a\n\n", "\nb", "Waiting for: typed by a person"):
+        body = render(notes, meta)
+        assert parse(body) == (notes, meta, [])
+        assert render(*parse(body)[:2]) == body
+        assert body.count(LINE) == 1
+    assert parse(render("a", meta).replace("\n", "\r\n"))[:2] == ("a", meta)  # CRLF from the browser
+
+
+def test_a_gate_without_a_ref_adds_no_line_and_a_cleared_gate_removes_it():
+    no_ref = {"lane": "a", "gates": {"merge": {"label": "merge of worktree-task-1", "ref": None, "since": "x"}}}
+    assert "Waiting for" not in render("n", no_ref)
+    assert render("n", no_ref).startswith("n\n\n<!-- taskgraph:meta v1\n")
+    notes, meta, _ = parse(render("n", {"lane": "a", "gates": {"merge": GATE}}))
+    meta.pop("gates")
+    assert render(notes, meta) == render("n", {"lane": "a"}) and "Waiting for" not in render(notes, meta)
+
+
+def test_two_gates_with_refs_share_one_line_and_labels_are_escaped():
+    meta = {"gates": {"review": {"label": "legal [draft] <b>", "ref": "https://x.example/a b(1)"}, "merge": GATE}}
+    assert render("", meta).split("\n")[0] == ("Waiting for: [PR #95](https://github.com/o/r/pull/95), "
+                                               "[legal \\[draft\\] \\<b\\>](https://x.example/a%20b%281%29) <!-- taskgraph:waiting -->")
+    assert parse(render("n", meta)) == ("n", meta, [])

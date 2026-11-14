@@ -602,3 +602,56 @@ def test_a_gate_set_elsewhere_between_refresh_and_push_survives_a_local_gate(env
     env.ok("gate", str(a), "mine", "--clear")  # a removal drops only its own key
     gates = env.ok("--fresh", "show", str(a))["meta"]["gates"]
     assert set(gates) == {"theirs", "ours"}
+
+
+PR = "https://github.com/o/demo/pull/95"
+WAITING = f"Waiting for: [PR #95]({PR}) <!-- taskgraph:waiting -->"
+
+
+def test_a_gate_with_a_ref_shows_a_waiting_line_in_the_issue_body(env, fake):
+    a = env.ok("add", "A", "--notes", "Why.")["id"]
+    env.ok("gate", str(a), "merge", "--label", "merge of worktree-task-1")
+    assert "Waiting for" not in fake.issue(a)["body"]  # no ref: no line
+    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
+    assert fake.issue(a)["body"].startswith(f"Why.\n\n{WAITING}\n\n<!-- taskgraph:meta v1\n")
+    shown = env.ok("--fresh", "show", str(a))
+    assert shown["notes"] == "Why." and shown["meta"]["gates"]["merge"]["ref"] == PR
+    env.ok("edit", str(a), "--notes", "Why, again.")
+    env.ok("start", str(a))
+    body = fake.issue(a)["body"]
+    assert body.count("Waiting for:") == 1 and body.startswith(f"Why, again.\n\n{WAITING}\n\n")
+    assert env.ok("--fresh", "show", str(a))["notes"] == "Why, again."
+    env.ok("gate", str(a), "merge", "--clear")
+    body = fake.issue(a)["body"]
+    assert "Waiting for" not in body and body.startswith("Why, again.\n\n<!-- taskgraph:meta v1\n")
+    assert env.ok("--fresh", "show", str(a))["notes"] == "Why, again."
+
+
+def test_the_host_closes_the_issue_before_the_gate_clear_and_done(env, fake):
+    # A merged request that says "Closes #N" closes the issue first; run.py then clears the gate and runs tg done.
+    a = env.ok("add", "A")["id"]
+    env.ok("start", str(a))
+    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
+    fake.edit_issue(a, state="closed", state_reason="completed")
+    assert env.ok("--fresh", "show", str(a))["status"] == "done"
+    fake.clear_log()
+    assert env.ok("gate", str(a), "merge", "--clear")["cleared"] is True
+    done = env.ok("done", str(a))
+    assert done["status"] == "done" and "warnings" not in done
+    assert not any(c["method"] == "PATCH" and "state" in (c.get("body") or {}) for c in fake.calls())  # GitHub's close stands
+    issue = fake.issue(a)
+    assert (issue["state"], issue["labels"]) == ("closed", ["taskgraph"]) and "Waiting for" not in issue["body"]
+    assert env.ok("--fresh", "show", str(a))["status"] == "done" and env.ok("done", str(a))["status"] == "done"
+
+
+def test_tg_done_before_the_host_closes_the_issue(env, fake):
+    a = env.ok("add", "A")["id"]
+    env.ok("start", str(a))
+    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
+    env.ok("gate", str(a), "merge", "--clear")
+    env.ok("done", str(a))
+    closed = fake.issue(a)
+    assert (closed["state"], closed["state_reason"]) == ("closed", "completed")
+    fake.edit_issue(a, state="closed", state_reason="completed")  # the request merges later and closes it again: a no-op on GitHub
+    shown = env.ok("--fresh", "show", str(a))
+    assert shown["status"] == "done" and "gates" not in shown["meta"] and fake.issue(a)["body"] == closed["body"]
