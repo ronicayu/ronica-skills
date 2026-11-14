@@ -27,7 +27,8 @@ A reader above the writer must approve or choose: a submission to an executive o
 
 Readers learn what a programme found and endorse a direction; no one is asked for a specific decision. Add decision owners and dates only if the author asks for them.
 
-- **Open with the strongest result in the reader's terms:** who did what, in how long, against what it would otherwise take.
+- **Open with the strongest result in the reader's terms:** what was done, in how long, against what it would otherwise take.
+- **The work or the team is the subject,** with effort in person-months. Name a person or a role only where the role is the point, such as who the method depends on.
 - **Each stage's section opens with its result and impact,** not with the difficulty it overcame. The old way and the size of the problem follow, as the comparison.
 - **Translate measurements into consequences the reader can use,** from the author's sources; where none gives the consequence, ask. A 70-foot steel tower torn from its foundations half a mile away means unshielded buildings at that distance would be destroyed.
 - **Group the results by how the work is divided,** such as lifecycle stages, one result per item. The reason for a choice, such as rework that earlier choices caused, supports the stage it belongs to; it is not a result beside the others.

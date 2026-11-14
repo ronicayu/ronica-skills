@@ -90,7 +90,7 @@ Everything sits where the reader needs it, in groups they can hold:
 
 - **Load-bearing claims show their source** (a document, a person, a measurement, a run), in line and brief. A source supports a claim. The draft or agent that first proposed an idea is not a source. Tag claims, not sections.
 - **Uncertainty is marked, with what would settle it.** "Unverified: no one has run the rollback end to end." A hedge that only lowers the temperature does not count.
-- **The finding comes first, and each limit is stated once.** A caveat goes after the claim it limits, not before it, and is not repeated in later sections. A limit that changes nothing the reader does or believes moves to a note or an appendix; cut it only from text you drafted, and in review mode flag it. Write a limit forward only from a plan the author gave: what is expected, on what basis, and when the evidence arrives ("operations results will be measured after go-live"). Without a plan, keep the limit in the *Unverified:* form above and ask the author.
+- **The finding comes first, and each limit is stated once.** A caveat goes after the claim it limits, not before it, and is not repeated in later sections. A limit that changes nothing the reader does or believes moves to a note or an appendix; cut it only from text you drafted, and in review mode flag it. Write a limit forward: what will be measured and when the evidence arrives ("operations results will be measured after go-live"). Take the plan and the date from the author; where the draft has none, write the measure with a placeholder ("development results: [date]") and ask, never an invented plan. A claim nobody has checked keeps the *Unverified:* form above.
 - **Disagreement shows who said what.** Where sources disagree, set their figures side by side with each source named, and let the spread make the point.
 - **Decided is distinguishable from proposed.**
 - **Numbers carry a basis:** measured, estimated or assumed, and as of when. Put the basis in the number's own sentence as a short qualifier ("in the team's experience", "measured in March"), not in a separate sentence about what the number is not.
@@ -112,7 +112,14 @@ Open `references/line-editing-checklist.md` now and work through its sections in
 
 Run this last, and without exception on anything you drafted. Open the *Tells of machine-drafted prose* section of the checklist now, check the five most common, then scan the rest. On text the user wrote, report a tell only as a pattern of three or more, and voice wins over tells 21 and 24.
 
-Then, on text you drafted, name each sentence's job: a finding, evidence, context the reader needs, a limit, or an ask. Judge by the job, whatever the wording. Cut a sentence with no job; tells 28 and 29 and pass 3 cover the rest. If you can start a subagent, give it the draft and this audit without your reasoning: a fresh reader sees what the author has stopped seeing.
+Then, on text you drafted or rewrote, name each sentence's job: a finding, evidence, context the reader needs, a limit, or an ask. Judge by the job, whatever the wording; the phrases below are examples, not a list to search for. Rewrite or cut a sentence when:
+
+- it has no job;
+- it is a limit stated as an absence, including headings ("not yet measured", "no data so far"): write it forward as pass 3 says;
+- it comments on the text or the evidence instead of stating something (tell 28);
+- it explains a fact unasked or says what a number is not (tell 29, pass 3).
+
+If you can start a subagent, give it the draft and this audit without your reasoning: a fresh reader sees what the author has stopped seeing.
 
 ## Reporting a review
 
