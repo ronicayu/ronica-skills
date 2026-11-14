@@ -39,6 +39,7 @@ const recordLabel = (from, to) => {
 // A close from one state ends in one of three states; the condition tells the arrows apart. A failing and a
 // check-only verdict share one condition, because they go to one state.
 const closeLabel = (from, to) => {
+  if (closed(from)) return `the Manager closes the task again [${to.merged ? "merged now" : "the merge still waits"}]`;
   if (!closed(to)) return "the Manager closes the task [verdict does not pass]";
   if (to.merged && !from.merged) return "the Manager closes the task [verdict passes, merged at once]";
   return "the Manager closes the task [verdict passes, the merge waits]";
