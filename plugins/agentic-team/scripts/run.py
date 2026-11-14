@@ -16,6 +16,11 @@ Usage:
                    branch and open a request (pr); the task is done once its
                    change is merged, and waits as awaiting_merge until then
     merged <id>    record that the operator merged a task branch; marks it done
+    repoint <id> --pr <n>
+                   pr mode: a task that waits for its merge follows request
+                   <n>, which carries its change (the request of another
+                   task); closes the task's own request unless --keep-old;
+                   `record` marks it done once <n> merged with its commit
     stop <id>      stop a worker for a pause and file a STOPPED result
     abandon <id>   mark a task abandoned after attempt 3 failed
     status         print the status report (tables), with the Follow-ups
@@ -786,6 +791,7 @@ OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing clos
 #   close_merged     close records a passing verdict on output outside git: nothing to merge
 #   merged           a merge is recorded (mark_merged), or a recorded one is finished (finish_merged)
 #   abandon          abandon drops the task
+# repoint (#111) sends no event: the task stays awaiting_merge and follows another request, so it has no row here.
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
 # model/phase-edges.json holds the edges of model/Lifecycle.tla; test_run.py checks that this table has the same ones,
@@ -2521,9 +2527,11 @@ def cmd_launch(run, args):
     sessions = recorded_sessions(task) + [{**entry, **picked.stored}]
     if task["status"] == "open":
         run.tg("start", str(tid))
-    # Never unset pr, pr_branch, pushed or target: one request per task across attempts. `base` is the commit the
-    # task branch forked from: the first launch writes it, a retry keeps it.
-    keep = [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
+    # Never unset pr, pr_branch, pushed or target: one request per task across attempts. A repointed task (run.py
+    # repoint) gets its own request back: its pr meta is another task's request. `base` is the commit the task branch
+    # forked from: the first launch writes it, a retry keeps it.
+    keep, drop = own_request_meta(task)
+    keep += [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
     if not meta.get("base") and mode in ("first", "base", "head"):
         keep.append(meta_arg("base", base))
     table = mailbox_table(task)  # delivery state of earlier attempts goes; this attempt starts with none
@@ -2533,7 +2541,7 @@ def cmd_launch(run, args):
     lower_flag(run, tid)
     run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
            meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase),
-           *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *(["mailbox"] if table and not left else []))
+           *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *drop, *(["mailbox"] if table and not left else []))
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
@@ -3948,7 +3956,10 @@ def record_closed(run, snap, task):
             run.emit("unpublished", tid, None, None, f"closed at {str(meta['verdict_ref'])[:7]}, not pushed", f"run.py close {tid}")
         else:
             p = run.host().pr(int(meta["pr"]))
-            pr_status(run, snap, task, p)
+            if repointed(task):  # another task's request: information only, never pr_status's actions
+                follow_request(run, task, p)
+            else:
+                pr_status(run, snap, task, p)
             if unmerged(task):  # the request of a gate set earlier, or none yet: write it once
                 request_gate(run, task, p.number, p.url)
     elif unmerged(task):
@@ -4289,6 +4300,8 @@ def not_merged_reason(run, task, head):
     if run.pr_mode:
         if head == meta.get("caught_up_from"):
             return None  # the host rebased this commit into the pushed head, with the same change
+        if repointed(task) and is_sha(meta.get("verdict_ref")) and head == commit_of(run, str(meta["verdict_ref"])):
+            return None  # record found the change in the target (in_target), or the operator said it is merged
         pushed = meta.get("pushed")
         if pushed and not commit_of(run, str(pushed)):
             branch = meta.get("pr_branch") or "task-" + str(task["id"])
@@ -5071,6 +5084,146 @@ def pr_status(run, snap, task, p):
                          "fix the cause (permission, protection, method) and run.py record")
 
 
+# ----------------------------------------------------------------- repoint
+#
+# A task that waits for its merge may follow another task's request when its change went into that request (#111).
+# repoint writes `pr` and `pr_branch` of that request and `repointed_at`; the first repoint keeps the task's own
+# request in `repointed_from`, `repointed_branch` and `repointed_pushed`, and unsets `pushed`: the followed request's
+# head is not pinned, since its own task may add commits. The phase stays awaiting_merge, so TRANSITIONS has no row
+# for it. The next attempt of the task (launch or adopt after abandon) gets its own request back.
+
+REPOINT_FIELDS = ("repointed_at", "repointed_from", "repointed_branch", "repointed_pushed")
+
+
+def repointed(task):
+    """True for a task that follows another task's request (run.py repoint): its `pr` is that request."""
+    return bool((task.get("meta") or {}).get("repointed_at"))
+
+
+def own_request(task):
+    """The number of the task's own request: `repointed_from` on a repointed task, else `pr`; None when it has none."""
+    meta = task.get("meta") or {}
+    number = meta.get("repointed_from") if repointed(task) else meta.get("pr")
+    return int(number) if number else None
+
+
+def own_request_meta(task):
+    """(`--meta` arguments, keys to unset) that give a repointed task its own request back, for its next launch: pr,
+    pr_branch and pushed from the repointed_* fields, which go. Nothing for a task that is not repointed. adopt needs
+    none: it refuses a task that waits for its merge and an abandoned one."""
+    meta = task.get("meta") or {}
+    if not repointed(task):
+        return [], []
+    back = {"pr": meta.get("repointed_from"), "pr_branch": meta.get("repointed_branch"), "pushed": meta.get("repointed_pushed")}
+    return [meta_arg(k, v) for k, v in back.items() if v], [k for k, v in back.items() if not v] + list(REPOINT_FIELDS)
+
+
+def in_target(run, task):
+    """(True, how) when the task's verified commit is in its target branch, else (False, why). For a repointed task
+    after the request it follows merged. First merged_into: the commit, or one with the same patch, is in the fetched
+    target (a merge commit, or a rebase merge of a one-commit change; `pushed` is unset on a repointed task, so only
+    the target counts). Else `git merge-tree --write-tree <target> <commit>`: when merging the commit into the target
+    gives the target's own tree, the target holds the change already (a squash merge, or a rebase merge of several
+    commits). A conflict, or a change the target does not have, is no proof."""
+    sha = str(task["meta"]["verdict_ref"])
+    ref = run.target_ref(task)
+    if not commit_of(run, sha):
+        return False, f"{sha[:7]} is not in this clone"
+    if merged_into(run, task, sha):
+        return True, f"{sha[:7]} is in {ref}"
+    out = run.git("merge-tree", "--write-tree", ref, sha, check=False)
+    if out.returncode not in (0, 1):
+        return False, f"git merge-tree failed: {first_line(out.stderr) or 'no output'}"
+    tree = out.stdout.split("\n", 1)[0].strip() if out.returncode == 0 else ""
+    if tree and tree == run.git("rev-parse", "--verify", "-q", f"{ref}^{{tree}}", check=False).stdout.strip():
+        return True, f"{ref} holds the change of {sha[:7]}"
+    return False, f"{ref} does not hold the change of {sha[:7]}"
+
+
+def follow_request(run, task, p):
+    """record for a repointed task. The request belongs to another task, which merges it: its state is information only.
+    No decision, rebase, push or merge, and its head is not compared with anything. Once it merged, the task is merged
+    when its verified commit is in the target (in_target)."""
+    tid, meta = task["id"], task["meta"]
+    label = run.host().label(p.number)
+    origin = f" (repointed from {run.host().label(meta['repointed_from'])})" if meta.get("repointed_from") else " (repointed)"
+    if p.state == "MERGED":
+        try:
+            ok, how = in_target(run, task)
+        except Refused as exc:  # a failed fetch of the target is this task's host-error line, not the end of the drain
+            raise codehost.HostError(str(exc))
+        if ok:
+            mark_merged(run, task, "operator")
+            run.emit("merged", tid, None, None, f"{label}, which #{tid} follows, merged at "
+                     f"{p.merge_commit or 'unknown commit'}; {how}; recorded merged_by=operator")
+            cleanup(run, task)
+        else:
+            run.emit("not-in-target", tid, None, None, f"{label}, which #{tid} follows, merged, but {how}; #{tid} is not done",
+                     f"if the change is in {p.base_branch} after all, run.py merged {tid} --by operator; else run.py repoint "
+                     f"{tid} --pr <n> to a request that carries it, or {redo_text(task)}")
+    elif p.state == "CLOSED":
+        run.emit("pr-closed", tid, None, None, f"{label}, which #{tid} follows{origin}, closed without a merge",
+                 f"run.py repoint {tid} --pr <n> to follow another request, or {redo_text(task)}")
+    else:
+        run.emit("follows", tid, None, None, f"{label}{origin} is open ({p.raw_state}); #{tid} waits for its merge, "
+                 "which the task that owns it does")
+
+
+def cmd_repoint(run, args):
+    """Let a task that waits for its merge follow another request, which carries its change. Writes the request meta and
+    the merge gate, and closes the task's own request unless --keep-old. The phase does not change. A repeat with the
+    same request does the steps that are still missing."""
+    tid = args.id
+    task = run.show(tid)
+    meta = task.setdefault("meta", {})
+    if not run.pr_mode:
+        raise Refused(f'repoint needs merge.mode = "pr"; #{tid} merges as a branch here')
+    if task["status"] != "in_progress" or stored_phase(task) != "awaiting_merge" or not unmerged(task):
+        raise Refused(f"#{tid} does not wait for its merge (status {task['status']}, phase {task_phase(task) or 'none'}); "
+                      "repoint takes a task that run.py closed, with phase awaiting_merge")
+    host = run.host()
+    p = host.pr(args.pr)
+    label, own = host.label(p.number), own_request(task)
+    if own == p.number:
+        raise Refused(f"{label} is the request of #{tid} itself; repoint follows the request of another task")
+    if p.state == "CLOSED":
+        raise Refused(f"{label} is closed without a merge; repoint follows an open or merged request")
+    target = run.target(task)
+    if p.base_branch != target:
+        raise Refused(f"{label} merges into {p.base_branch}, but #{tid} merges into {target}")
+    old = host.pr(own) if own else None
+    old_label = host.label(own) if own else None
+    if old and old.state == "MERGED" and not repointed(task):
+        raise Refused(f"{old_label} of #{tid} is merged; run.py record records it")
+    fields = {"pr": p.number, "pr_branch": p.head_branch, "repointed_at": run.now()}
+    if not repointed(task):  # the first repoint keeps the task's own request; a later one only changes what it follows
+        kept = {"repointed_from": own, "repointed_branch": meta.get("pr_branch"), "repointed_pushed": meta.get("pushed")}
+        fields.update({k: v for k, v in kept.items() if v})
+    run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in fields.items()], "--unset-meta", "pushed", "host_rebase")
+    meta.update(fields)
+    for key in ("pushed", "host_rebase"):
+        meta.pop(key, None)
+    request_gate(run, task, p.number, p.url)
+    was = f"its own request {old_label}" if own else "no request of its own"
+    run.emit("repointed", tid, wanted_attempt(task), None,
+             f"#{tid} follows {label} {p.url} ({p.state.lower()}, into {target}); it had {was}; the head of {label} is not "
+             "pinned", f"run.py record checks that {str(meta['verdict_ref'])[:7]} is in {target} once {label} is merged"
+             if p.state == "MERGED" else f"run.py record follows {label}; the task that owns it merges it")
+    if old and old.state == "OPEN":
+        if args.keep_old:
+            run.emit("kept-open", tid, None, None, f"{old_label} stays open (--keep-old); record no longer follows it",
+                     "close it on the host when it is no longer needed")
+            return
+        try:
+            host.close_pr(own, f"Closed by run.py repoint: the change of task #{tid} goes in through {label} ({p.url}).")
+        except codehost.HostError as exc:
+            run.host_failed = True
+            run.emit("host-error", tid, None, None, f"closing {old_label}: {exc}",
+                     f"close {old_label} on the host by hand, or run.py repoint {tid} --pr {p.number} again")
+            return
+        run.emit("superseded", tid, None, None, f"{old_label} closed with a comment that names {label}")
+
+
 # ------------------------------------------------------------------- close
 
 def transcript_usage(path):
@@ -5372,6 +5525,10 @@ def cmd_close(run, args):
     tid = args.id
     task = run.show(tid)
     meta = task.get("meta") or {}
+    if unmerged(task) and repointed(task) and run.pr_mode:  # publish would push to the request of another task
+        label = run.label(int(meta["pr"]))
+        raise Refused(f"#{tid} follows {label} (run.py repoint), which another task merges; run.py record follows it, "
+                      f"run.py repoint {tid} --pr <n> follows another one; {redo_text(task)}")
     if unmerged(task):
         return resume_close(run, task)
     if awaiting(task) and not meta.get("abandoned"):  # merged, or closed outside git, and not done yet
@@ -5577,9 +5734,14 @@ def cmd_abandon(run, args):
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
                   ((m := LEGACY_WT.match(e)) and int(m.group(1)) == tid)}
-    request = (f"; request {run.label(int(meta['pr']))} stays open"
-               + (" and record no longer follows it" if closed else "") + ", close it on the host by hand"
-               if run.pr_mode and meta.get("pr") else "")
+    if run.pr_mode and meta.get("pr") and repointed(task):  # the request is another task's: it is not ours to close
+        request = (f"; record no longer follows {run.label(int(meta['pr']))}, which another task merges; the next attempt "
+                   "goes back to " + (f"the task's own request {run.label(int(meta['repointed_from']))}"
+                                      if meta.get("repointed_from") else "a request of its own"))
+    else:
+        request = (f"; request {run.label(int(meta['pr']))} stays open"
+                   + (" and record no longer follows it" if closed else "") + ", close it on the host by hand"
+                   if run.pr_mode and meta.get("pr") else "")
     if closed and not request:  # it was closed and waited for its merge
         request = f"; branch {task_branch(tid)} at {str(meta['verdict_ref'])[:7]} is not merged and stays"
     run.emit("abandoned", tid, attempt, None,
@@ -5737,7 +5899,10 @@ def cmd_status(run, args):
     for task in snap.closed:
         meta = task.get("meta") or {}
         if unmerged(task):
-            request = f"{'!' if gitlab else '#'}{meta['pr']}" if meta.get("pr") else None
+            mark = "!" if gitlab else "#"
+            request = f"{mark}{meta['pr']}" if meta.get("pr") else None
+            if request and repointed(task):  # it follows another task's request
+                request += f" (repointed from {mark}{meta['repointed_from']})" if meta.get("repointed_from") else " (repointed)"
             unmerged_rows.append((f"#{task['id']}", task["title"], meta.get("verdict_ref"), request, meta.get("verdict")))
     for task in snap.in_progress:
         meta = task.get("meta") or {}
@@ -5840,7 +6005,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -5882,6 +6047,13 @@ def build_parser():
     p = sub.add_parser("merged", help="record that a task branch is merged")
     p.add_argument("id", type=int)
     p.add_argument("--by", choices=("operator", "manager"), default="operator")
+
+    p = sub.add_parser("repoint", help="pr mode: let a task that waits for its merge follow another request that "
+                                       "carries its change")
+    p.add_argument("id", type=int)
+    p.add_argument("--pr", type=int, required=True, help="the number of the request to follow (another task's)")
+    p.add_argument("--keep-old", action="store_true", help="leave the task's own request open (default: close it with "
+                   "a comment that names the new one)")
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
     p.add_argument("id", type=int)
@@ -5948,13 +6120,13 @@ def build_parser():
 
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
-            "merged": cmd_merged, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
+            "merged": cmd_merged, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
             "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
 # `status`, `inbox`, `steer --by operator` and the like may run in another Claude session, whose socket must not replace it
-LOCKED = ("launch", "adopt", "verify", "close", "merged", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
+LOCKED = ("launch", "adopt", "verify", "close", "merged", "repoint", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
 
 
 def main(argv=None):
