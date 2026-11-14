@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>taskgraph</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script>
 // The theme is set before the first paint; the page script keeps it in step afterwards.
 (() => {
@@ -16,8 +16,8 @@
 </script>
 <style>
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-:root { --bar: 80px; --panel-w: 0px; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+:root { --bar: 80px; --panel-w: 0px; --sheet-h: 0px; --safe-b: env(safe-area-inset-bottom, 0px); }
 /* Colour tokens. Dark is the default; light is for bright rooms and projectors. The page sets
    data-theme from View options (Auto follows the system). Plan colours (--st-*, --load-*, flags)
    are read by the script for the canvas; print always uses the light set (.theme-light). */
@@ -83,6 +83,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #toolbar .dot.on { background: var(--live); }
 #toolbar .dot.off { background: #ef4444; }
 #toolbar .menuWrap { position: relative; }
+@media (max-width: 640px) {
+  #toolbar #optsWrap, #toolbar #optsWrap.open { display: contents; }
+  #toolbar #optsWrap.open #opts { display: block; }
+  #toolbar #optsBtn { display: none; }
+  #toolbar #optsWrap.open #opts { display: block; }
+}
 #toolbar .menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 220px; max-height: calc(100vh - var(--bar) - 16px); overflow-y: auto; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px var(--shadow); }
 #toolbar .menu.right { left: auto; right: 0; }
 #toolbar .menuWrap.open > .menu { display: block; }
@@ -128,49 +134,81 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #toolbar .hit { align-items: center; }
 #toolbar .hit i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 #toolbar .hit .when { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+#toolbar .hit > span:not(.when) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #banner { margin: 0 -14px -5px; padding: 3px 14px; background: #f59e0b; color: #1c1004; font-size: 12px; }
 #banner[hidden] { display: none; }
 #toolbar #banner button { margin-left: 6px; padding: 0 8px; background: #1c1004; color: #fde68a; border-color: #1c1004; }
 #tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: var(--tip); border: 1px solid var(--line-2); border-radius: 6px; color: var(--text); font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px var(--shadow); }
 #tip[hidden] { display: none; }
-#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
-#toolbar #searchBtn, #toolbar #fitMore { display: none; }
+#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; touch-action: none; }
+#toolbar #searchBtn, #toolbar #fitMore, #toolbar .phoneOnly { display: none; }
 #toolbar .seg [data-short]::after { content: attr(data-short); display: none; }
-/* Narrow screens: two rows. Row 1 is project, goal, options; row 2 is view, Filter, More and a search button
-   that opens the search box over the row. The rows dissolve so every control can be ordered on one wrapping line. */
+/* A phone has project, view, Filter, search and More on one row. Goal, options and Legend
+   live in More; only active filters add a second line of chips. */
 @media (max-width: 640px) {
-  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 10px; }
+  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 5px; padding: 4px 8px; }
   #toolbar .row { display: contents; }
-  #toolbar .row > .spacer { display: none; }
-  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 32px; padding: 3px 8px; }
-  #toolbar #project { order: 1; flex: 0 1 112px; min-width: 64px; max-width: 140px; text-overflow: ellipsis; }
-  #toolbar #goalWrap { order: 2; flex: 1 1 0; min-width: 72px; }
-  #toolbar #optsWrap { order: 3; }
-  #toolbar #stamp { order: 4; margin-left: -2px; }
-  #toolbar #stamp .t, #toolbar #goalInfo { display: none; }
-  #toolbar #stamp .dot { margin-right: 0; }
-  #toolbar #row1::after { content: ''; order: 5; flex: 0 0 100%; height: 0; }
-  #toolbar .seg { order: 6; }
-  #toolbar .seg button { padding: 3px 7px; }
-  #toolbar .seg [data-short] { font-size: 0; }
-  #toolbar .seg [data-short]::after { display: inline; font-size: 13px; }
-  #toolbar #filterWrap { order: 7; }
-  #toolbar #moreWrap { order: 8; }
-  #toolbar #searchWrap { order: 9; margin-left: auto; }
-  #toolbar #fit { display: none; }
-  #toolbar #fitMore, #toolbar #searchBtn { display: block; }
-  #toolbar #searchBtn { min-width: 36px; font-size: 18px; line-height: 1; }
+  #toolbar .row > .spacer, #toolbar #row1::after { display: none; }
+  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 44px; padding: 4px 7px; font-size: 13px; }
+  #toolbar #projectWrap { order: 1; flex: 1 1 0; min-width: 44px; }
+  #toolbar #project { display: none; }
+  #toolbar #projectBtn { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 44px; overflow: hidden; }
+  #toolbar #projectLabel { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #toolbar #projectBtn > span[aria-hidden] { flex: none; }
+  #toolbar #projectLive { flex: none; }
+  #toolbar #goalWrap, #toolbar #optsWrap, #toolbar .seg, #toolbar #goalInfo { display: none; }
+  #toolbar #optsWrap.open { display: block; position: fixed; inset: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+  #toolbar #optsWrap.open #opts { display: block; pointer-events: auto; }
+  #toolbar #stamp { display: none; }
+  #toolbar #projectLive .dot { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--live); }
+  #toolbar #projectLive .dot.off { background: #ef4444; }
+  #toolbar #viewWrap { order: 2; }
+  #toolbar #viewBtn { display: block; }
+  #toolbar #filterWrap { order: 3; }
+  #toolbar #searchWrap { order: 4; }
+  #toolbar #moreWrap { order: 5; }
+  #toolbar #fitMore, #toolbar #searchBtn, #toolbar .phoneOnly { display: block; }
+  #toolbar #fitMore { display: none; }
+  #toolbar #searchBtn, #toolbar #moreBtn { min-width: 44px; font-size: 18px; line-height: 1; }
+  #toolbar #filterBtn { min-width: 44px; padding-inline: 7px; }
+  #toolbar #moreBtn { font-size: 0; }
+  #toolbar #moreBtn::before { content: '⋯'; font-size: 22px; }
   #toolbar #chips, #toolbar #clearAll { order: 10; }
-  #toolbar #chips { flex: 1 1 0; overflow-x: auto; scrollbar-width: none; }
-  #toolbar #chips:empty { display: none; }
+  #toolbar #chips { flex: 1 1 0; min-height: 44px; overflow-x: auto; scrollbar-width: none; }
+  #toolbar #chips:empty, #toolbar #clearAll[hidden] { display: none; }
   #toolbar #chips .chip[data-key="goal"] { display: none; }
-  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; top: calc(var(--bar) + 4px); left: 8px; right: 8px; width: auto; min-width: 0; max-height: calc(100vh - var(--bar) - 16px); }
-  #toolbar .box { display: none; position: fixed; left: 0; right: 0; top: var(--search-top, 0); z-index: 6; box-sizing: border-box; padding: 4px 10px; background: var(--surface); }
-  #toolbar.searching .box { display: flex; }
-  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 32px; }
-  #toolbar #searchClear { right: 12px; min-width: 32px; }
+  #toolbar #chips .chip button { min-width: 44px; min-height: 44px; }
+  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 16px); margin: 0 -8px -4px; box-sizing: border-box; padding: 3px 8px; }
+  #legend { display: none; }
+  #cy { touch-action: none; }
+}
+@media (pointer: coarse) {
+  #toolbar .chip button, #toolbar #searchClear { min-height: 44px; }
+  #toolbar .link { min-height: 44px; padding: 4px 8px; }
+}
+#menuBackdrop { position: fixed; inset: 0; background: #0008; z-index: 7; }
+#menuBackdrop[hidden] { display: none; }
+body.menu-open #toolbar { z-index: 8; }
+@media (max-width: 640px) {
+  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; inset: auto 0 20px 0; width: 100%; min-width: 0; max-width: 100vw; max-height: calc(80dvh - 20px); padding: 8px 8px calc(8px + var(--safe-b)); border-radius: 16px 16px 0 0; z-index: 9; }
+  #toolbar .menu::before { content: ''; display: block; width: 40px; height: 4px; margin: 0 auto 8px; border-radius: 2px; background: var(--line-2); }
+  #toolbar #goalList { display: none; }
+  #toolbar #goalWrap.open { display: block; position: static; }
+  #toolbar #goalWrap.open .combo { display: flex; position: fixed; inset: auto 0 20px 0; z-index: 10; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; }
+  #toolbar #goalWrap.open #goal { flex: 1; min-width: 0; font-size: 16px; }
+  #toolbar #goalWrap.open #goalList { display: block; bottom: 80px; }
+  #toolbar .menu .item, #toolbar .choice { min-height: 44px; padding: 9px 10px; }
+  #toolbar .opt { min-height: 44px; padding: 9px 6px; white-space: normal; }
+  #toolbar .grp { padding: 4px; }
+  #toolbar .list { max-height: none; }
+  #toolbar .link { min-height: 44px; padding: 8px; }
+  #toolbar .box { display: none; position: fixed; inset: auto 0 20px 0; z-index: 10; box-sizing: border-box; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; }
+  #toolbar.searching .box { display: flex; align-items: center; min-height: 60px; }
+  #toolbar.searching #results { top: auto; bottom: 80px; border-radius: 16px 16px 0 0; }
+  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 44px; font-size: 16px; }
+  #toolbar #searchClear { right: 8px; min-width: 44px; min-height: 44px; }
   #toolbar #searchCount { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 20px); margin: 0 -10px -4px; box-sizing: border-box; padding: 3px 10px; }
+  #toolbar input[type=number] { font-size: 16px; }
 }
 #legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: var(--surface-a); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
 #legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
@@ -247,6 +285,37 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 #panel details table { margin-top: 6px; }
 #panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 4px); width: 8px; cursor: ew-resize; z-index: 3; }
+#panelHandle { display: none; }
+#panel .peek { display: none; }
+/* The details become an overlay under 700px; the canvas never narrows for them. */
+@media (max-width: 699px) {
+  #panel { top: auto; left: 0; right: 0; bottom: 0; width: 100%; min-width: 0; max-width: 100vw; height: var(--sheet-h, 200px); padding: 0 14px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -6px 24px var(--shadow); z-index: 4; overflow-y: auto; overscroll-behavior: contain; transition: height .2s ease; }
+  #panel.dragging { transition: none; }
+  #panel[data-detent="peek"] { overflow: hidden; padding-bottom: 0; }
+  #panel h2 { padding-right: 44px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+  #panel .sub { margin-bottom: 4px; }
+  #panel .actions { display: flex; gap: 8px; margin: 0; }
+  #panel .actions button { flex: 1 1 0; margin: 8px 0 0; min-width: 0; padding: 4px 8px; }
+  #panel #panelBack { margin: 0 0 4px; }
+  #panel #panelClose { top: 0; right: 6px; width: 44px; height: 44px; font-size: 24px; background: transparent; border-color: transparent; z-index: 2; }
+  #panel #panelClose:hover { background: var(--hover); }
+  #panel #panelHandle { display: block; position: sticky; top: 0; width: calc(100% + 28px); height: 44px; min-height: 44px; margin: 0 -14px; padding: 0; border: 0; border-radius: 0; background: transparent; z-index: 1; cursor: grab; touch-action: none; }
+  #panelHandle::before { content: ''; display: block; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--line-2); }
+  #panelGrip { display: none; }
+  #panel .peek { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #panel .peek button { min-width: 0; margin-top: 8px; padding: 5px 8px; text-align: left; }
+  #panel .peek button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #panel .peek button small { display: block; color: var(--muted); font-size: 11px; }
+  #panel[data-detent="peek"] #facts, #panel[data-detent="peek"] > h3, #panel[data-detent="peek"] > ul, #panel[data-detent="peek"] > .lead, #panel[data-detent="peek"] > .notes, #panel[data-detent="peek"] > .none, #panel[data-detent="peek"] > #notesMore, #panel[data-detent="peek"] > details { display: none; }
+}
+#fit { position: fixed; right: calc(var(--panel-w) + 14px); bottom: calc(var(--sheet-h) + 14px + var(--safe-b)); min-width: 44px; min-height: 36px; padding: 5px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); font: inherit; cursor: pointer; z-index: 2; }
+#fit:hover { background: var(--hover); }
+@media (pointer: coarse) {
+  #toolbar button, #toolbar select, #toolbar input[type=text], #toolbar input[type=number], #legendToggle, #empty button { min-height: 44px; font-size: 16px; }
+  #fit, #panel button, #panel .row[role=button], #loadView [role=button], table.load td.c[role=button] { min-height: 44px; }
+  #panel #panelClose { min-width: 44px; width: 44px; height: 44px; }
+  #panel li > .row { padding-top: 8px; padding-bottom: 8px; }
+}
 #panelGrip:focus-visible { background: var(--link); outline: none; }
 #panelGrip:hover { background: var(--on); }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
@@ -357,7 +426,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
 <header id="toolbar" aria-label="Plan controls">
   <h1 class="sr-only" id="pageTitle">taskgraph</h1>
   <div class="row" id="row1">
-    <select id="project" title="Project" aria-label="Project"></select>
+    <span class="menuWrap" id="projectWrap"><button id="projectBtn" class="phoneOnly" aria-expanded="false" aria-controls="projectMenu" aria-label="Project" title="Project"><span id="projectLive"></span><span id="projectLabel">All projects</span><span aria-hidden="true"> ▾</span></button><select id="project" title="Project" aria-label="Project"></select><div class="menu" id="projectMenu" role="listbox" aria-label="Projects"></div></span>
     <span class="combo menuWrap" id="goalWrap">
       <input type="text" id="goal" placeholder="All goals" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="goalList" aria-autocomplete="list" aria-label="Goal: show only what one milestone or objective needs" title="Show only what one milestone or objective needs">
       <span class="caret" aria-hidden="true">▾</span>
@@ -365,6 +434,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
     <span class="seg" role="group" aria-label="View"><button id="viewGraph" aria-label="Graph"><span aria-hidden="true">Graph</span></button><button id="viewLanes" aria-label="Swimlane"><span aria-hidden="true" data-short="Lanes">Swimlane</span></button><button id="viewTimeline" aria-label="Timeline"><span aria-hidden="true" data-short="Time">Timeline</span></button><button id="viewLoad" aria-label="Load" title="Hours per person per week, from estimates"><span aria-hidden="true">Load</span></button></span>
+    <span class="menuWrap" id="viewWrap"><button id="viewBtn" class="phoneOnly" aria-expanded="false" aria-controls="viewMenu" aria-label="Choose view"><span id="viewLabel">Graph</span><span aria-hidden="true"> ▾</span></button><div class="menu" id="viewMenu" role="listbox" aria-label="Views"></div></span>
     <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-expanded="false" aria-controls="opts" aria-label="View options" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
         <div class="grp" id="lanesBy" role="radiogroup" aria-labelledby="lanesHead"><div class="h" id="lanesHead">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
@@ -391,10 +461,11 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     <span id="chips"></span>
     <button class="link" id="clearAll" hidden title="Remove every filter">Clear all</button>
     <span class="spacer"></span>
-    <button id="fit" title="Show the whole plan (F)">Fit</button>
     <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-expanded="false" aria-controls="more" title="More actions">More ▾</button>
       <div class="menu right" id="more">
-        <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
+        <button class="item phoneOnly" id="goalMore">Goal…</button>
+        <button class="item phoneOnly" id="optsMore">View options…</button>
+        <button class="item phoneOnly" id="legendMore" aria-expanded="false" aria-controls="legendBody">Legend</button>        <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
         <button class="item" id="fitMore" title="Show the whole plan (F)">Fit <kbd>F</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
@@ -408,12 +479,14 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
   </div>
   <div id="banner" role="alert" hidden></div>
 </header>
+<div id="menuBackdrop" hidden></div>
 <main id="main" tabindex="-1" aria-label="Plan">
 <div id="cy" tabindex="0" role="application" aria-roledescription="plan" aria-label="Plan" aria-describedby="cyHelp"></div>
 <p id="cyHelp" class="sr-only">Arrow keys move between items, Home and End go to the first and last. Enter opens the item's details, Space expands or collapses a summary, plus and minus zoom.</p>
 <div id="loadView" hidden></div>
 <div id="empty" role="status" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 </main>
+<button id="fit" title="Show the whole plan (F)" aria-label="Fit the whole plan">Fit</button>
 <section id="legend" aria-label="Legend">
   <button id="legendToggle" title="Show or hide the legend" aria-expanded="true" aria-controls="legendBody">Legend ▾</button>
   <div id="legendBody">
@@ -499,6 +572,9 @@ const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
 const narrowScreen = matchMedia('(max-width: 640px)');
+const phoneSheet = matchMedia('(max-width: 699px)');
+const phoneChrome = () => narrowScreen.matches;
+const touchPointer = matchMedia('(pointer: coarse)');
 const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, NARROW_LABEL_W = 96, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
@@ -692,6 +768,19 @@ function cyStyle(p) {
     { selector: 'node.goal', style: { 'border-width': 3, 'border-color': p.goal, 'font-weight': 'bold' } },
     { selector: 'node.atrisk', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': p.amber, 'outline-opacity': 0.9 } },
     { selector: 'node.late, node.conflict', style: { 'outline-width': 4, 'outline-offset': 2, 'outline-color': p.red, 'outline-opacity': 0.8 } },
+    { selector: 'node.graph.card', style: {
+      'width': 'data(cardW)', 'height': 'data(cardH)', 'padding': 0,
+      'text-halign': 'center', 'text-margin-x': 'data(cardDx)',
+      'text-justification': 'left', 'font-size': narrowScreen.matches ? 12 : 13, 'line-height': 1.12,
+      'text-max-width': narrowScreen.matches ? 148 : 192
+    } },
+    { selector: 'node.graph.card', style: { 'font-weight': 'normal' } },
+    // Semantic zoom: under 0.6 a card shows only its id, large; under 0.33 only its colour. A phone keeps full cards
+    // down to 0.45 and ids down to 0.25: it opens with the whole plan, and small text is fine there.
+    { selector: 'node.graph.id-only', style: {
+      'label': 'data(zoomId)', 'font-size': 20, 'font-weight': 'bold', 'text-halign': 'center', 'text-margin-x': 0, 'text-justification': 'center'
+    } },
+    { selector: 'node.graph.block-only', style: { 'label': '' } },
     { selector: 'node.lanes', style: { 'width': NODE_W, 'height': NODE_H, 'padding': 0 } },
     { selector: 'node.lanes[type="milestone"]', style: {
       'text-valign': 'center', 'text-margin-y': 0, 'text-max-width': MILESTONE_LANE_W + 8, 'font-size': 11, 'font-weight': 'normal', 'color': ele => c(ele).fg
@@ -777,8 +866,18 @@ const cy = cytoscape({
   container: $('cy'),
   minZoom: 0.1,
   maxZoom: 3,
+  pixelRatio: Math.min(2, window.devicePixelRatio || 1),
+  textureOnViewport: true,
   wheelSensitivity: 0.3,
   style: cyStyle(P)
+});
+// Touch: nodes cannot be dragged (a pan that starts on one would move it), and a drag that starts
+// on a node pans the view as one on the background does.
+cy.autoungrabify(touchPointer.matches);
+cy.on('add', 'node', e => { if (touchPointer.matches) e.target.panify(); });
+touchPointer.addEventListener('change', e => {
+  cy.autoungrabify(e.matches);
+  cy.nodes()[e.matches ? 'panify' : 'unpanify']();
 });
 
 let goal = Number(query.get('goal')) || null;
@@ -942,12 +1041,35 @@ const troubleText = n => {
 const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
 
 // Open completion gates (meta.gates): "waiting: <label>", nothing when there are none.
+const gateLabels = n => n.meta.gates && typeof n.meta.gates === 'object'
+  ? Object.entries(n.meta.gates).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => v.label || k) : [];
 const waitText = n => {
-  const g = n.meta.gates && typeof n.meta.gates === 'object' ? Object.entries(n.meta.gates).filter(([, v]) => v && typeof v === 'object') : [];
-  return g.length ? 'waiting: ' + g.map(([k, v]) => v.label || k).join('; ') : null;
+  const g = gateLabels(n);
+  return g.length ? 'waiting: ' + g.join('; ') : null;
 };
+const graphMeta = n => {
+  if (n.rollup && n.rollup.total) return `${n.rollup.done}/${n.rollup.total} done`;
+  const gates = gateLabels(n);
+  return gates.length ? '⧗ ' + gates[0] : '';
+};
+// The text box inside a Graph card; a decision's hexagon loses its slanted ends as well.
+const graphTitleW = type => (narrowScreen.matches ? 164 - 16 : 212 - 20) - (type === 'decision' ? 40 : 0);
+const graphCardLabel = n => {
+  const meta = [nodeMark(n) + '#' + n.id, priorityMark(n).trim(), graphMeta(n)].filter(Boolean);
+  const metaLine = clampLabel(meta.join(' '), graphTitleW(n.type), 1);
+  const title = clampLabel(n.title, graphTitleW(n.type), 2);
+  return metaLine + '\n' + title;
+};
+// Cytoscape centres a left-justified label as a block; shift it so its lines start at the card's
+// inner left edge whatever the widest line is.
+const cardCtx = document.createElement('canvas').getContext('2d');
+function cardShift(label, type) {
+  cardCtx.font = (narrowScreen.matches ? 12 : 13) + 'px ' + FONT;
+  const widest = Math.max(...label.split('\n').map(s => cardCtx.measureText(s).width));
+  return Math.min(0, (widest - graphTitleW(type)) / 2);
+}
 
-// Graph nodes are narrower on a phone so a whole plan fits at a larger zoom.
+// Graph nodes have a compact summary and a two-line title; milestones keep their separate shape.
 const graphLabelW = () => view === 'graph' && narrowScreen.matches ? NARROW_LABEL_W : LABEL_W;
 
 function labelOf(n, open) {
@@ -969,7 +1091,12 @@ function labelOf(n, open) {
   return sub ? title + '\n' + clampLabel(sub, width, subLines) : title;
 }
 
-const nodeData = (n, open) => ({ id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label: view === 'timeline' ? dateText(n) : labelOf(n, open) });
+const nodeData = (n, open) => {
+  const card = view === 'graph' && n.type !== 'milestone';
+  const label = view === 'timeline' ? dateText(n) : card ? graphCardLabel(n) : labelOf(n, open);
+  return { id: String(n.id), type: n.type, derived_status: n.derived_status, title: n.title, label,
+    zoomId: '#' + n.id, cardW: narrowScreen.matches ? 164 : 212, cardH: narrowScreen.matches ? 60 : 66, cardDx: card ? cardShift(label, n.type) : 0 };
+};
 const flagsOf = (n, sources) => ({
   summary: isSummary(n),
   late: n.late_days != null || (collapsed(n) && trouble(n).late > 0),
@@ -1295,7 +1422,8 @@ function layout(fit = true) {
   cy.batch(() => {
     cy.elements('.bg').remove();
     cy.edges().removeStyle().removeClass('back tl-off tl-dep tl-critical tl-conflict');
-    cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline');
+    cy.elements().toggleClass('lanes', view === 'lanes').toggleClass('tl', view === 'timeline').toggleClass('graph', view === 'graph');
+    cy.nodes().forEach(n => n.toggleClass('card', view === 'graph' && n.data('type') !== 'milestone'));
     if (view === 'lanes') layoutLanes();
     else if (view === 'timeline') layoutTimeline();
   });
@@ -1383,7 +1511,8 @@ function packedLayout(nodes, edges, opts) {
     const box = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
     const grow = (x, y) => { box.x1 = Math.min(box.x1, x); box.x2 = Math.max(box.x2, x); box.y1 = Math.min(box.y1, y); box.y2 = Math.max(box.y2, y); };
     ns.forEach(n => {
-      const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
+      const card = view === 'graph' && n.data('type') !== 'milestone';
+      const d = card ? { w: n.data('cardW'), h: n.data('cardH') } : n.layoutDimensions({ nodeDimensionsIncludeLabels: true }), p = res.pos[n.id()];
       grow(p.x - d.w / 2, p.y - d.h / 2);
       grow(p.x + d.w / 2, p.y + d.h / 2);
     });
@@ -1420,7 +1549,12 @@ function dagreLayout(nodes, edges, opts) {
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: 'BT', ...opts });
   g.setDefaultEdgeLabel(() => ({}));
-  nodes.forEach(n => { const d = n.layoutDimensions({ nodeDimensionsIncludeLabels: true }); g.setNode(n.id(), { width: d.w, height: d.h }); });
+  nodes.forEach(n => {
+    // The card's own box, not a label-sized approximation, determines dagre spacing.
+    const card = view === 'graph' && n.data('type') !== 'milestone';
+    const d = card ? { w: n.data('cardW'), h: n.data('cardH') } : n.layoutDimensions({ nodeDimensionsIncludeLabels: true });
+    g.setNode(n.id(), { width: d.w, height: d.h });
+  });
   edges.forEach(e => g.setEdge(e.source().id(), e.target().id(), { minlen: 1, weight: 1 }, e.id()));
   dagre.layout(g);
   wrapRanks(g, nodes, opts);
@@ -1509,14 +1643,15 @@ function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   if (eles.empty()) return null;
   const bb = eles.boundingBox();
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
-  const reserve = Math.max(pad, box.bottom - legend.top + 12);
+  const reserve = phoneChrome() ? pad : Math.max(pad, box.bottom - legend.top + 12);
   const w = box.width - 2 * pad, h = box.height - pad - reserve;
   const zoom = Math.min(MAX_FIT, Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
 }
 
-// On a phone, Graph shows every task, however small: seeing the whole plan matters more there than reading it unzoomed.
-const readable = () => view === 'graph' && narrowScreen.matches ? 0 : READABLE;
+// On a phone, Graph fits the whole plan however small; semantic zoom keeps it recognisable.
+// Other views and wider screens keep the readable floor and the anchored framing.
+const readable = () => view === 'graph' && phoneChrome() ? 0 : READABLE;
 
 // Too big to show whole at a readable zoom: show the top of the plan around its goal instead,
 // never pushing the plan's top or side edges off screen.
@@ -1564,7 +1699,7 @@ function hiddenTasks() {
   if (all.empty()) return false;
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
-  const under = b => b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1;
+  const under = b => !phoneChrome() && b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1;
   const u = all.renderedBoundingBox();
   if (u.x1 < 0 || u.y1 < 0 || u.x2 > box.width || u.y2 > box.height) return true;
   return under(u) && all.some(n => under(n.renderedBoundingBox()));
@@ -1981,6 +2116,11 @@ function applySearch() {
   mirrorNames();
 }
 
+// An empty search is a quick route to work that can move now, in priority order.
+const nowSearchHits = () => ['in_progress', 'ready'].flatMap(status => DATA.nodes.filter(n => passes(n) && n.derived_status === status)
+  .sort((a, b) => (hasPriority(a) ? PRIORITIES.indexOf(a.priority) : 9) - (hasPriority(b) ? PRIORITIES.indexOf(b.priority) : 9) || a.id - b.id));
+const activeSearchHits = q => q ? searchHits(q) : nowSearchHits();
+const activeResultIndex = (q, id) => activeSearchHits(q).findIndex(n => n.id === id);
 // The results list: up to 12 rows around the current one, what matched when it was not the title.
 const RESULT_ROWS = 12;
 function snippet(text, q) {
@@ -2001,21 +2141,29 @@ function syncActive(input, list) {
   else input.removeAttribute('aria-activedescendant');
 }
 function renderResults() {
-  const q = searchQuery(), list = searchMatches(q), box = $('results');
-  if (!q || !list.length) {
+  const q = searchQuery(), box = $('results'), matches = searchMatches(q);
+  const byStatus = new Map(matches.map(({ n, m }) => [n.id, { n, m }]));
+  const list = activeSearchHits(q);
+  if (!list.length) {
     box.replaceChildren();
     if (menuOpen('searchWrap')) setMenu('searchWrap', false);
     return;
   }
   const at = searched.q === q ? searched.at : -1;
-  const from = Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS));
-  const rows = list.slice(from, from + RESULT_ROWS).map(({ n, m }, k) => {
-    const i = from + k;
-    return el('div', { id: 'hit' + i, className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', ariaSelected: String(i === at), ariaLabel: `#${n.id} ${n.title}, ${LABELS[n.derived_status]}, ${resultNote(n, m, q)}`, dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
+  const from = q ? Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS)) : 0;
+  const rows = [];
+  let previous = null;
+  list.slice(from, from + (q ? RESULT_ROWS : list.length)).forEach((n, k) => {
+    const i = from + k, m = q ? byStatus.get(n.id).m : { field: 'now' };
+    if (!q && previous !== n.derived_status) {
+      rows.push(el('div', { className: 'group', textContent: LABELS[n.derived_status] }));
+      previous = n.derived_status;
+    }
+    rows.push(el('div', { id: 'hit' + i, className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', ariaSelected: String(i === at), ariaLabel: `#${n.id} ${n.title}, ${LABELS[n.derived_status]}, ${q ? resultNote(n, m, q) : LABELS[n.derived_status]}`, dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
       statusMark(n.derived_status), el('span', { textContent: '#' + n.id + ' ' + n.title }),
-      el('span', { className: 'when', textContent: resultNote(n, m, q) }));
+      el('span', { className: 'when', textContent: q ? resultNote(n, m, q) : [hasPriority(n) ? n.priority : '', gateLabels(n).length ? '⧗' : ''].filter(Boolean).join(' ') })));
   });
-  const rest = list.length - from - rows.length;
+  const rest = q ? list.length - from - rows.length : 0;
   box.replaceChildren(...(from ? [el('div', { className: 'none', textContent: `${from} more above` })] : []), ...rows,
     ...(rest > 0 ? [el('div', { className: 'none', textContent: `+${rest} more · Enter steps through all` })] : []));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
@@ -2057,7 +2205,7 @@ function runSearch() {
     rebuild(true);
     if (pinned) openPanel(byId.get(pinned));
   } else applySearch();
-  if (q && document.activeElement === $('search')) setMenu('searchWrap', searchHits(q).length > 0);
+  if (document.activeElement === $('search')) setMenu('searchWrap', activeSearchHits(q).length > 0);
 }
 
 function stepSearch(back) {
@@ -2068,7 +2216,7 @@ function stepSearch(back) {
 }
 function moveHit(step) {
   if (searched.q !== searchQuery()) runSearch();
-  const hits = searchHits(searched.q);
+  const hits = activeSearchHits(searched.q);
   if (!hits.length) return;
   searched.at = searched.at < 0 ? (step > 0 ? 0 : hits.length - 1) : (searched.at + step + hits.length) % hits.length;
   searched.moved = true;
@@ -2076,12 +2224,25 @@ function moveHit(step) {
   applySearch();
 }
 function openHit(i) {
-  const hits = searchHits(searched.q);
+  const hits = activeSearchHits(searched.q);
   if (!hits[i]) return;
   searched.at = i;
   searched.moved = false;
   setMenu('searchWrap', false);
-  select(hits[i].id, true);
+  if (phoneChrome()) openSearchBox(false);
+  const id = hits[i].id;
+  if (view !== 'graph') select(id, true);
+  else {
+    // One move: readable zoom and the node centred in the canvas left above the sheet.
+    select(id, false);
+    const node = cy.getElementById(String(id));
+    if (node.nonempty()) {
+      const box = $('cy').getBoundingClientRect(), z = Math.max(cy.zoom(), .85), p = node.position();
+      userMoved = true;
+      cy.stop();
+      cy.animate({ zoom: z, pan: { x: box.width / 2 - z * p.x, y: (box.height - sheetHeight()) / 2 - z * p.y } }, { duration: 250 * MOTION });
+    }
+  }
   applySearch();
 }
 
@@ -2359,10 +2520,48 @@ const MIN_PANEL = 320, MAX_PANEL = 520;
 let panelW = Math.max(MIN_PANEL, Math.min(MAX_PANEL, Number(store.get('taskgraph.panelW')) || 340));
 function setPanelWidth(w) {
   panelW = Math.round(Math.max(MIN_PANEL, Math.min(MAX_PANEL, w)));
-  $('panel').style.width = panelW + 'px';
-  document.documentElement.style.setProperty('--panel-w', panelW + 'px');
-  $('cy').style.right = panelW + 'px';
+  const overlay = phoneSheet.matches;
+  $('panel').style.width = overlay ? '100%' : panelW + 'px';
+  document.documentElement.style.setProperty('--panel-w', overlay ? '0px' : panelW + 'px');
+  $('cy').style.right = overlay ? '0' : panelW + 'px';
 }
+function sheetDetents(panel = $('panel')) {
+  const half = Math.round(innerHeight * .56), full = Math.max(200, innerHeight - 60);
+  const last = panel.dataset.detent || 'peek';
+  // Measure just the title, badges and dependency buttons; actions start below the peek fold.
+  panel.dataset.detent = 'peek';
+  panel.style.height = 'auto';
+  const path = panel.querySelector('.peek');
+  const end = path ? path.getBoundingClientRect().bottom - panel.getBoundingClientRect().top : panel.scrollHeight;
+  const css = getComputedStyle(panel);
+  const bottom = parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth);
+  // Up to 12px below the buttons so their borders never sit on the screen's edge, but never
+  // so much that the first action or fact peeks in.
+  const next = [...panel.querySelectorAll('#facts tr, .actions button')].map(e => e.getBoundingClientRect().top - panel.getBoundingClientRect().top);
+  const peek = Math.max(Math.ceil(end), Math.min(half, Math.ceil(end + bottom + 12), ...next.filter(t => t >= end).map(Math.floor)));
+  panel.style.height = '';
+  panel.dataset.detent = last;
+  return { peek, half, full };
+}
+function sheetHeight(panel = $('panel')) {
+  return phoneSheet.matches && panel.style.display === 'block' ? panel.getBoundingClientRect().height : 0;
+}
+function setDetent(name) {
+  const panel = $('panel'), detent = ['peek', 'half', 'full'].includes(name) ? name : 'peek';
+  const d = sheetDetents(panel);
+  panel.dataset.detent = detent;
+  document.documentElement.style.setProperty('--sheet-h', phoneSheet.matches && panel.style.display === 'block' ? d[detent] + 'px' : '0px');
+  $('panelHandle').setAttribute('aria-expanded', String(detent !== 'peek'));
+  $('panelHandle').title = detent === 'peek' ? 'Show more details' : 'Show a summary';
+  if (detent === 'peek') panel.scrollTop = 0;
+}
+phoneSheet.addEventListener('change', () => {
+  if ($('panel').style.display === 'block') {
+    setPanelWidth(panelW);
+    setDetent($('panel').dataset.detent);
+  } else document.documentElement.style.setProperty('--sheet-h', '0px');
+  cy.resize();
+});
 function grip() {
   const g = el('div', { id: 'panelGrip', title: 'Drag to resize', tabIndex: 0, role: 'separator', ariaOrientation: 'vertical', ariaLabel: 'Panel width',
     ariaValueMin: String(MIN_PANEL), ariaValueMax: String(MAX_PANEL), ariaValueNow: String(panelW) });
@@ -2426,6 +2625,9 @@ function openPanel(n) {
   const hasParent = n.parent != null && byId.has(n.parent);
   panel.replaceChildren(...[
     grip(),
+    // Pointer taps and drags are handled by the sheet's pointer listeners; this is the keyboard path.
+    el('button', { id: 'panelHandle', type: 'button', ariaLabel: 'Resize details', ariaExpanded: 'false',
+      onclick: e => { if (e.detail === 0) setDetent(panel.dataset.detent === 'peek' ? 'half' : 'peek'); } }),
     el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
     back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { id: 'panelTitle', tabIndex: -1, textContent: n.title }),
@@ -2436,15 +2638,20 @@ function openPanel(n) {
       conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
       n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null,
       waitText(n) ? el('span', { className: 'badge gate', textContent: waitText(n) }) : null),
+    el('div', { className: 'peek', ariaLabel: 'Dependencies' },
+      el('button', { id: 'needsCount', onclick: () => { setDetent('full'); $('blockedByHead').scrollIntoView({ block: 'start' }); } },
+        el('span', { textContent: `← Needs ${n.depends_on.length}` }), el('small', { textContent: `${n.depends_on.filter(id => byId.get(id)?.derived_status !== 'done').length} still open` })),
+      el('button', { id: 'unlocksCount', onclick: () => { setDetent('full'); $('blocksHead').scrollIntoView({ block: 'start' }); } },
+        el('span', { textContent: `Unlocks ${n.blocks.length} →` }), el('small', { textContent: n.blocks.length ? n.blocks.map(id => '#' + id).join(' ') : 'nothing downstream' }))),
     el('table', { id: 'facts' }, ...facts(n)),
     el('div', { className: 'actions' },
       n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
       focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
       el('button', { id: 'copyLink', textContent: 'Copy link', title: 'Copy a link that opens this item', onclick: e => copyLink(e.currentTarget) })),
     ...why(n),
-    el('h3', { textContent: 'Blocks' }),
+    el('h3', { id: 'blocksHead', textContent: 'Blocks' }),
     refList(n.blocks),
-    el('h3', { textContent: 'Blocked by' }),
+    el('h3', { id: 'blockedByHead', textContent: 'Blocked by' }),
     refList(n.depends_on, lateNote),
     chainOf(n).length ? el('h3', { id: 'chainHead', textContent: 'Driving chain' }) : null,
     chainOf(n).length ? refList(chainOf(n)) : null,
@@ -2470,10 +2677,11 @@ function openPanel(n) {
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
   setPanelWidth(panelW);
+  setDetent(wasHidden || !phoneSheet.matches ? 'peek' : panel.dataset.detent);
   const notes = panel.querySelector('.notes');
   if (notes) $('notesMore').hidden = !(notes.scrollHeight > notes.clientHeight + 1 || notesOpen === n.id);
   cy.resize();
-  if (wasHidden) fitView();
+  if (wasHidden && !phoneSheet.matches) fitView();
   if (keyed) {
     if (!panelReturn && !panel.contains(document.activeElement)) panelReturn = document.activeElement;
     $('panelTitle').focus();
@@ -2498,6 +2706,7 @@ function closePanel() {
   if (had || panelReturn) (panelReturn && panelReturn.isConnected ? panelReturn : $('cy')).focus();
   panelReturn = null;
   document.documentElement.style.setProperty('--panel-w', '0px');
+  document.documentElement.style.setProperty('--sheet-h', '0px');
   $('cy').style.right = '0';
   cy.resize();
   refocus();
@@ -2529,11 +2738,12 @@ function select(id, center, how) {
 // least that shows it again. Timeline never pushes the name column off the left edge.
 function keepInView(node) {
   const box = $('cy').getBoundingClientRect(), m = 16;
+  const sheet = sheetHeight($('panel'));
   const b = node.renderedBoundingBox({ includeLabels: view !== 'timeline' });
   let dx = 0, dy = 0;
   if (b.x2 > box.width - m) dx = box.width - m - b.x2;
   if (b.x1 + dx < m) dx = m - b.x1;
-  if (b.y2 > box.height - m) dy = box.height - m - b.y2;
+  if (b.y2 > box.height - sheet - m) dy = box.height - sheet - m - b.y2;
   if (b.y1 + dy < m) dy = m - b.y1;
   if (view === 'timeline' && dx < 0) dx = Math.max(dx, Math.min(0, -cy.nodes('.tl-name').renderedBoundingBox().x1));
   if (!dx && !dy) return;
@@ -2572,6 +2782,22 @@ $('loadView').addEventListener('mousemove', e => {
   tipAt = { x: e.clientX, y: e.clientY };
   if (!$('tip').hidden) placeTip();
 });
+// Semantic zoom changes a class once the viewport settles, never a label every frame.
+let zoomClassTimer = null, zoomClassAt = 0;
+function updateZoomClass() {
+  zoomClassAt = cy.zoom();
+  if (zoomClassTimer !== null) {
+    clearTimeout(zoomClassTimer);
+    zoomClassTimer = null;
+  }
+  zoomClassTimer = setTimeout(() => {
+    zoomClassTimer = null;
+    const [full, ids] = narrowScreen.matches ? [.45, .25] : [.6, .33];
+    const idOnly = zoomClassAt < full, blockOnly = zoomClassAt < ids;
+    cy.batch(() => cy.nodes().forEach(n => n.toggleClass('id-only', idOnly).toggleClass('block-only', blockOnly)));
+  }, 80);
+}
+cy.on('zoom', updateZoomClass);
 cy.on('viewport tapstart', hideTip);
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
@@ -2592,9 +2818,11 @@ cy.on('mouseout', 'node', () => {
 cy.on('tap', 'node', e => {
   const n = byId.get(Number(e.target.id()));
   kbdId = n.id;
-  highlight(n.id);
+  // Touch selects immediately instead of waiting to distinguish a second tap.
+  if (touchPointer.matches) select(n.id, false);
+  else highlight(n.id);
 });
-cy.on('dbltap', 'node', e => select(Number(e.target.id()), false));
+cy.on('dbltap', 'node', e => { if (!touchPointer.matches) select(Number(e.target.id()), false); });
 // Keyboard on the plan: the canvas is one tab stop with a current item, ringed while it has focus
 // and spoken through the live region. Arrows move by position (by row in the Timeline), Home and
 // End jump, Enter opens the panel, Space expands or collapses a summary, + and - zoom.
@@ -2712,6 +2940,11 @@ function edgeItem(edge) {
 cy.on('tap', 'edge', e => { if (!e.target.hasClass('bg')) highlight(edgeItem(e.target)); });
 cy.on('dbltap', 'edge', e => { if (!e.target.hasClass('bg')) select(edgeItem(e.target), false); });
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
+cy.on('dbltap', e => {
+  if (e.target !== cy) return;
+  userMoved = true;
+  cy.animate({ zoom: { level: Math.min(cy.maxZoom(), cy.zoom() * 1.4), renderedPosition: e.renderedPosition }, duration: 160 * MOTION });
+});
 
 const projectSelect = $('project');
 projectSelect.append(el('option', { value: '', textContent: 'All projects' }));
@@ -2878,11 +3111,57 @@ const keepsIgnoringDone = n => {
   return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id));
 };
 
-// Popovers: one open at a time, closed by a click elsewhere or Esc. Menus of actions close
-// after a choice; Filter and View options stay open while several boxes are ticked.
-const MENUS = ['goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
+// The sheet's transparent 44px handle is the drag target; its small bar is only a visual cue.
+// Close remains a separate, higher control so a drag never lands on it.
+let sheetDrag = null;
+$('panel').addEventListener('pointerdown', e => {
+  if (!phoneSheet.matches || e.target.id !== 'panelHandle') return;
+  e.preventDefault();
+  const panel = $('panel');
+  sheetDrag = { y: e.clientY, at: performance.now(), height: panel.getBoundingClientRect().height, moved: false, full: sheetDetents(panel).full };
+  panel.classList.add('dragging');
+  $('panelHandle').setPointerCapture(e.pointerId);
+});
+$('panel').addEventListener('pointermove', e => {
+  if (!sheetDrag) return;
+  const dy = sheetDrag.y - e.clientY;
+  if (Math.abs(dy) > 5) sheetDrag.moved = true;
+  if (!sheetDrag.moved) return;
+  document.documentElement.style.setProperty('--sheet-h', Math.max(40, Math.min(sheetDrag.full, sheetDrag.height + dy)) + 'px');
+});
+function endSheetDrag(e) {
+  if (!sheetDrag) return;
+  const drag = sheetDrag;
+  sheetDrag = null;
+  const panel = $('panel'), d = sheetDetents(panel);
+  panel.classList.remove('dragging');
+  const h = panel.getBoundingClientRect().height, velocity = (drag.y - e.clientY) / Math.max(1, performance.now() - drag.at);
+  if (!drag.moved) {
+    setDetent(panel.dataset.detent === 'peek' ? 'half' : 'peek');
+  } else if (h < d.peek - 48 || (panel.dataset.detent === 'peek' && velocity < -.65)) {
+    return closePanel();
+  } else {
+    const name = Object.keys(d).reduce((a, b) => Math.abs(d[b] - h) < Math.abs(d[a] - h) ? b : a);
+    setDetent(name);
+  }
+  if (pinned) keepInView(cy.getElementById(String(pinned)));
+}
+$('panel').addEventListener('pointerup', endSheetDrag);
+$('panel').addEventListener('pointercancel', e => {
+  if (!sheetDrag) return;
+  sheetDrag = null;
+  $('panel').classList.remove('dragging');
+  setDetent($('panel').dataset.detent);
+});
+
+// Popovers: one open at a time, closed by a click elsewhere, the phone backdrop, or Esc.
+// On a phone they become bottom sheets. Menus of actions close after a choice; Filter and
+// View options stay open while several boxes are ticked.
+const MENUS = ['projectWrap', 'viewWrap', 'goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
+const MENU_NAMES = { projectWrap: 'Project', viewWrap: 'View', goalWrap: 'Goal', optsWrap: 'View options', filterWrap: 'Filter', moreWrap: 'More actions', searchWrap: 'Search results' };
 const menuOpen = id => $(id).classList.contains('open');
 function setMenu(id, open) {
+  const wasModal = document.body.classList.contains('menu-open');
   MENUS.forEach(m => {
     const on = m === id ? open : false;
     if (menuOpen(m) === on) return;
@@ -2890,21 +3169,75 @@ function setMenu(id, open) {
     $(m).querySelector('[aria-expanded]').setAttribute('aria-expanded', String(on));
     if (m === 'filterWrap' && on) fillFilters();
     if (m === 'goalWrap' && !on) showGoal();
+    if (m === 'projectWrap' && on) renderProjects();
+    if (m === 'viewWrap' && on) renderViews();
+  });
+  const menu = MENUS.find(menuOpen), modal = !!menu && phoneChrome();
+  const searching = phoneChrome() && toolbar.classList.contains('searching');
+  $('menuBackdrop').hidden = !(modal || searching);
+  document.body.classList.toggle('menu-open', modal || searching);
+  if (id && open) {
+    const control = $(id).querySelector('.menu');
+    if (modal && control.getAttribute('role') !== 'dialog') {
+      control.dataset.popoverRole = control.getAttribute('role') || '';
+      control.setAttribute('role', 'dialog');
+      control.setAttribute('aria-label', MENU_NAMES[id]);
+      control.tabIndex = -1;
+    }
+    if (modal && !wasModal && !$(id).contains(document.activeElement)) {
+      (control.querySelector('button:not(:disabled), input:not(:disabled)') || control).focus();
+    }
+  }
+  MENUS.filter(m => !menuOpen(m)).forEach(m => {
+    const control = $(m).querySelector('.menu');
+    if (control.dataset.popoverRole != null) {
+      if (control.dataset.popoverRole) control.setAttribute('role', control.dataset.popoverRole);
+      else control.removeAttribute('role');
+      delete control.dataset.popoverRole;
+    }
   });
 }
 // Closing a popover from inside it puts focus back on the button that opened it.
 function closeMenus() {
   const open = MENUS.find(menuOpen);
   if (!open) return false;
-  const back = $(open).contains(document.activeElement) && $(open).querySelector('[aria-expanded]');
+  const back = $(open).querySelector('[aria-expanded]');
   setMenu(null, false);
-  if (back && back !== document.activeElement) back.focus();
+  if (back && back !== document.activeElement) (back.offsetParent ? back : $('moreBtn')).focus();
   return true;
 }
-[['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
+[['projectBtn', 'projectWrap'], ['viewBtn', 'viewWrap'], ['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
+$('menuBackdrop').onclick = () => {
+  if (menuOpen('searchWrap')) closeMenus();
+  else if (toolbar.classList.contains('searching')) { openSearchBox(false); $('searchBtn').focus(); }
+  else closeMenus();
+};
+// Modal sheets trap Tab, while the goal and search fields keep their combobox keyboard model.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const open = MENUS.find(menuOpen);
+  if (!open || !phoneChrome()) return;
+  const focus = [...$(open).querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"], .menu[role="dialog"]')].filter(x => x.offsetParent !== null);
+  if (!focus.length) return;
+  const first = focus[0], last = focus[focus.length - 1];
+  if (!focus.includes(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
+$('goalMore').onclick = () => {
+  setMenu('goalWrap', true);
+  renderGoalList(false);
+  goalBox.focus();
+};
+$('optsMore').onclick = () => { setMenu('optsWrap', true); ($('opts').querySelector('input:not(:disabled)') || $('opts')).focus(); };
+$('legendMore').onclick = () => {
+  setLegend($('legend').classList.contains('closed'));
+  setMenu('moreWrap', false);
+  fitIfOutside();
+};
 // The path, not the target: a click that re-renders a popover leaves its target detached.
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList && n.classList.contains('menuWrap'))) closeMenus(); });
-$('more').addEventListener('click', e => { if (e.target.closest('.item')) setMenu('moreWrap', false); });
+$('more').addEventListener('click', e => { if (e.target.closest('.item:not(#goalMore):not(#optsMore):not(#legendMore)')) setMenu('moreWrap', false); });
 
 // View options: radios for lanes and dependencies; the ones that do nothing in this view say so.
 const LANE_NAMES = { lane: 'Lane', owner: 'Owner', tag: 'Tag', project: 'Project' };
@@ -2964,6 +3297,8 @@ function setLaneKey(v) {
 }
 
 const syncControls = () => {
+  $('projectLabel').textContent = projectSelect.value || 'All projects';
+  $('viewLabel').textContent = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline', load: 'Load' }[view];
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('viewTimeline').classList.toggle('on', view === 'timeline');
@@ -3090,7 +3425,7 @@ goalBox.onkeydown = e => {
     goalBox.blur();
   }
 };
-goalBox.onblur = () => setTimeout(() => { if (document.activeElement !== goalBox) setMenu('goalWrap', false); }, 0);
+goalBox.onblur = () => setTimeout(() => { if (document.activeElement !== goalBox && !phoneChrome()) setMenu('goalWrap', false); }, 0);
 $('goalList').addEventListener('mousedown', e => e.preventDefault());
 $('goalList').addEventListener('click', e => {
   const c = e.target.closest('.choice');
@@ -3101,6 +3436,20 @@ $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
 $('viewLoad').onclick = () => setView('load');
+function renderProjects() {
+  $('projectMenu').replaceChildren(...Array.from(projectSelect.options, o => {
+    const row = el('button', { className: 'item choice' + (o.value === projectSelect.value ? ' active' : ''), role: 'option', ariaSelected: String(o.value === projectSelect.value), textContent: o.textContent });
+    row.onclick = () => { projectSelect.value = o.value; setMenu('projectWrap', false); projectSelect.onchange(); };
+    return row;
+  }));
+}
+function renderViews() {
+  $('viewMenu').replaceChildren(...VIEWS.map(v => {
+    const row = el('button', { className: 'item choice' + (v === view ? ' active' : ''), role: 'option', ariaSelected: String(v === view), textContent: VIEW_NAMES[v] });
+    row.onclick = () => { setMenu('viewWrap', false); setView(v); };
+    return row;
+  }));
+}
 $('skip').onclick = e => {
   e.preventDefault();
   (view === 'load' ? $('loadView').querySelector('[role=button], td.c') || $('main') : $('cy')).focus();
@@ -3123,31 +3472,41 @@ $('search').onkeydown = e => {
     else stepSearch(e.shiftKey);
   }
 };
-$('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
+$('search').onfocus = () => {
+  if (!searchQuery()) applySearch();
+  if (activeSearchHits(searchQuery()).length) setMenu('searchWrap', true);
+};
 $('search').onblur = () => setTimeout(() => {
   if (document.activeElement === $('search')) return;
   setMenu('searchWrap', false);
   openSearchBox(false);
 }, 0);
-// On a narrow screen the box is hidden behind a button and opens over the second toolbar row.
+// On a narrow screen the search icon opens a sheet above the results.
 function openSearchBox(open) {
   if (toolbar.classList.contains('searching') === open) return;
-  if (open) toolbar.style.setProperty('--search-top', ($('searchBtn').getBoundingClientRect().top - 4) + 'px');
+  if (open) MENUS.forEach(m => { if (m !== 'searchWrap') setMenu(m, false); });
   toolbar.classList.toggle('searching', open);
   $('searchBtn').setAttribute('aria-expanded', String(open));
+  if (phoneChrome()) {
+    $('menuBackdrop').hidden = !open || MENUS.some(menuOpen);
+    document.body.classList.toggle('menu-open', open || MENUS.some(menuOpen));
+  }
 }
 function focusSearch() {
   openSearchBox(true);
   $('search').focus();
   $('search').select();
 }
-$('searchBtn').onclick = focusSearch;
+$('searchBtn').onclick = () => {
+  if (toolbar.classList.contains('searching')) { openSearchBox(false); return; }
+  focusSearch();
+};
 $('fitMore').onclick = () => $('fit').click();
 $('searchClear').onclick = () => {
   clearSearch();
   $('search').focus();
 };
-$('results').addEventListener('mousedown', e => e.preventDefault());
+$('results').addEventListener('mousedown', e => { if (!touchPointer.matches) e.preventDefault(); });
 $('searchClear').addEventListener('mousedown', e => e.preventDefault());
 $('results').addEventListener('click', e => {
   const r = e.target.closest('.hit');
@@ -3357,8 +3716,10 @@ function drawSvg(paper) {
     const size = px(node, 'font-size') || 13, line = size * 1.2, lines = text.split('\n');
     const mx = px(node, 'text-margin-x'), my = px(node, 'text-margin-y');
     const halign = node.style('text-halign'), valign = node.style('text-valign');
-    const x = halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
-    const anchor = halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
+    // A Graph card's lines start at its inner left edge (see cardShift).
+    const card = halign === 'center' && node.style('text-justification') === 'left';
+    const x = card ? at.x - graphTitleW(node.data('type')) / 2 : halign === 'left' ? at.x - w / 2 + mx : halign === 'right' ? at.x + w / 2 + mx : at.x + mx;
+    const anchor = card ? 'start' : halign === 'left' ? 'end' : halign === 'right' ? 'start' : 'middle';
     const top = valign === 'top' ? at.y - h / 2 + my - lines.length * line : valign === 'bottom' ? at.y + h / 2 + my : at.y + my - lines.length * line / 2;
     return lines.map((t, i) => `<text x="${n2(x)}" y="${n2(top + (i + 0.5) * line)}" text-anchor="${anchor}" dominant-baseline="central" font-family="${esc(node.style('font-family'))}" font-size="${size}" font-weight="${node.style('font-weight')}" fill="${node.style('color')}" fill-opacity="${node.style('text-opacity')}">${esc(t)}</text>`).join('');
   };
@@ -3459,6 +3820,8 @@ const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
   $('legendToggle').setAttribute('aria-expanded', String(open));
+  $('legendMore').setAttribute('aria-expanded', String(open));
+  $('legendMore').textContent = open ? 'Legend ✓' : 'Legend';
   $('legendOn').checked = open;
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
@@ -3492,6 +3855,7 @@ if (DATA.live) {
     const when = new Date().toLocaleTimeString([], HM);
     if (ok) lastOk = when;
     $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), el('span', { className: 't', textContent: lastOk || when }));
+    $('projectLive').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }));
     $('stamp').title = ok ? 'Live · checked ' + when : `Disconnected · tried ${when} · last good ${lastOk || 'never'}`;
     $('banner').hidden = ok;
     if (!ok) $('banner').replaceChildren(`Not live since ${lastOk || 'the page opened'} · the server is not answering, so this may be out of date.`,
