@@ -775,7 +775,8 @@ function cyStyle(p) {
       'text-max-width': narrowScreen.matches ? 148 : 192
     } },
     { selector: 'node.graph.card', style: { 'font-weight': 'normal' } },
-    // Semantic zoom: under 0.6 a card shows only its id, large; under 0.33 only its colour.
+    // Semantic zoom: under 0.6 a card shows only its id, large; under 0.33 only its colour. A phone keeps full cards
+    // down to 0.45 and ids down to 0.25: it opens with the whole plan, and small text is fine there.
     { selector: 'node.graph.id-only', style: {
       'label': 'data(zoomId)', 'font-size': 20, 'font-weight': 'bold', 'text-halign': 'center', 'text-margin-x': 0, 'text-justification': 'center'
     } },
@@ -2791,7 +2792,8 @@ function updateZoomClass() {
   }
   zoomClassTimer = setTimeout(() => {
     zoomClassTimer = null;
-    const idOnly = zoomClassAt < .6, blockOnly = zoomClassAt < .33;
+    const [full, ids] = narrowScreen.matches ? [.45, .25] : [.6, .33];
+    const idOnly = zoomClassAt < full, blockOnly = zoomClassAt < ids;
     cy.batch(() => cy.nodes().forEach(n => n.toggleClass('id-only', idOnly).toggleClass('block-only', blockOnly)));
   }, 80);
 }

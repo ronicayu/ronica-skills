@@ -1808,9 +1808,12 @@ def test_phone_graph_cards_zoom_and_touch_selection(browser, page_file):
     assert sizes and all(w == 164 and h == 60 and lines <= 3 for w, h, lines in sizes)
     # Evaluate to a number: returning cy itself makes Playwright serialise the whole graph.
     page.evaluate("cy.zoom(.5); 0")
+    page.wait_for_timeout(200)
+    assert page.evaluate("tasks().every(n => !n.hasClass('id-only'))")  # a phone keeps full cards down to 0.45
+    page.evaluate("cy.zoom(.4); 0")
     page.wait_for_function("tasks().every(n => n.hasClass('id-only') && !n.hasClass('block-only'))")
     assert page.evaluate("tasks().map(n => n.style('label'))") == page.evaluate("tasks().map(n => '#' + n.id())")
-    page.evaluate("cy.zoom(.3); 0")
+    page.evaluate("cy.zoom(.2); 0")
     page.wait_for_function("tasks().every(n => n.hasClass('block-only'))")
     assert set(page.evaluate("tasks().map(n => n.style('label'))")) == {""}
     page.evaluate("cy.zoom(.8); 0")
