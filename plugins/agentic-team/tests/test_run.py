@@ -5588,6 +5588,32 @@ class RunTest(Base):
                      f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: {follow_ups}\nCheckpoint: {CHECKPOINT}\n")
         return self.run_cmd("check-report", path)
 
+    def test_120_a_verifier_report_with_issues_never_closes_whatever_its_verdict_line_says(self):
+        task = self.running_task()
+        self.pass_report(task)
+        self.add_result(task, "ISSUES", "Status: ISSUES\nVerdict: artifact-verified\nIssues:\n- blocking: a check fails\n",
+                        kind="verify", by=f"verify-{task}-1")
+        events = self.events("close", str(task))
+        self.assertIn("verify-failed", self.one(events, "verdict")["detail"])
+        self.assertNotEqual(self.meta(task).get("phase"), "awaiting_merge")
+        self.assertNotEqual(self.status_of(task), "done")
+
+    def test_120_check_report_refuses_a_verifier_status_that_disagrees_with_its_verdict(self):
+        path = os.path.join(self.dir, "report.md")
+        for status, verdict, ok in (("ISSUES", "artifact-verified", False), ("BLOCKED", "test-verified", False),
+                                    ("ISSUES", "verify-failed", True)):
+            with self.subTest(status=status, verdict=verdict):
+                issues = "- blocking: a check fails" if status == "ISSUES" else "None"
+                with open(path, "w") as fh:
+                    fh.write(f"Task: 1\nStatus: {status}\nVerdict: {verdict}\nHead: {SHA_A}\nIssues:\n{issues}\n"
+                             f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+                out = self.run_cmd("check-report", path, "--verifier")
+                if ok:
+                    self.assertNotIn("needs `Verdict:", out.stderr)
+                else:
+                    self.assertEqual(out.returncode, 2, out.stdout)
+                    self.assertIn(f"Status {status} needs `Verdict: ", out.stderr)
+
     def test_107_check_report_accepts_labelled_listed_and_empty_follow_ups(self):
         cases = {
             "labelled": "\ncaller: src/b.py:12: calls the old name\ndoc: README.md: names the old flag\n"
