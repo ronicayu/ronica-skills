@@ -3490,8 +3490,8 @@ if (DATA.live) {
     busy = true;
     let next = null;
     try {
-      const { version } = await getJson('/version');
-      if (force || !connected || version !== lastVersion) next = await getJson('/data.json');
+      const { version } = await getJson('version');
+      if (force || !connected || version !== lastVersion) next = await getJson('data.json');
       setStatus(true);
     } catch (e) {
       setStatus(false);
