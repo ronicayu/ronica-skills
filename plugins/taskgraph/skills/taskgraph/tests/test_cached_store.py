@@ -604,40 +604,40 @@ def test_a_gate_set_elsewhere_between_refresh_and_push_survives_a_local_gate(env
     assert set(gates) == {"theirs", "ours"}
 
 
-PR = "https://github.com/o/demo/pull/95"
-WAITING = f"Waiting for: [PR #95]({PR}) <!-- taskgraph:waiting -->"
+REF = "https://example.com/review/7"
+WAITING = f"Waiting for: [Review by legal]({REF}) <!-- taskgraph:waiting -->"
 
 
 def test_a_gate_with_a_ref_shows_a_waiting_line_in_the_issue_body(env, fake):
     a = env.ok("add", "A", "--notes", "Why.")["id"]
-    env.ok("gate", str(a), "merge", "--label", "merge of worktree-task-1")
+    env.ok("gate", str(a), "legal", "--label", "Review pending")
     assert "Waiting for" not in fake.issue(a)["body"]  # no ref: no line
-    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
+    env.ok("gate", str(a), "legal", "--label", "Review by legal", "--ref", REF)
     assert fake.issue(a)["body"].startswith(f"Why.\n\n{WAITING}\n\n<!-- taskgraph:meta v1\n")
     shown = env.ok("--fresh", "show", str(a))
-    assert shown["notes"] == "Why." and shown["meta"]["gates"]["merge"]["ref"] == PR
+    assert shown["notes"] == "Why." and shown["meta"]["gates"]["legal"]["ref"] == REF
     env.ok("edit", str(a), "--notes", "Why, again.")
     env.ok("start", str(a))
     body = fake.issue(a)["body"]
     assert body.count("Waiting for:") == 1 and body.startswith(f"Why, again.\n\n{WAITING}\n\n")
     assert env.ok("--fresh", "show", str(a))["notes"] == "Why, again."
-    env.ok("gate", str(a), "merge", "--clear")
+    env.ok("gate", str(a), "legal", "--clear")
     body = fake.issue(a)["body"]
     assert "Waiting for" not in body and body.startswith("Why, again.\n\n<!-- taskgraph:meta v1\n")
     assert env.ok("--fresh", "show", str(a))["notes"] == "Why, again."
 
 
-def test_the_host_closes_the_issue_before_the_gate_clear_and_done(env, fake):
-    # run.py's order: a merged request that says "Closes #N" closes the issue first; run.py then clears the gate and runs
-    # tg done, which removes the tg:in-progress label the close left.
+def test_an_outside_close_before_the_gate_clear_and_done(env, fake):
+    # An outside close comes first: someone closes the issue, then the gate is cleared and tg done runs;
+    # tg done removes the tg:in-progress label the close left.
     a = env.ok("add", "A")["id"]
     env.ok("start", str(a))
-    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
+    env.ok("gate", str(a), "legal", "--label", "Review by legal", "--ref", REF)
     fake.edit_issue(a, state="closed", state_reason="completed")
     closed = env.ok("--fresh", "show", str(a))
     assert closed["status"] == "done" and closed["done_at"]
     fake.clear_log()
-    assert env.ok("gate", str(a), "merge", "--clear")["cleared"] is True
+    assert env.ok("gate", str(a), "legal", "--clear")["cleared"] is True
     assert "tg:in-progress" in fake.issue(a)["labels"]  # the gate write leaves the status alone
     done = env.ok("done", str(a))
     assert done["status"] == "done" and "warnings" not in done and done["done_at"] == closed["done_at"]
@@ -647,14 +647,14 @@ def test_the_host_closes_the_issue_before_the_gate_clear_and_done(env, fake):
     assert env.ok("--fresh", "show", str(a))["status"] == "done" and env.ok("done", str(a))["status"] == "done"
 
 
-def test_tg_done_before_the_host_closes_the_issue(env, fake):
+def test_tg_done_before_an_outside_close(env, fake):
     a = env.ok("add", "A")["id"]
     env.ok("start", str(a))
-    env.ok("gate", str(a), "merge", "--label", "PR #95", "--ref", PR)
-    env.ok("gate", str(a), "merge", "--clear")
+    env.ok("gate", str(a), "legal", "--label", "Review by legal", "--ref", REF)
+    env.ok("gate", str(a), "legal", "--clear")
     env.ok("done", str(a))
     closed = fake.issue(a)
     assert (closed["state"], closed["state_reason"]) == ("closed", "completed")
-    fake.edit_issue(a, state="closed", state_reason="completed")  # the request merges later and closes it again: a no-op on GitHub
+    fake.edit_issue(a, state="closed", state_reason="completed")  # the outside close happens again later: a no-op on GitHub
     shown = env.ok("--fresh", "show", str(a))
     assert shown["status"] == "done" and "gates" not in shown["meta"] and fake.issue(a)["body"] == closed["body"]

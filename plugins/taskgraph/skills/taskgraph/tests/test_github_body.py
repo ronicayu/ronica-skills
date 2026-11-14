@@ -97,12 +97,12 @@ def test_meta_is_json_for_anything_tg_stores():
     assert parse(render("", meta))[1] == meta
 
 
-GATE = {"label": "PR #95", "ref": "https://github.com/o/r/pull/95", "since": "2026-11-14T10:00:00Z"}
-LINE = "Waiting for: [PR #95](https://github.com/o/r/pull/95) <!-- taskgraph:waiting -->"
+GATE = {"label": "Review by legal", "ref": "https://example.com/review/7", "since": "2026-11-14T10:00:00Z"}
+LINE = "Waiting for: [Review by legal](https://example.com/review/7) <!-- taskgraph:waiting -->"
 
 
 def test_a_gate_with_a_ref_shows_a_visible_waiting_line_outside_the_block():
-    meta = {"lane": "a", "gates": {"merge": GATE}}
+    meta = {"lane": "a", "gates": {"legal": GATE}}
     body = render("Why.", meta)
     assert body.startswith(f"Why.\n\n{LINE}\n\n<!-- taskgraph:meta v1\n")
     assert parse(body) == ("Why.", meta, [])
@@ -111,7 +111,7 @@ def test_a_gate_with_a_ref_shows_a_visible_waiting_line_outside_the_block():
 
 
 def test_the_waiting_line_is_not_read_back_as_notes_and_is_never_doubled():
-    meta = {"gates": {"merge": GATE}}
+    meta = {"gates": {"legal": GATE}}
     for notes in ("", "a", "a\n", "a\n\n", "\nb", "Waiting for: typed by a person"):
         body = render(notes, meta)
         assert parse(body) == (notes, meta, [])
@@ -121,17 +121,17 @@ def test_the_waiting_line_is_not_read_back_as_notes_and_is_never_doubled():
 
 
 def test_a_gate_without_a_ref_adds_no_line_and_a_cleared_gate_removes_it():
-    no_ref = {"lane": "a", "gates": {"merge": {"label": "merge of worktree-task-1", "ref": None, "since": "x"}}}
+    no_ref = {"lane": "a", "gates": {"legal": {"label": "Review by legal", "ref": None, "since": "x"}}}
     assert "Waiting for" not in render("n", no_ref)
     assert render("n", no_ref).startswith("n\n\n<!-- taskgraph:meta v1\n")
-    notes, meta, _ = parse(render("n", {"lane": "a", "gates": {"merge": GATE}}))
+    notes, meta, _ = parse(render("n", {"lane": "a", "gates": {"legal": GATE}}))
     meta.pop("gates")
     assert render(notes, meta) == render("n", {"lane": "a"}) and "Waiting for" not in render(notes, meta)
 
 
 def test_two_gates_with_refs_share_one_line_and_labels_are_escaped():
-    meta = {"gates": {"review": {"label": "legal [draft] <b>", "ref": "https://x.example/a b(1)"}, "merge": GATE}}
-    assert render("", meta).split("\n")[0] == ("Waiting for: [PR #95](https://github.com/o/r/pull/95), "
+    meta = {"gates": {"review": {"label": "legal [draft] <b>", "ref": "https://x.example/a b(1)"}, "legal": GATE}}
+    assert render("", meta).split("\n")[0] == ("Waiting for: [Review by legal](https://example.com/review/7), "
                                                "[legal \\[draft\\] \\<b\\>](https://x.example/a%20b%281%29) <!-- taskgraph:waiting -->")
     assert parse(render("n", meta)) == ("n", meta, [])
 
@@ -141,7 +141,7 @@ def block_of(meta):
 
 
 def test_text_typed_after_the_waiting_line_stays_notes_and_the_line_is_not_doubled():
-    meta = {"gates": {"merge": GATE}}
+    meta = {"gates": {"legal": GATE}}
     for typed, notes in ((f"Why.\n\n{LINE}\n\nmore\n\n", "Why.\n\nmore"), (f"Why.\n\n{LINE}\nmore\n\n", "Why.\n\nmore"),
                          (f"{LINE}\n\nmore\n\n", "more"), (f"Why.\r\n\r\n{LINE} \r\n\r\nmore\r\n\r\n", "Why.\r\n\r\nmore")):
         assert parse(typed + block_of(meta)) == (notes, meta, [])
@@ -149,7 +149,7 @@ def test_text_typed_after_the_waiting_line_stays_notes_and_the_line_is_not_doubl
 
 
 def test_an_extra_blank_line_before_the_block_does_not_move_the_waiting_line_into_the_notes():
-    meta = {"gates": {"merge": GATE}}
+    meta = {"gates": {"legal": GATE}}
     for extra in ("\n", "\n\n", "\r\n"):
         body = render("Why.", meta).replace(f"{LINE}\n\n", f"{LINE}\n\n{extra}")
         assert parse(body) == ("Why.", meta, [])
@@ -158,7 +158,7 @@ def test_an_extra_blank_line_before_the_block_does_not_move_the_waiting_line_int
 
 
 def test_two_gates_with_refs_and_copies_left_in_the_notes_are_dropped():
-    meta = {"gates": {"merge": GATE, "review": {"label": "Review", "ref": "https://x.example/r"}}}
+    meta = {"gates": {"legal": GATE, "review": {"label": "Review", "ref": "https://x.example/r"}}}
     line = render("", meta).split("\n")[0]
     assert line.count("](") == 2 and line.endswith(" <!-- taskgraph:waiting -->")
     assert parse(render("Why.", meta)) == ("Why.", meta, [])
@@ -168,13 +168,13 @@ def test_two_gates_with_refs_and_copies_left_in_the_notes_are_dropped():
 
 
 def test_a_line_whose_marker_was_deleted_is_notes():
-    meta = {"gates": {"merge": GATE}}
+    meta = {"gates": {"legal": GATE}}
     body = render("Why.", meta).replace(" <!-- taskgraph:waiting -->", "")
     assert parse(body)[0] == "Why.\n\n" + LINE.removesuffix(" <!-- taskgraph:waiting -->")
 
 
 def test_ordinary_notes_round_trip_exactly_next_to_the_waiting_line():
-    meta = {"gates": {"merge": GATE}}
+    meta = {"gates": {"legal": GATE}}
     for notes in ("", "a", "a\n", "a\n\n", "a\n\n\n", " a ", "\nb", "a\r\n\r\nb", "x <!-- other -->", "Waiting for: you"):
         body = render(notes, meta)
         assert parse(body) == (notes, meta, [])
@@ -182,10 +182,10 @@ def test_ordinary_notes_round_trip_exactly_next_to_the_waiting_line():
 
 
 def test_only_a_web_ref_becomes_a_link_and_a_label_mentions_nobody():
-    meta = {"gates": {"merge": {"label": "PR #5 for @octocat", "ref": "notaurl"},
+    meta = {"gates": {"legal": {"label": "Review #5 for @octocat", "ref": "notaurl"},
                       "z": {"label": "@team/x", "ref": "HTTPS://x.example/a"}}}
     line = render("", meta).split("\n")[0]
-    assert line == "Waiting for: PR #5 for @‍octocat, [@‍team/x](HTTPS://x.example/a) <!-- taskgraph:waiting -->"
+    assert line == "Waiting for: Review #5 for @‍octocat, [@‍team/x](HTTPS://x.example/a) <!-- taskgraph:waiting -->"
     assert "@o" not in line and "@t" not in line and "#5" in line  # a # stays as it is
     assert parse(render("n", meta)) == ("n", meta, [])
-    assert "Waiting for" not in render("n", {"gates": {"merge": {"label": "x", "ref": "  "}}})
+    assert "Waiting for" not in render("n", {"gates": {"legal": {"label": "x", "ref": "  "}}})

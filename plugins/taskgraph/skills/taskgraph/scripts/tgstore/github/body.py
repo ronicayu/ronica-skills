@@ -29,8 +29,8 @@ def dumps(value):
 
 
 def waiting(meta):
-    """The visible line for the open gates that have a ref, as Markdown links; "" when none has one. GitHub reads a link to an issue
-    or a pull request in the body as a cross-reference, so the request shows the task that waits for it."""
+    """The visible line for the open gates that have a ref, as Markdown links; "" when none has one. A ref is any URL; when it
+    is a GitHub URL, GitHub may show a cross-reference to the task there."""
     gates = meta.get("gates")
     if not isinstance(gates, dict):
         return ""
