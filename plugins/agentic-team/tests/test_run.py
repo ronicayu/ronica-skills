@@ -5960,6 +5960,71 @@ class RoleTest(Base):
         row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "tidy")
         self.assertEqual((row["fits"], row["tier"], row["skills"]), ("code: features, fixes", "judgement", ["a:b"]))
 
+    # --- extends (#114)
+
+    def test_07b_a_project_role_extends_the_shipped_role_of_its_own_name(self):
+        path = self.role_file("software-engineer", fits=None, extends="software-engineer", drop="[review 5]",
+                              method="1. Paste the red line at base.\n2. Deflake: reproduce first.",
+                              review="1. Mutation check: delete each new guard.")
+        plugin = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles", "software-engineer.md")
+        role = self.section(self.brief(self.add_task(role="software-engineer")), "ROLE")
+        self.assertIn(f"Role: software-engineer ({path}, extends {plugin}).", role)
+        self.assertIn("1. Read the code you will change", role)
+        self.assertIn("13. Commit in logical steps.", role)
+        self.assertTrue(role.endswith("13. Commit in logical steps. Each message says what changed and why.\n\n"
+                                      "14. Paste the red line at base.\n15. Deflake: reproduce first."), role)
+        review = self.section(self.verify_text(self.running_task(role="software-engineer")), "ROLE")
+        self.assertNotIn("TODO without a task id", review)
+        self.assertIn("5. Comments: a comment that restates", review)
+        self.assertTrue(review.endswith("6. Staleness: docs, config and examples that describe the changed behaviour are updated."
+                                        "\n\n7. Mutation check: delete each new guard."), review)
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "software-engineer")
+        self.assertEqual((row["source"], row["tier"], row["verify_kind"], row["error"]),
+                         ("project, extends plugin:software-engineer", "implementation", "code", None))
+        self.assertTrue(row["fits"].startswith("code changes"))
+        self.assertIn("role: software-engineer (project, extends plugin:software-engineer); fits: code changes",
+                      self.ok("roles").stdout)
+
+    def test_07b_a_role_extends_another_project_role_and_its_own_keys_win(self):
+        self.role_file("base", tier="judgement", verify_kind="schema", skills="[a:b]")
+        self.role_file("child", fits=None, extends="base", verify_kind="design-doc", review=None)
+        role = self.section(self.brief(self.add_task(role="child")), "ROLE")
+        self.assertIn("Load these skills with the Skill tool before you start: a:b.", role)
+        self.assertTrue(role.endswith("Method text of base.\n\nMethod text of child."), role)
+        self.assertEqual(self.section(self.verify_text(self.running_task(role="child")), "ROLE").split("\n\n", 1)[1],
+                         "Review text of base.")
+        row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "child")
+        self.assertEqual((row["source"], row["fits"], row["tier"], row["verify_kind"]),
+                         ("project, extends project:base", "tasks for the base tests", "judgement", "design-doc"))
+
+    def test_07b_a_broken_extends_is_refused(self):
+        cases = (("an unknown parent", {}, dict(extends="nosuch"), "extends: no role named 'nosuch' to extend"),
+                 ("its own name with no shipped file", {}, dict(extends="bad"), "extends: no role named 'bad' to extend"),
+                 ("a parent that extends", dict(extends="architect"), dict(extends="mid"), "a role extends one level only"),
+                 ("a broken parent", dict(fits=None), dict(extends="mid"), "the parent role file"),
+                 ("drop with no extends", {}, dict(drop="[review 1]"), "it needs an extends line"),
+                 ("a bad drop item", {}, dict(extends="mid", drop="[review]"), "'review' is not `method N` or `review N`"),
+                 ("a dropped item the parent lacks", {}, dict(extends="software-engineer", drop="[review 8]"),
+                  "the parent's Review has no item 8"),
+                 ("a bad parent name", {}, dict(extends="Mid Role"), "'Mid Role' is not a role name"))
+        for label, mid, front, problem in cases:
+            with self.subTest(label):
+                self.fresh()
+                self.role_file("mid", **mid)
+                path = self.role_file("bad", **front)
+                err = self.refused("launch", str(self.add_task(role="bad")))
+                self.assertIn(f"role file {path}: ", err)
+                self.assertIn(problem, err)
+                out = self.run_cmd("roles")
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertIn(problem, out.stdout)
+
+    def test_07b_the_size_warning_counts_the_merged_role(self):
+        self.role_file("base", method=" ".join(["word"] * 400), review=None)
+        self.role_file("child", fits=None, extends="base", method=" ".join(["word"] * 201), review=None)
+        (warn,) = self.named(self.events("launch", str(self.add_task(role="child")), "--dry-run"), "warn")
+        self.assertIn("is 601 words", warn["detail"])
+
     # --- [roles] default
 
     def test_08_the_default_role_applies_to_a_task_with_no_role_and_the_meta_beats_it(self):

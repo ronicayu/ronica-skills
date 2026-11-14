@@ -976,9 +976,12 @@ def ids_text(ids):
 
 # ------------------------------------------------------------------- roles
 
-ROLE_KEYS = ("fits", "tier", "verify_kind", "skills")
+ROLE_KEYS = ("fits", "tier", "verify_kind", "skills", "extends", "drop")
+ROLE_INHERITED = ("fits", "tier", "verify_kind", "skills")
 ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
 ROLE_NAME = re.compile(r"[a-z0-9-]+")
+ROLE_DROP = re.compile(r"(method|review) ([1-9][0-9]*)")
+ROLE_ITEM = re.compile(r"([1-9][0-9]*)\. ")  # a numbered item of Method or Review starts at column 0
 ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
 STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
 
@@ -987,14 +990,20 @@ class Role:
     """One role file. `source` is "plugin" or "project"; `overrides` marks a project file that hides a plugin file of the
     same name. parse_role fills the rest, or sets `error` to one line that names the problem."""
 
-    def __init__(self, name, path, source, overrides=False):
-        self.name, self.path, self.source, self.overrides = name, path, source, overrides
-        self.fits = self.tier = self.verify_kind = self.review = None
-        self.skills, self.method, self.error = [], "", None
+    def __init__(self, name, path, source, overrides=False, hidden=None):
+        self.name, self.path, self.source, self.overrides, self.hidden = name, path, source, overrides, hidden
+        self.fits = self.tier = self.verify_kind = self.review = self.extends = self.parent = None
+        self.skills, self.drop, self.method, self.error = [], [], "", None
 
     @property
     def where(self):
+        if self.parent:
+            return f"project, extends {self.parent.source}:{self.parent.name}"
         return "project, overrides plugin" if self.overrides else self.source
+
+    @property
+    def shown_path(self):
+        return f"{self.path}, extends {self.parent.path}" if self.parent else self.path
 
     @property
     def words(self):
@@ -1028,8 +1037,8 @@ def parse_role(run, role):
     except ValueError as exc:
         role.error = str(exc)
         return
-    role.fits, role.tier, role.verify_kind, role.skills = (fields.get(k) for k in ROLE_KEYS)
-    role.skills = role.skills or []
+    role.fits, role.tier, role.verify_kind, role.skills, role.extends, role.drop = (fields.get(k) for k in ROLE_KEYS)
+    role.skills, role.drop = role.skills or [], role.drop or []
     sections, current = {}, None
     for line in body:
         if line.startswith("## "):
@@ -1045,7 +1054,7 @@ def parse_role(run, role):
             sections[current].append(line)
     role.method = "\n".join(sections.get("Method", [])).strip()
     role.review = "\n".join(sections.get("Review", [])).strip() or None
-    if not role.method:
+    if not role.method and not role.extends:
         role.error = "no ## Method section, or it is empty"
 
 
@@ -1073,11 +1082,15 @@ def role_frontmatter(run, lines):
             value = role_value(raw)
         except ValueError as exc:
             raise ValueError(f"line {number}: {key}: {exc}")
-        if key == "skills":
-            fields[key] = role_skills(value, number)
+        if key in ("skills", "drop"):
+            fields[key] = role_skills(value, number) if key == "skills" else role_drops(value, number)
         elif value:
             fields[key] = value
-    if not fields.get("fits"):
+    if fields.get("extends") and not ROLE_NAME.fullmatch(fields["extends"]):
+        raise ValueError(f"extends: {fields['extends']!r} is not a role name")
+    if fields.get("drop") and not fields.get("extends"):
+        raise ValueError("drop removes items of the parent role; it needs an extends line")
+    if not fields.get("fits") and not fields.get("extends"):
         raise ValueError("no `fits` line: say in one line which tasks the role is for")
     if tier := fields.get("tier"):
         try:
@@ -1103,6 +1116,85 @@ def role_skills(value, number):
     return names
 
 
+def role_drops(value, number):
+    """The parent items a `drop:` value removes, as [("method" | "review", n), ...], from `[method 4, review 5]`."""
+    if not value.startswith("["):
+        raise ValueError(f"line {number}: drop must be a list in brackets, as [method 4, review 5], not {value!r}")
+    found = []
+    for item in (i.strip() for i in value[1:-1].split(",") if i.strip()):
+        match = ROLE_DROP.fullmatch(item)
+        if not match:
+            raise ValueError(f"line {number}: drop: {item!r} is not `method N` or `review N`")
+        found.append((match[1], int(match[2])))
+    return found
+
+
+def role_items(text):
+    """(the text before the first numbered item, [(number, text of the item)]) of a Method or Review section. An item
+    runs from its `N. ` line to the next one, so its indented and blank lines go with it."""
+    lead, items = [], []
+    for line in (text or "").splitlines():
+        match = ROLE_ITEM.match(line)
+        if match:
+            items.append([int(match[1]), [line[match.end():]]])
+        elif items:
+            items[-1][1].append(line)
+        else:
+            lead.append(line)
+    return "\n".join(lead).strip(), [(n, "\n".join(lines).rstrip()) for n, lines in items]
+
+
+def merge_section(kind, parent, child, drops):
+    """The parent's section without its dropped items, then the child's, with the numbered items numbered again from 1.
+    ValueError names a dropped number the parent does not have."""
+    lead, items = role_items(parent)
+    gone = {n for k, n in drops if k == kind}
+    missing = sorted(gone - {n for n, _ in items})
+    if missing:
+        raise ValueError(f"drop: the parent's {kind.title()} has no item {', '.join(map(str, missing))}")
+    child_lead, child_items = role_items(child)
+    kept = [t for n, t in items if n not in gone]
+    numbered = lambda texts, start: "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start))  # noqa: E731
+    parts = [lead, numbered(kept, 1), child_lead, numbered([t for _, t in child_items], len(kept) + 1)]
+    return "\n\n".join(p for p in parts if p).strip() or None
+
+
+def read_role(run, role, found):
+    """Parse `role` and, when it extends a parent, merge the parent in. Any problem sets role.error."""
+    if not ROLE_NAME.fullmatch(role.name):
+        role.error = "the file name must be lowercase letters, digits and -"
+        return
+    parse_role(run, role)
+    if role.error or not role.extends:
+        return
+    if role.source != "project":
+        role.error = "extends: only a project role can extend another role"
+        return
+    name = role.extends
+    parent = role.hidden if name == role.name else found.get(name)
+    if parent is None or parent is role:
+        role.error = f"extends: no role named {name!r} to extend; available roles: {role_list(found)}"
+        return
+    parent = Role(parent.name, parent.path, parent.source)
+    parse_role(run, parent)
+    if parent.error:
+        role.error = f"extends: the parent role file {parent.path} is broken: {parent.error}"
+        return
+    if parent.extends:
+        role.error = f"extends: the parent role {name} extends {parent.extends} itself; a role extends one level only"
+        return
+    try:
+        role.method = merge_section("method", parent.method, role.method, role.drop)
+        role.review = merge_section("review", parent.review, role.review, role.drop)
+    except ValueError as exc:
+        role.error = str(exc)
+        return
+    for key in ROLE_INHERITED:
+        if not getattr(role, key):
+            setattr(role, key, getattr(parent, key))
+    role.parent = parent
+
+
 def role_files(run):
     """{name: Role} for every role file, not yet parsed. A project file hides the plugin file of the same name. A file
     whose name is not lowercase letters, digits and `-` is kept under its name, with its error set."""
@@ -1111,7 +1203,7 @@ def role_files(run):
                            ("project", os.path.join(run.root, ".claude", "agentic-team", "roles"))):
         for path in sorted(glob.glob(os.path.join(glob.escape(folder), "*.md"))):
             name = os.path.basename(path)[:-3]
-            found[name] = Role(name, path, source, overrides=name in found)
+            found[name] = Role(name, path, source, overrides=name in found, hidden=found.get(name))
     return found
 
 
@@ -1126,10 +1218,7 @@ def load_role(run, name, origin):
     role = found.get(name)
     if role is None:
         raise Refused(f"{origin}: no role named {name!r}; available roles: {role_list(found)}")
-    if not ROLE_NAME.fullmatch(name):
-        role.error = "the file name must be lowercase letters, digits and -"
-    else:
-        parse_role(run, role)
+    read_role(run, role, found)
     if role.error:
         raise Refused(f"{origin}: role file {role.path}: {role.error}; available roles: {role_list(found)}")
     return role
@@ -1139,7 +1228,7 @@ def role_size_warning(run, task, role, attempt=None):
     """One `warn` event when the role is longer than ROLE_WORDS_MAX words."""
     if role and role.words > ROLE_WORDS_MAX:
         run.emit("warn", task["id"], attempt, None,
-                 f"role {role.name} ({role.path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
+                 f"role {role.name} ({role.shown_path}) is {role.words} words; over {ROLE_WORDS_MAX} words a worker follows it less "
                  "closely; shorten Method and Review")
 
 
@@ -1232,9 +1321,9 @@ def role_section(role, kind):
     if kind == "verify":
         if not role.review:
             return f"Task role: {role.name}. No review checks."
-        return (f"Task role: {role.name} ({role.path}). Check these in addition to the method under VERIFY:\n\n"
+        return (f"Task role: {role.name} ({role.shown_path}). Check these in addition to the method under VERIFY:\n\n"
                 f"{role.review}")
-    parts = [f"Role: {role.name} ({role.path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
+    parts = [f"Role: {role.name} ({role.shown_path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
     if role.skills:
         parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
                      "load, say so under Deviations: and follow the method below.")
@@ -1246,10 +1335,7 @@ def cmd_roles(run, args):
     found, rows, broken = role_files(run), [], 0
     for name in sorted(found):
         role = found[name]
-        if ROLE_NAME.fullmatch(name):
-            parse_role(run, role)
-        else:
-            role.error = "the file name must be lowercase letters, digits and -"
+        read_role(run, role, found)
         broken += bool(role.error)
         rows.append({"name": name, "source": role.where, "path": role.path, "fits": role.fits, "tier": role.tier,
                      "verify_kind": role.verify_kind, "skills": role.skills, "words": None if role.error else role.words,
