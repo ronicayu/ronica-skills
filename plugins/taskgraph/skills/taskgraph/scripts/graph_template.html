@@ -83,6 +83,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #toolbar .dot.on { background: var(--live); }
 #toolbar .dot.off { background: #ef4444; }
 #toolbar .menuWrap { position: relative; }
+@media (max-width: 640px) {
+  #toolbar #optsWrap, #toolbar #optsWrap.open { display: contents; }
+  #toolbar #optsBtn { display: none; }
+  #toolbar #optsWrap.open #opts { display: block; }
+}
 #toolbar .menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 220px; max-height: calc(100vh - var(--bar) - 16px); overflow-y: auto; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px var(--shadow); }
 #toolbar .menu.right { left: auto; right: 0; }
 #toolbar .menuWrap.open > .menu { display: block; }
@@ -134,43 +139,73 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: var(--tip); border: 1px solid var(--line-2); border-radius: 6px; color: var(--text); font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px var(--shadow); }
 #tip[hidden] { display: none; }
 #cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
-#toolbar #searchBtn, #toolbar #fitMore { display: none; }
+#toolbar #searchBtn, #toolbar #fitMore, #toolbar .phoneOnly { display: none; }
 #toolbar .seg [data-short]::after { content: attr(data-short); display: none; }
-/* Narrow screens: two rows. Row 1 is project, goal, options; row 2 is view, Filter, More and a search button
-   that opens the search box over the row. The rows dissolve so every control can be ordered on one wrapping line. */
+/* A phone has project, view, Filter, search and More on one row. Goal, options and Legend
+   live in More; only active filters add a second line of chips. */
 @media (max-width: 640px) {
-  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 10px; }
+  #toolbar { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 5px; padding: 4px 8px; }
   #toolbar .row { display: contents; }
-  #toolbar .row > .spacer { display: none; }
-  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 32px; padding: 3px 8px; }
-  #toolbar #project { order: 1; flex: 0 1 112px; min-width: 64px; max-width: 140px; text-overflow: ellipsis; }
-  #toolbar #goalWrap { order: 2; flex: 1 1 0; min-width: 72px; }
-  #toolbar #optsWrap { order: 3; }
-  #toolbar #stamp { order: 4; margin-left: -2px; }
-  #toolbar #stamp .t, #toolbar #goalInfo { display: none; }
-  #toolbar #stamp .dot { margin-right: 0; }
-  #toolbar #row1::after { content: ''; order: 5; flex: 0 0 100%; height: 0; }
-  #toolbar .seg { order: 6; }
-  #toolbar .seg button { padding: 3px 7px; }
-  #toolbar .seg [data-short] { font-size: 0; }
-  #toolbar .seg [data-short]::after { display: inline; font-size: 13px; }
-  #toolbar #filterWrap { order: 7; }
-  #toolbar #moreWrap { order: 8; }
-  #toolbar #searchWrap { order: 9; margin-left: auto; }
-  #toolbar #fit { display: none; }
-  #toolbar #fitMore, #toolbar #searchBtn { display: block; }
-  #toolbar #searchBtn { min-width: 36px; font-size: 18px; line-height: 1; }
+  #toolbar .row > .spacer, #toolbar #row1::after { display: none; }
+  #toolbar select, #toolbar input[type=text], #toolbar button { min-height: 44px; padding: 4px 7px; font-size: 13px; }
+  #toolbar #projectWrap { order: 1; flex: 1 1 0; min-width: 44px; }
+  #toolbar #project { display: none; }
+  #toolbar #projectBtn { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 44px; overflow: hidden; }
+  #toolbar #projectLabel { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #toolbar #projectBtn > span[aria-hidden] { flex: none; }
+  #toolbar #projectLive { flex: none; }
+  #toolbar #goalWrap, #toolbar #optsWrap, #toolbar .seg, #toolbar #goalInfo { display: none; }
+  #toolbar #optsWrap.open { display: block; position: static; }
+  #toolbar #stamp { display: none; }
+  #toolbar #projectLive .dot { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--live); }
+  #toolbar #projectLive .dot.off { background: #ef4444; }
+  #toolbar #viewWrap { order: 2; }
+  #toolbar #viewBtn { display: block; }
+  #toolbar #filterWrap { order: 3; }
+  #toolbar #searchWrap { order: 4; }
+  #toolbar #moreWrap { order: 5; }
+  #toolbar #fitMore, #toolbar #searchBtn, #toolbar .phoneOnly { display: block; }
+  #toolbar #fitMore { display: none; }
+  #toolbar #searchBtn, #toolbar #moreBtn { min-width: 44px; font-size: 18px; line-height: 1; }
+  #toolbar #filterBtn { min-width: 44px; padding-inline: 7px; }
+  #toolbar #moreBtn { font-size: 0; }
+  #toolbar #moreBtn::before { content: '⋯'; font-size: 22px; }
   #toolbar #chips, #toolbar #clearAll { order: 10; }
-  #toolbar #chips { flex: 1 1 0; overflow-x: auto; scrollbar-width: none; }
-  #toolbar #chips:empty { display: none; }
+  #toolbar #chips { flex: 1 1 0; min-height: 44px; overflow-x: auto; scrollbar-width: none; }
+  #toolbar #chips:empty, #toolbar #clearAll[hidden] { display: none; }
   #toolbar #chips .chip[data-key="goal"] { display: none; }
-  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; top: calc(var(--bar) + 4px); left: 8px; right: 8px; width: auto; min-width: 0; max-height: calc(100vh - var(--bar) - 16px); }
-  #toolbar .box { display: none; position: fixed; left: 0; right: 0; top: var(--search-top, 0); z-index: 6; box-sizing: border-box; padding: 4px 10px; background: var(--surface); }
-  #toolbar.searching .box { display: flex; }
-  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 32px; }
-  #toolbar #searchClear { right: 12px; min-width: 32px; }
+  #toolbar #chips .chip button { min-width: 44px; min-height: 44px; }
+  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 16px); margin: 0 -8px -4px; box-sizing: border-box; padding: 3px 8px; }
+  #legend { display: none; }
+  #cy { touch-action: none; }
+}
+@media (pointer: coarse) {
+  #toolbar .chip button, #toolbar #searchClear { min-height: 44px; }
+  #toolbar .link { min-height: 44px; padding: 4px 8px; }
+}
+#menuBackdrop { position: fixed; inset: 0; background: #0008; z-index: 7; }
+#menuBackdrop[hidden] { display: none; }
+body.menu-open #toolbar { z-index: 8; }
+@media (max-width: 640px) {
+  #toolbar .menu, #toolbar .menu.right, #toolbar #goalList, #toolbar #results { position: fixed; inset: auto 0 20px 0; width: 100%; min-width: 0; max-width: 100vw; max-height: calc(80dvh - 20px); padding: 8px 8px calc(8px + var(--safe-b)); border-radius: 16px 16px 0 0; z-index: 9; }
+  #toolbar .menu::before { content: ''; display: block; width: 40px; height: 4px; margin: 0 auto 8px; border-radius: 2px; background: var(--line-2); }
+  #toolbar #goalList { display: none; }
+  #toolbar #goalWrap.open { display: block; position: static; }
+  #toolbar #goalWrap.open .combo { display: flex; position: fixed; inset: auto 0 20px 0; z-index: 10; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; }
+  #toolbar #goalWrap.open #goal { flex: 1; min-width: 0; font-size: 16px; }
+  #toolbar #goalWrap.open #goalList { display: block; bottom: 80px; }
+  #toolbar .menu .item, #toolbar .choice { min-height: 44px; padding: 9px 10px; }
+  #toolbar .opt { min-height: 44px; padding: 9px 6px; white-space: normal; }
+  #toolbar .grp { padding: 4px; }
+  #toolbar .list { max-height: none; }
+  #toolbar .link { min-height: 44px; padding: 8px; }
+  #toolbar .box { display: none; position: fixed; inset: auto 0 20px 0; z-index: 10; box-sizing: border-box; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; }
+  #toolbar.searching .box { display: flex; align-items: center; min-height: 60px; }
+  #toolbar.searching #results { top: auto; bottom: 80px; border-radius: 16px 16px 0 0; }
+  #toolbar #search { flex: 1; width: auto; min-width: 0; padding-right: 44px; font-size: 16px; }
+  #toolbar #searchClear { right: 8px; min-width: 44px; min-height: 44px; }
   #toolbar #searchCount { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  #toolbar #banner { flex: 0 0 auto; width: calc(100% + 20px); margin: 0 -10px -4px; box-sizing: border-box; padding: 3px 10px; }
+  #toolbar input[type=number] { font-size: 16px; }
 }
 #legend { position: fixed; left: 14px; bottom: 14px; max-width: calc(100vw - 28px - var(--panel-w, 0px)); background: var(--surface-a); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 6px; font-size: 12px; z-index: 2; }
 #legendBody { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
@@ -272,7 +307,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #fit { position: fixed; right: calc(var(--panel-w) + 14px); bottom: calc(var(--sheet-h) + 14px + var(--safe-b)); min-width: 44px; min-height: 36px; padding: 5px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); font: inherit; cursor: pointer; z-index: 2; }
 #fit:hover { background: var(--hover); }
 @media (pointer: coarse) {
-  #toolbar button, #toolbar select, #toolbar input[type=text], #toolbar input[type=number], #legendToggle, #empty button { min-width: 44px; min-height: 44px; font-size: 16px; }
+  #toolbar button, #toolbar select, #toolbar input[type=text], #toolbar input[type=number], #legendToggle, #empty button { min-height: 44px; font-size: 16px; }
   #fit, #panel button, #panel .row[role=button], #loadView [role=button], table.load td.c[role=button] { min-height: 44px; }
   #panel #panelClose { min-width: 44px; width: 44px; height: 44px; }
   #panel li > .row { padding-top: 8px; padding-bottom: 8px; }
@@ -387,7 +422,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
 <header id="toolbar" aria-label="Plan controls">
   <h1 class="sr-only" id="pageTitle">taskgraph</h1>
   <div class="row" id="row1">
-    <select id="project" title="Project" aria-label="Project"></select>
+    <span class="menuWrap" id="projectWrap"><button id="projectBtn" class="phoneOnly" aria-expanded="false" aria-controls="projectMenu" aria-label="Project" title="Project"><span id="projectLive"></span><span id="projectLabel">All projects</span><span aria-hidden="true"> ▾</span></button><select id="project" title="Project" aria-label="Project"></select><div class="menu" id="projectMenu" role="listbox" aria-label="Projects"></div></span>
     <span class="combo menuWrap" id="goalWrap">
       <input type="text" id="goal" placeholder="All goals" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="goalList" aria-autocomplete="list" aria-label="Goal: show only what one milestone or objective needs" title="Show only what one milestone or objective needs">
       <span class="caret" aria-hidden="true">▾</span>
@@ -395,6 +430,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     </span>
     <span class="goalinfo" id="goalInfo" hidden></span>
     <span class="seg" role="group" aria-label="View"><button id="viewGraph" aria-label="Graph"><span aria-hidden="true">Graph</span></button><button id="viewLanes" aria-label="Swimlane"><span aria-hidden="true" data-short="Lanes">Swimlane</span></button><button id="viewTimeline" aria-label="Timeline"><span aria-hidden="true" data-short="Time">Timeline</span></button><button id="viewLoad" aria-label="Load" title="Hours per person per week, from estimates"><span aria-hidden="true">Load</span></button></span>
+    <span class="menuWrap" id="viewWrap"><button id="viewBtn" class="phoneOnly" aria-expanded="false" aria-controls="viewMenu" aria-label="Choose view"><span id="viewLabel">Graph</span><span aria-hidden="true"> ▾</span></button><div class="menu" id="viewMenu" role="listbox" aria-label="Views"></div></span>
     <span class="menuWrap" id="optsWrap"><button id="optsBtn" aria-expanded="false" aria-controls="opts" aria-label="View options" title="View options">⚙ ▾</button>
       <div class="menu" id="opts">
         <div class="grp" id="lanesBy" role="radiogroup" aria-labelledby="lanesHead"><div class="h" id="lanesHead">Lanes by <span class="note" id="lanesNote">Swimlane and Timeline</span></div></div>
@@ -423,7 +459,9 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     <span class="spacer"></span>
     <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-expanded="false" aria-controls="more" title="More actions">More ▾</button>
       <div class="menu right" id="more">
-        <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
+        <button class="item phoneOnly" id="goalMore">Goal…</button>
+        <button class="item phoneOnly" id="optsMore">View options…</button>
+        <button class="item phoneOnly" id="legendMore" aria-expanded="false" aria-controls="legendBody">Legend</button>        <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
         <button class="item" id="collapseAll" title="Collapse all workstreams (objectives stay open)">Collapse all <kbd>C</kbd></button>
         <button class="item" id="fitMore" title="Show the whole plan (F)">Fit <kbd>F</kbd></button>
         <button class="item" id="relayout" title="Lay the view out again">Re-layout</button>
@@ -437,6 +475,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
   </div>
   <div id="banner" role="alert" hidden></div>
 </header>
+<div id="menuBackdrop" hidden></div>
 <main id="main" tabindex="-1" aria-label="Plan">
 <div id="cy" tabindex="0" role="application" aria-roledescription="plan" aria-label="Plan" aria-describedby="cyHelp"></div>
 <p id="cyHelp" class="sr-only">Arrow keys move between items, Home and End go to the first and last. Enter opens the item's details, Space expands or collapses a summary, plus and minus zoom.</p>
@@ -1542,7 +1581,7 @@ function fitTarget(eles = cy.elements(), pad = narrowScreen.matches ? 12 : 40) {
   if (eles.empty()) return null;
   const bb = eles.boundingBox();
   const box = $('cy').getBoundingClientRect(), legend = $('legend').getBoundingClientRect();
-  const reserve = Math.max(pad, box.bottom - legend.top + 12);
+  const reserve = phoneChrome() ? pad : Math.max(pad, box.bottom - legend.top + 12);
   const w = box.width - 2 * pad, h = box.height - pad - reserve;
   const zoom = Math.min(MAX_FIT, Math.max(cy.minZoom(), Math.min(w / Math.max(bb.w, 1), h / Math.max(bb.h, 1))));
   return { zoom, pan: { x: pad + (w - zoom * bb.w) / 2 - zoom * bb.x1, y: pad + (h - zoom * bb.h) / 2 - zoom * bb.y1 } };
@@ -1597,7 +1636,7 @@ function hiddenTasks() {
   if (all.empty()) return false;
   const box = $('cy').getBoundingClientRect(), l = $('legend').getBoundingClientRect();
   const legend = { x1: l.left - box.left, x2: l.right - box.left, y1: l.top - box.top, y2: l.bottom - box.top };
-  const under = b => b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1;
+  const under = b => !phoneChrome() && b.x1 < legend.x2 && b.x2 > legend.x1 && b.y1 < legend.y2 && b.y2 > legend.y1;
   const u = all.renderedBoundingBox();
   if (u.x1 < 0 || u.y1 < 0 || u.x2 > box.width || u.y2 > box.height) return true;
   return under(u) && all.some(n => under(n.renderedBoundingBox()));
@@ -2114,6 +2153,7 @@ function openHit(i) {
   searched.at = i;
   searched.moved = false;
   setMenu('searchWrap', false);
+  if (phoneChrome()) openSearchBox(false);
   select(hits[i].id, true);
   applySearch();
 }
@@ -2937,11 +2977,14 @@ const keepsIgnoringDone = n => {
   return (!project || n.project === project || (scope && scope.has(n.id))) && (!scope || scope.has(n.id));
 };
 
-// Popovers: one open at a time, closed by a click elsewhere or Esc. Menus of actions close
-// after a choice; Filter and View options stay open while several boxes are ticked.
-const MENUS = ['goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
+// Popovers: one open at a time, closed by a click elsewhere, the phone backdrop, or Esc.
+// On a phone they become bottom sheets. Menus of actions close after a choice; Filter and
+// View options stay open while several boxes are ticked.
+const MENUS = ['projectWrap', 'viewWrap', 'goalWrap', 'optsWrap', 'filterWrap', 'moreWrap', 'searchWrap'];
+const MENU_NAMES = { projectWrap: 'Project', viewWrap: 'View', goalWrap: 'Goal', optsWrap: 'View options', filterWrap: 'Filter', moreWrap: 'More actions', searchWrap: 'Search results' };
 const menuOpen = id => $(id).classList.contains('open');
 function setMenu(id, open) {
+  const wasModal = document.body.classList.contains('menu-open');
   MENUS.forEach(m => {
     const on = m === id ? open : false;
     if (menuOpen(m) === on) return;
@@ -2949,21 +2992,74 @@ function setMenu(id, open) {
     $(m).querySelector('[aria-expanded]').setAttribute('aria-expanded', String(on));
     if (m === 'filterWrap' && on) fillFilters();
     if (m === 'goalWrap' && !on) showGoal();
+    if (m === 'projectWrap' && on) renderProjects();
+    if (m === 'viewWrap' && on) renderViews();
+  });
+  const menu = MENUS.find(menuOpen), modal = !!menu && phoneChrome();
+  const searching = phoneChrome() && toolbar.classList.contains('searching');
+  $('menuBackdrop').hidden = !(modal || searching);
+  document.body.classList.toggle('menu-open', modal || searching);
+  if (id && open) {
+    const control = $(id).querySelector('.menu');
+    if (modal && control.getAttribute('role') !== 'dialog') {
+      control.dataset.popoverRole = control.getAttribute('role') || '';
+      control.setAttribute('role', 'dialog');
+      control.setAttribute('aria-label', MENU_NAMES[id]);
+    }
+    if (modal && !wasModal && !$(id).contains(document.activeElement)) {
+      (control.querySelector('button:not(:disabled), input:not(:disabled)') || $(id).querySelector('[aria-expanded]')).focus();
+    }
+  }
+  MENUS.filter(m => !menuOpen(m)).forEach(m => {
+    const control = $(m).querySelector('.menu');
+    if (control.dataset.popoverRole != null) {
+      if (control.dataset.popoverRole) control.setAttribute('role', control.dataset.popoverRole);
+      else control.removeAttribute('role');
+      delete control.dataset.popoverRole;
+    }
   });
 }
 // Closing a popover from inside it puts focus back on the button that opened it.
 function closeMenus() {
   const open = MENUS.find(menuOpen);
   if (!open) return false;
-  const back = $(open).contains(document.activeElement) && $(open).querySelector('[aria-expanded]');
+  const back = $(open).querySelector('[aria-expanded]');
   setMenu(null, false);
   if (back && back !== document.activeElement) back.focus();
   return true;
 }
-[['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
+[['projectBtn', 'projectWrap'], ['viewBtn', 'viewWrap'], ['optsBtn', 'optsWrap'], ['filterBtn', 'filterWrap'], ['moreBtn', 'moreWrap']].forEach(([b, m]) => { $(b).onclick = () => setMenu(m, !menuOpen(m)); });
+$('menuBackdrop').onclick = () => {
+  if (menuOpen('searchWrap')) closeMenus();
+  else if (toolbar.classList.contains('searching')) { openSearchBox(false); $('searchBtn').focus(); }
+  else closeMenus();
+};
+// Modal sheets trap Tab, while the goal and search fields keep their combobox keyboard model.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const open = MENUS.find(menuOpen);
+  if (!open || !phoneChrome()) return;
+  const focus = [...$(open).querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]')].filter(x => x.offsetParent !== null);
+  if (!focus.length) return;
+  const first = focus[0], last = focus[focus.length - 1];
+  if (!focus.includes(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
+$('goalMore').onclick = () => {
+  setMenu('goalWrap', true);
+  renderGoalList(false);
+  goalBox.focus();
+};
+$('optsMore').onclick = () => { setMenu('optsWrap', true); $('opts').querySelector('input:not(:disabled)')?.focus(); };
+$('legendMore').onclick = () => {
+  setLegend($('legend').classList.contains('closed'));
+  setMenu('moreWrap', false);
+  fitIfOutside();
+};
 // The path, not the target: a click that re-renders a popover leaves its target detached.
 document.addEventListener('click', e => { if (!e.composedPath().some(n => n.classList && n.classList.contains('menuWrap'))) closeMenus(); });
-$('more').addEventListener('click', e => { if (e.target.closest('.item')) setMenu('moreWrap', false); });
+$('more').addEventListener('click', e => { if (e.target.closest('.item') && !e.target.closest('#goalMore, #optsMore, #legendMore')) setMenu('moreWrap', false); });
 
 // View options: radios for lanes and dependencies; the ones that do nothing in this view say so.
 const LANE_NAMES = { lane: 'Lane', owner: 'Owner', tag: 'Tag', project: 'Project' };
@@ -3023,6 +3119,8 @@ function setLaneKey(v) {
 }
 
 const syncControls = () => {
+  $('projectLabel').textContent = projectSelect.value || 'All projects';
+  $('viewLabel').textContent = { graph: 'Graph', lanes: 'Swimlane', timeline: 'Timeline', load: 'Load' }[view];
   $('viewGraph').classList.toggle('on', view === 'graph');
   $('viewLanes').classList.toggle('on', view === 'lanes');
   $('viewTimeline').classList.toggle('on', view === 'timeline');
@@ -3149,7 +3247,7 @@ goalBox.onkeydown = e => {
     goalBox.blur();
   }
 };
-goalBox.onblur = () => setTimeout(() => { if (document.activeElement !== goalBox) setMenu('goalWrap', false); }, 0);
+goalBox.onblur = () => setTimeout(() => { if (document.activeElement !== goalBox && !phoneChrome()) setMenu('goalWrap', false); }, 0);
 $('goalList').addEventListener('mousedown', e => e.preventDefault());
 $('goalList').addEventListener('click', e => {
   const c = e.target.closest('.choice');
@@ -3160,6 +3258,20 @@ $('viewGraph').onclick = () => setView('graph');
 $('viewLanes').onclick = () => setView('lanes');
 $('viewTimeline').onclick = () => setView('timeline');
 $('viewLoad').onclick = () => setView('load');
+function renderProjects() {
+  $('projectMenu').replaceChildren(...Array.from(projectSelect.options, o => {
+    const row = el('button', { className: 'item choice' + (o.value === projectSelect.value ? ' active' : ''), role: 'option', ariaSelected: String(o.value === projectSelect.value), textContent: o.textContent });
+    row.onclick = () => { projectSelect.value = o.value; setMenu('projectWrap', false); projectSelect.onchange(); };
+    return row;
+  }));
+}
+function renderViews() {
+  $('viewMenu').replaceChildren(...VIEWS.map(v => {
+    const row = el('button', { className: 'item choice' + (v === view ? ' active' : ''), role: 'option', ariaSelected: String(v === view), textContent: VIEW_NAMES[v] });
+    row.onclick = () => { setMenu('viewWrap', false); setView(v); };
+    return row;
+  }));
+}
 $('skip').onclick = e => {
   e.preventDefault();
   (view === 'load' ? $('loadView').querySelector('[role=button], td.c') || $('main') : $('cy')).focus();
@@ -3188,25 +3300,32 @@ $('search').onblur = () => setTimeout(() => {
   setMenu('searchWrap', false);
   openSearchBox(false);
 }, 0);
-// On a narrow screen the box is hidden behind a button and opens over the second toolbar row.
+// On a narrow screen the search icon opens a sheet above the results.
 function openSearchBox(open) {
   if (toolbar.classList.contains('searching') === open) return;
-  if (open) toolbar.style.setProperty('--search-top', ($('searchBtn').getBoundingClientRect().top - 4) + 'px');
+  if (open) MENUS.forEach(m => { if (m !== 'searchWrap') setMenu(m, false); });
   toolbar.classList.toggle('searching', open);
   $('searchBtn').setAttribute('aria-expanded', String(open));
+  if (phoneChrome()) {
+    $('menuBackdrop').hidden = !open || MENUS.some(menuOpen);
+    document.body.classList.toggle('menu-open', open || MENUS.some(menuOpen));
+  }
 }
 function focusSearch() {
   openSearchBox(true);
   $('search').focus();
   $('search').select();
 }
-$('searchBtn').onclick = focusSearch;
+$('searchBtn').onclick = () => {
+  if (toolbar.classList.contains('searching')) { openSearchBox(false); return; }
+  focusSearch();
+};
 $('fitMore').onclick = () => $('fit').click();
 $('searchClear').onclick = () => {
   clearSearch();
   $('search').focus();
 };
-$('results').addEventListener('mousedown', e => e.preventDefault());
+$('results').addEventListener('mousedown', e => { if (!touchPointer.matches) e.preventDefault(); });
 $('searchClear').addEventListener('mousedown', e => e.preventDefault());
 $('results').addEventListener('click', e => {
   const r = e.target.closest('.hit');
@@ -3518,6 +3637,8 @@ const setLegend = (open, save = true) => {
   $('legend').classList.toggle('closed', !open);
   $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
   $('legendToggle').setAttribute('aria-expanded', String(open));
+  $('legendMore').setAttribute('aria-expanded', String(open));
+  $('legendMore').textContent = open ? 'Legend ✓' : 'Legend';
   $('legendOn').checked = open;
   if (save) store.set('taskgraph.legend', open ? 'open' : 'closed');
 };
@@ -3551,6 +3672,7 @@ if (DATA.live) {
     const when = new Date().toLocaleTimeString([], HM);
     if (ok) lastOk = when;
     $('stamp').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }), el('span', { className: 't', textContent: lastOk || when }));
+    $('projectLive').replaceChildren(el('i', { className: 'dot ' + (ok ? 'on' : 'off') }));
     $('stamp').title = ok ? 'Live · checked ' + when : `Disconnected · tried ${when} · last good ${lastOk || 'never'}`;
     $('banner').hidden = ok;
     if (!ok) $('banner').replaceChildren(`Not live since ${lastOk || 'the page opened'} · the server is not answering, so this may be out of date.`,
