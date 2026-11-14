@@ -1065,7 +1065,8 @@ folder with the worktree after the merge.
 
 ### Auto-mode allow rules for workers
 
-A worker uses scratch folders, cold-cache runs and temporary directories. In auto
+A worker uses scratch folders and cold-cache runs, both inside its worktree's
+`.agentic-team-scratch/` (it never uses `/tmp` or `mktemp`). In auto
 mode, a prompt on these steps stalls a session nobody watches. Add rules like these
 to `autoMode.allow` in the Claude Code settings of the operator (`~/.claude/settings.json`),
 and change the paths to your own:
@@ -1075,8 +1076,7 @@ and change the paths to your own:
   "autoMode": {
     "allow": [
       "$defaults",
-      "Scratch and cache housekeeping in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating, copying into and deleting directories under that worktree's .agentic-team-scratch/, and the worktree's own build or test caches (node_modules/.cache, .pytest_cache, .ruff_cache, .vitest cache, test-results), is routine and allowed.",
-      "Temporary directories for worker tasks: creating directories under /tmp, $TMPDIR or the system temp folder, writing tree copies there (git archive, cp -R of the repo) and deleting those directories afterwards is routine and allowed."
+      "Scratch and cache housekeeping in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating, copying into and deleting directories under that worktree's .agentic-team-scratch/, and the worktree's own build or test caches (node_modules/.cache, .pytest_cache, .ruff_cache, .vitest cache, test-results), is routine and allowed."
     ]
   }
 }
@@ -1084,7 +1084,7 @@ and change the paths to your own:
 
 A rule is free text that the auto-mode classifier reads. Keep `"$defaults"` first so the
 built-in rules stay. A rule must not allow deleting a shared cache or a path outside
-the worktrees and temporary directories.
+the worktrees.
 
 ## Results
 
