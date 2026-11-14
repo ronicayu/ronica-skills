@@ -139,7 +139,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #toolbar #banner button { margin-left: 6px; padding: 0 8px; background: #1c1004; color: #fde68a; border-color: #1c1004; }
 #tip { position: fixed; z-index: 10; max-width: 420px; padding: 5px 9px; background: var(--tip); border: 1px solid var(--line-2); border-radius: 6px; color: var(--text); font-size: 12px; pointer-events: none; box-shadow: 0 4px 12px var(--shadow); }
 #tip[hidden] { display: none; }
-#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; }
+#cy { position: fixed; top: var(--bar); left: 0; right: 0; bottom: 0; touch-action: none; }
 #toolbar #searchBtn, #toolbar #fitMore, #toolbar .phoneOnly { display: none; }
 #toolbar .seg [data-short]::after { content: attr(data-short); display: none; }
 /* A phone has project, view, Filter, search and More on one row. Goal, options and Legend
@@ -864,8 +864,18 @@ const cy = cytoscape({
   container: $('cy'),
   minZoom: 0.1,
   maxZoom: 3,
+  pixelRatio: Math.min(2, window.devicePixelRatio || 1),
+  textureOnViewport: true,
   wheelSensitivity: 0.3,
   style: cyStyle(P)
+});
+// Touch: nodes cannot be dragged (a pan that starts on one would move it), and a drag that starts
+// on a node pans the view as one on the background does.
+cy.autoungrabify(touchPointer.matches);
+cy.on('add', 'node', e => { if (touchPointer.matches) e.target.panify(); });
+touchPointer.addEventListener('change', e => {
+  cy.autoungrabify(e.matches);
+  cy.nodes()[e.matches ? 'panify' : 'unpanify']();
 });
 
 let goal = Number(query.get('goal')) || null;
@@ -2745,6 +2755,21 @@ $('loadView').addEventListener('mousemove', e => {
   tipAt = { x: e.clientX, y: e.clientY };
   if (!$('tip').hidden) placeTip();
 });
+// Semantic zoom changes a class once the viewport settles, never a label every frame.
+let zoomClassTimer = null, zoomClassAt = 0;
+function updateZoomClass() {
+  zoomClassAt = cy.zoom();
+  if (zoomClassTimer !== null) {
+    clearTimeout(zoomClassTimer);
+    zoomClassTimer = null;
+  }
+  zoomClassTimer = setTimeout(() => {
+    zoomClassTimer = null;
+    const idOnly = zoomClassAt < .6, blockOnly = zoomClassAt < .33;
+    cy.batch(() => cy.nodes().forEach(n => n.toggleClass('id-only', idOnly).toggleClass('block-only', blockOnly)));
+  }, 80);
+}
+cy.on('zoom', updateZoomClass);
 cy.on('viewport tapstart', hideTip);
 
 // Hover only highlights: on a projector a resting mouse must not fade the slide.
@@ -2765,9 +2790,11 @@ cy.on('mouseout', 'node', () => {
 cy.on('tap', 'node', e => {
   const n = byId.get(Number(e.target.id()));
   kbdId = n.id;
-  highlight(n.id);
+  // Touch selects immediately instead of waiting to distinguish a second tap.
+  if (touchPointer.matches) select(n.id, false);
+  else highlight(n.id);
 });
-cy.on('dbltap', 'node', e => select(Number(e.target.id()), false));
+cy.on('dbltap', 'node', e => { if (!touchPointer.matches) select(Number(e.target.id()), false); });
 // Keyboard on the plan: the canvas is one tab stop with a current item, ringed while it has focus
 // and spoken through the live region. Arrows move by position (by row in the Timeline), Home and
 // End jump, Enter opens the panel, Space expands or collapses a summary, + and - zoom.
@@ -2885,6 +2912,11 @@ function edgeItem(edge) {
 cy.on('tap', 'edge', e => { if (!e.target.hasClass('bg')) highlight(edgeItem(e.target)); });
 cy.on('dbltap', 'edge', e => { if (!e.target.hasClass('bg')) select(edgeItem(e.target), false); });
 cy.on('tap', e => { if (e.target === cy) closePanel(); });
+cy.on('dbltap', e => {
+  if (e.target !== cy) return;
+  userMoved = true;
+  cy.animate({ zoom: { level: Math.min(cy.maxZoom(), cy.zoom() * 1.4), renderedPosition: e.renderedPosition }, duration: 160 * MOTION });
+});
 
 const projectSelect = $('project');
 projectSelect.append(el('option', { value: '', textContent: 'All projects' }));

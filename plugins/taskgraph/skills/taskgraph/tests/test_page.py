@@ -1802,6 +1802,42 @@ def test_desktop_graph_fixed_cards_do_not_overlap(browser, page_file):
     page.close()
 
 
+def test_phone_graph_cards_zoom_and_touch_selection(browser, page_file):
+    page, problems = open_phone(browser, page_file)
+    sizes = page.evaluate("tasks().filter(n => n.data('type') !== 'milestone').map(n => [n.width(), n.height(), n.data('label').split('\\n').length])")
+    assert sizes and all(w == 164 and h == 60 and lines <= 3 for w, h, lines in sizes)
+    # Evaluate to a number: returning cy itself makes Playwright serialise the whole graph.
+    page.evaluate("cy.zoom(.5); 0")
+    page.wait_for_function("tasks().every(n => n.hasClass('id-only') && !n.hasClass('block-only'))")
+    assert page.evaluate("tasks().map(n => n.style('label'))") == page.evaluate("tasks().map(n => '#' + n.id())")
+    page.evaluate("cy.zoom(.3); 0")
+    page.wait_for_function("tasks().every(n => n.hasClass('block-only'))")
+    assert set(page.evaluate("tasks().map(n => n.style('label'))")) == {""}
+    page.evaluate("cy.zoom(.8); 0")
+    page.wait_for_function("tasks().every(n => !n.hasClass('id-only'))")
+    assert page.evaluate("cy.getElementById('3').grabbable()") is False
+    # A real touch drag that starts on a node pans the view and leaves the node where it was.
+    page.evaluate("cy.center(cy.getElementById('3')); 0")
+    before, pan = page.evaluate("[cy.getElementById('3').position(), cy.pan()]")
+    x, y = page.evaluate("""() => { const p = cy.getElementById('3').renderedPosition(), b = document.getElementById('cy').getBoundingClientRect(); return [b.left + p.x, b.top + p.y]; }""")
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+    for k in range(1, 9):
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": x + 10 * k, "y": y + 8 * k}]})
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    page.wait_for_timeout(100)
+    assert page.evaluate("cy.getElementById('3').position()") == before
+    moved = page.evaluate("cy.pan()")
+    assert moved["x"] - pan["x"] > 40 and moved["y"] - pan["y"] > 30
+    # A single tap selects at once, with no wait for a possible second tap.
+    page.evaluate("cy.getElementById('3').emit({ type: 'tap', position: cy.getElementById('3').position() }); 0")
+    assert page.evaluate("pinned") == 3 and page.evaluate(PANEL_OPEN)
+    assert page.evaluate("getComputedStyle(document.getElementById('cy')).touchAction") == "none"
+    assert page.evaluate("getComputedStyle(document.body).overscrollBehavior") == "none"
+    assert problems == []
+    page.close()
+
+
 def test_phone_menus_are_bottom_sheets_inside_viewport(browser, page_file):
     page, problems = open_phone(browser, page_file)
     for button, menu in (("projectBtn", "projectMenu"), ("viewBtn", "viewMenu"), ("filterBtn", "filters"), ("moreBtn", "more")):
