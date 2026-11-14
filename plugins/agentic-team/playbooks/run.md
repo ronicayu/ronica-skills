@@ -125,7 +125,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - Before you close a task, sort every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes, into one of three places: a new task, the tail of a later task's notes, or dropped with a one-line reason in the task's notes. Never leave one unsorted. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is sorted the same way and never opens a fix round.
+   - Before you close a task, triage every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes: a new task, the tail of a later task's notes, or won't-fix with a one-line reason in the task's notes. Never leave one untriaged. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is triaged the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, and then follows `merge.mode`. The task is done only
      when its change is merged; until then it stays in progress with

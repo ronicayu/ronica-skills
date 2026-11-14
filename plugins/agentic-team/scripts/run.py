@@ -318,7 +318,8 @@ class Run:
         self.db = os.path.abspath(os.path.expanduser(os.environ.get("TASKGRAPH_DB") or "~/.taskgraph/tasks.db"))
         self.run_dir = os.path.abspath(args.run_dir or os.path.join(self.root, ".agentic-team"))
         self.wt_dir = os.path.realpath(os.path.join(self.root, ".claude", "worktrees"))
-        self._sessions = None
+        self._sessions = self._users = self._worktrees = self._sweep_cache = None
+        self.sweep_dirty = False
         self.extra_profiles = set()  # profiles to list although no `sessions` entry names them yet (a launch in flight)
         self._host = self._default = None
         self.host_failed = False
@@ -2030,9 +2031,17 @@ def start_session(run, worktree, name, model, effort, text, profile=None, settin
     return out.stdout.strip()
 
 
-def registered_worktrees(run):
+def worktree_list(run, cached=False):
+    """`git worktree list --porcelain`. `cached` reuses the list cleanup read earlier in this command; cleanup drops it
+    when it changes a worktree."""
+    if not cached or run._worktrees is None:
+        run._worktrees = run.git("worktree", "list", "--porcelain", check=False).stdout
+    return run._worktrees
+
+
+def registered_worktrees(run, cached=False):
     """Real paths of the worktrees git has registered, including stale ones whose folder is gone."""
-    out = run.git("worktree", "list", "--porcelain", check=False).stdout
+    out = worktree_list(run, cached)
     return {os.path.realpath(line[len("worktree "):]) for line in out.splitlines() if line.startswith("worktree ")}
 
 
@@ -4121,6 +4130,7 @@ def cmd_record(run, args):
         run.emit("decision", d["id"], None, None,
                  f'"{d["title"]}" decider {(d.get("meta") or {}).get("decider") or "none"} '
                  f"by {d.get('due') or 'no date'} blocks {ids_text(blocks)}")
+    run._sessions = None  # cleanup kept the list it read earlier; count live sessions as they are now
     run.emit("slots", None, None, None, f"{live_count(run)}/{run.config['sessions']['max_parallel']} live")
     ready_events(run, snap)
 
@@ -4292,9 +4302,9 @@ def cmd_notify_to(run, args):
 
 # ----------------------------------------------------------------- cleanup
 
-def worktree_locks(run):
+def worktree_locks(run, cached=False):
     """{real path: lock reason} for the locked worktrees git lists. The reason is "" for a lock without one."""
-    out = run.git("worktree", "list", "--porcelain", check=False).stdout
+    out = worktree_list(run, cached)
     locks, path = {}, None
     for line in out.splitlines():
         if line.startswith("worktree "):
@@ -4393,6 +4403,13 @@ def pid_alive(pid):
     except PermissionError:
         return True
     return True
+
+
+def cwd_users_once(run):
+    """cwd_users(), read at most once per run.py command: one `lsof` for every folder cleanup checks."""
+    if run._users is None:
+        run._users = (cwd_users(),)
+    return run._users[0]
 
 
 def cwd_users():
@@ -4548,7 +4565,72 @@ def container_reason(run, path):
     return f"used by docker: {files_text(uses, limit=3)}" if uses else None
 
 
-def folder_check(run, task, folder, path, registered, live, locks, users):
+SWEEP_RECHECK_SECONDS = 1800  # a reused `kept` reason is checked with git again after this long, changed or not
+
+
+def folder_stamp(path):
+    """The modification times of a worktree folder, its HEAD and its index, or None: a new or deleted top-level file,
+    a checkout or a `git add` moves one of them."""
+    try:
+        with open(os.path.join(path, ".git"), encoding="utf-8") as fh:
+            line = fh.read().strip()
+        if not line.startswith("gitdir: "):
+            return None
+        gitdir = os.path.join(path, line[len("gitdir: "):])
+        return [os.stat(p).st_mtime_ns if os.path.exists(p) else 0
+                for p in (path, os.path.join(gitdir, "HEAD"), os.path.join(gitdir, "index"))]
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def sweep_cache(run):
+    """{folder path: {"stamp", "at", "why", "ignored"}}: the last `git status` check of each folder `record`'s sweep
+    kept, from .agentic-team/sweep-cache.json. Local run state, never in Taskgraph; a file that cannot be read or does
+    not have this shape reads as empty."""
+    if run._sweep_cache is None:
+        try:
+            with open(os.path.join(run.run_dir, "sweep-cache.json"), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        run._sweep_cache = {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("stamp"), list)
+                            and isinstance(v.get("at"), (int, float)) and isinstance(v.get("why"), (str, type(None)))
+                            and isinstance(v.get("ignored"), list)} if isinstance(data, dict) else {}
+    return run._sweep_cache
+
+
+def save_sweep_cache(run):
+    """Best effort: a cache that cannot be written only costs the next `record` its git calls."""
+    cache = {k: v for k, v in sweep_cache(run).items() if os.path.isdir(k)}
+    temp = os.path.join(run.run_dir, f".sweep-cache.json.{os.getpid()}")
+    try:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with open(temp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(temp, os.path.join(run.run_dir, "sweep-cache.json"))
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(temp)
+
+
+def swept_status(run, path, sweep):
+    """status_reason(), or in a sweep its last result while the folder's stamp is unchanged and the result is younger
+    than SWEEP_RECHECK_SECONDS. A reused result never removes a folder: cleanup checks again, uncached, before it does."""
+    if not sweep:
+        return status_reason(run, path)
+    cache, stamp = sweep_cache(run), folder_stamp(path)
+    entry = cache.get(path)
+    if (stamp is not None and entry and entry["stamp"] == stamp
+            and 0 <= time.time() - entry["at"] < SWEEP_RECHECK_SECONDS):
+        return entry["why"], entry["ignored"]
+    why, ignored = status_reason(run, path)
+    if stamp is not None:
+        cache[path] = {"stamp": stamp, "at": time.time(), "why": why, "ignored": ignored}
+        run.sweep_dirty = True
+    return why, ignored
+
+
+def folder_check(run, task, folder, path, registered, live, locks, users, sweep=False):
     """Why a worktree folder is not safe to remove, else None. The checks, in this order: no live session,
     process or Docker container uses it; `git status` shows no change; every ignored path is disposable; its
     HEAD commit is merged. A lock must be Claude Code's own for a session that has ended. Returns (reason,
@@ -4571,7 +4653,7 @@ def folder_check(run, task, folder, path, registered, live, locks, users):
     why = container_reason(run, path)
     if why:
         return why, None, None, []
-    why, ignored = status_reason(run, path)
+    why, ignored = swept_status(run, path, sweep)
     if why:
         return why, None, None, []
     head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
@@ -4611,7 +4693,7 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     for s in rows:
         if s.sid and s.sid not in gone and (s.wtname == folder or cwd_in(s.cwd, path)):
             out = run.claude("rm", s.sid, check=False, profile=s.profile)
-            if out.returncode == 0:
+            if out.returncode == 0 or no_such_session(out):
                 gone.add(s.sid)
             else:
                 run.emit("kept", tid, None, s.sid, f"{folder}: claude rm said: {first_line(out.stderr or out.stdout)}")
@@ -4619,6 +4701,11 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     if ignored:
         extra = f" (ignored files removed: {len(ignored)}: {', '.join(ignored[:5])}{', ...' if len(ignored) > 5 else ''})"
     run.emit("removed", tid, None, None, f"worktree {folder} (merged at {head[:7]}){extra}")
+
+
+def no_such_session(out):
+    """True when `claude rm` failed only because the CLI has no such session: the row is already gone."""
+    return out.returncode != 0 and bool(re.search(r"No job matching", f"{out.stderr}\n{out.stdout}"))
 
 
 def cleanup(run, task, sweep=False):
@@ -4671,13 +4758,14 @@ def cleanup(run, task, sweep=False):
         if os.path.isdir(wt):
             if s.wtname not in held_back:
                 real = os.path.realpath(wt)
-                held_back[s.wtname] = bool(status_reason(run, real)[0] or container_reason(run, real))
+                held_back[s.wtname] = bool(swept_status(run, real, sweep)[0] or container_reason(run, real))
             if held_back[s.wtname]:
                 continue
         out = run.claude("rm", s.sid, check=False, profile=s.profile)
-        if out.returncode == 0:
+        if out.returncode == 0 or no_such_session(out):
             gone.add(s.sid)
-            run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}")
+            run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}"
+                     + (" (the CLI no longer had the session)" if out.returncode else ""))
             continue
         message = (out.stderr + "\n" + out.stdout).strip()
         m = re.search(r"--discard-unpushed\s+([0-9A-Za-z]+)@(\S+)", message)
@@ -4696,20 +4784,27 @@ def cleanup(run, task, sweep=False):
                 held.setdefault(s.wtname, (s.sid, f"commit {commit} is not merged"))
         else:
             held.setdefault(s.wtname, (s.sid, f"claude rm said: {first_line(message)}"))
-    run._sessions = None  # the pass changed the rows; look again before the sweep
-    registered, locks = registered_worktrees(run), worktree_locks(run)
-    live = [s for s in run.sessions() if s.live and not s.ghost]
+    if gone:  # the pass changed the rows and may have removed a folder; look again before the sweep
+        run._sessions = run._worktrees = None
     present = [f for f in sum(task_folders(run, tid), []) if os.path.isdir(os.path.join(run.wt_dir, f))]
-    users = cwd_users() if present else None
+    registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
+    live = [s for s in run.sessions() if s.live and not s.ghost]
+    users = cwd_users_once(run) if present else None
     swept = set()
     for folder in sorted(present):
         path = os.path.join(run.wt_dir, folder)
         swept.add(folder)
-        reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users)
+        reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users, sweep)
+        if not reason:  # the lists above may be from earlier in this command: read them all again before a removal
+            run._sessions = run._worktrees = run._users = None
+            registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
+            live, users = [s for s in run.sessions() if s.live and not s.ghost], cwd_users_once(run)
+            reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users)
         if reason:
             note(folder, reason, sid)
         else:
             remove_folder(run, task, folder, path, locks, head, ignored, run.sessions(), gone, note)
+            run._sessions = run._worktrees = None
     for folder, (sid, detail) in held.items():  # a session whose folder the sweep did not see
         if folder not in swept:
             note(folder, detail, sid)
@@ -4720,6 +4815,9 @@ def cleanup(run, task, sweep=False):
             note(s.wtname, "still running", s.sid)
     if after != before:
         run.set_meta(task, cleanup_kept=after)
+    if run.sweep_dirty:
+        save_sweep_cache(run)
+        run.sweep_dirty = False
 
 
 # ---------------------------------------------------- pull and merge requests
