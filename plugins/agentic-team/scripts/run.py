@@ -319,6 +319,7 @@ class Run:
         self.run_dir = os.path.abspath(args.run_dir or os.path.join(self.root, ".agentic-team"))
         self.wt_dir = os.path.realpath(os.path.join(self.root, ".claude", "worktrees"))
         self._sessions = self._users = self._worktrees = self._sweep_cache = None
+        self.sweep_dirty = False
         self.extra_profiles = set()  # profiles to list although no `sessions` entry names them yet (a launch in flight)
         self._host = self._default = None
         self.host_failed = False
@@ -4129,6 +4130,7 @@ def cmd_record(run, args):
         run.emit("decision", d["id"], None, None,
                  f'"{d["title"]}" decider {(d.get("meta") or {}).get("decider") or "none"} '
                  f"by {d.get('due') or 'no date'} blocks {ids_text(blocks)}")
+    run._sessions = None  # cleanup kept the list it read earlier; count live sessions as they are now
     run.emit("slots", None, None, None, f"{live_count(run)}/{run.config['sessions']['max_parallel']} live")
     ready_events(run, snap)
 
@@ -4567,7 +4569,7 @@ SWEEP_RECHECK_SECONDS = 1800  # a reused `kept` reason is checked with git again
 
 
 def folder_stamp(path):
-    """The modification times of a worktree folder, its HEAD and its index, or None: a new top-level file, a commit,
+    """The modification times of a worktree folder, its HEAD and its index, or None: a new or deleted top-level file,
     a checkout or a `git add` moves one of them."""
     try:
         with open(os.path.join(path, ".git"), encoding="utf-8") as fh:
@@ -4582,52 +4584,50 @@ def folder_stamp(path):
 
 
 def sweep_cache(run):
-    """{"<check>:<folder path>": {"stamp", "at", "why"}} of the git checks that kept a folder, from
-    .agentic-team/sweep-cache.json. Local run state, never in Taskgraph."""
+    """{folder path: {"stamp", "at", "why", "ignored"}}: the last `git status` check of each folder `record`'s sweep
+    kept, from .agentic-team/sweep-cache.json. Local run state, never in Taskgraph; a file that cannot be read or does
+    not have this shape reads as empty."""
     if run._sweep_cache is None:
         try:
             with open(os.path.join(run.run_dir, "sweep-cache.json"), encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, ValueError):
             data = {}
-        run._sweep_cache = data if isinstance(data, dict) else {}
+        run._sweep_cache = {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("stamp"), list)
+                            and isinstance(v.get("at"), (int, float)) and isinstance(v.get("why"), (str, type(None)))
+                            and isinstance(v.get("ignored"), list)} if isinstance(data, dict) else {}
     return run._sweep_cache
 
 
 def save_sweep_cache(run):
-    cache = {k: v for k, v in sweep_cache(run).items() if os.path.isdir(k.split(":", 1)[1])}
-    os.makedirs(run.run_dir, exist_ok=True)
+    """Best effort: a cache that cannot be written only costs the next `record` its git calls."""
+    cache = {k: v for k, v in sweep_cache(run).items() if os.path.isdir(k)}
     temp = os.path.join(run.run_dir, f".sweep-cache.json.{os.getpid()}")
-    with open(temp, "w", encoding="utf-8") as fh:
-        json.dump(cache, fh)
-    os.replace(temp, os.path.join(run.run_dir, "sweep-cache.json"))
+    try:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with open(temp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(temp, os.path.join(run.run_dir, "sweep-cache.json"))
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(temp)
 
 
-def remembered(run, path, check, compute, sweep):
-    """compute() -> (why, value). In a sweep, a `why` that kept the folder last time is reused, with value None,
-    while the folder's stamp is unchanged and the reason is younger than SWEEP_RECHECK_SECONDS; every other case runs
-    compute() and stores a new `why`."""
+def swept_status(run, path, sweep):
+    """status_reason(), or in a sweep its last result while the folder's stamp is unchanged and the result is younger
+    than SWEEP_RECHECK_SECONDS. A reused result never removes a folder: cleanup checks again, uncached, before it does."""
     if not sweep:
-        return compute()
-    cache, key, stamp = sweep_cache(run), f"{check}:{path}", folder_stamp(path)
-    entry = cache.get(key)
-    if (stamp is not None and isinstance(entry, dict) and entry.get("why") and entry.get("stamp") == stamp
-            and 0 <= time.time() - float(entry.get("at") or 0) < SWEEP_RECHECK_SECONDS):
-        return entry["why"], None
-    why, value = compute()
-    if why and stamp is not None:
-        cache[key] = {"stamp": stamp, "at": time.time(), "why": why}
-    else:
-        cache.pop(key, None)
-    return why, value
-
-
-def head_reason(run, task, path):
-    """(why the folder's HEAD keeps it, else None; the HEAD commit)."""
-    head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
-    if not head:
-        return "cannot read its HEAD commit", None
-    return not_merged_reason(run, task, head), head
+        return status_reason(run, path)
+    cache, stamp = sweep_cache(run), folder_stamp(path)
+    entry = cache.get(path)
+    if (stamp is not None and entry and entry["stamp"] == stamp
+            and 0 <= time.time() - entry["at"] < SWEEP_RECHECK_SECONDS):
+        return entry["why"], entry["ignored"]
+    why, ignored = status_reason(run, path)
+    if stamp is not None:
+        cache[path] = {"stamp": stamp, "at": time.time(), "why": why, "ignored": ignored}
+        run.sweep_dirty = True
+    return why, ignored
 
 
 def folder_check(run, task, folder, path, registered, live, locks, users, sweep=False):
@@ -4653,10 +4653,13 @@ def folder_check(run, task, folder, path, registered, live, locks, users, sweep=
     why = container_reason(run, path)
     if why:
         return why, None, None, []
-    why, ignored = remembered(run, path, "status", lambda: status_reason(run, path), sweep)
+    why, ignored = swept_status(run, path, sweep)
     if why:
         return why, None, None, []
-    why, head = remembered(run, path, "head", lambda: head_reason(run, task, path), sweep)
+    head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
+    if not head:
+        return "cannot read its HEAD commit", None, None, []
+    why = not_merged_reason(run, task, head)
     if why:
         return why, None, None, []
     return None, None, head, ignored
@@ -4750,8 +4753,7 @@ def cleanup(run, task, sweep=False):
         if os.path.isdir(wt):
             if s.wtname not in held_back:
                 real = os.path.realpath(wt)
-                held_back[s.wtname] = bool(remembered(run, real, "status", lambda: status_reason(run, real), sweep)[0]
-                                           or container_reason(run, real))
+                held_back[s.wtname] = bool(swept_status(run, real, sweep)[0] or container_reason(run, real))
             if held_back[s.wtname]:
                 continue
         out = run.claude("rm", s.sid, check=False, profile=s.profile)
@@ -4787,6 +4789,11 @@ def cleanup(run, task, sweep=False):
         path = os.path.join(run.wt_dir, folder)
         swept.add(folder)
         reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users, sweep)
+        if not reason:  # the lists above may be from earlier in this command: read them all again before a removal
+            run._sessions = run._worktrees = run._users = None
+            registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
+            live, users = [s for s in run.sessions() if s.live and not s.ghost], cwd_users_once(run)
+            reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users)
         if reason:
             note(folder, reason, sid)
         else:
@@ -4802,8 +4809,9 @@ def cleanup(run, task, sweep=False):
             note(s.wtname, "still running", s.sid)
     if after != before:
         run.set_meta(task, cleanup_kept=after)
-    if sweep:
+    if run.sweep_dirty:
         save_sweep_cache(run)
+        run.sweep_dirty = False
 
 
 # ---------------------------------------------------- pull and merge requests

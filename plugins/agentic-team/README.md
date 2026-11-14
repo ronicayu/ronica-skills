@@ -321,13 +321,14 @@ to 0.6.0. It prints a folder's `kept` line only when the reason differs from
 the last one (stored in the task's `cleanup_kept` meta); the merge and
 `run.py merged` always print it. The sweep is cheap on a project with many
 kept folders: one `record` reads `claude agents`, `lsof` and `git worktree list`
-once, and reads them again only after it removed something. A folder that a
-`git status` or HEAD check kept last time keeps that reason without running git
-while the modification times of the folder, its HEAD and its index are unchanged,
-for at most 30 minutes; then it is checked again. So a change deeper in the folder
-that moves none of those times (an untracked file deleted from a subfolder) is
-seen within 30 minutes, not at once. The live-session, lock, process and Docker
-checks run every time. Set `merge.remove_worktrees = false` to keep everything: `run.py`
+once and reuses them for every folder. Before it removes a folder it reads all
+three again and checks that folder once more, uncached, so a session or process
+that started during the command still keeps it. A folder's `git status` result is
+reused without running git while the modification times of the folder, its HEAD
+and its index are unchanged, for at most 30 minutes; then it is checked again.
+So a change deeper in the folder that moves none of those times (an untracked
+file deleted from a subfolder) is seen within 30 minutes, not at once. The HEAD,
+live-session, lock, process and Docker checks run every time. Set `merge.remove_worktrees = false` to keep everything: `run.py`
 then removes no session and no worktree, and prints `kept <folder>:
 merge.remove_worktrees is false` once, at the merge.
 
@@ -1159,7 +1160,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
 | `inbox/` | Per attempt: `<task>-<attempt>.ctx.json` (the context that `mailbox.py` reads), `<task>-<attempt>.addr` (written by the worker's `SessionStart` hook); `task-<id>-<attempt>.flag` (the pointer line that the `PostToolUse` hook shows while a message waits). Removed with the task's worktree. |
 | `locks/task-<id>.lock` | The task's lock file (see Messaging). It is never removed. |
-| `sweep-cache.json` | The reasons the `git status` and HEAD checks of `record`'s sweep kept a folder, with the folder's modification times and when it was checked (see Cleanup). Safe to delete: the next `record` checks every folder again. |
+| `sweep-cache.json` | The last `git status` result of each folder `record`'s sweep checked, with the folder's modification times and when it was checked (see Cleanup). Safe to delete: the next `record` checks every folder again. A damaged file reads as empty. |
 | `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
 
 A session's report file is not in this folder. It is
@@ -1285,7 +1286,7 @@ then id, and the Manager launches them in that order.
 
 ### Upgrading from 0.22.0
 
-Version 0.22.1 (issue #117) makes `record` fast on a project with many kept worktree folders: it reads the session list, `lsof` and `git worktree list` once per command instead of once per merged task, and reuses a folder's last `kept` reason from the new `.agentic-team/sweep-cache.json` while the folder is unchanged (at most 30 minutes). Nothing else changes. On video-making-tools (576 closed tasks, 243 folders) one `record` took 100–140 s.
+Version 0.22.1 (issue #117) makes `record` fast on a project with many kept worktree folders: it reads the session list, `lsof` and `git worktree list` once per command instead of once per merged task, and reuses a folder's last `git status` result from the new `.agentic-team/sweep-cache.json` while the folder is unchanged (at most 30 minutes). Before a removal it checks the folder again with fresh data. Nothing else changes. On video-making-tools (576 closed tasks, 243 folders) one `record` took 100–140 s.
 
 ### Upgrading from 0.21.0
 

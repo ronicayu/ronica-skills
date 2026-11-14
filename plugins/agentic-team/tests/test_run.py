@@ -4321,7 +4321,7 @@ class RunTest(Base):
                 fh.write("x\n")
         self.agents()
         self.events("record")
-        self.assertEqual(len(self.calls("agents")), 1)
+        self.assertEqual(len(self.calls("agents")), 2)  # once for the folders, once more for the slots line
 
     def test_117_a_sweep_reuses_a_kept_reason_until_the_folder_changes_or_it_ages(self):
         task = self.merged_task()
