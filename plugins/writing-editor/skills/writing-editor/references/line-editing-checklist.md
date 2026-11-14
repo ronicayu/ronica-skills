@@ -193,7 +193,7 @@ The same goes for *X, not Y* where no one proposed Y: "The fix is a rename, not 
 
 **20. Abstract metaphor nouns.** *Substrate*, *surface* (as in "API surface"), *primitive*, *harness*, *vector*, *wedge*, *locus*, *nexus*, *scaffolding*, *ratchet*, *north star*, *flywheel*, *endgame*. They sound technical and name nothing. Use the concrete word: base, add, method, the mechanism's real name.
 
-**21. Mannered prose.** Aphorisms ("wire it or delete it"), fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"). Say it literally. One exception, for this tell and tell 20: a single image that names the governing thought, used throughout and backed by evidence wherever it appears, such as "peanut butter" for investment spread thin across every opportunity. Keep it if a reader could repeat it in a meeting to mean the whole argument. A second image is decoration.
+**21. Mannered prose.** Aphorisms ("wire it or delete it"), fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"). Say it literally. One exception, for this tell and tell 20: a single image that names the governing thought, used throughout and backed by evidence wherever it appears, such as "peanut butter" for investment spread thin across every opportunity. Keep it if a reader could repeat it in a meeting to mean the whole argument. A second image is decoration, unless it is a part-for-part analogy kept under *Analogy*.
 
 **22. A fancy way to say "is".** *Serves as*, *stands as*, *boasts*, *features*. Write "is" or "has".
 
@@ -203,18 +203,19 @@ The same goes for *X, not Y* where no one proposed Y: "The fix is a rename, not 
 
 **25. False ranges.** "From X to Y" where X and Y sit on no real scale. List the items.
 
+### Commentary on the text
+
 **28. Meta-commentary.** A heading or sentence that tells the reader how to read the text instead of saying something: *Why this matters*, *Key takeaways*, *What this means for you*, *The evidence is strongest where…*. Put the implication into the sentence that carries the fact, and give the section a heading that states its message. Addressing an audience about its own interest (*What this means for executives*) is the same fault: choose the content for that reader and leave the label out.
 
 **29. The add-on explanation.** A clause or sentence after a fact that explains it unasked and weakens it:
 
 - *Overreach:* the explanation claims more than the fact shows. "All 212 tests pass, so the change is safe." The reader doubts the inference, then the fact.
-- *Generic reason:* a reason any project could give. "We chose Postgres because it is reliable and widely used."
 - *Reassurance:* "This is a small change and should not affect anything else." It raises the doubt it means to settle.
-- *Self-justification:* explaining a routine choice whose reason the reader knows.
-- *Disclaimer:* a sentence saying what a fact is not. "That duration reflects the team's previous experience; it was not recorded as a formal baseline for system-wide discovery." It names concepts the reader never raised and leaves doubt where the fact was. Put the basis in the fact's own sentence: "In the team's experience, discovery took three to six months."
 - *Comment on evidence:* "This is a striking result."
 
-Test: delete the add-on. If the reader loses nothing they need, leave it deleted. If they would ask "so what?", answer with a specific consequence in their terms (a number, a decision, who acts), not an interpretation. "A replacement without this rule could allow a transaction the existing system rejects" stays.
+Related faults have their own entries: a disclaimer about what a number is not (pass 3 of `SKILL.md`, the basis goes in the number's own sentence), a reason any project could give (tell 4), and explaining a routine choice the reader understands (*Respect*).
+
+An add-on stays when the fact alone supports it, it comes from the author's sources, and the reader would act on it: "A replacement without this rule could allow a transaction the existing system rejects." It goes when it claims more than the fact shows.
 
 ## Swap tables
 
