@@ -134,6 +134,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #toolbar .hit { align-items: center; }
 #toolbar .hit i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 #toolbar .hit .when { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+#toolbar .hit > span:not(.when) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #banner { margin: 0 -14px -5px; padding: 3px 14px; background: #f59e0b; color: #1c1004; font-size: 12px; }
 #banner[hidden] { display: none; }
 #toolbar #banner button { margin-left: 6px; padding: 0 8px; background: #1c1004; color: #fde68a; border-color: #1c1004; }
@@ -2114,6 +2115,11 @@ function applySearch() {
   mirrorNames();
 }
 
+// An empty search is a quick route to work that can move now, in priority order.
+const nowSearchHits = () => ['in_progress', 'ready'].flatMap(status => DATA.nodes.filter(n => passes(n) && n.derived_status === status)
+  .sort((a, b) => (hasPriority(a) ? PRIORITIES.indexOf(a.priority) : 9) - (hasPriority(b) ? PRIORITIES.indexOf(b.priority) : 9) || a.id - b.id));
+const activeSearchHits = q => q ? searchHits(q) : nowSearchHits();
+const activeResultIndex = (q, id) => activeSearchHits(q).findIndex(n => n.id === id);
 // The results list: up to 12 rows around the current one, what matched when it was not the title.
 const RESULT_ROWS = 12;
 function snippet(text, q) {
@@ -2134,21 +2140,29 @@ function syncActive(input, list) {
   else input.removeAttribute('aria-activedescendant');
 }
 function renderResults() {
-  const q = searchQuery(), list = searchMatches(q), box = $('results');
-  if (!q || !list.length) {
+  const q = searchQuery(), box = $('results'), matches = searchMatches(q);
+  const byStatus = new Map(matches.map(({ n, m }) => [n.id, { n, m }]));
+  const list = activeSearchHits(q);
+  if (!list.length) {
     box.replaceChildren();
     if (menuOpen('searchWrap')) setMenu('searchWrap', false);
     return;
   }
   const at = searched.q === q ? searched.at : -1;
-  const from = Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS));
-  const rows = list.slice(from, from + RESULT_ROWS).map(({ n, m }, k) => {
-    const i = from + k;
-    return el('div', { id: 'hit' + i, className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', ariaSelected: String(i === at), ariaLabel: `#${n.id} ${n.title}, ${LABELS[n.derived_status]}, ${resultNote(n, m, q)}`, dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
+  const from = q ? Math.max(0, Math.min(at - 5, list.length - RESULT_ROWS)) : 0;
+  const rows = [];
+  let previous = null;
+  list.slice(from, from + (q ? RESULT_ROWS : list.length)).forEach((n, k) => {
+    const i = from + k, m = q ? byStatus.get(n.id).m : { field: 'now' };
+    if (!q && previous !== n.derived_status) {
+      rows.push(el('div', { className: 'group', textContent: LABELS[n.derived_status] }));
+      previous = n.derived_status;
+    }
+    rows.push(el('div', { id: 'hit' + i, className: 'choice hit' + (i === at ? ' active' : ''), role: 'option', ariaSelected: String(i === at), ariaLabel: `#${n.id} ${n.title}, ${LABELS[n.derived_status]}, ${q ? resultNote(n, m, q) : LABELS[n.derived_status]}`, dataset: { i: String(i), id: String(n.id) }, title: '#' + n.id + ' ' + n.title },
       statusMark(n.derived_status), el('span', { textContent: '#' + n.id + ' ' + n.title }),
-      el('span', { className: 'when', textContent: resultNote(n, m, q) }));
+      el('span', { className: 'when', textContent: q ? resultNote(n, m, q) : [hasPriority(n) ? n.priority : '', gateLabels(n).length ? '⧗' : ''].filter(Boolean).join(' ') })));
   });
-  const rest = list.length - from - rows.length;
+  const rest = q ? list.length - from - rows.length : 0;
   box.replaceChildren(...(from ? [el('div', { className: 'none', textContent: `${from} more above` })] : []), ...rows,
     ...(rest > 0 ? [el('div', { className: 'none', textContent: `+${rest} more · Enter steps through all` })] : []));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
@@ -2190,7 +2204,7 @@ function runSearch() {
     rebuild(true);
     if (pinned) openPanel(byId.get(pinned));
   } else applySearch();
-  if (q && document.activeElement === $('search')) setMenu('searchWrap', searchHits(q).length > 0);
+  if (document.activeElement === $('search')) setMenu('searchWrap', activeSearchHits(q).length > 0);
 }
 
 function stepSearch(back) {
@@ -2201,7 +2215,7 @@ function stepSearch(back) {
 }
 function moveHit(step) {
   if (searched.q !== searchQuery()) runSearch();
-  const hits = searchHits(searched.q);
+  const hits = activeSearchHits(searched.q);
   if (!hits.length) return;
   searched.at = searched.at < 0 ? (step > 0 ? 0 : hits.length - 1) : (searched.at + step + hits.length) % hits.length;
   searched.moved = true;
@@ -2209,13 +2223,25 @@ function moveHit(step) {
   applySearch();
 }
 function openHit(i) {
-  const hits = searchHits(searched.q);
+  const hits = activeSearchHits(searched.q);
   if (!hits[i]) return;
   searched.at = i;
   searched.moved = false;
   setMenu('searchWrap', false);
   if (phoneChrome()) openSearchBox(false);
-  select(hits[i].id, true);
+  const id = hits[i].id;
+  if (view !== 'graph') select(id, true);
+  else {
+    // One move: readable zoom and the node centred in the canvas left above the sheet.
+    select(id, false);
+    const node = cy.getElementById(String(id));
+    if (node.nonempty()) {
+      const box = $('cy').getBoundingClientRect(), z = Math.max(cy.zoom(), .85), p = node.position();
+      userMoved = true;
+      cy.stop();
+      cy.animate({ zoom: z, pan: { x: box.width / 2 - z * p.x, y: (box.height - sheetHeight()) / 2 - z * p.y } }, { duration: 250 * MOTION });
+    }
+  }
   applySearch();
 }
 
@@ -3444,7 +3470,10 @@ $('search').onkeydown = e => {
     else stepSearch(e.shiftKey);
   }
 };
-$('search').onfocus = () => { if (searchHits(searchQuery()).length) setMenu('searchWrap', true); };
+$('search').onfocus = () => {
+  if (!searchQuery()) applySearch();
+  if (activeSearchHits(searchQuery()).length) setMenu('searchWrap', true);
+};
 $('search').onblur = () => setTimeout(() => {
   if (document.activeElement === $('search')) return;
   setMenu('searchWrap', false);

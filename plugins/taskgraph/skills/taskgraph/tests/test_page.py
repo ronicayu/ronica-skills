@@ -1838,6 +1838,30 @@ def test_phone_graph_cards_zoom_and_touch_selection(browser, page_file):
     page.close()
 
 
+def test_phone_empty_search_shows_now_groups_and_opens_a_readable_card(browser, priority_file):
+    page, problems = open_phone(browser, priority_file)
+    page.evaluate("""() => {
+        const base = DATA.nodes.find(n => n.id === 2);
+        applyData({ ...DATA, nodes: [...DATA.nodes, { ...base, id: 10, title: 'Summary', children: [2], parent: null, derived_status: 'in_progress', rollup: { done: 0, total: 1 } }] });
+    }""")
+    page.click("#searchBtn")
+    page.wait_for_function("document.querySelectorAll('#results .group').length === 2")
+    groups = page.evaluate("[...document.querySelectorAll('#results .group')].map(g => g.textContent)")
+    assert groups == ["In progress", "Ready"]
+    assert page.evaluate("[...document.querySelectorAll('#results .hit')].map(r => r.dataset.id)") == ["10", "1", "2"]
+    page.click('#results .hit[data-id="1"]')
+    assert page.evaluate("pinned") == 1 and not page.is_visible("#search")
+    page.wait_for_function("!cy.animated()")
+    assert page.evaluate("cy.zoom()") >= .85
+    assert page.evaluate("document.getElementById('panel').dataset.detent") == "peek"
+    # Centred in the canvas left above the sheet.
+    x, y = page.evaluate("[cy.getElementById('1').renderedPosition('x'), cy.getElementById('1').renderedPosition('y')]")
+    h = page.evaluate("document.getElementById('cy').clientHeight - sheetHeight()")
+    assert abs(x - 195) < 2 and abs(y - h / 2) < 2
+    assert problems == []
+    page.close()
+
+
 def test_phone_menus_are_bottom_sheets_inside_viewport(browser, page_file):
     page, problems = open_phone(browser, page_file)
     for button, menu in (("projectBtn", "projectMenu"), ("viewBtn", "viewMenu"), ("filterBtn", "filters"), ("moreBtn", "more")):
