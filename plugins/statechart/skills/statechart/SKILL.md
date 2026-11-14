@@ -5,7 +5,7 @@ description: "Check a TLA+ model of a system that moves between states, such as 
 
 # Statechart
 
-Adapted from the statechart skill in [poteto's pstack](https://github.com/cursor/plugins/tree/bb68f2365eceafa0cb2d253112f675acf5f144cc/pstack/skills/statechart), by Lauren Tan (poteto), MIT. "Setup without mise" and the sections after "Hand off" are additions from ronica-skills. `NOTICE.md` at the plugin root lists every change.
+Adapted from the statechart skill in [poteto's pstack](https://github.com/cursor/plugins/tree/bb68f2365eceafa0cb2d253112f675acf5f144cc/pstack/skills/statechart), by Lauren Tan (poteto), MIT. "Setup without mise", "Write the labels", the label notes in "Read the report" and "Hand off", and the sections after "Hand off" are from ronica-skills. `NOTICE.md` at the plugin root lists every change.
 
 The chart shows how a system moves between states, in the words of the person who reads it. That person, the reader, decides whether the behavior is right.
 
@@ -55,11 +55,33 @@ To show the reader's words, the view exports `state(vars)`. The value that `stat
 - An array gives parent states: `export const state = (v) => v.main.split(".");`
 - An object gives one parallel region for each key: `export const state = (v) => ({ Playback: v.playback, Volume: v.volume });`
 
-Label each state with what the reader can see or cares about, such as "Paying" or "Lease held, write pending". Keep variable names out of labels. In `vars`, a TLA+ sequence is an object with keys from 1, so `v.pc[1]` is `pc[1]`. A set is an array.
+In `vars`, a TLA+ sequence is an object with keys from 1, so `v.pc[1]` is `pc[1]`. A set is an array.
 
-The view can also export `step(action, from, to)`. It gets the TLC action name and the values before and after the step, and it returns the label of the arrow. Write each step label as the user sees it happen, such as "you press play" or "the connect fails". Do not name the code or the TLA+ action. Two actions that end the same in the chart get the same label, so that they share one arrow.
+The view can also export `step(action, from, to)`. It gets the TLC action name and the values before and after the step, and it returns the label of the arrow. Two actions that end the same in the chart get the same label, so that they share one arrow.
 
-When a step can occur only in some conditions, end its label with the condition in brackets, in the reader's words, such as `you press play [while the file loads]`. In a regions chart, the command writes the condition on the other regions on the arrow, in the words of their labels, such as `[when Offline]`. Your brackets replace it, and two arrows from one state can then look the same. So in a regions chart, do not write brackets for a condition on another region. When a value that no label shows decides where a step goes, name the result in the label, such as "the roster read fails".
+### Write the labels
+
+Write each label for the reader, not for a reader of the code. Keep variable names, TLA+ action names and names from the code out of every label.
+
+- Start each arrow label with its actor: a role that the reader knows, such as "the shopper", "the operator", "the payment provider" or "the player". Then say what the actor does, as the reader sees it happen. Never start with a pronoun (you, I, we, it, they), and never write a verb alone. Do not use a short word that the reader cannot place.
+- Give each actor one name, and use it in every label.
+- Label each state with what the reader can see or cares about, and name its subject. Write "Payment declined", not "Declined". Write "Order shipped, refund pending", not "Shipped, pending".
+- When two arrows leave one state with the same label, end each with a condition in brackets, in the reader's words, so that the reader can tell them apart.
+- When a step can occur only in some conditions, end its label with the condition in brackets, such as `the player presses play [while the file loads]`.
+- When a value that no label shows decides where a step goes, name the result in the label, such as "the payment provider declines the card".
+
+In a regions chart, the command writes the condition on the other regions on the arrow, in the words of their labels, such as `[when Offline]`. Your brackets replace it, and two arrows from one state can then look the same. So in a regions chart, do not write brackets for a condition on another region.
+
+Before and after:
+
+| Before | After | Why |
+| --- | --- | --- |
+| `you pay` | `the shopper pays` | The actor is a role, not "you". |
+| `Declined` | `Payment declined` | The state names its subject. |
+| `it retries`, `it retries` (from "Paying" to two states) | `the payment provider retries [the card is valid]`, `the payment provider retries [the card has expired]` | The actor is named, and a condition tells the two arrows apart. |
+| `ends` | `the player reaches the end of the track` | A verb alone does not say who acts. |
+
+The view also exports `glossary`, an object that maps each term to one sentence, such as `{ "payment provider": "The outside service that charges the card." }`. Give an entry for each actor and for each short noun in the chart. The Legend shows the glossary, so the reader can look up each word.
 
 The view can also export these:
 
@@ -80,6 +102,8 @@ Aim for about 20 arrows or fewer, because a busier chart is hard to read. First 
 
 ## Read the report
 
+- "Label warnings" lists each label that breaks a rule of "Write the labels": a label that starts with a pronoun, a label of fewer than 3 words, arrows that leave one state with the same label and go to different states, and a label that the command made by joining labels with "or". The command prints the count. Fix the view and run again until the list is empty. When a warning must stay, explain it in the hand-off.
+- The "Arrows" table gives each arrow: its label, its from state and to state, the TLA+ actions behind it, and the number of steps. Use it to check that each arrow says what its actions do. When the command joined labels with "or", give those steps one label, or split the state they go to.
 - In the chart, a state that breaks a rule has the class `breaks`. When only some model states behind it break the rule, it has the class `mayBreak`. The Legend names the rules of each mark. When two rules break, it names both on one mark, so say in the hand-off which state breaks which rule. In a regions chart, a state gets a mark when each combination of region states that includes it can break a rule. When a combination can break a rule and none of its states has a mark, each state in that combination gets a mark.
 - TLC goes past a state that breaks a rule, so the chart shows the states after a bug.
 - Because TLC goes past bugs, a model with no limit on its states can run without end. Keep the constants small, or add a CONSTRAINT.
@@ -96,7 +120,7 @@ Render charts with Pele. When the user asks for an image, or a chart is too larg
 
 ## Hand off
 
-Give each chart and its Mermaid text to the person who must decide. Add one line for each bug: the rule, the reader's sentence for that rule, and the path as the report numbers it. Say what the model leaves out. Give the command that makes the files again, with a new `--out` folder.
+Give each chart and its Mermaid text to the person who must decide. Add one line for each bug: the rule, the reader's sentence for that rule, and the path as the report numbers it. Say what the model leaves out. "Label warnings" in the report must be empty, or explain each warning that remains. Give the command that makes the files again, with a new `--out` folder.
 
 When the model describes code, replay each bug path against the real code, as a test or a live repro, one step for each action. If a bug does not occur, think that the model is wrong until you show that it is not.
 

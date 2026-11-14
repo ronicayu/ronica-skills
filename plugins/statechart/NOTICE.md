@@ -65,8 +65,15 @@ Upstream's `SKILL.md` has additions:
   dead end per round", "Keep the state space small", "Render with the bundled
   script", and "Run it from Claude Code".
 
-No upstream line is removed or edited. To see our additions, diff our
-`SKILL.md` against the upstream file at the commit above.
+- "Pick the chart" has a new subsection "Write the labels" (#108). It
+  replaces upstream's label paragraphs: each arrow label starts with its
+  actor, each state label names its subject, arrows with the same label get
+  a condition, and the view exports `glossary`. "Read the report" and "Hand
+  off" say how to use "Label warnings" and the "Arrows" table.
+
+Apart from the label paragraphs, no upstream line is removed or edited. To
+see our changes, diff our `SKILL.md` against the upstream file at the commit
+above.
 
 Our two scripts:
 
