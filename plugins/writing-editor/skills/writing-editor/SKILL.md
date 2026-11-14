@@ -56,7 +56,7 @@ When one document serves two of these, write the body for the primary reader and
 
 ### 1. Structure
 
-- **Answer early.** The opening gives the recommendation, finding or main claim, not a tour of the background.
+- **Answer early, at every level.** The opening gives the recommendation, finding or main claim, not a tour of the background. Each section and subsection does the same: its first sentence is its result. A before-and-after story puts the after first; the before follows as the comparison or as context further down.
 - **Message headings.** Headings state a message, not a category ("Background", "Next Steps"). Read alone, they carry the argument; with the title and opening, they give the answer and the ask. Keep each heading short enough to cite in a sentence, about eight words. The section's first sentence carries the rest.
 - **Vertical logic.** Each section answers the question its parent raises, and nothing else.
 - **Horizontal logic: MECE.** The items in a group are the same kind of thing and do not overlap. A group that claims to cover the whole leaves nothing out; a list of examples says "such as", and a partial list names its scope. If one case, or one piece of evidence, fits two items, they overlap. The items also answer the same question: a speed result and the reason for a design choice belong in different groups.

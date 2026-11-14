@@ -25,6 +25,7 @@ Readers learn what a programme found and endorse a direction; no one is asked fo
 
 - **Open with the strongest result in the reader's terms:** who did what, in how long, against what it would otherwise take.
 - **Say where code and data went** when the work used an AI service or a vendor, and under which approval. Senior readers answer for it, and will ask.
+- **Each stage's section opens with its result and impact,** not with the difficulty it overcame. The old way and the size of the problem follow, as the comparison.
 - **Translate measurements into consequences the reader can use.** A 70-foot steel tower torn from its foundations half a mile away means unshielded buildings at that distance would be destroyed.
 - **Group the results by how the work is divided,** such as lifecycle stages, one result per item. The reason for a choice, such as rework that earlier choices caused, supports the stage it belongs to; it is not a result beside the others.
 - **Stages without results are written forward:** the belief, the concrete intended uses, and when the evidence will come. One "We believe" carries the uncertainty for the paragraph. Use only plans the author has given. Where the draft has none, group those stages in one short forward paragraph and ask the author for the plans; empty sections with placeholders read as an unfinished report.
