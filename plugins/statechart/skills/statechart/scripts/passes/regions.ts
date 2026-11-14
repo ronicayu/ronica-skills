@@ -29,12 +29,26 @@ type RegionMove = {
   t: number;
   text: string;
   group: number[];
+  actions: Set<string>;
+  steps: number;
   other: RegionMove | undefined;
 };
 
 export function drawRegions(
   { states: tla, index, from, to }: Walk,
-  { names, shapes, drawnLabels, group, keys, kinds, sizes, sorted, pathSteps, notes }: Labels,
+  {
+    names,
+    shapes,
+    drawnLabels,
+    group,
+    keys,
+    kinds,
+    sizes,
+    sorted,
+    pathSteps,
+    notes,
+    actionOf,
+  }: Labels,
   order: Int32Array,
   found: Bug[],
   view: View,
@@ -159,10 +173,12 @@ export function drawRegions(
       let move = pairs.get(pair);
       while (move && move.text !== text) move = move.other;
       if (!move) {
-        move = { f, t, text, group: [], other: pairs.get(pair) };
+        move = { f, t, text, group: [], actions: new Set(), steps: 0, other: pairs.get(pair) };
         pairs.set(pair, move);
         moves.push(move);
       }
+      move.actions.add(actionOf[j]);
+      move.steps++;
       if (R > 1) move.group.push(j);
     }
     const tuplesAt = new Map<number, number[]>();
@@ -263,6 +279,9 @@ export function drawRegions(
         to: objectOf[moves[k].t].path,
         label: a.label,
         when: a.label.endsWith("]") ? undefined : a.when,
+        parts: [a.label],
+        actions: [...moves[k].actions].sort(byText),
+        steps: moves[k].steps,
       });
     regions.push({ name, states: [...states.values()], steps, arrows });
     objects.push(objectOf);
@@ -289,6 +308,7 @@ export function drawRegions(
     inside,
     quiet: m - sorted.length,
     colors: view.colors ?? {},
+    glossary: view.glossary ?? {},
     paths,
     loops,
   };

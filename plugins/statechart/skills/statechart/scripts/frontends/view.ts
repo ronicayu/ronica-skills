@@ -55,7 +55,7 @@ const isPlainObject = (v: unknown): v is { [key: string]: unknown } => {
 
 const isString = (v: unknown) => typeof v === "string";
 
-const VIEW_EXPORTS = ["state", "step", "group", "colors", "title"];
+const VIEW_EXPORTS = ["state", "step", "group", "colors", "title", "glossary"];
 
 type Inspect = (value: unknown, options: { breakLength: number }) => string;
 
@@ -83,6 +83,7 @@ export function checkView(
   const group = pick("group", "a function", isFunction);
   const exported = pick("colors", "a plain object", isPlainObject);
   const title = pick("title", "a string", isString);
+  const terms = pick("glossary", "a plain object", isPlainObject);
   if (wrong.length) throw new Error(`The view's ${list(wrong)}.`);
   if (group !== undefined && exported === undefined)
     throw new Error("The view exports group() but no colors. Give each group a color in colors.");
@@ -95,6 +96,17 @@ export function checkView(
   if (bad.length)
     throw new Error(
       `The view's colors give ${list(bad)}. Give each group ${list(THEME_COLORS, "or")}.`,
+    );
+  const glossary: { [term: string]: string } = Object.create(null);
+  const unclear: string[] = [];
+  for (const [term, meaning] of Object.entries(terms ?? {})) {
+    if (typeof meaning === "string" && meaning.trim() !== "" && term.trim() !== "")
+      glossary[term] = meaning;
+    else unclear.push(`${JSON.stringify(term)} the value ${literal(meaning)}`);
+  }
+  if (unclear.length)
+    throw new Error(
+      `The view's glossary gives ${list(unclear)}. Give each term a definition that is a string, and use no empty term.`,
     );
   const named =
     group &&
@@ -114,6 +126,7 @@ export function checkView(
     group: named,
     colors,
     title,
+    glossary,
     [checked]: true,
   };
 }

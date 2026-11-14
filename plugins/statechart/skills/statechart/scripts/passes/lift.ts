@@ -1,5 +1,6 @@
 import {
   append,
+  byText,
   type Chart,
   type ChartState,
   type ChartStep,
@@ -8,6 +9,12 @@ import {
   tupleKey,
   unkey,
 } from "../ir.ts";
+
+const union = (steps: ChartStep[]) => {
+  const actions = new Set<string>();
+  for (const s of steps) for (const a of s.actions) actions.add(a);
+  return [...actions].sort(byText);
+};
 
 export function liftToParents(states: ChartState[], steps: ChartStep[]) {
   const depths = new Map<string, number>();
@@ -39,7 +46,12 @@ export function liftToParents(states: ChartState[], steps: ChartStep[]) {
     for (const group of groups.values()) {
       if (under < 2 || group.length < under) continue;
       for (const s of group) removed.add(s);
-      lifted.push({ ...group[0], from: unkey(prefix) });
+      lifted.push({
+        ...group[0],
+        from: unkey(prefix),
+        actions: union(group),
+        steps: group.reduce((sum, s) => sum + s.steps, 0),
+      });
     }
   }
   const kept: ChartStep[] = [];
@@ -76,8 +88,12 @@ export function lift(chart: Chart): Chart {
           ? f * 2 ** 26 + t
           : `${f},${t}:${s.when}`;
       const prior = merged.get(k);
-      if (prior) prior.label += ` or ${s.label}`;
-      else merged.set(k, { ...s });
+      if (prior) {
+        prior.label += ` or ${s.label}`;
+        prior.parts = [...prior.parts, ...s.parts];
+        prior.actions = union([prior, s]);
+        prior.steps += s.steps;
+      } else merged.set(k, { ...s });
     }
     regions.push({ ...r, steps: [...merged.values()] });
   }

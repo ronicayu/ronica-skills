@@ -83,7 +83,8 @@ const code = (s: string, ref: (n: number) => string) =>
     .replace(MARKER, `${ref(0x2060)}"`)
     .replace(HAZARD, (c) => ref(c.charCodeAt(0)));
 const esc = (s: string, quoted = false) => {
-  const plain = code(s, (n) => `#${n};`);
+  // A second colon in a state's text or an arrow label is a syntax error for mermaid.js (Pele reads it), so encode each one.
+  const plain = code(s, (n) => `#${n};`).replaceAll(":", "#58;");
   const out = quoted ? plain.replaceAll('"', "#34;") : plain;
   if (!out.trim()) return "#32;";
   const turned = out.replace(DIRECTION, "$1#32;");
@@ -97,6 +98,8 @@ const MARK_STYLES = {
   breaks: "fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834",
   mayBreak: "fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06",
 };
+
+const TERMS_PER_COLUMN = 4;
 
 export function mermaidLines(chart: Chart) {
   let next = 0;
@@ -185,9 +188,22 @@ export function mermaidLines(chart: Chart) {
   if (title) lines.push("---", `title: ${JSON.stringify(title)}`, "---");
   lines.push("stateDiagram-v2");
   if (chart.regions.length > 1) lines.push("  direction LR");
-  if (legend.length) {
+  const terms = Object.entries(chart.glossary);
+  if (legend.length || terms.length) {
     lines.push(`  state "Legend" as legend {`);
     for (const [i, [text]] of legend.entries()) lines.push(`    lg${i}: ${esc(text)}`);
+    if (terms.length) {
+      // More than one column of terms makes one long row: group them so the Legend stays about as wide as the chart.
+      lines.push(`    state "Terms" as terms {`);
+      const columns = terms.length > TERMS_PER_COLUMN;
+      if (columns) lines.push("      direction TB");
+      for (const [i, [term, meaning]] of terms.entries()) {
+        if (columns && i % TERMS_PER_COLUMN === 0) lines.push(`      state " " as tc${i / TERMS_PER_COLUMN} {`, "        direction LR");
+        lines.push(`${columns ? "        " : "      "}tm${i}: ${esc(`${term} = ${meaning}`)}`);
+        if (columns && (i % TERMS_PER_COLUMN === TERMS_PER_COLUMN - 1 || i === terms.length - 1)) lines.push("      }");
+      }
+      lines.push("    }");
+    }
     lines.push("  }");
     for (const [i, [, cls]] of legend.entries()) lines.push(`  class lg${i} ${cls}`);
   }
