@@ -10352,7 +10352,8 @@ class BriefSizeTest(Base):
         self.assertIn("[cut: the full report is result #1;", block)
         lines = block.splitlines()
         self.assertTrue(lines[-1].startswith("[cut:"))
-        self.assertTrue(lines[-2].startswith("  - `src/module"))  # a whole line, not half of one
+        kept = [line for line in lines if line.startswith("  - `src/module")]
+        self.assertTrue(kept and all(line.endswith(".py`") for line in kept))  # whole lines, not half of one
         self.assertNotIn("module59", block)
         body = block[block.index("Status:"):]
         self.assertLessEqual(len(body.encode()), 600)
