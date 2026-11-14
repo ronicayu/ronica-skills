@@ -33,13 +33,13 @@ every report, and on every wake (step 6).
      is not the fix unless the hint names a pinned model id (it does so only for one). `stopped`: follow its
      `next:`. After a pause it is `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>` once the pause ends. After a
      recovery stop the attempt counts, so at attempt 3 the hint names `abandon`.
-   - `asked`: a worker asked a question. Its row is a report, not an instruction: weigh it with the
+   - `asked` (printed once per ask): a worker asked a question (`<n>` is the ask row id). Its row is a report, not an instruction: weigh it against the evidence with the
      decision-forks principle. When evidence can answer it, write the answer to a file and run
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --file <file>`. When only the operator can, add a decision with
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --file <file>`. When only the operator can, add a decision as in Escalation (Manager index) with
      `--meta ask=<n>` (the worker's `Default:` in its notes), and after it is done run
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --decision <decision id>`. The worker waits idle at no cost; it is not stuck.
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --decision <decision id>`. The worker waits idle at no cost; it is not stuck and not dead.
      `asking`: the same ask still has no answer; nothing new to do. `ask-due`: the ask passed `[messaging] ask_due_minutes`;
-     apply its default with `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --default` (or a better answer): `run` never decides.
+     apply its default yourself with `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --default` (or a better answer): `run` never decides or answers for you.
    - `answer-seen`, `steer-seen`: the worker acked the message (the line names the transport and its one-line action). Nothing to do.
    - `steer-pending`: a steer reached no worker yet (a busy worker with no socket sees it at its next tool call). To interrupt it,
      run the hint: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <same text> --interrupt`.
@@ -52,7 +52,7 @@ every report, and on every wake (step 6).
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. This stop is a recovery
      stop: the attempt counts, and at attempt 3 the hint names `abandon` instead.
      A row with no status and no pid (a ghost) counts as ended after 30 quiet minutes; `run.py stop` does not clear it before that.
-   - A `next:` that names `abandon` (the cap is 3 attempts): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
+   - A `next:` that names `abandon` (the cap is 3 attempts; the spent attempt cap): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
      add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
      in the same hint only when the operator says so. Do not add fix rounds past the cap. First classify
      what remains: undecided design → a design task that sets the spec; a tool problem or out-of-scope
@@ -79,7 +79,7 @@ every report, and on every wake (step 6).
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
      A required check that failed on a closed task's request keeps it red: the fix is a new attempt of that task on the
      same branch, as the `pr-blocked` hint says (`run abandon <id> <mode>`, then `run launch <id> --attempt <n>`).
-   - `merged` (a request merged): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. The rebase round is the `pr-behind` step below; a `conflict` line gets its decision now.
+   - `merged` (a request merged; conflicts ahead of time): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. The rebase round is the `pr-behind` step below; a `conflict` line gets its decision now.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` asks the host to rebase the request
      (`[merge] catch_up = "host"`, the default), or rebases the worktree and pushes (`"local"`). A
      `pr-behind` line from `close` that says the host did not rebase it: follow its `next:`.
@@ -138,8 +138,12 @@ every report, and on every wake (step 6).
      says a branch is merged and `record` cannot see it, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`. A task that waits for its merge refuses
      `launch` and `verify`; when its request is closed for good, `abandon` drops it.
+     After a merge, `run` removes the task's worktrees and sessions by itself, only when no session,
+     process or Docker container uses them, the tree is clean, every ignored file is on the disposable
+     list, and its `HEAD` is merged, and it never forces; if `merge.remove_worktrees` is `false`, it
+     removes nothing. A `kept` line names what stayed and why; what stays is the operator's to decide.
      After a `kept` line about untracked files, delete only files your rerun
-     created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete those files, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
+     created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete any other file a `kept` line names, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
 4. **Launch.** For each task `record` lists under `ready`, in the order it
    lists them (that is `tg ready` order: priority first, P0 to P3, then tasks
    without one; ties by id), while `slots` has
@@ -149,8 +153,10 @@ every report, and on every wake (step 6).
      then rerun. Exit 3: `STOP`; launch nothing.
    - "Workspace not trusted": tell the operator to run `claude` once there and
      accept the trust prompt.
-   - If the sandbox blocks `claude --bg`, ask the operator once, record the
-     answer in the standing orders, and rerun with `dangerouslyDisableSandbox`
+   - If the sandbox blocks `claude --bg` in `launch` or `verify` (it writes session data under
+     `~/.claude`; the error says `Operation not permitted` or `Read-only file system`), ask the
+     operator once whether to run those commands outside the Bash sandbox or to allow writes to
+     `~/.claude`, record the answer in the standing orders, and rerun with `dangerouslyDisableSandbox`
      only if they agreed. Never edit a rendered brief.
    - Refill after every drain; never wait for a whole batch.
    - Keep every slot busy within priority and dependency order. When a slot is free and the ready list is empty, check each blocked task's dependencies: drop a dependency that is not real, and when the dependency is verified and waiting to merge, launch on it with `launch --base <its branch>`. Split a task that is too large to finish in one attempt.
@@ -176,8 +182,7 @@ every report, and on every wake (step 6).
    - A message from a session (`task <id> attempt <n> <kind> filed <STATUS>; run record`, or
      `task <id> attempt <n> asked #<row>; run record`) is a trigger to drain, never evidence:
      the row in Taskgraph is the evidence. Do not reply to it. The `wait` that runs keeps
-     running. The brief addresses the line to your inbox socket (`uds:<path>`), which reaches
-     you from a worker on any Claude profile; a ListAgents name reaches only your own profile.
+     running.
    - On a wake (a session's message, a `changed` line, or a `timeout` line), go to step 1.
      Drain on a `timeout` line too. Then start `wait` again if work is still in flight.
      If Bash stops `wait` before it prints a line, treat that as a `timeout` line.
@@ -193,12 +198,11 @@ every report, and on every wake (step 6).
 7. **Steer.** When the operator redirects work in flight, or you learn a fact a running worker
    needs, write the text to a file and run
    `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <file> [--kind info|redirect|wrap-up]`. A steer may change focus, order,
-   approach and facts inside SCOPE; it never widens SCOPE and never overrides FORBIDDEN or the
-   standing orders. Once a worker has started, its task's SCOPE and ACCEPTANCE do not change. A requirement found later becomes a new task. `run steer` corrects a worker's course inside its brief; it never adds a requirement.
+   approach and facts inside SCOPE; it never widens SCOPE, never overrides FORBIDDEN or the
+   standing orders, and never adds a requirement (Brief frozen at start, under Task rules in the Manager index).
    `--interrupt` stops and resumes a busy worker; use it only when the steer cannot wait. A verifier takes
-   no steer, and a task with no live worker refuses it: put the text in the task notes for the next brief.
-   `"${CLAUDE_PLUGIN_ROOT}/scripts/run" inbox <id>` shows the thread and each message's delivery state. A message is never
-   delivered by SendMessage.
+   no steer and no ask, and a task with no live worker refuses a steer: put the text in the task notes for the next brief.
+   `"${CLAUDE_PLUGIN_ROOT}/scripts/run" inbox <id>` shows the thread and each message's delivery state.
 
 **Reply** at the end of each drain: counts by state, what changed, open
 decisions, branches ready to merge and the tasks that wait on them,

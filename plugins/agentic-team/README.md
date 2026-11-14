@@ -1284,6 +1284,10 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
 
+### Upgrading from 0.22.1
+
+Version 0.22.2 fixes #120: a verifier report whose `Status:` is ISSUES or BLOCKED now reads as `verify-failed` or `verify-blocked` whatever its `Verdict:` line says, so it never closes a task; `check-report --verifier` refuses such a report before it is filed. A task that an earlier version closed from such a report is not reopened: check the verifier rows of your recently closed tasks. The Manager texts state each rule once (about 500 words fewer); no rule changed.
+
 ### Upgrading from 0.22.0
 
 Version 0.22.1 (issue #117) makes `record` fast on a project with many kept worktree folders: it reads the session list, `lsof` and `git worktree list` once per command instead of once per merged task, and reuses a folder's last `git status` result from the new `.agentic-team/sweep-cache.json` while the folder is unchanged (at most 30 minutes). Before a removal it checks the folder again with fresh data. A `claude rm` that fails with `No job matching` (the CLI no longer has the session) now counts as removed, not as a `kept` line. The shipped role, verify and Manager texts use a few precise terms instead of longer wording: triage / won't-fix for follow-ups, fail-to-pass test, deterministic transition table (at most one transition fires per state and event), observable behaviour change and pure refactor. On video-making-tools (576 closed tasks, 243 folders) one `record` took 100–140 s.
