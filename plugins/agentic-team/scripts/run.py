@@ -168,7 +168,13 @@ REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|E
 SECTION_LINE = re.compile(r"^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Findings|"
                           r"Deviations|Follow-ups|Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason|Needs CI):"
                           r"(?:[ \t]|$)")
-PRIORITY = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations")  # kept first when a report is cut
+PRIORITY = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations", "Evidence")  # kept first when a report is cut
+# The end of the Ran block in a Ran section: right after a blank line, outside a ``` fence, a line at column 0 (no list
+# marker, quote, heading, table bar or backtick first) that reads `<label>:`: up to 40 characters with no colon, then a
+# colon and a space or the line end, or a full-width colon. What follows (`Root cause:`, say) is the worker's own text,
+# and a carried report keeps it. A label line with no blank line before it (`Exit code: 0`) is still log.
+RAN_END = re.compile(r"^[^\s\-*+>#|`][^:\uff1a]{0,40}(?::(?:\s|$)|\uff1a)")
+VERIFIER_FIELDS = ("Status", "Verdict", "Issues", "Findings", "Follow-ups")  # of a verifier report carried into a fix round
 UPSTREAM_FIELDS = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations")
 SCOPE_TOKEN = re.compile(r"[A-Za-z0-9_./@+~-]+")  # ASCII only: a path in Chinese text must not take its neighbours
 OMIT_ROOM = 300  # bytes of a report that must fit before a report is cut to the room left; else it is left out
@@ -816,10 +822,19 @@ class TransitionError(RuntimeError):
     """A command sent an event that the table has no row for in the task's phase: a bug in run.py."""
 
 
+def stored_phase(task):
+    """The stored phase, or None for a task with no phase (not launched, or from before 0.19.0) or a value that is not
+    a phase. A flight phase on a task that Taskgraph has as done also reads as None: an older run.py (a Manager session
+    still on 0.18.0) closed the task after a newer record wrote the phase, and done outranks it. The fields say where
+    such a task is, as for a task with no phase (the backfill), so record and `merged` follow it instead of stopping."""
+    meta, status = task.get("meta") or {}, task.get("status")
+    stored = meta.get("phase")
+    return None if stored not in PHASES or (stored in FLIGHT and status == "done") else stored
+
+
 def next_phase(task, event):
     """The phase `event` moves the task to. Every phase that run.py writes comes from here."""
-    stored = (task.get("meta") or {}).get("phase")
-    key = (stored if stored in PHASES else None, event)
+    key = (stored_phase(task), event)
     if key not in TRANSITIONS:
         raise TransitionError(f"internal error: #{task['id']} has no transition for event {event} from phase {key[0]}")
     return TRANSITIONS[key]
@@ -880,9 +895,8 @@ def derive_phase(task, rows=None, kind=None):
 
 
 def task_phase(task, rows=None):
-    """The stored phase, else the derived one."""
-    stored = (task.get("meta") or {}).get("phase")
-    return stored if stored in PHASES else derive_phase(task, rows)
+    """The stored phase (stored_phase), else the derived one."""
+    return stored_phase(task) or derive_phase(task, rows)
 
 
 def awaiting(task):
@@ -1288,15 +1302,33 @@ def report_sections(body):
     return [(label, "\n".join(lines)) for label, lines in sections]
 
 
+def without_ran(sections):
+    """report_sections with the Ran block left out. The block runs from the `Ran:` line to the end of its section, or to
+    the first RAN_END line; that line and the rest of the section stay, as a section with no label."""
+    out = []
+    for label, text in sections:
+        if label != "Ran":
+            out.append((label, text))
+            continue
+        lines, fenced = text.splitlines(), False
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            elif i and not fenced and not lines[i - 1].strip() and RAN_END.match(line):
+                out.append((None, "\n".join(lines[i:])))
+                break
+    return out
+
+
 def carried_body(body, pointers, cap, keep=(), only=None, always=False, hard=None):
-    """The text of a carried report: no `Ran:` section, and with `only` just those sections. `pointers` is (the line that
-    ends a cut report, the line that ends a whole one). Over `cap` UTF-8 bytes the report is cut at a line boundary: the
-    sections of PRIORITY come first, then the others in order. The sections named in `keep` are cut only at `hard` bytes,
-    so the text may pass the cap. `always` ends a whole text with the second line. None when a cut leaves nothing but
-    the pointer."""
+    """The text of a carried report: no Ran block (without_ran), and with `only` just those sections. `pointers` is (the
+    line that ends a cut report, the line that ends a whole one). Over `cap` UTF-8 bytes the report is cut at a line
+    boundary: the sections of PRIORITY come first, then the others in order. The sections named in `keep` are cut only
+    at `hard` bytes, so the text may pass the cap. `always` ends a whole text with the second line. None when a cut
+    leaves nothing but the pointer."""
     cut_line, full_line = pointers
-    sections = [(label, text.splitlines()) for label, text in report_sections(strip_comments(body or "").strip())
-                if label != "Ran" and (only is None or label in only)]
+    sections = [(label, text.splitlines()) for label, text in without_ran(report_sections(strip_comments(body or "").strip()))
+                if only is None or label in only]
     if sum(utf8(line) + 1 for _, lines in sections for line in lines) - 1 <= cap:
         kept = [lines for _, lines in sections]
         tail = [full_line] if always else []
@@ -1346,7 +1378,7 @@ def result_pointer(tg_cmd, tid, row):
     attempt = f" --attempt {row['attempt']}" if row.get("attempt") is not None else ""
     command = f"{tg_cmd} result ls {tid} --kind {row['kind']}{attempt}"
     return (command, f"[cut: the full report is result #{row['id']}; print it with `{command}`]",
-            f"[full report: result #{row['id']}; print it with `{command}`]")
+            f"[full report, with any Ran log: result #{row['id']}; print it with `{command}`]")
 
 
 def fit_carried(parts, per_report, total, tg_cmd):
@@ -1480,18 +1512,21 @@ def refresh_manager_addr(run):
             pass  # the notify step then falls back to the session name
 
 
-def refresh_manager_session(run):
+def refresh_manager_session(run, replace):
     """Note the Manager's session id, from $CLAUDE_CODE_SESSION_ID, which only a Claude Code session's own Bash has. The
     compaction hook gives the role and orders back only to the session this file names. A call without the variable
-    leaves the file as it is; a new Manager session (or a resume with a new id) rewrites it."""
+    leaves the file as it is. Only `notify-to` (Start step 4, run by the Manager) replaces an id (`replace`); `record`
+    writes the file only when there is none, so that an operator's `record` in another session never takes the Manager's
+    place."""
     session = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
     if not session or "\n" in session:
         return
     path = os.path.join(run.run_dir, MANAGER_SESSION)
     try:
         with open(path, encoding="utf-8") as fh:
-            if fh.read().strip() == session:
-                return
+            current = fh.read().strip()
+        if current == session or (current and not replace):  # an empty file counts as none
+            return
     except OSError:
         pass
     try:
@@ -1792,12 +1827,13 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "GOAL": (f"Judge whether the output of task {tid} ({task['title']}) meets every ACCEPTANCE line. "
                      "Check the real artifact, not the worker's report. Do not fix anything."),
             "SCOPE": ("Read only. You run in your own worktree. Change nothing: do not edit, commit, or delete "
-                      f"anything. The exceptions are your report file, which REPORT names, and {SCRATCH_DIR}/."),
+                      f"anything. You may write only your report file, which REPORT names, and new files and folders in {SCRATCH_DIR}/; "
+                      "delete nothing there either."),
             "SETUP": setup,
             "CHECKPOINT": "None",
             "UPSTREAM": "\n\n".join(fit_carried(
                 [{"head": f"### Worker report ({describe_result(worker)})", "row": worker, "task": tid, "rank": 0,
-                  "keep": ("Deviations",), "only": None, "always": False, "label": ""}],
+                  "keep": ("Deviations",), "only": None, "always": True, "label": ""}],
                 config["brief"]["carried_report_bytes"], config["brief"]["carried_total_bytes"], tg_cmd)),
             "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + "\n\n" + VERIFIER_FINDINGS + (
                 f"\n\n### Adjacent changes\n\nThe project allows these changes outside SCOPE, nothing more: "
@@ -1817,7 +1853,14 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                 checkpoint = m.group(1).strip() or "None"
             upstream.append({"head": f"### Previous attempt ({describe_result(previous)})\n\nStart from this report. Fix what "
                                      "it lists; do not redo what passed.", "row": previous, "task": tid, "rank": 0,
-                             "keep": ("Issues", "Findings", "Checkpoint"), "only": None, "always": False, "label": ""})
+                             "keep": ("Issues", "Findings", "Checkpoint"), "only": None, "always": True, "label": ""})
+            judged = verifier_rows(rows, previous.get("attempt"))
+            if judged:  # a verify-failed verdict on a PASS: the worker's report says nothing is wrong, the verifier's says what
+                upstream.append({"head": f"### Verifier report on the previous attempt ({describe_result(judged[-1])})\n\n"
+                                         "The verifier's findings on that attempt. Fix each blocking one.",
+                                 "row": judged[-1], "task": tid, "rank": 0,
+                                 "keep": ("Status", "Verdict", "Issues", "Findings"), "only": VERIFIER_FIELDS,
+                                 "always": True, "label": ""})
         carried = carried_text(rows, task, attempt)
         if carried:
             upstream.append(carried)
@@ -2590,7 +2633,8 @@ def refuse_closed(task):
     if task_phase(task) == "merged":
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
     raise Refused(f"#{tid} is closed and waits for the merge of its change; run.py record follows the merge, "
-                  f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} <mode> drops it")
+                  f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} <mode> drops it; "
+                  f"{redo_text(task)}")
 
 
 def refuse_unless_running(task):
@@ -3852,14 +3896,19 @@ def record_in_progress(run, snap, task, unmanaged):
 
 def settle_phase(run, snap, task):
     """True when record may act on the task. A task with no phase gets the derived one (backfill), and an in-flight phase
-    follows the result rows. Where the stored phase and the derived one disagree on anything else, record prints
-    phase-mismatch and leaves the task alone: it never picks one. A merged_at on a task whose phase still says
-    awaiting_merge is the merge: mark_merged writes both, so only a hand edit splits them."""
+    follows the result rows. A done task with a flight phase (closed by an older run.py, see stored_phase) is
+    re-derived as a backfill. A done task that is merged, or closed with nothing to merge, and has no phase gets none
+    written: record has nothing to do for it, and task_phase derives the same phase when it reads it, so the first
+    record after an upgrade does not edit every finished task. Where the stored phase and the derived one disagree on
+    anything else, record prints phase-mismatch and leaves the task alone: it never picks one. A merged_at on a task
+    whose phase still says awaiting_merge is the merge: mark_merged writes both, so only a hand edit splits them."""
     tid, meta = task["id"], task.get("meta") or {}
     kind = verify_kind(run, task, strict=False) if task["status"] == "in_progress" and meta.get("verdict") else None
-    stored, derived = meta.get("phase"), derive_phase(task, snap.rows(tid), kind)
+    stored, derived = stored_phase(task), derive_phase(task, snap.rows(tid), kind)
     if derived is None or stored == derived:
         return True
+    if meta.get("phase") not in PHASES and task["status"] == "done" and derived == "merged":
+        return True  # derived when read; a merge gate left open is cleared by record_closed, which writes the phase
     if stored == "verifying" and derived == "reported":
         return True  # a verify that recorded no session, or a CI run not filed yet: the rows cannot show it
     if stored in ("verifying", "stopped") and derived == "verdict_failed":
@@ -4958,6 +5007,16 @@ def rebase_branch(run, task, branch, head, p):
     run.emit("pushed", tid, attempt, None, f"{new[:7]} to {remote}/{meta['pr_branch']}")
 
 
+def redo_text(task):
+    """How to make a new attempt of a closed task that waits for its merge: abandon, then launch the next attempt, which
+    works on the same branch and pushes to the same request. A task that an older run.py marked done cannot be
+    abandoned; its fix is a new task."""
+    tid = task["id"]
+    if task["status"] == "done":
+        return f"#{tid} is done (closed by 0.18.0), so a fix is a new task"
+    return f"to redo it, run.py abandon {tid} <mode>, then run.py launch {tid} --attempt {(wanted_attempt(task) or 1) + 1}"
+
+
 def pr_status(run, snap, task, p):
     """Print what the request's state means for a closed task, and merge it when it is clean and allowed."""
     tid, meta = task["id"], task["meta"]
@@ -4973,7 +5032,7 @@ def pr_status(run, snap, task, p):
     elif p.state == "CLOSED":
         run.emit("pr-closed", tid, None, None, f"{label} closed without a merge",
                  f"reopen it on the host and run.py record, or " + decision_text(f"{label} for #{tid} was closed: redo or drop?", task, snap)
-                 + f"; to redo, run.py abandon {tid} <mode>, then run.py launch {tid} --attempt {(wanted_attempt(task) or 1) + 1}")
+                 + f"; {redo_text(task)}")
     elif p.head != pushed and meta.get("host_rebase") == pushed:
         run.emit("pr-rebased", tid, None, None, f"{label} head is {p.head[:7]}: the host rebased {pushed[:7]}; not checked yet",
                  f"run.py close {tid} (checks that the change is the same and records the new head)")
@@ -4993,7 +5052,7 @@ def pr_status(run, snap, task, p):
         run.emit("pr-behind", tid, None, None, f"{label} is behind {target}", f"run.py close {tid} ({how})")
     elif p.merge_state == "BLOCKED":
         run.emit("pr-blocked", tid, None, None, f"{label} {p.raw_state}; {host.blockers(p.number)}",
-                 "run.py record later; a failed check is evidence for a fix task")
+                 f"run.py record later; if a required check failed, {redo_text(task)}")
     else:  # CLEAN
         orders, method = run.orders(), run.config["merge"]["method"]
         if orders.stop:
@@ -5909,7 +5968,8 @@ def main(argv=None):
         if args.command in ADDR_COMMANDS and not getattr(args, "dry_run", False):  # a dry run writes nothing
             refresh_manager_addr(run)
         if args.command in ("record", "notify-to") and not getattr(args, "dry_run", False):
-            refresh_manager_session(run)
+            # notify-to with a name or --clear is the Manager's Start step 4; printing the name replaces nothing
+            refresh_manager_session(run, replace=args.command == "notify-to" and (args.name is not None or args.clear))
         if args.command in LOCKED:  # one lock per task, so two run.py commands cannot interleave a stop with a resume
             with task_lock(run, args.id):
                 COMMANDS[args.command](run, args)

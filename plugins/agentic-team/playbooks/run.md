@@ -77,6 +77,8 @@ every report, and on every wake (step 6).
    - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
+     A required check that failed on a closed task's request keeps it red: the fix is a new attempt of that task on the
+     same branch, as the `pr-blocked` hint says (`run abandon <id> <mode>`, then `run launch <id> --attempt <n>`).
    - `merged` (a request merged): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. The rebase round is the `pr-behind` step below; a `conflict` line gets its decision now.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` asks the host to rebase the request
      (`[merge] catch_up = "host"`, the default), or rebases the worktree and pushes (`"local"`). A
