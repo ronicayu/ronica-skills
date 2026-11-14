@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>taskgraph</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script>
 // The theme is set before the first paint; the page script keeps it in step afterwards.
 (() => {
@@ -16,8 +16,8 @@
 </script>
 <style>
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-:root { --bar: 80px; --panel-w: 0px; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+:root { --bar: 80px; --panel-w: 0px; --sheet-h: 0px; --safe-b: env(safe-area-inset-bottom, 0px); }
 /* Colour tokens. Dark is the default; light is for bright rooms and projectors. The page sets
    data-theme from View options (Auto follows the system). Plan colours (--st-*, --load-*, flags)
    are read by the script for the canvas; print always uses the light set (.theme-light). */
@@ -247,6 +247,36 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #panel summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 #panel details table { margin-top: 6px; }
 #panelGrip { position: fixed; top: var(--bar); bottom: 0; right: calc(var(--panel-w) - 4px); width: 8px; cursor: ew-resize; z-index: 3; }
+#panelHandle { display: none; }
+#panel .peek { display: none; }
+/* The details become an overlay under 700px; the canvas never narrows for them. */
+@media (max-width: 699px) {
+  #panel { top: auto; left: 0; right: 0; bottom: 0; width: 100%; min-width: 0; max-width: 100vw; height: 200px; padding: 0 14px 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; box-shadow: 0 -6px 24px var(--shadow); z-index: 4; overflow-y: auto; overscroll-behavior: contain; }
+  #panel[data-detent="full"] { height: calc(100dvh - 60px); }
+  #panel[data-detent="peek"] { overflow: hidden; }
+  #panel h2 { padding-right: 0; }
+  #panel .sub { margin-bottom: 4px; }
+  #panel .actions { display: flex; gap: 8px; margin: 0; }
+  #panel .actions button { flex: 1 1 0; margin: 8px 0 0; min-width: 0; padding: 4px 8px; }
+  #panel #panelBack { margin: 0 0 4px; }
+  #panel #panelClose { top: 8px; right: 8px; width: 44px; height: 44px; font-size: 24px; }
+  #panelHandle { display: block; position: sticky; top: 0; width: 100%; height: 44px; min-height: 44px; margin: 0; padding: 0 48px 0 0; border: 0; border-radius: 0; background: var(--surface); z-index: 1; cursor: pointer; }
+  #panelHandle::before { content: ''; display: block; width: 40px; height: 4px; margin: 0 auto; border-radius: 2px; background: var(--line-2); }
+  #panelGrip { display: none; }
+  #panel .peek { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #panel .peek button { min-width: 0; margin-top: 8px; padding: 5px 8px; text-align: left; }
+  #panel .peek button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #panel .peek button small { display: block; color: var(--muted); font-size: 11px; }
+  #panel[data-detent="peek"] #facts, #panel[data-detent="peek"] > h3, #panel[data-detent="peek"] > ul, #panel[data-detent="peek"] > .lead, #panel[data-detent="peek"] > .notes, #panel[data-detent="peek"] > .none, #panel[data-detent="peek"] > #notesMore, #panel[data-detent="peek"] > details { display: none; }
+}
+#fit { position: fixed; right: calc(var(--panel-w) + 14px); bottom: calc(var(--sheet-h) + 14px + var(--safe-b)); min-width: 44px; min-height: 36px; padding: 5px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); font: inherit; cursor: pointer; z-index: 2; }
+#fit:hover { background: var(--hover); }
+@media (pointer: coarse) {
+  #toolbar button, #toolbar select, #toolbar input[type=text], #toolbar input[type=number], #legendToggle, #empty button { min-width: 44px; min-height: 44px; font-size: 16px; }
+  #fit, #panel button, #panel .row[role=button], #loadView [role=button], table.load td.c[role=button] { min-height: 44px; }
+  #panel #panelClose { min-width: 44px; width: 44px; height: 44px; }
+  #panel li > .row { padding-top: 8px; padding-bottom: 8px; }
+}
 #panelGrip:focus-visible { background: var(--link); outline: none; }
 #panelGrip:hover { background: var(--on); }
 #empty { position: fixed; top: var(--bar); left: 0; right: var(--panel-w, 0px); bottom: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; z-index: 1; }
@@ -391,7 +421,6 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
     <span id="chips"></span>
     <button class="link" id="clearAll" hidden title="Remove every filter">Clear all</button>
     <span class="spacer"></span>
-    <button id="fit" title="Show the whole plan (F)">Fit</button>
     <span class="menuWrap" id="moreWrap"><button id="moreBtn" aria-expanded="false" aria-controls="more" title="More actions">More ▾</button>
       <div class="menu right" id="more">
         <button class="item" id="expandAll" title="Expand all summaries">Expand all <kbd>E</kbd></button>
@@ -414,6 +443,7 @@ table.load td.extra { color: var(--muted); text-align: right; padding: 0 8px; }
 <div id="loadView" hidden></div>
 <div id="empty" role="status" hidden><p id="emptyText"></p><button id="emptyAction" hidden></button></div>
 </main>
+<button id="fit" title="Show the whole plan (F)" aria-label="Fit the whole plan">Fit</button>
 <section id="legend" aria-label="Legend">
   <button id="legendToggle" title="Show or hide the legend" aria-expanded="true" aria-controls="legendBody">Legend ▾</button>
   <div id="legendBody">
@@ -499,6 +529,9 @@ const $ = id => document.getElementById(id);
 let pinned = null;
 const UNASSIGNED = 'Unassigned', OBJECTIVES = 'Objectives';
 const narrowScreen = matchMedia('(max-width: 640px)');
+const phoneSheet = matchMedia('(max-width: 699px)');
+const phoneChrome = () => narrowScreen.matches;
+const touchPointer = matchMedia('(pointer: coarse)');
 const GUTTER = 140, COL_W = 260, ROW_H = 88, NODE_W = 200, NODE_H = 52, READABLE = 0.9, MAX_FIT = 1.25;
 const TL = { row: 28, head: 32, names: 290, px: 4, bar: 14, indent: 14 };
 const FONT = 'system-ui, sans-serif', LABEL_W = NODE_W - 24, NARROW_LABEL_W = 96, LABEL_LINES = 3, LANE_W = GUTTER - 28, MILESTONE_LANE_W = 112, DECISION_LANE_W = 150;
@@ -2359,10 +2392,27 @@ const MIN_PANEL = 320, MAX_PANEL = 520;
 let panelW = Math.max(MIN_PANEL, Math.min(MAX_PANEL, Number(store.get('taskgraph.panelW')) || 340));
 function setPanelWidth(w) {
   panelW = Math.round(Math.max(MIN_PANEL, Math.min(MAX_PANEL, w)));
-  $('panel').style.width = panelW + 'px';
-  document.documentElement.style.setProperty('--panel-w', panelW + 'px');
-  $('cy').style.right = panelW + 'px';
+  const overlay = phoneSheet.matches;
+  $('panel').style.width = overlay ? '100%' : panelW + 'px';
+  document.documentElement.style.setProperty('--panel-w', overlay ? '0px' : panelW + 'px');
+  $('cy').style.right = overlay ? '0' : panelW + 'px';
 }
+function setDetent(name) {
+  const panel = $('panel'), detent = name === 'full' ? 'full' : 'peek';
+  panel.dataset.detent = detent;
+  const height = detent === 'full' ? Math.max(200, innerHeight - 60) : 200;
+  document.documentElement.style.setProperty('--sheet-h', phoneSheet.matches && panel.style.display === 'block' ? height + 'px' : '0px');
+  $('panelHandle').setAttribute('aria-expanded', String(detent === 'full'));
+  $('panelHandle').title = detent === 'full' ? 'Show a summary' : 'Show all details';
+  if (detent === 'peek') panel.scrollTop = 0;
+}
+phoneSheet.addEventListener('change', () => {
+  if ($('panel').style.display === 'block') {
+    setPanelWidth(panelW);
+    setDetent($('panel').dataset.detent);
+  } else document.documentElement.style.setProperty('--sheet-h', '0px');
+  cy.resize();
+});
 function grip() {
   const g = el('div', { id: 'panelGrip', title: 'Drag to resize', tabIndex: 0, role: 'separator', ariaOrientation: 'vertical', ariaLabel: 'Panel width',
     ariaValueMin: String(MIN_PANEL), ariaValueMax: String(MAX_PANEL), ariaValueNow: String(panelW) });
@@ -2426,6 +2476,7 @@ function openPanel(n) {
   const hasParent = n.parent != null && byId.has(n.parent);
   panel.replaceChildren(...[
     grip(),
+    el('button', { id: 'panelHandle', type: 'button', ariaLabel: 'Toggle details height', ariaExpanded: 'false', onclick: () => { setDetent(panel.dataset.detent === 'full' ? 'peek' : 'full'); keepInView(cy.getElementById(String(n.id))); } }),
     el('button', { id: 'panelClose', ariaLabel: 'Close', title: 'Close (Esc)', textContent: '×', onclick: closePanel }),
     back ? el('button', { id: 'panelBack', className: 'link', title: 'Back (Alt+←)', textContent: '‹ #' + back.id + ' ' + back.title, onclick: goBack }) : null,
     el('h2', { id: 'panelTitle', tabIndex: -1, textContent: n.title }),
@@ -2436,15 +2487,20 @@ function openPanel(n) {
       conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
       n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null,
       waitText(n) ? el('span', { className: 'badge gate', textContent: waitText(n) }) : null),
+    el('div', { className: 'peek', ariaLabel: 'Dependencies' },
+      el('button', { id: 'needsCount', onclick: () => { setDetent('full'); $('blockedByHead').scrollIntoView({ block: 'start' }); } },
+        el('span', { textContent: `← Needs ${n.depends_on.length}` }), el('small', { textContent: `${n.depends_on.filter(id => byId.get(id)?.derived_status !== 'done').length} still open` })),
+      el('button', { id: 'unlocksCount', onclick: () => { setDetent('full'); $('blocksHead').scrollIntoView({ block: 'start' }); } },
+        el('span', { textContent: `Unlocks ${n.blocks.length} →` }), el('small', { textContent: n.blocks.length ? n.blocks.map(id => '#' + id).join(' ') : 'nothing downstream' }))),
     el('table', { id: 'facts' }, ...facts(n)),
     el('div', { className: 'actions' },
       n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,
       focus ? el('button', { id: 'focusGoal', textContent: focusText, title: 'Show only what this needs', onclick: () => setGoal(goal === n.id ? null : n.id) }) : null,
       el('button', { id: 'copyLink', textContent: 'Copy link', title: 'Copy a link that opens this item', onclick: e => copyLink(e.currentTarget) })),
     ...why(n),
-    el('h3', { textContent: 'Blocks' }),
+    el('h3', { id: 'blocksHead', textContent: 'Blocks' }),
     refList(n.blocks),
-    el('h3', { textContent: 'Blocked by' }),
+    el('h3', { id: 'blockedByHead', textContent: 'Blocked by' }),
     refList(n.depends_on, lateNote),
     chainOf(n).length ? el('h3', { id: 'chainHead', textContent: 'Driving chain' }) : null,
     chainOf(n).length ? refList(chainOf(n)) : null,
@@ -2470,10 +2526,11 @@ function openPanel(n) {
   const wasHidden = panel.style.display !== 'block';
   panel.style.display = 'block';
   setPanelWidth(panelW);
+  setDetent(wasHidden || !phoneSheet.matches ? 'peek' : panel.dataset.detent);
   const notes = panel.querySelector('.notes');
   if (notes) $('notesMore').hidden = !(notes.scrollHeight > notes.clientHeight + 1 || notesOpen === n.id);
   cy.resize();
-  if (wasHidden) fitView();
+  if (wasHidden && !phoneSheet.matches) fitView();
   if (keyed) {
     if (!panelReturn && !panel.contains(document.activeElement)) panelReturn = document.activeElement;
     $('panelTitle').focus();
@@ -2498,6 +2555,7 @@ function closePanel() {
   if (had || panelReturn) (panelReturn && panelReturn.isConnected ? panelReturn : $('cy')).focus();
   panelReturn = null;
   document.documentElement.style.setProperty('--panel-w', '0px');
+  document.documentElement.style.setProperty('--sheet-h', '0px');
   $('cy').style.right = '0';
   cy.resize();
   refocus();
@@ -2529,11 +2587,12 @@ function select(id, center, how) {
 // least that shows it again. Timeline never pushes the name column off the left edge.
 function keepInView(node) {
   const box = $('cy').getBoundingClientRect(), m = 16;
+  const sheet = phoneSheet.matches && $('panel').style.display === 'block' ? $('panel').getBoundingClientRect().height : 0;
   const b = node.renderedBoundingBox({ includeLabels: view !== 'timeline' });
   let dx = 0, dy = 0;
   if (b.x2 > box.width - m) dx = box.width - m - b.x2;
   if (b.x1 + dx < m) dx = m - b.x1;
-  if (b.y2 > box.height - m) dy = box.height - m - b.y2;
+  if (b.y2 > box.height - sheet - m) dy = box.height - sheet - m - b.y2;
   if (b.y1 + dy < m) dy = m - b.y1;
   if (view === 'timeline' && dx < 0) dx = Math.max(dx, Math.min(0, -cy.nodes('.tl-name').renderedBoundingBox().x1));
   if (!dx && !dy) return;
