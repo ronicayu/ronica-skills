@@ -3670,10 +3670,11 @@ def record_closed(run, snap, task):
     tid, meta = task["id"], task.get("meta") or {}
     if meta.get("abandoned") or not settle_phase(run, snap, task):
         return
-    if task["status"] != "done" and task_phase(task) == "merged":
-        finish_merged(run, task)  # a command stopped between the merge record and `tg done`
-        run.emit("merged", tid, None, None, f"recorded {meta.get('merged_at') or 'with nothing to merge'}, "
-                 "but the task was not done; marked it done")
+    if task_phase(task) == "merged" and (task["status"] != "done" or merge_gate(task)):
+        # a command stopped between the merge record and `tg done`; the snapshot has the gates Taskgraph holds
+        why = "the task was not done; marked it done" if task["status"] != "done" else "its merge gate was open; cleared it"
+        finish_merged(run, task)
+        run.emit("merged", tid, None, None, f"recorded {meta.get('merged_at') or 'with nothing to merge'}, but {why}")
         cleanup(run, task)
     elif unmerged(task) and run.pr_mode:
         if not meta.get("pr"):
@@ -5016,7 +5017,10 @@ def tg_gate(run, task, *args):
 
 
 def set_merge_gate(run, task, label, ref=None):
-    """Set the merge gate; nothing is written when it already has this label and ref."""
+    """Set the merge gate; nothing is written when it already has this label and ref. A task that is done in Taskgraph
+    (closed by 0.18.0) gets no gate: it is not waiting there."""
+    if task.get("status") == "done":
+        return
     gate = merge_gate(task)
     if gate and gate.get("label") == label and (gate.get("ref") or None) == (ref or None):
         return
@@ -5032,7 +5036,7 @@ def request_gate(run, task, number, url=None):
     """The merge gate of a task that waits for its request: `PR #<n>` or `MR !<n>`, and the request URL. Only a closed
     task waits for its merge: a request opened by a CI verify gets no gate. Without `url` the host is asked for it,
     unless the gate already holds this request with a URL."""
-    if task_phase(task) != "awaiting_merge":
+    if task_phase(task) != "awaiting_merge" or task.get("status") == "done":
         return
     host = run.host()
     label, gate = host.label(number), merge_gate(task)
@@ -5061,12 +5065,14 @@ def mark_merged(run, task, by, **extra):
 
 def finish_merged(run, task):
     """phase merged, clear the merge gate, then `tg done`. A command that stops between them leaves phase merged on a task
-    in progress, and record calls this again. The task may be done already: a code host can close its issue."""
+    in progress or with its gate, and record calls this again. The task may be done already: a code host can close its
+    issue, and `tg done` then keeps done_at and removes the tg:in-progress label the close left on the GitHub backend."""
     if not (task.get("meta") or {}).get("abandoned"):
         set_phase(run, task, "merged")
-    clear_merge_gate(run, task)
+    if merge_gate(task):
+        clear_merge_gate(run, task)
+    run.tg("done", str(task["id"]))
     if task["status"] != "done":
-        run.tg("done", str(task["id"]))
         task["status"] = "done"
         run.marked_done.append(task["id"])
 

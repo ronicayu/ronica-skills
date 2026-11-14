@@ -204,7 +204,7 @@ TaskRowsOut(b) ==
 \* BLOCKED row of a stuck verifier) no longer hides an older verdict (3557-3561, #62). Since 8006a3c a verifier's
 \* verify-failed row whose Issues: lines fail verifier_problems (unlabelled_failure, 693-702) gets the hint
 \* `run.py verify <id> --again (the verifier's report has no blocking: line: ...)` (unlabelled_next, 705-706;
-\* emit_verified 2555-2567), at any attempt; close refuses it (choose_verdict 4945-4948). Before (REGRESS_89)
+\* emit_verified 2555-2567), at any attempt; close refuses it (choose_verdict 4946-4949). Before (REGRESS_89)
 \* only the Verdict: line was read, and the hint was close.
 Verdicts(b) ==
   IF b.vv # "none" /\ b.vNewer /\ (verdict = "none" \/ b.vv # verdict)
@@ -233,8 +233,8 @@ RecInProgress ==
      ELSE IF lost /\ ~vreport THEN [Same EXCEPT !.ev = "no-verdict", !.nx = "verifyAgain"]  \* 3535-3544
      ELSE Verdicts(IF lost THEN salvaged ELSE Same)
 
-\* pr_status, lines 4732-4786. The standing orders hold a MERGE: line, so a clean request is merged here,
-\* except during a pause (4771).
+\* pr_status, lines 4733-4786. The standing orders hold a MERGE: line, so a clean request is merged here,
+\* except during a pause (4772).
 PrStatus(b) ==
   IF pr = "merged" THEN [b EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]
   ELSE IF pr = "closed" THEN [b EXCEPT !.ev = "pr-closed", !.nx = "none"]      \* reopen it, or a decision
@@ -245,18 +245,18 @@ PrStatus(b) ==
   ELSE IF stopOrder THEN [b EXCEPT !.ev = "ready-to-merge", !.nx = "none"]
   ELSE [b EXCEPT !.pr = "merged", !.merged = TRUE, !.ev = "merged", !.nx = "none"]
 
-\* record_closed, lines 3668-3701: a done task, or one in progress that waits for its merge.
+\* record_closed, lines 3668-3702: a done task, or one in progress that waits for its merge.
 RecDone ==
   IF merged THEN [Same EXCEPT !.ev = "nothing", !.nx = "none"]
   ELSE IF PrMode THEN
-     IF pr = "none" THEN [Same EXCEPT !.ev = "unpublished", !.nx = "close"]   \* line 3682
-     ELSE PrStatus(Same)                                                 \* line 3685
-  ELSE IF mainHas THEN [Same EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]   \* merged_into, 3690
-  ELSE [Same EXCEPT !.ev = "unmerged", !.nx = "none"]                   \* line 3698: no next
+     IF pr = "none" THEN [Same EXCEPT !.ev = "unpublished", !.nx = "close"]   \* line 3683
+     ELSE PrStatus(Same)                                                 \* line 3686
+  ELSE IF mainHas THEN [Same EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]   \* merged_into, 3691
+  ELSE [Same EXCEPT !.ev = "unmerged", !.nx = "none"]                   \* line 3699: no next
 
 RecOut ==
   IF abandoned THEN [Same EXCEPT !.ev = "nothing", !.nx = "none"]
-  ELSE IF status = "open" THEN [Same EXCEPT !.ev = "ready", !.nx = "launch"]  \* ready_events, line 3704
+  ELSE IF status = "open" THEN [Same EXCEPT !.ev = "ready", !.nx = "launch"]  \* ready_events, line 3705
   ELSE IF status = "in_progress" /\ ~Closed THEN RecInProgress  \* Snapshot.in_progress: not a task that waits for its merge
   ELSE RecDone                                                     \* record_closed: done, or in progress and awaiting_merge
 
@@ -358,7 +358,7 @@ VerifyAgain ==
 
 \* ---------------------------------------------------------------- close
 
-\* stop_live, lines 4861-4881: stop the live worker (a STOPPED row with Reason: close, no Head line) and, since
+\* stop_live, lines 4862-4882: stop the live worker (a STOPPED row with Reason: close, no Head line) and, since
 \* 0.12.0 (#57), the live verifier (no row). Before (REGRESS_57) a verifier stayed live.
 StopLive ==
   /\ worker' = IF Live(worker) THEN AfterStop(worker) ELSE worker
@@ -366,9 +366,9 @@ StopLive ==
   /\ stopReason' = IF Live(worker) THEN "close" ELSE stopReason
   /\ verifier' = IF Live(verifier) /\ ~REGRESS_57 THEN AfterStop(verifier) ELSE verifier
 
-\* publish with catch_up (lines 4527-4588) once the host shows the request in state s:
+\* publish with catch_up (lines 4528-4589) once the host shows the request in state s:
 \* clean is merged (pr_status), unless a STOP order holds it; behind goes to the host's rebase (host_catch_up,
-\* 4615-4660), which ends rebased (the host recomputes the state), in a conflict (a decision), or not at all.
+\* 4616-4661), which ends rebased (the host recomputes the state), in a conflict (a decision), or not at all.
 PublishAfter(s) ==
   \/ s = "clean" /\ ~stopOrder /\ pr' = "merged" /\ merged' = TRUE
   \/ s = "clean" /\ stopOrder /\ pr' = s /\ merged' = merged            \* ready-to-merge: not merged during a pause
@@ -376,19 +376,19 @@ PublishAfter(s) ==
   \/ s \in {"pending", "blocked", "dirty", "closed"} /\ pr' = s /\ merged' = merged
   \/ s = "merged" /\ pr' = s /\ merged' = TRUE
 
-\* A first push creates the request and the host picks its state; or the push fails (push-failed, 4603: exit 1,
+\* A first push creates the request and the host picks its state; or the push fails (push-failed, 4604: exit 1,
 \* the task in progress with phase awaiting_merge), and record says unpublished until a later close pushes again.
 PublishStep ==
   IF pr = "none" THEN (\E s \in OpenPr : PublishAfter(s)) \/ (pr' = "none" /\ merged' = merged)
   ELSE PublishAfter(pr)
 
-\* merge_branch, lines 5159-5189: a merge, or a conflict that becomes a decision, or a pause (5161-5162, 5170-5173).
+\* merge_branch, lines 5165-5195: a merge, or a conflict that becomes a decision, or a pause (5167-5168, 5176-5179).
 LocalMergeStep ==
   \/ (~stopOrder /\ merged' = TRUE /\ mainHas' = TRUE)
   \/ (merged' = FALSE /\ mainHas' = mainHas)
 
 \* 0.12.3 (#72): a verified head with no commit beyond its base is recorded merged at once, with no merge,
-\* push or request (no_change 4962-4974, close_no_change 4977-4984; at 5143-5148 and 4918-4920). A free
+\* push or request (no_change 4963-4975, close_no_change 4978-4985; at 5149-5154 and 4919-4921). A free
 \* choice: the model does not track the commits of the branch. Only before any request exists.
 NoChangeClose == pr = "none" /\ merged' = TRUE /\ UNCHANGED <<pr, mainHas>>
 
@@ -396,35 +396,35 @@ Finish ==
   \/ NoChangeClose
   \/ (IF PrMode THEN mainHas' = mainHas /\ PublishStep ELSE pr' = pr /\ LocalMergeStep)
 
-\* resume_close, lines 4902-4929: a closed task that waits for its merge (unmerged: phase awaiting_merge).
+\* resume_close, lines 4903-4930: a closed task that waits for its merge (unmerged: phase awaiting_merge).
 ResumeClose ==
-  /\ Awaiting                                                          \* cmd_close, lines 5078-5079
+  /\ Awaiting                                                          \* cmd_close, lines 5084-5085
   /\ StopLive
   /\ Finish
   /\ status' = StatusAfter(merged')
   /\ UNCHANGED <<attempt, abandoned, verdict, workerResult, vv, vIssues, vManager, vNewer, vfiled,
                  vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_close lines 5138-5155: stop the sessions, publish or merge; `tg done` only with the merge (mark_merged).
+\* cmd_close lines 5144-5161: stop the sessions, publish or merge; `tg done` only with the merge (mark_merged).
 CloseAsPassing == StopLive /\ Finish /\ status' = StatusAfter(merged')
 
-\* cmd_close lines 5134-5137: the verdict is recorded, the task is not closed.
+\* cmd_close lines 5140-5143: the verdict is recorded, the task is not closed.
 CloseNotPassing ==
   /\ status' = status
   /\ UNCHANGED <<worker, verifier, lastTask, stopReason, merged, pr, mainHas>>
 
-\* cmd_close, lines 5074-5156, with choose_verdict, lines 4896-4923. L is --verdict, or "auto" for none.
+\* cmd_close, lines 5080-5162, with choose_verdict, lines 4897-4923. L is --verdict, or "auto" for none.
 \* close never refuses on a role: verify_kind (1893-1908) reads the kind stored at launch (0.18.0).
 NormalClose(L) ==
   /\ status = "in_progress" /\ ~abandoned /\ ~Closed                    \* refuse_unless_running; else resume_close
   /\ workerResult = "PASS"                                              \* worker_for
-  /\ (vv = "none") => (L # "auto")                                      \* line 4941: no verdict at all
-  /\ (vv # "none") => (L = "auto" \/ L = vv)                            \* lines 4943-4956: no --override-verifier
-  /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)            \* 4945-4948: refused, `verify --again` (8006a3c)
+  /\ (vv = "none") => (L # "auto")                                      \* line 4942: no verdict at all
+  /\ (vv # "none") => (L = "auto" \/ L = vv)                            \* lines 4944-4957: no --override-verifier
+  /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)            \* 4946-4949: refused, `verify --again` (8006a3c)
   /\ LET level == IF vv = "none" THEN L ELSE vv
          manual == vv = "none"
-     IN /\ verdict' = level                                             \* line 5114
-        /\ vManager' = IF manual THEN "manual" ELSE vManager            \* lines 5097-5107
+     IN /\ verdict' = level                                             \* line 5120
+        /\ vManager' = IF manual THEN "manual" ELSE vManager            \* lines 5103-5113
         /\ vNewer' = IF manual THEN FALSE ELSE vNewer
         /\ vfiled' = vfiled \/ manual
         /\ IF level \in Passing THEN CloseAsPassing ELSE CloseNotPassing
@@ -442,21 +442,21 @@ CloseManual ==
 
 \* ---------------------------------------------------------------- stop, abandon, merged
 
-\* cmd_stop, lines 5209-5244: accepted for any live worker row of the attempt (5219, `s.live`). The row's
-\* Reason: is pause under a STOP order, else recover (5231). The Manager runs it where the `unknown` hint
+\* cmd_stop, lines 5215-5250: accepted for any live worker row of the attempt (5225, `s.live`). The row's
+\* Reason: is pause under a STOP order, else recover (5237). The Manager runs it where the `unknown` hint
 \* says so (#58); the operator runs it as a pause under a STOP order (OPERATOR_PAUSES).
 Stop ==
   /\ status = "in_progress" /\ ~Closed /\ Live(worker)                  \* cmd_stop refuses a task that waits for its merge
   /\ \/ Hint = "stop"
      \/ (OPERATOR_PAUSES /\ stopOrder /\ worker = "busy")
   /\ worker' = IF worker = "busy" THEN "stopping" ELSE AfterStop(worker)   \* stop_session: the row counts as ended
-  /\ lastTask' = "STOPPED"                                              \* lines 5237-5239: no Head line
+  /\ lastTask' = "STOPPED"                                              \* lines 5243-5245: no Head line
   /\ stopReason' = IF stopOrder THEN "pause" ELSE "recover"
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_abandon, lines 5247-5291: stops the task's live worker sessions (5256-5261) and, since 0.12.0 (#57),
-\* its live verifier (5262-5265). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
+\* cmd_abandon, lines 5253-5297: stops the task's live worker sessions (5262-5267) and, since 0.12.0 (#57),
+\* its live verifier (5268-5271). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
 \* is another instance of this model, so the model ends here.
 Abandon ==
   /\ Hint = "abandon"
@@ -468,7 +468,7 @@ Abandon ==
   /\ UNCHANGED <<status, attempt, verdict, merged, pr, mainHas, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
 
-\* cmd_merged, lines 5192-5206, through mark_merged. No modelled event names it, so it never fires (NOTES.md).
+\* cmd_merged, lines 5198-5212, through mark_merged. No modelled event names it, so it never fires (NOTES.md).
 Merged ==
   /\ Hint = "merged"
   /\ Awaiting
@@ -532,7 +532,7 @@ VerifierGhostReturns == ~End /\ FULL_ENV /\ verifier = "ghost" /\ verifier' = "i
 VerifierGhostStays == ~End /\ FULL_ENV /\ verifier \in {"ghost", "ghostStopped"} /\ verifier' = "ghostGone" /\ UNCHANGED worker /\ UNCHANGED NotSessions
 
 \* The verifier files its one verify row (result_command, 1467-1472: a plain `tg result add`). Its brief runs
-\* `check-report --verifier` first (1508, 1522-1527; verifier_problems 5338-5354): an ISSUES report needs a
+\* `check-report --verifier` first (1508, 1522-1527; verifier_problems 5344-5360): an ISSUES report needs a
 \* `blocking:` line under Issues:, and findings that do not block go under Follow-ups: in a PASS report. A
 \* report that passes the check: verify-failed with blocking findings, or another level with none under Issues:.
 VerifierFilesUnchanged ==
@@ -570,7 +570,7 @@ SomeoneMerges == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "merged" /\ HostUnchan
 SomeoneCloses == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "closed" /\ HostUnchanged
 SomeoneReopens == ~End /\ PrMode /\ pr = "closed" /\ pr' = "pending" /\ HostUnchanged
 
-\* Local mode: the operator merges the branch by hand; record then finds it in HEAD (merged_into, 3690).
+\* Local mode: the operator merges the branch by hand; record then finds it in HEAD (merged_into, 3691).
 OperatorMerges ==
   /\ ~End /\ ~PrMode /\ Awaiting /\ ~mainHas /\ mainHas' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, lastTask, stopReason, workerResult,
@@ -672,7 +672,7 @@ PausedWipCommitted == (lastTask = "STOPPEDhead") => ~wtDirty
 PauseFinishedFirst ==
   (status = "in_progress" /\ ~abandoned /\ ~Closed /\ lastTask = "STOPPED" /\ worker # "stopping") => Hint = "record"
 
-\* cleanup line 4273: "Remove the sessions and worktrees of a merged task." stop_live and cmd_abandon stop the
+\* cleanup line 4274: "Remove the sessions and worktrees of a merged task." stop_live and cmd_abandon stop the
 \* task's live sessions (#57). So an end state leaves no live session of the task. A young ghost row is not one:
 \* `claude stop` cannot end it, it ends by itself after 30 quiet minutes, and cleanup removes it with `claude rm`
 \* once the task is done (#65). Before 0.12.1 (REGRESS_65) cleanup skipped it as live, so it was left.

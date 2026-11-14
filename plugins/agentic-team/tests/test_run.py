@@ -10106,17 +10106,83 @@ class PhaseTest(Base):
                 self.assertEqual((self.meta(task)["phase"], self.gate(task)), ("abandoned", None))
 
     def test_gate_crash_between_clear_and_done_heals(self):
-        for gated in (True, False):  # the command stopped before the clear, or between the clear and `tg done`
-            with self.subTest(gated=gated):
+        # the command stopped before the clear, or between the clear and `tg done`; done: the host closed the issue first
+        for gated, done in ((True, False), (False, False), (True, True)):
+            with self.subTest(gated=gated, done=done):
                 self.fresh()
                 task = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A,
                                      phase="merged", merged_at='"2026-11-14 10:00 UTC"', merged_by="manager")
                 if gated:
                     self.tg("gate", str(task), "merge", "--label", "PR #1", "--ref", "https://github.com/o/r/pull/1")
+                if done:
+                    self.tg("done", str(task))
                 events = [e for e in self.events("record") if e["task"] == task]
                 self.assertEqual([e["event"] for e in events], ["merged"])
+                self.assertIn("cleared it" if done else "marked it done", events[0]["detail"])
                 self.assert_merged(task, "manager")
                 self.assertIsNone(self.gate(task))
+                self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], [])
+
+    def tg_shim(self, gate_error=None):
+        """A tg.py that logs each command and runs the real one; with gate_error, `tg gate` fails with that stderr and
+        exit 2, as an older Taskgraph does. Returns its path and a function that lists the logged [command, id]."""
+        path, log = os.path.join(self.dir, "tg-shim.py"), os.path.join(self.dir, "tg-calls.jsonl")
+        with open(path, "w") as fh:
+            fh.write("import json, subprocess, sys\n"
+                     "cmd = sys.argv[sys.argv.index('--json') + 1:]\n"
+                     f"with open({log!r}, 'a') as fh:\n"
+                     "    fh.write(json.dumps(cmd) + '\\n')\n"
+                     f"if cmd[:1] == ['gate'] and {gate_error!r} is not None:\n"
+                     f"    sys.stderr.write({gate_error!r})\n"
+                     "    sys.exit(2)\n"
+                     f"sys.exit(subprocess.run([sys.executable, {TG!r}, *sys.argv[1:]]).returncode)\n")
+        if os.path.exists(log):
+            os.remove(log)
+
+        def calls():
+            if not os.path.exists(log):
+                return []
+            with open(log) as fh:
+                return [json.loads(line)[:2] for line in fh]
+        return path, calls
+
+    @both_hosts
+    def test_gate_the_host_closes_first_then_record_clears_the_gate_and_runs_tg_done(self):
+        # run.py's order on the GitHub backend: the host closed the issue, then gate --clear, then tg done, which removes
+        # the tg:in-progress label the close left (Taskgraph's test_the_host_closes_the_issue_before_the_gate_clear_and_done)
+        task, head, _ = self.closed_pr()
+        self.tg("done", str(task))
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        tg, calls = self.tg_shim()
+        self.one(self.events("record", tg=tg), "merged")
+        self.assertEqual([c for c in calls() if c[0] in ("gate", "done")], [["gate", str(task)], ["done", str(task)]])
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+
+    def test_gate_finish_runs_no_tg_gate_for_a_task_without_one(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")
+        tg, calls = self.tg_shim()
+        self.one(self.events("merged", str(task), tg=tg), "merged")
+        self.assertEqual([c for c in calls() if c[0] in ("gate", "done")], [["done", str(task)]])
+        self.assert_merged(task, "operator")
+
+    def test_gate_an_older_taskgraph_without_tg_gate_gets_one_warn(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")
+        old = ("usage: tg.py [-h] ...\ntg.py: error: argument command: invalid choice: 'gate' "
+               "(choose from 'add', 'ls', 'show')\n")
+        tg, calls = self.tg_shim(gate_error=old)
+        events = [e for e in self.events("record", tg=tg) if e["task"] == task]
+        self.assertEqual([e["event"] for e in events], ["warn", "unmerged"])
+        self.assertIn("this Taskgraph has no tg gate", events[0]["detail"])
+        self.assertEqual([c for c in calls() if c[0] == "gate"], [["gate", str(task)]])
+        self.assertIsNone(self.gate(task))
+        tg, calls = self.tg_shim(gate_error="error: database is locked\n")  # any other failure is not swallowed
+        out = self.run_cmd("record", tg=tg)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("database is locked", out.stderr + out.stdout)
+        self.assertNotIn("this Taskgraph has no tg gate", out.stdout)
 
     def test_gate_backfill_of_a_gateless_waiting_task_happens_once(self):
         task, wt, head = self.closed_local()
@@ -10139,11 +10205,23 @@ class PhaseTest(Base):
         old = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
         self.tg("done", str(old))  # closed by 0.18.0: done, not merged
         self.one(self.events("record"), "unmerged")
-        self.assertEqual(self.gate(old), ("merge of worktree-task-1", None))
+        self.assertIsNone(self.gate(old))  # done in Taskgraph: it waits for nothing there
         self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
         self.one(self.events("record"), "merged")
         self.assert_merged(old, "operator")
         self.assertIsNone(self.gate(old))
+
+    @both_hosts
+    def test_gate_none_for_a_0_18_0_task_with_a_request(self):
+        task, head, _ = self.closed_pr()
+        self.tg("gate", str(task), "merge", "--clear")
+        self.tg("done", str(task))  # as 0.18.0 left it: done at publish
+        self.one(self.events("record"), "pr-pending")
+        self.assertIsNone(self.gate(task))
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
 
     @both_hosts
     def test_gate_the_host_closes_the_issue_before_record_sees_the_merge(self):
