@@ -4314,6 +4314,17 @@ class RunTest(Base):
         self.assertEqual(len(self.named(removed, "removed")), 1)
         self.assertEqual(self.meta(task)["cleanup_kept"], {})
 
+    def test_117_a_session_the_cli_no_longer_has_counts_as_removed(self):
+        task = self.merged_task(self.entry(1, 1))
+        wt = self.worktree("task-1")
+        self.agents(self.finished("task-1", 1))
+        with open(self.rm_file, "w") as fh:
+            json.dump({"sess-task-1-1": {"exit": 1, "stderr": "No job matching 'sess-task-1-1'"}}, fh)
+        events = self.events("merged", str(task))
+        self.assertEqual(self.named(events, "kept"), [])
+        self.assertIn("(the CLI no longer had the session)", self.named(events, "removed")[0]["detail"])
+        self.assertFalse(os.path.isdir(wt))
+
     def test_117_record_reads_the_session_list_once_for_many_kept_folders(self):
         for _ in range(3):
             task = self.merged_task()

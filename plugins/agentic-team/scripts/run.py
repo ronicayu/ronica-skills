@@ -4693,7 +4693,7 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     for s in rows:
         if s.sid and s.sid not in gone and (s.wtname == folder or cwd_in(s.cwd, path)):
             out = run.claude("rm", s.sid, check=False, profile=s.profile)
-            if out.returncode == 0:
+            if out.returncode == 0 or no_such_session(out):
                 gone.add(s.sid)
             else:
                 run.emit("kept", tid, None, s.sid, f"{folder}: claude rm said: {first_line(out.stderr or out.stdout)}")
@@ -4701,6 +4701,11 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     if ignored:
         extra = f" (ignored files removed: {len(ignored)}: {', '.join(ignored[:5])}{', ...' if len(ignored) > 5 else ''})"
     run.emit("removed", tid, None, None, f"worktree {folder} (merged at {head[:7]}){extra}")
+
+
+def no_such_session(out):
+    """True when `claude rm` failed only because the CLI has no such session: the row is already gone."""
+    return out.returncode != 0 and bool(re.search(r"No job matching", f"{out.stderr}\n{out.stdout}"))
 
 
 def cleanup(run, task, sweep=False):
@@ -4757,9 +4762,10 @@ def cleanup(run, task, sweep=False):
             if held_back[s.wtname]:
                 continue
         out = run.claude("rm", s.sid, check=False, profile=s.profile)
-        if out.returncode == 0:
+        if out.returncode == 0 or no_such_session(out):
             gone.add(s.sid)
-            run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}")
+            run.emit("removed", tid, None, s.sid, f"session {s.sid} worktree {s.wtname}"
+                     + (" (the CLI no longer had the session)" if out.returncode else ""))
             continue
         message = (out.stderr + "\n" + out.stdout).strip()
         m = re.search(r"--discard-unpushed\s+([0-9A-Za-z]+)@(\S+)", message)

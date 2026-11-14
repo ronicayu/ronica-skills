@@ -34,8 +34,8 @@ Verdict levels for this kind:
 - `artifact-verified`: you drove the application or read the values it
   produced, and every ACCEPTANCE line holds.
 - `test-verified`: VERIFY passes and covers every ACCEPTANCE line, and the
-  change has no behaviour a user or another program can see (tests, docs,
-  build files, a refactor the same tests cover). A behaviour change you did
+  change has no observable behaviour change (tests, docs, build files, a
+  pure refactor the same tests cover). A behaviour change you did
   not drive is `check-only`, not `test-verified`.
 - `check-only`: static checks or a read-through only.
 - `verify-blocked`: a check could not run; name the cause.
