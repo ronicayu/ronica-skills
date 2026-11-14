@@ -440,9 +440,13 @@ the operator's standing permission for `run.py` to push task branches to
    The merge gate becomes `PR #<n>` or `MR !<n>` with its URL (`tg gate`). By
    default it closes the task's own request with a comment that names `<n>`
    (`superseded`; GitHub `gh pr close --comment`, GitLab a note, then
-   `state_event=close`); `--keep-old` leaves it open. The phase does not change,
+   `state_event=close`); `--keep-old` leaves it open. It also leaves it open, with
+   `kept-open` naming them, while another task that waits for its merge follows
+   that request (it was repointed to it before). The phase does not change,
    so the transition table has no row for it. A repeat with the same request does
-   the steps a failed run left (`host-error` when the close failed).
+   the steps a failed run left (`host-error` when the close failed). When the
+   comment was posted but the close failed, the repeat posts the comment again,
+   so the old request can show it twice.
    `record` then reads `<n>` for the task as information only: `follows` while
    it is open, whatever its merge state; it opens no decision and never rebases,
    pushes or merges `<n>` for this task. The task that owns `<n>` does that.
@@ -450,7 +454,10 @@ the operator's standing permission for `run.py` to push task branches to
    that the task's change goes in through `<n>`, as `run.py merged <id> --by
    operator` is. `record` records the merge with `merged_by=repoint` and
    `merged_via=<n>`: the task is done, the gate is cleared, and its dependents
-   become ready. Before that it prints one `target-check` line, for information
+   become ready. The cleanup of the merged task then removes its worktree and
+   its local branch, even when the task's commit is not in the target; the
+   commit stays on the host on the branch of the task's own request
+   (`repointed_branch`). Before the merge record it prints one `target-check` line, for information
    only: `in target` when the task's `verdict_ref` is in the fetched target
    branch (the commit or one with the same patch, `git merge-base
    --is-ancestor` and `git cherry`: a merge commit, or a rebase merge of one
@@ -459,9 +466,14 @@ the operator's standing permission for `run.py` to push task branches to
    2.38 or later), else `not proven in target (<why>): its content may have been
    redone in <n>`. A combined request that another task redid and rebased often
    holds neither the task's commits nor their exact content, so the check does
-   not hold the task back; read the line when you want to look. When `<n>` is
+   not hold the task back; read the line when you want to look. When `<n>` was
+   merged into another branch than the task's target (its base changed after the
+   repoint), `record` prints `pr-retargeted` and does not mark the task merged:
+   repoint it to a request into the target, or run `run.py merged <id> --by
+   operator` when the change is in the target. When `<n>` is
    closed without a merge, `record` prints `pr-closed`: repoint the task again,
-   or abandon it and launch the next attempt.
+   run `run.py merged <id> --by operator` when the change is in the target
+   another way, or abandon it and launch the next attempt.
    `close` refuses a repointed task (its publish would push to another task's
    branch). `abandon` leaves `<n>` alone, and the next `launch` gives the task its
    own request back (`pr`, `pr_branch` and `pushed` from the `repointed_*`
@@ -1244,7 +1256,7 @@ then id, and the Manager launches them in that order.
 Version 0.21.0 (issue #111) adds `run.py repoint <id> --pr <n>`: a task that waits for its merge follows another task's request when its change went into that request. No data migration and no Taskgraph change: repoint uses the `tg gate` of Taskgraph 1.19.0.
 
 - **Combined requests.** Before, a task whose change went into another request kept its own request, which stayed open with a conflict: every `record` printed `conflict` with a decision, closing it gave the `abandon` hint, and the only way out was `run.py merged <id> --by operator` after the combined request merged, which `run.py` did not check. Now run `run.py repoint <id> --pr <n>` for each such task (it closes the old request; `--keep-old` keeps it open). If you already closed the old requests by hand, repoint still works: it closes only a request that is open.
-- **New event names.** `repointed`, `superseded`, `kept-open` (repoint), `follows` and `target-check` (record). `pr-closed` also comes for a repointed task, with a repoint hint instead of a decision.
+- **New event names.** `repointed`, `superseded`, `kept-open` (repoint), `follows`, `target-check` and `pr-retargeted` (record). `pr-closed` also comes for a repointed task, with a repoint hint instead of a decision.
 - **New meta keys.** `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed`, and `merged_via` on a repointed task once it is merged (see [Task metadata](#task-metadata)). On the Taskgraph GitHub backend they are written once per repoint or merge, so they need no `local` entry.
 - **GitLab.** The close is two `glab api` calls (a note, then `PUT merge_requests/<iid>` with `state_event=close`), unverified like the other GitLab calls (`host.py`, note 13).
 - **The followed request's merge completes the task** (the Decision in #111). `record` marks a repointed task merged with `merged_by=repoint` and `merged_via=<n>` as soon as `<n>` is merged, whether or not the task's commit is provably in the target: a combined request that another task redid and rebased often holds neither the commits nor their exact content. The `target-check` line before it is information only (`in target`, or `not proven in target ... may have been redone in <n>`). Its squash case uses `git merge-tree --write-tree` (git 2.38 or later); with an older git that case reads as not proven, which changes nothing else.

@@ -10909,6 +10909,20 @@ class RepointTest(Base):
         self.assertEqual(self.close_calls(1), [])
         self.assertEqual(self.meta(task)["repointed_from"], 1)
 
+    @both_hosts
+    def test_111_repoint_keeps_the_old_request_open_while_another_task_follows_it(self):
+        self.pr_config()
+        (first, _), (second, _) = self.waiting(1), self.waiting(2)
+        self.requests(own=(2,), number=1, branch=f"task-{first}")  # the change of `second` went into 1, the request of `first`
+        self.one(self.events("repoint", str(second), "--pr", "1"), "superseded")
+        self.assertEqual(self.meta(second)["pr"], 1)
+        self.requests(own=(1,))  # then the change of `first` went into 9
+        events = self.events("repoint", str(first), "--pr", "9")
+        self.one(events, "repointed")
+        self.assertIn(f"{self.label(1)} stays open (#{second} follows it)", self.one(events, "kept-open")["detail"])
+        self.assertEqual(self.named(events, "superseded"), [])
+        self.assertEqual(self.close_calls(1), [])
+
     def test_111_repoint_reports_a_failed_close_and_a_repeat_finishes_it(self):
         self.pr_config()
         task, _ = self.waiting(1)
@@ -11033,7 +11047,32 @@ class RepointTest(Base):
         self.assertIsNone(check["next"])
         self.assertNotIn("not-in-target", [e["event"] for e in events])
         self.assertIn(later, [t["id"] for t in self.tg("ready")])
+        # cleanup removes the worktree of the task left out too (its commit stays on the host on repointed_branch)
+        removed = [e["detail"] for e in events if e["event"] == "removed" and e["task"] == left]
+        self.assertEqual(len(removed), 1, events)
+        self.assertIn(f"merged at {h3[:7]}", removed[0])
+        self.assertFalse(os.path.isdir(self.wt_path(f"task-{left}")))
+        self.assertEqual([e for e in events if e["event"] == "kept" and e["task"] == left], [])
         self.assertEqual(self.task_events(self.events("record"), left), [])  # done: record has nothing more to say
+
+    @both_hosts
+    def test_111_record_keeps_waiting_when_the_request_merged_into_another_branch(self):
+        (task, head), = self.repointed(1)  # repoint checked that 9 merges into main
+        self.git("checkout", "-q", "-b", "release")
+        self.git("cherry-pick", head)
+        self.git("push", "-q", "origin", "release")
+        self.git("checkout", "-q", "main")
+        self.requests(own=(1,), state="MERGED", base="release", merge_commit=self.git("rev-parse", "release"))
+        events = self.events("record")
+        self.assertEqual(self.task_events(events, task), ["pr-retargeted"])
+        line = self.one(events, "pr-retargeted")
+        self.assertIn(f"{self.label(9)}, which #{task} follows (repointed from {self.label(1)}), merged into release, "
+                      f"not into main; #{task} is not marked merged", line["detail"])
+        self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow a request into main, or "
+                                       f"run.py merged {task} --by operator when the change is in main")
+        self.assert_awaiting(task)
+        self.assertNotIn("merged_by", self.meta(task))
+        self.assertEqual(self.gate(task), (self.label(9), self.url(9)))
 
     @both_hosts
     def test_111_record_hints_repoint_or_redo_when_the_request_closed(self):
@@ -11044,7 +11083,8 @@ class RepointTest(Base):
         line = self.one(events, "pr-closed")
         self.assertIn(f"{self.label(9)}, which #{task} follows (repointed from {self.label(1)}), closed without a merge",
                       line["detail"])
-        self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow another request, or to redo it, "
+        self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow another request, run.py merged {task} "
+                                       "--by operator when the change is in main another way, or to redo it, "
                                        f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
         self.assertEqual(self.tg("ls", "--type", "decision"), [])
         self.assert_awaiting(task)

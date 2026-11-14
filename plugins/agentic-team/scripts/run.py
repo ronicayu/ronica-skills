@@ -5150,7 +5150,13 @@ def follow_request(run, task, p):
     tid, meta = task["id"], task["meta"]
     label = run.host().label(p.number)
     origin = f" (repointed from {run.host().label(meta['repointed_from'])})" if meta.get("repointed_from") else " (repointed)"
-    if p.state == "MERGED":
+    target = run.target(task)
+    if p.state == "MERGED" and p.base_branch != target:  # repoint checked the base; someone changed it before the merge
+        run.emit("pr-retargeted", tid, None, None, f"{label}, which #{tid} follows{origin}, merged into "
+                 f"{p.base_branch}, not into {target}; #{tid} is not marked merged",
+                 f"run.py repoint {tid} --pr <n> to follow a request into {target}, or run.py merged {tid} --by operator "
+                 f"when the change is in {target}")
+    elif p.state == "MERGED":
         sha = str(meta["verdict_ref"])[:7]
         try:
             ok, how = in_target(run, task)
@@ -5164,7 +5170,8 @@ def follow_request(run, task, p):
         cleanup(run, task)
     elif p.state == "CLOSED":
         run.emit("pr-closed", tid, None, None, f"{label}, which #{tid} follows{origin}, closed without a merge",
-                 f"run.py repoint {tid} --pr <n> to follow another request, or {redo_text(task)}")
+                 f"run.py repoint {tid} --pr <n> to follow another request, run.py merged {tid} --by operator when "
+                 f"the change is in {target} another way, or {redo_text(task)}")
     else:
         run.emit("follows", tid, None, None, f"{label}{origin} is open ({p.raw_state}); #{tid} waits for its merge, "
                  "which the task that owns it does")
@@ -5211,8 +5218,11 @@ def cmd_repoint(run, args):
              "pinned", f"run.py record marks #{tid} merged (merged_by=repoint), since {label} is merged"
              if p.state == "MERGED" else f"run.py record follows {label}; the task that owns it merges it")
     if old and old.state == "OPEN":
-        if args.keep_old:
-            run.emit("kept-open", tid, None, None, f"{old_label} stays open (--keep-old); record no longer follows it",
+        others = [t["id"] for t in Snapshot(run, ready=False).awaiting  # tasks repointed to it earlier still follow it
+                  if t["id"] != tid and unmerged(t) and str((t.get("meta") or {}).get("pr")) == str(own)]
+        if args.keep_old or others:
+            why = "--keep-old" if args.keep_old else f"{ids_text(others)} {'follows' if len(others) == 1 else 'follow'} it"
+            run.emit("kept-open", tid, None, None, f"{old_label} stays open ({why}); record no longer follows it for #{tid}",
                      "close it on the host when it is no longer needed")
             return
         try:
