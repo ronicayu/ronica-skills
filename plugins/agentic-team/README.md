@@ -561,8 +561,8 @@ in either file.
 Model values are either a model id (`"opus"`) or a table
 (`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
 profile for the sessions of that tier (see [Workers on more than one Claude
-profile](#workers-on-more-than-one-claude-profile)). The config has 10 sections
-and 30 keys, and one optional table, `[profiles]`, whose names are your own.
+profile](#workers-on-more-than-one-claude-profile)). The config has 11 sections
+and 32 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -679,6 +679,13 @@ pattern.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `default` | string | `""` | The role of a task with no `role` meta: `"architect"`, `"software-engineer"`, or a project role. `""` means no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See [Roles](#roles). |
+
+### `[brief]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `carried_report_bytes` | positive integer | `3000` | The most UTF-8 bytes of one carried report (the previous attempt, an upstream dependency, the worker report in a verify brief) in a brief. A report over it is cut at a line boundary and ends with a line that names its result id and the command that prints it. |
+| `carried_total_bytes` | positive integer | `12000` | The most UTF-8 bytes of all carried reports of one brief together. It must be at least `carried_report_bytes`. |
 
 ### `[notifications]`
 
@@ -914,7 +921,7 @@ notes, ACCEPTANCE is the `- [ ]` items and `Exit test:` or `Acceptance:` lines,
 SCOPE and VERIFY are the `scope` and `verify` meta, and TIMEBOX is twice the
 `estimate` meta (2 hours without one). CONTEXT holds the base commit, the last
 checkpoint, the previous report of a fix round, and the latest report of each
-task this one depends on. To change the brief for every task, edit the
+task this one depends on (see "Carried reports" below). To change the brief for every task, edit the
 template. `run.py verify` fills the same template, with verifier values in
 GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
 REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Project verify skill` note (where `.claude/skills/verify/SKILL.md` is, or that it is missing), then
@@ -925,6 +932,26 @@ and the VERIFY commands), then exports the base with `git archive` into
 `.agentic-team-scratch/base` in its own worktree and runs only the base-side
 checks there. It leaves the export in place; `run.py` removes it with the
 worktree.
+
+Carried reports are short. Every carried report (the previous attempt, each
+upstream dependency, the worker report in a verify brief) drops its `Ran:`
+section and keeps every other section. A report section runs from its `Label:`
+line at column 0 to the next one, so a section of many lines is dropped or kept
+whole. An upstream report is a summary: the result line, then `Status`, `Head`,
+`Branch`, `Files`, `Issues`, `Findings`, `Follow-ups` and `Deviations`, and the
+command that prints the full result (`tg result ls <task> --kind task --attempt
+<n>`). A decision's notes stay whole. Each report is at most
+`[brief] carried_report_bytes` UTF-8 bytes (default 3000); a report over it is
+cut at a line boundary and ends with a line that names the result id and the
+print command. All carried reports of one brief are at most
+`carried_total_bytes` (default 12000). Over that, the previous attempt keeps its
+place, then the upstream reports whose `Files:` share a path with SCOPE get the
+room, then the others in order; a report with too little room left becomes one
+line under "Reports not shown" (result id, status, attempt, and one shared print
+command). Those lines are not counted in the total. The previous attempt's
+`Issues`, `Findings` and `Checkpoint` are never cut, so that report may pass its
+cap; its other sections are cut first. In a verify brief the worker report's
+`Deviations` is never cut either: the verifier checks its `adjacent:` lines.
 
 The worker runs `mailbox.py report` and `run.py check-report` from its own session, so
 its permission mode must allow both. Allow only a `--body-file` path in the
@@ -1104,6 +1131,15 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.19.0
+
+Version 0.20.0 (issue #104) makes the reports in a brief shorter. No migration.
+
+- **Briefs get shorter.** The previous attempt, each upstream report and the worker report of a verify brief lose their `Ran:` section. An upstream report is a summary (`Status`, `Head`, `Branch`, `Files`, `Issues`, `Findings`, `Follow-ups`, `Deviations`). Each carried report is at most 3000 bytes and all of them 12000 bytes; a cut ends with the result id and a command. Decision notes are not cut.
+- **See a full report.** Run the command at the end of the cut report, `tg result ls <task id> --kind task --attempt <n>`; it prints every report of that attempt with its `Ran:` log. `tg result ls <task id>` lists them all.
+- **New keys.** `[brief] carried_report_bytes` and `carried_total_bytes` change the caps; `config.py check` validates them. Raise them to get longer reports back.
+- **A worker that depended on a log.** A worker no longer sees the `Ran:` lines of earlier attempts. The previous attempt's `Issues`, `Findings` and `Checkpoint` stay whole, so a fix round has what it needs; it prints the full report when it wants the log.
 
 ### Upgrading from 0.18.0
 

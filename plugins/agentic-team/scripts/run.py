@@ -163,6 +163,10 @@ OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "arti
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
 REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
+SECTION_LINE = re.compile(r"^([A-Z][\w-]*(?: [\w-]+){0,2}):(?:[ \t]|$)")  # a report section label, at column 0
+UPSTREAM_FIELDS = ("Status", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations")
+SCOPE_TOKEN = re.compile(r"[A-Za-z0-9_./@+~-]+")  # ASCII only: a path in Chinese text must not take its neighbours
+OMIT_ROOM = 300  # bytes of a report that must fit before a report is cut to the room left; else it is left out
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
 VERIFIER_FINDINGS = """### Findings
 
@@ -1247,6 +1251,105 @@ def describe_result(result):
     return f"result #{result['id']}, {result['status']}{attempt}"
 
 
+def utf8(text):
+    return len(text.encode("utf-8"))
+
+
+def report_sections(body):
+    """[(label, text)] of a report. A section runs from its `Label:` line at column 0 to the next one, so a section of
+    many lines is one section. Text before the first label has the label None. Every label is kept, known or not."""
+    sections = []
+    for line in body.splitlines():
+        match = SECTION_LINE.match(line)
+        if match or not sections:
+            sections.append((match.group(1) if match else None, []))
+        sections[-1][1].append(line)
+    return [(label, "\n".join(lines)) for label, lines in sections]
+
+
+def carried_body(body, pointer, cap, keep=(), only=None, always=False):
+    """The text of a carried report: no `Ran:` section, and with `only` just those sections. Over `cap` UTF-8 bytes it is
+    cut at a line boundary and ends with `pointer`. The sections named in `keep` are never cut, so the text may pass
+    the cap. `always` adds the pointer to a text that was not cut. None when the cut leaves no line but the pointer."""
+    sections = [(label, text) for label, text in report_sections(strip_comments(body or "").strip())
+                if label != "Ran" and (only is None or label in only)]
+    lines = [(line, label in keep) for label, text in sections for line in text.splitlines()]
+    kept, size = [], sum(utf8(line) + 1 for line, fixed in lines)
+    if size - 1 <= cap:
+        kept = [line for line, _ in lines]
+    else:
+        room = cap - sum(utf8(line) + 1 for line, fixed in lines if fixed) - utf8(pointer) - 1
+        cut = False
+        for line, fixed in lines:
+            if fixed:
+                kept.append(line)
+            elif not cut and room - utf8(line) - 1 >= 0:
+                kept.append(line)
+                room -= utf8(line) + 1
+            else:
+                cut = True
+        always = True
+        if not any(line.strip() for line in kept):
+            return None
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept + ([pointer] if always else []))
+
+
+def scope_files(text):
+    """The path-like words of `text`, without a trailing slash or dot."""
+    return {t for t in (w.strip(".,").rstrip("/") for w in SCOPE_TOKEN.findall(text or ""))
+            if t and ("/" in t or t.rsplit(".", 1)[-1] in PATH_EXTENSIONS)}
+
+
+def shares_scope(report, scope):
+    """True when a file named under `Files:` of the report is, or lies inside or above, a path that SCOPE names."""
+    files = scope_files(report_field(strip_comments(report or ""), "Files"))
+    return any(f == s or f.startswith(s + "/") or s.startswith(f + "/") for f in files for s in scope_files(scope))
+
+
+def result_pointer(tg_cmd, tid, row):
+    """(the command that prints the result's attempt, the line that ends a cut report)."""
+    attempt = f" --attempt {row['attempt']}" if row.get("attempt") is not None else ""
+    command = f"{tg_cmd} result ls {tid} --kind {row['kind']}{attempt}"
+    return command, f"[cut: the full report is result #{row['id']}; print it with `{command}`]"
+
+
+def fit_carried(parts, per_report, total, tg_cmd):
+    """The brief text of the carried parts, in order. A part is a string (kept whole: a decision, an open thread) or a
+    dict {head, row, task, rank, keep, only, always, label} for a report. Each report is cut at `per_report` bytes. When
+    the reports pass `total`, they get the room in order of rank (0 never cut away, then the reports that share files
+    with SCOPE, then the rest); a report that has too little room left becomes one line at the end."""
+    done = [part if isinstance(part, str) else None for part in parts]
+    left, order = total, sorted((i for i, p in enumerate(parts) if not isinstance(p, str)), key=lambda i: (parts[i]["rank"], i))
+    omitted = []
+    for i in order:
+        part = parts[i]
+        _, pointer = result_pointer(tg_cmd, part["task"], part["row"])
+        head = part["head"] + "\n\n"
+
+        def make(cap):
+            body = carried_body(part["row"]["body"], pointer, cap, part["keep"], part["only"], part["always"])
+            return None if body is None else head + body
+        text = make(per_report)
+        if part["rank"] and (text is None or utf8(text) > left):
+            text = make(min(per_report, left - utf8(head)))
+            if text is None or utf8(text) > left or left - utf8(head) < OMIT_ROOM:
+                omitted.append(i)
+                continue
+        done[i] = text or head + pointer
+        left -= utf8(done[i])
+    if omitted:
+        lines = [f"- {parts[i]['label']}: result #{parts[i]['row']['id']}, {parts[i]['row']['status']}"
+                 + (f", attempt {parts[i]['row']['attempt']}" if parts[i]["row"].get("attempt") is not None else "")
+                 for i in omitted]
+        done.append(f"### Reports not shown\n\nThe carried reports reach `brief.carried_total_bytes` ({total} bytes). Print one "
+                    f"with `{tg_cmd} result ls <task id> --kind task --attempt <attempt>`:\n\n" + "\n".join(lines))
+    return [text for text in done if text]
+
+
 def report_path(run, worktree, session):
     """The session's report file: one per session name, so an attempt never reads the report of an earlier one."""
     return os.path.join(run.wt_dir, worktree, REPORT_DIR, f"report-{session}.md")
@@ -1638,8 +1741,10 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                       f"anything. The exceptions are your report file, which REPORT names, and {SCRATCH_DIR}/."),
             "SETUP": setup,
             "CHECKPOINT": "None",
-            "UPSTREAM": (f"### Worker report ({describe_result(worker)})\n\n"
-                         f"{strip_comments(worker['body']).strip()}"),
+            "UPSTREAM": "\n\n".join(fit_carried(
+                [{"head": f"### Worker report ({describe_result(worker)})", "row": worker, "task": tid, "rank": 0,
+                  "keep": ("Deviations",), "only": None, "always": False, "label": ""}],
+                config["brief"]["carried_report_bytes"], config["brief"]["carried_total_bytes"], tg_cmd)),
             "VERIFY": values["VERIFY"] + "\n\n" + skill + "\n\n" + method + "\n\n" + VERIFIER_FINDINGS + (
                 f"\n\n### Adjacent changes\n\nThe project allows these changes outside SCOPE, nothing more: "
                 f"{adjacent_text(config)}. Check that each `adjacent: <kind>: <path>` line under the worker's "
@@ -1656,9 +1761,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         if previous:
             if m := CHECKPOINT_LINE.search(previous["body"]):
                 checkpoint = m.group(1).strip() or "None"
-            upstream.append(f"### Previous attempt ({describe_result(previous)})\n\n"
-                            "Start from this report. Fix what it lists; do not redo what passed.\n\n"
-                            f"{strip_comments(previous['body']).strip()}")
+            upstream.append({"head": f"### Previous attempt ({describe_result(previous)})\n\nStart from this report. Fix what "
+                                     "it lists; do not redo what passed.", "row": previous, "task": tid, "rank": 0,
+                             "keep": ("Issues", "Findings", "Checkpoint"), "only": None, "always": False, "label": ""})
         carried = carried_text(rows, task, attempt)
         if carried:
             upstream.append(carried)
@@ -1669,9 +1774,14 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                                 f"{strip_comments(node.get('notes') or '').strip() or 'No notes on file.'}")
                 continue
             found = [r for r in run.results_for(dep["id"]) if is_worker_result(r)]
-            body = (f"{describe_result(found[-1])}\n\n{strip_comments(found[-1]['body']).strip()}"
-                    if found else "No report on file.")
-            upstream.append(f"### Upstream #{dep['id']}: {dep['title']} ({dep['status']})\n\n{body}")
+            head = f"### Upstream #{dep['id']}: {dep['title']} ({dep['status']})"
+            if not found:
+                upstream.append(f"{head}\n\nNo report on file.")
+                continue
+            upstream.append({"head": f"{head}\n\n{describe_result(found[-1])}", "row": found[-1], "task": dep["id"],
+                             "rank": 1 if shares_scope(found[-1]["body"], meta["scope"]) else 2, "keep": (),
+                             "only": UPSTREAM_FIELDS, "always": True, "label": f"Upstream #{dep['id']}: {dep['title']}"})
+        upstream = fit_carried(upstream, config["brief"]["carried_report_bytes"], config["brief"]["carried_total_bytes"], tg_cmd)
         autonomy = config["autonomy"]
         values.update({
             "GOAL": f"{task['title']}. {why}",

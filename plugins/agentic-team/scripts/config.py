@@ -33,6 +33,10 @@ message counts as undelivered, the doorbell ("socket" posts to the receiver's
 inbox socket and falls back to stop plus resume; "resume" only stops and
 resumes), and the seconds between two reads of Taskgraph in `run.py wait`.
 
+[brief] caps the reports that a brief carries (the previous attempt, the upstream
+reports, the worker report in a verify brief): the UTF-8 bytes of one report and of
+all of them in one brief.
+
 Python callers (run.py) may import load(root), problems(config),
 resolve_model(config, name) and profile_path(config, name).
 """
@@ -149,6 +153,10 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "pending_minutes": ("posint", 10),
         "doorbell": ("choice:socket,resume", "socket"),
         "tg_poll_seconds": ("posint", 5),
+    },
+    "brief": {
+        "carried_report_bytes": ("posint", 3000),
+        "carried_total_bytes": ("posint", 12000),
     },
     "notifications": {"skill": ("str", "")},
 }
@@ -405,6 +413,10 @@ def problems(config):
                 found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
                           f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"
                           for v in value if v not in ADJACENT_KINDS]
+    brief = config["brief"]
+    if (type_ok("posint", brief["carried_report_bytes"]) and type_ok("posint", brief["carried_total_bytes"])
+            and brief["carried_total_bytes"] < brief["carried_report_bytes"]):
+        found.append("brief.carried_total_bytes must be at least brief.carried_report_bytes")
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")

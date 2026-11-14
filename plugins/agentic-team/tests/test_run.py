@@ -10252,6 +10252,178 @@ class PhaseTest(Base):
         self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
 
 
+class BriefSizeTest(Base):
+    """agentic-team 0.20.0 (issue #104): a carried report in a brief has no `Ran:` log, an upstream report is a summary, and
+    the carried reports have a per-report cap and a total cap in UTF-8 bytes."""
+
+    def body(self, task, files="out.txt", ran=3, extra="", evidence="- criterion: `make test` printed OK", issues="None"):
+        ran_lines = "\n".join(f"- RANLINE{i}: `make step{i}` printed ok" for i in range(ran))
+        return (f"Task: {task}\nStatus: PASS\nBranch: worktree-task-{task}\nHead: {SHA_A}\n"
+                f"Ran:\n{ran_lines}\nEvidence:\n{evidence}\nFiles: {files}\nIssues: {issues}\n"
+                f"Follow-ups: none\n{extra}Checkpoint: {CHECKPOINT}\n")
+
+    def with_upstreams(self, bodies, scope="src/", title="Use base", prev=None):
+        """A task in attempt 2 with one done upstream task for each body. Returns (task, [upstream ids])."""
+        ups = [self.add_task(f"Base {i}", "Why: base.\n- [ ] built") for i in range(len(bodies))]
+        task = self.add_task(title, "Why: needs base.\n- [ ] used", scope=scope, depends=ups, attempt=1)
+        for up, body in zip(ups, bodies):
+            self.add_result(up, "PASS", body, attempt=1)
+            self.tg("done", str(up))
+        self.add_result(task, "ISSUES", prev or self.body(task, issues="blocking: broken"), attempt=1)
+        self.add_result(task, "DIED", "manager saw no session", attempt=2, by="manager")
+        self.worktree(f"task-{task}")
+        return task, ups
+
+    def context(self, task):
+        return self.section(self.brief(task), "CONTEXT")
+
+    def test_i104_an_upstream_report_is_a_summary_with_the_command_that_prints_it(self):
+        task, (up,) = self.with_upstreams([self.body(1, files="base.txt", issues="blocking: slow",
+                                                     extra="Notes: UNKNOWN-NOTE\n")])
+        context = self.context(task)
+        upstream = context[context.index("### Upstream"):]
+        for kept in ("result #1, PASS, attempt 1", "Status: PASS", f"Head: {SHA_A}", "Branch: worktree-task-1",
+                     "Files: base.txt", "Issues: blocking: slow", "Follow-ups: none"):
+            self.assertIn(kept, upstream)
+        for left in ("Task: 1", "criterion", "UNKNOWN-NOTE", f"Checkpoint: {CHECKPOINT}"):
+            self.assertNotIn(left, upstream)
+        self.assertIn(f"result ls {up} --kind task --attempt 1", upstream)
+        self.assertIn("the full report is result #1", upstream)
+
+    def test_i104_a_decision_note_stays_whole(self):
+        note = "Options: REST or RPC.\n" + "\n".join(f"Line {i} of the answer." for i in range(400))
+        gate = self.tg("add", "Which API?", "--type", "decision", "--meta", "decider=operator", "--notes", note)["id"]
+        self.tg("done", str(gate))
+        task = self.add_task("Use API", "Why: needs it.\n- [ ] used", depends=(gate,))
+        self.worktree(f"task-{task}")
+        context = self.context(task)
+        self.assertIn("Line 399 of the answer.", context)
+        self.assertNotIn("the full report is", context)
+
+    def test_i104_ran_is_dropped_from_the_previous_attempt_the_upstream_report_and_the_worker_report_of_a_verify_brief(self):
+        task, _ = self.with_upstreams([self.body(1)])
+        context = self.context(task)
+        self.assertNotIn("RANLINE", context)
+        previous = context[context.index("### Previous attempt"):context.index("### Upstream")]
+        self.assertIn("criterion: `make test` printed OK", previous)
+        self.assertIn("Evidence:", previous)
+        self.assertNotIn("Ran:", context)
+        worker = self.running_task()
+        self.add_result(worker, "PASS", self.body(worker, ran=5, files="a.py"), attempt=1)
+        verify = self.section(self.ok("verify", str(worker), "--dry-run").stdout, "CONTEXT")
+        self.assertIn("### Worker report (result", verify)
+        self.assertIn("criterion: `make test` printed OK", verify)
+        self.assertIn("Files: a.py", verify)
+        self.assertNotIn("RANLINE", verify)
+        self.assertNotIn("\nRan:", verify)
+
+    def test_i104_a_section_of_many_lines_runs_to_the_next_label(self):
+        import run as runner
+        body = ("Task: 1\nStatus: PASS\nRan:\n- first `cmd`\n  - nested line\n\nStill the log, after a blank line\n"
+                "Acceptance evidence:\n- one\n- two\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept\n")
+        self.assertEqual([label for label, _ in runner.report_sections(body)],
+                         ["Task", "Status", "Ran", "Acceptance evidence", "Issues", "Odd label"])
+        out = runner.carried_body(body, "[cut]", 10_000)
+        for gone in ("first", "nested", "Still the log", "Ran:"):
+            self.assertNotIn(gone, out)
+        for kept in ("Acceptance evidence:\n- one\n- two", "Issues: blocking: a\n  continues here\n- and here", "Odd label: kept"):
+            self.assertIn(kept, out)
+        self.assertNotIn("[cut]", out)
+        only = runner.carried_body(body, "[full]", 10_000, only=("Status", "Issues"), always=True)
+        self.assertEqual(only, "Status: PASS\nIssues: blocking: a\n  continues here\n- and here\n[full]")
+
+    def test_i104_a_report_over_the_per_report_cap_is_cut_at_a_line_and_ends_with_the_pointer(self):
+        self.write_config("[brief]\ncarried_report_bytes = 600\n")
+        files = "\n".join(f"  - `src/module{i}/file_with_a_long_name.py`" for i in range(60))
+        task, (up,) = self.with_upstreams([self.body(1, files="\n" + files)])
+        context = self.context(task)
+        block = context[context.index("### Upstream"):]
+        block = block[:block.index("\n\n- Last") if "\n\n- Last" in block else len(block)]
+        self.assertIn(f"result ls {up} --kind task --attempt 1`]", block)
+        self.assertIn("[cut: the full report is result #1;", block)
+        lines = block.splitlines()
+        self.assertTrue(lines[-1].startswith("[cut:"))
+        self.assertTrue(lines[-2].startswith("  - `src/module"))  # a whole line, not half of one
+        self.assertNotIn("module59", block)
+        body = block[block.index("Status:"):]
+        self.assertLessEqual(len(body.encode()), 600)
+
+    def test_i104_over_the_total_cap_the_reports_that_share_files_with_scope_come_first(self):
+        self.write_config("[brief]\ncarried_report_bytes = 1000\ncarried_total_bytes = 1500\n")
+        bodies = [self.body(i + 1, files=f"docs/other{i}.md", issues="blocking: " + "o" * 700) for i in range(3)]
+        bodies.append(self.body(4, files="src/api/shared.py", issues="blocking: " + "s" * 700))  # last in order
+        task, ups = self.with_upstreams(bodies, scope="Write src/api/. Do not touch docs/.", prev="Task: 9\nStatus: ISSUES\nCheckpoint: c\n")
+        context = self.context(task)
+        self.assertIn("s" * 700, context)
+        self.assertNotIn("o" * 700, context)
+        self.assertIn("### Reports not shown", context)
+        omitted = context[context.index("### Reports not shown"):]
+        for i in range(3):
+            self.assertIn(f"Upstream #{ups[i]}: Base {i}: result #{i + 1}, PASS, attempt 1", omitted)
+        self.assertNotIn(f"Upstream #{ups[3]}: Base 3: result", omitted)
+        self.assertIn("result ls <task id> --kind task --attempt <attempt>", omitted)
+        self.assertIn("brief.carried_total_bytes", omitted)
+
+    def test_i104_the_previous_attempts_issues_findings_and_checkpoint_are_never_cut(self):
+        self.write_config("[brief]\ncarried_report_bytes = 300\n")
+        issues = "blocking: " + "\n".join(f"- ISSUE-{i} " + "i" * 40 for i in range(30))
+        findings = "\n".join(f"- FINDING-{i} " + "f" * 40 for i in range(30))
+        prev = ("Task: 2\nStatus: ISSUES\nEvidence:\n" + "\n".join(f"- EVID-{i} " + "e" * 40 for i in range(30))
+                + f"\nIssues: {issues}\nFindings:\n{findings}\nCheckpoint: {CHECKPOINT}\n")
+        task, _ = self.with_upstreams([self.body(1)], prev=prev)
+        context = self.context(task)
+        previous = context[context.index("### Previous attempt"):context.index("### Upstream")]
+        self.assertIn("ISSUE-29 " + "i" * 40, previous)
+        self.assertIn("FINDING-29 " + "f" * 40, previous)
+        self.assertIn(f"Checkpoint: {CHECKPOINT}", previous)
+        self.assertNotIn("EVID-", previous)  # the other sections are cut: the three kept ones left no room
+        self.assertIn("[cut: the full report is result #", previous)
+
+    def test_i104_the_caps_count_utf8_bytes(self):
+        import run as runner
+        line = "这是一个中文检查行的内容"  # 12 characters, 36 bytes
+        body = "Status: PASS\nIssues:\n" + "\n".join(f"- {line}{i:03d}" for i in range(100))
+        self.assertLess(len(body), 3000)
+        self.assertGreater(len(body.encode()), 3000)
+        self.assertEqual(runner.utf8(line), 36)
+        out = runner.carried_body(body, "[cut]", 3000)
+        self.assertEqual(runner.carried_body(body, "[cut]", 10_000).count("\n"), body.count("\n"))
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertLessEqual(len(out.encode()), 3000)
+        self.assertGreater(len(out), 1000)  # characters would let it hold about 3 times as much
+        for line_out in out.splitlines()[:-1]:
+            self.assertIn(line_out, body.splitlines())  # cut at a line boundary
+
+    def test_i104_a_brief_shaped_like_task_646_2_stays_under_the_total_cap(self):
+        files = "\n" + "\n".join(f"  - `apps/api/app/modules/generation/part{i}.py`" for i in range(40))
+        bodies = [self.body(i + 1, ran=60, files=files, issues="None", evidence="\n".join(
+            f"- 验收 {j}: `make test-pg` 输出 \"1152 passed\" 并且没有失败" for j in range(40))) for i in range(14)]
+        prev = self.body(99, ran=80, issues="blocking: broken", evidence="- 验收: " + "测试" * 200)
+        task, _ = self.with_upstreams(bodies, scope="apps/api/app/modules/generation/", prev=prev)
+        text = self.brief(task)
+        context = self.section(text, "CONTEXT")
+        carried = context[context.index("### Previous attempt"):]
+        self.assertNotIn("RANLINE", text)
+        shown = carried.count("### Upstream #")
+        self.assertLess(shown, 14)  # the rest are named under "Reports not shown"
+        self.assertIn("### Reports not shown", carried)
+        shown_part = carried[:carried.index("### Reports not shown")]
+        self.assertLessEqual(len(shown_part.encode()), 12000)
+        self.assertLess(len(text.encode()), 12000 + 14 * 200 + 20000)  # the carried part, the omitted lines, the fixed sections
+
+    def test_i104_the_report_caps_are_validated_by_config_check(self):
+        self.assertEqual(config.load(self.root)["brief"], {"carried_report_bytes": 3000, "carried_total_bytes": 12000})
+        for bad, text in (("carried_report_bytes = 0", "brief.carried_report_bytes must be a positive integer"),
+                          ("carried_total_bytes = -5", "brief.carried_total_bytes must be a positive integer"),
+                          ('carried_report_bytes = "big"', "brief.carried_report_bytes must be a positive integer"),
+                          ("carried_total_bytes = 100", "carried_total_bytes must be at least brief.carried_report_bytes"),
+                          ("carried_bytes = 5", "unknown key brief.carried_bytes")):
+            self.write_config(f"[brief]\n{bad}\n")
+            self.assertIn(text, " ".join(config.problems(config.load(self.root))), bad)
+        self.write_config("[brief]\ncarried_report_bytes = 500\ncarried_total_bytes = 500\n")
+        self.assertEqual(config.problems(config.load(self.root)), [])
+
+
 class TransitionTest(unittest.TestCase):
     """#99: run.py changes the phase only through TRANSITIONS."""
 
