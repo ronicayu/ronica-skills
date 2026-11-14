@@ -782,12 +782,14 @@ OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing clos
 #   abandon          abandon drops the task
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
+# model/phase-edges.json holds the edges of model/Lifecycle.tla; test_run.py checks that this table has the same ones,
+# apart from model/phase-edges-exclusions.json.
 TRANSITIONS: dict[tuple[str | None, str], str] = {
     **{(p, "launch"): "running" for p in OPEN + ("abandoned",)},
     **{(p, "adopt"): "reported" for p in OPEN},
-    **{(p, "worker_reported"): "reported" for p in (None, "running")},  # record has moved the phase to the rows
+    ("running", "worker_reported"): "reported",  # settle_phase moved the phase to the rows, which have no task row
     **{(p, "stopped"): "stopped" for p in OPEN},
-    **{(p, "died"): "stopped" for p in (None, "running")},
+    ("running", "died"): "stopped",  # as worker_reported
     **{(p, "verify"): "verifying" for p in OPEN},
     **{(p, "close_failed"): "verdict_failed" for p in OPEN},
     **{(p, "close_waits"): "awaiting_merge" for p in OPEN},
@@ -795,7 +797,17 @@ TRANSITIONS: dict[tuple[str | None, str], str] = {
     **{(p, "merged"): "merged" for p in (None, "awaiting_merge", "merged")},
     **{(p, "abandon"): "abandoned" for p in OPEN + ("awaiting_merge", "abandoned")},
     **{(None, f"seen_{p}"): p for p in PHASES},
-    **{(a, f"seen_{b}"): b for a in FLIGHT for b in FLIGHT if a != b},
+    # The rows move on without a phase write by a session's own row: the worker's report (also one filed after its stop),
+    # a verify row filed with no run.py verify, or the DIED of a resume that failed (file_died, before any task row); and
+    # by a hand edit of the attempt meta, which leaves a stopped task with no row of its new attempt. Rows are never
+    # removed, and every command that files a Manager row or starts an attempt writes the phase itself.
+    ("running", "seen_reported"): "reported",
+    ("running", "seen_verifying"): "verifying",
+    ("running", "seen_stopped"): "stopped",
+    ("stopped", "seen_running"): "running",
+    ("stopped", "seen_reported"): "reported",
+    ("stopped", "seen_verifying"): "verifying",
+    ("reported", "seen_verifying"): "verifying",
     ("awaiting_merge", "seen_merged"): "merged",
 }
 
@@ -3914,7 +3926,8 @@ def ready_events(run, snap):
 
 
 def host_guard(run, task, fn, *args):
-    """Run one task's part of the drain. A code host failure is that task's line, not the drain's end."""
+    """Run one task's part of the drain. A code host failure, or an event the transition table has no row for, is that
+    task's line, not the drain's end; record still exits 1."""
     try:
         fn(*args)
     except Refused:
@@ -3922,6 +3935,18 @@ def host_guard(run, task, fn, *args):
     except codehost.HostError as exc:
         run.host_failed = True
         run.emit("host-error", task["id"], None, None, str(exc), "fix it and run.py record")
+    except TransitionError as exc:
+        run.host_failed = True
+        tid = task["id"]
+        run.emit("transition-error", tid, wanted_attempt(task), None, str(exc),
+                 f"check #{tid}; if its phase is wrong, tg edit {tid} --meta phase=<the right phase> and run.py record, "
+                 "else report the bug in run.py")
+
+
+def record_task(run, snap, task, unmanaged):
+    """record's part for one task in progress: settle the phase, then follow the rows."""
+    if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
+        record_in_progress(run, snap, task, unmanaged)
 
 
 def record_lock(run, stack, task):
@@ -3951,8 +3976,7 @@ def cmd_record(run, args):
             task["meta"] = node.get("meta") or {}
             snap.results[task["id"]] = run.results_for(task["id"])
             run._sessions = None
-            if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
-                host_guard(run, task, record_in_progress, run, snap, task, unmanaged)
+            host_guard(run, task, record_task, run, snap, task, unmanaged)
     if unmanaged:
         run.emit("unmanaged", None, None, None, ids_text(unmanaged), "run.py adopt <id> --branch <b> --head <sha> [--pr <n>] "
                  "for work to bring under run.py; the others can stay")

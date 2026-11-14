@@ -214,3 +214,15 @@ Run on 2026-11-13 with tla2tools 1.7.4. Every prediction held.
 | overview.cfg, overview-pr.cfg | 110, 134 | every rule holds; `assets/diagrams/attempt-statechart.mmd` is the new overview chart |
 
 `DoneOnlyWhenMerged` holds in every regress config except regress-97.
+
+# agentic-team 0.19.0, step B of #99 (the phase edges)
+
+Written from the model before any run; this session could not run TLC. New in the model: the operator `Phase` (the phase meta as `derive_phase` reads it), which no action, rule or config reads. Only comments changed besides it: the line numbers moved with run.py's transition table. New beside the model: `phase-view.mjs`, `phase-edges.mjs`, `phase-edges.json` (written by hand from the actions) and `phase-edges-exclusions.json`.
+
+| Config | Expect |
+|---|---|
+| every config | the same states and the same result as in "Results (0.19.0)": check.cfg 15,566, check-pr.cfg 16,718, pause.cfg 60,892, pause-pr.cfg 64,780, peel-1.cfg 10,958, faults.cfg 43,832, faults-pr.cfg 48,440, overview.cfg 110, overview-pr.cfg 134; each regress config breaks its rule as there and nothing else. SANY parses `Phase` (it uses `Closed` and `WorkerStatuses`, both defined above it). |
+| check.cfg and check-pr.cfg through `phase-edges.mjs` (NOTES.md, "Phase edges") | the 18 edges of `phase-edges.json`, so `git diff --exit-code phase-edges.json` is empty. Each config alone gives all 18: in local mode a close waits on a conflict, merges at once by a merge or a no-change close, and record finds the operator's merge; in pr mode a close waits on the request, merges at once on a clean request or a no-change close, and record finds the request merged. I expect no `seen_*` edge but `running -> reported` (no other environment step moves a phase), no edge into `abandoned` from `verifying` or `awaiting_merge` (no hint names abandon there), no edge out of `merged` or `abandoned`, and no `record` label. |
+| overview.cfg with `phase-view.mjs` (optional, a chart) | 16 of the 18 edges, in a chart: without FULL_ENV no worker goes idle or gets stuck, so there is no `running -> stopped` (neither the hinted stop nor record's stop of a stuck worker) and no `running -> abandoned` (the unknown hint at the cap). |
+
+If the regenerated file differs: an extra edge with a `record` label means a `Record` path moves the phase in a way the view does not name (read it in the dump, then fix the view or the model). An extra `seen_*` edge means an environment step moves a phase (`WorkerFiles*` aside), which the model did not do before. A missing edge means my reading of a hint was wrong; the test then names the table row that lost its model edge, and the row needs an exclusion with a reason, or the model a fix.

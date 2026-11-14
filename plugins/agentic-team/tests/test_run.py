@@ -5283,6 +5283,22 @@ class RunTest(Base):
         self.one(self.events("record"), "stuck")
         self.assertEqual([e["id"] for e in self.meta(stuck_task)["sessions"]], ["sess-task-2-1"])
 
+    def test_99_a_transition_error_in_record_stays_with_its_task(self):
+        odd = self.running_task(phase="reported")  # a hand edit: the attempt has no row, so the rows say running
+        other = self.running_task()
+        self.agents(self.finished(f"task-{other}"))
+        out = self.run_cmd("record", pre=["--json"])
+        self.assertEqual(out.returncode, 1, out.stderr)
+        events = json.loads(out.stdout)
+        error = self.one(events, "transition-error")
+        self.assertEqual((error["task"], error["attempt"]), (odd, 1))
+        self.assertEqual(error["detail"], f"internal error: #{odd} has no transition for event seen_running from phase reported")
+        self.assertEqual(error["next"], f"check #{odd}; if its phase is wrong, tg edit {odd} --meta phase=<the right phase> "
+                         "and run.py record, else report the bug in run.py")
+        self.assertEqual(self.one(events, "died")["task"], other)  # the drain goes on with the next task
+        self.assertEqual((self.meta(odd)["phase"], self.meta(other)["phase"]), ("reported", "stopped"))
+        self.assertEqual([e["event"] for e in events if e["task"] == odd], ["transition-error"])
+
     def test_23_a_locked_stale_registration_gets_the_unlock_fix(self):
         task, wt, head = self.retry_ready()
         self.git("worktree", "lock", "--reason", "claude session task-1-1 (pid 1)", wt)
@@ -10628,6 +10644,53 @@ class TransitionTest(unittest.TestCase):
                 bad += [f"{fn.name}:{v.lineno}" for v in values
                         if not (from_table(v) or isinstance(v, ast.Name) and v.id in names)]
         self.assertEqual(bad, [])
+
+    def test_the_table_has_the_edges_of_the_model(self):
+        """model/phase-edges.json holds the steps between phases of Lifecycle.tla (phase-view.mjs, written by
+        phase-edges.mjs from TLC's graph; NOTES.md, "The phase edges"). TRANSITIONS has the same edges, apart from
+        model/phase-edges-exclusions.json, and each exclusion explains at least one edge. No TLC is run here."""
+        import fnmatch
+        import run as runner
+        model_dir = os.path.join(os.path.dirname(HERE), "model")
+        with open(os.path.join(model_dir, "phase-edges.json")) as fh:
+            fixture = json.load(fh)["edges"]
+        with open(os.path.join(model_dir, "phase-edges-exclusions.json")) as fh:
+            exclusions = json.load(fh)
+
+        def name(phase):
+            return "none" if phase is None else phase
+
+        code = {(name(before), event, after) for (before, event), after in runner.TRANSITIONS.items()}
+        model = set()
+        for before, events, after in fixture:
+            self.assertIn(before, ("none",) + runner.PHASES)
+            self.assertIn(after, runner.PHASES)
+            self.assertNotEqual(before, after)  # the view drops a step that keeps the phase
+            # One model step that run.py makes in two writes has both events: the first goes through the table
+            phase, steps = before, events.split(", ")
+            for i, event in enumerate(steps):
+                to = after if i == len(steps) - 1 else name(runner.TRANSITIONS.get((None if phase == "none" else phase, event), "?"))
+                model.add((phase, event, to))
+                phase = to
+
+        def explain(edges, entries):
+            """(edges no entry explains, entries that explain none); the first entry that matches an edge explains it."""
+            used = [0] * len(entries)
+            unexplained = []
+            for edge in sorted(edges):
+                hit = next((i for i, x in enumerate(entries)
+                            if all(fnmatch.fnmatchcase(part, pattern) for part, pattern in zip(edge, x["edge"]))), None)
+                if hit is None:
+                    unexplained.append(edge)
+                else:
+                    used[hit] += 1
+            return unexplained, [x["edge"] for x, n in zip(entries, used) if not n]
+
+        for side in ("code", "model"):
+            for x in exclusions[side]:
+                self.assertEqual((len(x["edge"]), bool(x["why"].strip())), (3, True), x)
+        self.assertEqual(explain(code - model, exclusions["code"]), ([], []))
+        self.assertEqual(explain(model - code, exclusions["model"]), ([], []))
 
 
 class LoggedTransitions:
