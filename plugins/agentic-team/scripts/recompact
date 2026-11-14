@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# The SessionStart(compact) hook of the plugin: run recompact.py with Python 3.11
+# or later. It never fails: with no Python, or on any error, it exits 0 and
+# prints nothing, so it can never block a session start. Stdin passes through.
+
+script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || exit 0
+py=$("$script_dir/python-path.sh" 2>/dev/null) || exit 0
+"$py" -S "$script_dir/recompact.py" 2>/dev/null
+exit 0

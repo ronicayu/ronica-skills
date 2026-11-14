@@ -64,7 +64,7 @@
       "name": "agentic-team",
       "source": "agentic-team",
       "description": "A project manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results.",
-      "version": "0.18.0",
+      "version": "0.20.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"
@@ -106,7 +106,7 @@
       "name": "taskgraph",
       "source": "taskgraph",
       "description": "Track project tasks and their dependencies in a SQLite-backed DAG, then open an interactive graph. Use when the user wants to plan a project backwards from a goal, decompose a goal into prerequisites, ask what can be worked on next or what is blocked, add or update tasks and dependencies, or see the plan as a picture — \"work backwards from shipping v1\", \"what's next\", \"what's blocking X\". Agents operate the CLI; humans view the graph.",
-      "version": "1.18.1",
+      "version": "1.19.0",
       "author": {
         "name": "Yu Rong",
         "url": "https://github.com/ronicayu"

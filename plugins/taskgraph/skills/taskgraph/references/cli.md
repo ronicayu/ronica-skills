@@ -16,10 +16,11 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 |---|---|
 | `add TITLE [--type T] [--parent ID] [--depends ID ...] [--blocks ID ...] [--start D] [--due D] [--promised D] [--priority P0\|P1\|P2\|P3] [--notes T] [--meta k=v ...]` | Create a task and its links. |
 | `dep add TASK DEPENDS_ON` / `dep rm TASK DEPENDS_ON` | Add or remove a dependency. Taskgraph rejects cycles. |
-| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--priority P0\|P1\|P2\|P3\|none ...] [--sort id\|due\|late\|priority] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
+| `ls [--status open\|in_progress\|done\|ready\|blocked ...] [--type T ...] [--parent ID] [--search TEXT] [--owner P] [--lane L] [--team T] [--meta k=v ...] [--due-before D] [--priority P0\|P1\|P2\|P3\|none ...] [--gated] [--sort id\|due\|late\|priority] [--all-projects]` | List tasks with dates, people, and lanes. Done tasks are hidden by default. A task with open gates shows `(waiting: LABEL)`; `--gated` lists only those tasks. Repeated flags accumulate. `--owner` matches owner, decider, or party. `--lane` and `--team` include inherited values. |
 | `ready [--all-projects]` | List leaf tasks that can start now, by priority (P0 first, tasks without one last), then by id. |
 | `show ID` | Show details, dependencies, dependents, and conflicts. |
-| `start ID` / `done ID` / `reopen ID` | Change a task's status. |
+| `start ID` / `done ID [--require-gates]` / `reopen ID` | Change a task's status. `done` warns on stderr about unfinished dependencies and open gates, and still marks the task done. `done` on a task that is done already keeps its `done_at`. With `--require-gates`, or `TASKGRAPH_GATES=refuse` in the environment, `done` refuses a task with open gates (exit 1, nothing changed). |
+| `gate ID KEY [--label TEXT] [--ref URL \| --no-ref] \| --clear` | Set, update, or clear one completion gate. See [Gates](#gates). |
 | `date ID [--start D] [--due D] [--promised D] [--clear start\|due\|promised ...]` | Set or clear dates. |
 | `agenda [--within DAYS] [--type T ...] [--all-projects]` | List late, at-risk, conflicting, due-soon, and chase-due items. It also lists tasks whose start dates have passed and items without dates. |
 | `edit ID [--title T] [--notes N] [--type T] [--parent ID \| --no-parent] [--priority P0\|P1\|P2\|P3 \| --no-priority] [--meta k=v ...] [--unset-meta k ...]` | Edit fields. Metadata merges. Valid JSON values are parsed as JSON. |
@@ -44,6 +45,17 @@ When parsing output, pass `--json` or `--brief`. See [planning and task semantic
 The result log is append-only. `result add` is one insert, so several writers can add to the same task at once. It does not change the task: not its status, notes, metadata, or `updated_at`, and it writes no history. Taskgraph has no command to edit or delete a single entry. Removing the task removes its entries. `show --json` lists the entries without bodies, `show --brief` leaves them out, and `result ls` reads them. Use this command as the one write that a background agent may make. A permission rule that allows it still lets the agent read any file it can open into the log through `--body-file PATH`, and create a database anywhere through `--db`. To narrow it, pin `--db` and allow only `--body` or `--body-file -`.
 
 Stored statuses are `open`, `in_progress`, and `done`. Taskgraph derives `blocked` and `ready`. Exit code 1 and an `error:` message on stderr indicate an error.
+
+### Gates
+
+A gate is a condition that blocks completion. Taskgraph does not know what it means: the owner of the gate sets and clears it (a review, a release, a sign-off). Gates live in the task's metadata under `gates`, as `{"KEY": {"label": TEXT, "ref": URL or null, "since": ISO time}}`.
+
+- `gate ID KEY --label TEXT [--ref URL]` sets or updates the gate `KEY`. The label defaults to the key. An update keeps `since` and any field you leave out; `--no-ref` clears the ref. Setting a gate to the label and ref it already has writes nothing. A summary or milestone takes no gate, because its status is derived.
+- `gate ID KEY --clear` removes it. The `gates` key goes when the last gate goes. Clearing a gate that is not set prints `#ID gate KEY not set` and exits 0, so a caller can repeat it; the JSON result has `"cleared": false` (`true` when it removed one).
+- Each command changes one gate key. On one machine the write is atomic, so two writers that gate different keys do not lose each other's gates. On the GitHub backend a push merges the change key by key into the gates GitHub holds; a narrow window between reading the issue and writing it remains. `edit --meta gates=...` is refused; use `gate`. `edit --unset-meta gates` removes all gates.
+- `show` lists the open gates, `ls` and the graph page show `waiting: LABEL`, and `changes` lists a gate change as `gates +KEY`, `~KEY` or `-KEY` under Gated, not under Re-scoped.
+- Gates change neither `derived_status` nor `ready`. They only affect `done` (above).
+- On the GitHub backend an open gate with a ref is also a visible `Waiting for: [LABEL](REF)` line in the issue body, which links the issue and the gate's ref. See [The GitHub backend](#the-github-backend).
 
 ### Priority
 
@@ -75,6 +87,10 @@ deferred = ["tokens", "model", "started_at"]                      # sent with th
 The file is found through `$TASKGRAPH_CONFIG` (a path; an empty value turns it off), else the first `.taskgraph.toml` in the current folder or a parent, else the main checkout of a git worktree. `--db` does not apply to a GitHub project.
 
 A task is an issue with the label `taskgraph`; its id is the issue number. A dependency is GitHub's "blocked by", a parent is a sub-issue, the status is open or closed plus the label `tg:in-progress`, the type is a label `tg:type:<type>`, the priority is a label `tg:priority:<P>`, notes are the issue body, and other meta is a hidden JSON block at the end of the body. A result is a comment with a hidden marker. `rm` closes the issue as not planned with the label `tg:removed`. The priority is written through, never into the body: the label is the source of truth on a pull, the cached `priority` key mirrors it, and a person can set it by changing the label. A task holds at most one `tg:priority:` label; if a person adds a second, the highest counts, `show` lists a conflict, and the next `tg edit --priority` leaves one. The first write creates the four labels `tg:priority:P0` to `tg:priority:P3`.
+
+An open gate with a ref is also shown as one visible line between the notes and the meta block, for example `Waiting for: [Review by legal](https://example.com/review/7)`, followed by a hidden `<!-- taskgraph:waiting -->` marker. A ref is any URL; when it is a GitHub URL, GitHub may show a cross-reference to the task there. tg writes the line from the `gates` meta on each body write and, when it reads the body, drops every line that ends with the marker, wherever an edit on GitHub moved it, so the line never becomes part of the notes; clearing the last gate with a ref removes it. A line whose marker a person deleted is ordinary text: it becomes part of the notes. A gate without a ref adds no line. Only an `http://` or `https://` ref becomes a link; another ref shows the label alone. An `@` in a label is followed by a zero-width joiner, so a label mentions nobody; a `#` stays as it is, so `Review #5` in a label refers to #5 in the issue's repository.
+
+If someone closes the issue outside tg, tg reads the task as done. The close leaves a `tg:in-progress` label on the issue, and `tg gate --clear` leaves it too. Running `tg done` again is safe: it removes that label and changes nothing else (the issue stays closed and the task keeps its `done_at`). `tg done` before the close needs nothing more, because closing a closed issue is a no-op on GitHub. Either way the task ends done once, with no gate and no `tg:in-progress` label.
 
 ```mermaid
 flowchart LR

@@ -93,6 +93,7 @@ class CachedRemoteStore:
         self.idmap = {}
         self.before = None
         self.claimed = {}  # task id -> ClaimOutcome of this command
+        self.restated = set()  # task ids whose status this write sends although the cache already has it
         self.warnings = []
 
     # -- opening and refreshing -------------------------------------------------------------------------------------
@@ -376,7 +377,7 @@ class CachedRemoteStore:
 
     @contextmanager
     def write(self, conn, *, journal=True):
-        self.claimed = {}
+        self.claimed, self.restated = {}, set()
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             before = self.before = self.load(conn)  # inside the lock: a write that committed while this one waited is part of the baseline
@@ -432,7 +433,7 @@ class CachedRemoteStore:
             b, a, e = before[i], after[i], Edit(i)
             e.title = a["title"] if a["title"] != b["title"] else None
             e.notes = a["notes"] if a["notes"] != b["notes"] else None
-            e.status = a["status"] if (a["status"] != b["status"] or i in self.claimed) else None
+            e.status = a["status"] if (a["status"] != b["status"] or i in self.claimed or i in self.restated) else None
             e.type = a["type"] if a["type"] != b["type"] else None
             e.priority = a["priority"] if a["priority"] != b["priority"] else KEEP
             e.parent = a["parent"] if a["parent"] != b["parent"] else KEEP
@@ -442,6 +443,10 @@ class CachedRemoteStore:
                 kind = self.kind_of(k)
                 if kind == "local":
                     local_rows.append((i, k, new))
+                elif kind == "through" and k == "gates" and all(isinstance(v, dict) or v is KEEP for v in (old, new)):
+                    og, ng = ({} if v is KEEP else v for v in (old, new))
+                    e.gates_set = {g: v for g, v in ng.items() if og.get(g) != v}
+                    e.gates_unset = sorted(og.keys() - ng.keys())
                 elif kind == "through":
                     if new is KEEP:
                         e.meta_unset.append(k)
@@ -452,7 +457,7 @@ class CachedRemoteStore:
                     rows[k] = {"task_id": i, "key": k, "op": "unset" if new is KEEP else "set", "value": None if new is KEEP else canon(new), "base": base, "at": now(), "old": old_rows.get(k)}
                     new_pending.setdefault(i, {})[k] = rows[k]
             e.pending = sorted(old_rows.values(), key=lambda r: r["key"])  # only rows queued earlier ride along; this edit's own stay queued
-            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.priority is not KEEP or e.parent is not KEEP or e.meta_set or e.meta_unset:
+            if e.title is not None or e.notes is not None or e.status is not None or e.type is not None or e.priority is not KEEP or e.parent is not KEEP or e.meta_set or e.meta_unset or e.gates_set or e.gates_unset:
                 plan.edits.append(e)
         plan.removed = sorted(before.keys() - after.keys())
         plan.edges_added, plan.edges_removed = list(cs.edges_added), list(cs.edges_removed)
@@ -640,6 +645,10 @@ class CachedRemoteStore:
     def claim(self, conn, task_id):
         # Reads GitHub, never the cache. Raises ClaimLost; the label goes out with the write that follows (commit).
         self.claimed[task_id] = self.remote.claim(task_id, self.claimant(conn))
+
+    def restate(self, conn, task_id):
+        # A person or the code host closed the issue and left tg:in-progress on it: tg done still removes the label.
+        self.restated.add(task_id)
 
     def claimant_of(self, conn, task_id):
         mine = self.unvoided(conn, task_id)

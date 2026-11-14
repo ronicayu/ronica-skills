@@ -178,3 +178,51 @@ Revised before the second run: the first run of check.cfg broke `FixRoundNeedsBl
 ## Results (round 2, 2026-11-11, code at ff2c8b0)
 
 Every prediction of the revised round held. check.cfg 15,566, check-pr.cfg 16,718, pause.cfg 60,892, pause-pr.cfg 64,780 (ALLOW_UNCHECKED_REPORT on), peel-1.cfg 10,958, faults.cfg 43,832 and faults-pr.cfg 48,440 (the same counts as round 1: the removed side-effect steps led to states the repair path reached anyway), overview.cfg 110 and overview-pr.cfg 134 hold every rule with no dead end. regress-89.cfg breaks FixRoundNeedsBlocking in 6 steps (13,998 states, the round-1 check.cfg path); regress-42 .. regress-65b break as in round 1. mailbox/impl-r3.cfg holds, 181,886.
+
+# agentic-team 0.19.0 (PR-1 of #97: a closed task is done only once its change is merged)
+
+Written from the model before any run. New in the model: `Closed` (a passing verdict: only a passing close writes one, with `phase=awaiting_merge`), `Awaiting` (closed, not merged, not abandoned), `StatusAfter` (a close or record leaves the task done only with the merge), the rule `DoneOnlyWhenMerged` (status done exactly when merged), and `REGRESS_97` (the old close: `tg done` at once). The closed states keep their other variables and only change `status` from done to in_progress, and `Stop`, `Launch`, the verify and the normal close were already disabled there by the done status, so the state counts should not move.
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg, pause.cfg, pause-pr.cfg | every rule holds, `DoneOnlyWhenMerged` included, no dead end. 15,566, 16,718, 60,892 and 64,780 states, as round 2. |
+| peel-1.cfg, faults.cfg, faults-pr.cfg | every rule holds; 10,958, 43,832 and 48,440 states. |
+| regress-97.cfg | `DoneOnlyWhenMerged` breaks in 5 steps: launch, the worker reports PASS, you start a verifier, the verifier files a passing verdict, you close and the local merge waits: the task is done and not merged. Nothing else breaks. 15,566 states (the round-2 check.cfg model). |
+| regress-42 .. regress-89 | as in round 2; `DoneOnlyWhenMerged` holds in each. |
+| overview.cfg, overview-pr.cfg | 110 and 134, every rule holds. The views now read a closed task from its verdict, so the chart keeps "Closed, waiting for the merge". |
+| mailbox/impl-r3.cfg | unchanged (the mailbox model did not change). |
+
+If `DoneOnlyWhenMerged` breaks in check.cfg, look for a step that sets `merged` without `status` (a `Record` path that `StatusAfter` does not cover) or a close that sets `status` from a stale `merged'`. If `PauseFinishedFirst` breaks, look for a closed task that `RecOut` sends to `RecInProgress`.
+
+## Results (0.19.0)
+
+Run on 2026-11-13 with tla2tools 1.7.4. Every prediction held.
+
+| Config | States | Result |
+|---|---|---|
+| check.cfg, check-pr.cfg | 15,566, 16,718 | every rule holds, `DoneOnlyWhenMerged` included, no dead end |
+| pause.cfg, pause-pr.cfg | 60,892, 64,780 | every rule holds |
+| peel-1.cfg, faults.cfg, faults-pr.cfg | 10,958, 43,832, 48,440 | every rule holds |
+| regress-97.cfg | 15,566 | only `DoneOnlyWhenMerged` breaks, in 6 steps, not 5: the verifier also ends (step 5) before the close |
+| regress-42 | 10,388 | VerdictNotLost and NoDeadlock break |
+| regress-54 | 41,332 | PauseFinishedFirst breaks |
+| regress-56, -58, -61, -62, -65 | 10,852, 10,953, 10,958, 13,070, 10,516 | NoDeadlock breaks |
+| regress-57 | 11,534 | NoSessionLeftAtEnd breaks |
+| regress-59 | 16,498 | AttemptCap breaks |
+| regress-65b | 11,798 | StoppedIdleNeverRefuses breaks |
+| regress-89 | 13,998 | FixRoundNeedsBlocking breaks |
+| overview.cfg, overview-pr.cfg | 110, 134 | every rule holds; `assets/diagrams/attempt-statechart.mmd` is the new overview chart |
+
+`DoneOnlyWhenMerged` holds in every regress config except regress-97.
+
+# agentic-team 0.19.0, step B of #99 (the phase edges)
+
+Written from the model before any run; this session could not run TLC. New in the model: the operator `Phase` (the phase meta as `derive_phase` reads it), which no action, rule or config reads. Only comments changed besides it: the line numbers moved with run.py's transition table. New beside the model: `phase-view.mjs`, `phase-edges.mjs`, `phase-edges.json` (written by hand from the actions) and `phase-edges-exclusions.json`.
+
+| Config | Expect |
+|---|---|
+| every config | the same states and the same result as in "Results (0.19.0)": check.cfg 15,566, check-pr.cfg 16,718, pause.cfg 60,892, pause-pr.cfg 64,780, peel-1.cfg 10,958, faults.cfg 43,832, faults-pr.cfg 48,440, overview.cfg 110, overview-pr.cfg 134; each regress config breaks its rule as there and nothing else. SANY parses `Phase` (it uses `Closed` and `WorkerStatuses`, both defined above it). |
+| check.cfg and check-pr.cfg through `phase-edges.mjs` (NOTES.md, "Phase edges") | the 18 edges of `phase-edges.json`, so `git diff --exit-code phase-edges.json` is empty. Each config alone gives all 18: in local mode a close waits on a conflict, merges at once by a merge or a no-change close, and record finds the operator's merge; in pr mode a close waits on the request, merges at once on a clean request or a no-change close, and record finds the request merged. I expect no `seen_*` edge but `running -> reported` (no other environment step moves a phase), no edge into `abandoned` from `verifying` or `awaiting_merge` (no hint names abandon there), no edge out of `merged` or `abandoned`, and no `record` label. |
+| overview.cfg with `phase-view.mjs` (optional, a chart) | 16 of the 18 edges, in a chart: without FULL_ENV no worker goes idle or gets stuck, so there is no `running -> stopped` (neither the hinted stop nor record's stop of a stuck worker) and no `running -> abandoned` (the unknown hint at the cap). |
+
+If the regenerated file differs: an extra edge with a `record` label means a `Record` path moves the phase in a way the view does not name (read it in the dump, then fix the view or the model). An extra `seen_*` edge means an environment step moves a phase (`WorkerFiles*` aside), which the model did not do before. A missing edge means my reading of a hint was wrong; the test then names the table row that lost its model edge, and the row needs an exclusion with a reason, or the model a fix.

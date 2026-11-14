@@ -190,6 +190,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #panel .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 12px; }
 #panel .badge.late { background: #c81e1e; color: #fff; border: 1px solid #c81e1e; }
 #panel .badge.chase { background: #f59e0b; color: #1c1004; border: 1px solid #f59e0b; }
+#panel .badge.gate { background: #1e3a5f; color: #bfdbfe; border: 1px solid #3b6aa3; }
+:root[data-theme="light"] #panel .badge.gate, .theme-light #panel .badge.gate { background: #dbeafe; color: #1e3a8a; border-color: #93b4e6; }
 #panel button { margin-top: 10px; background: var(--control); color: var(--text); border: 1px solid var(--edge); border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
 #panel button:hover { background: var(--hover); }
 #panel #panelClose { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; margin-top: 0; padding: 0; font-size: 18px; line-height: 1; }
@@ -939,6 +941,12 @@ const troubleText = n => {
 // Who to chase is the point of a chase-due external, so name the party rather than "chase due".
 const chaseText = n => n.meta.party ? 'chase ' + n.meta.party : 'chase due';
 
+// Open completion gates (meta.gates): "waiting: <label>", nothing when there are none.
+const waitText = n => {
+  const g = n.meta.gates && typeof n.meta.gates === 'object' ? Object.entries(n.meta.gates).filter(([, v]) => v && typeof v === 'object') : [];
+  return g.length ? 'waiting: ' + g.map(([k, v]) => v.label || k).join('; ') : null;
+};
+
 // Graph nodes are narrower on a phone so a whole plan fits at a larger zoom.
 const graphLabelW = () => view === 'graph' && narrowScreen.matches ? NARROW_LABEL_W : LABEL_W;
 
@@ -950,6 +958,7 @@ function labelOf(n, open) {
   if (n.children.length && !open.has(n.id)) parts.unshift('▸ ' + descendants(n));
   if (troubleText(n)) parts.unshift(troubleText(n));
   if (n.chase_due) parts.unshift(chaseText(n));
+  if (waitText(n)) parts.unshift(waitText(n));
   if (conflicted(n)) parts.unshift('conflict');
   if (atRisk(n)) parts.unshift('at risk');
   if (n.late_days != null) parts.unshift(n.late_days + 'd late');
@@ -2403,6 +2412,7 @@ function openPanel(n) {
   trail = trail.filter(id => byId.has(id));
   const known = factKeys(n);
   if (hasPriority(n)) known.add('priority');  // the badge shows it
+  if (waitText(n)) known.add('gates');
   const extra = Object.entries(n.meta).filter(([k]) => !known.has(k));
   const focus = goal === n.id || n.type !== 'risk';
   const focusText = goal === n.id ? 'Show everything' : GOAL_TYPES.includes(n.type) ? 'Focus on this goal' : 'Show only what this needs';
@@ -2418,7 +2428,8 @@ function openPanel(n) {
       n.late_days != null ? el('span', { className: 'badge late', textContent: 'Late ' + n.late_days + 'd' }) : null,
       atRisk(n) ? el('span', { className: 'badge risk', textContent: 'At risk' }) : null,
       conflicted(n) ? el('span', { className: 'badge conflict', textContent: 'Conflict' }) : null,
-      n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null),
+      n.chase_due ? el('span', { className: 'badge chase', textContent: 'Chase due' }) : null,
+      waitText(n) ? el('span', { className: 'badge gate', textContent: waitText(n) }) : null),
     el('table', { id: 'facts' }, ...facts(n)),
     el('div', { className: 'actions' },
       n.children.length ? el('button', { textContent: expandedIds().has(n.id) ? 'Collapse' : 'Expand', onclick: () => toggleExpand(n.id) }) : null,

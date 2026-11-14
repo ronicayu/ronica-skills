@@ -5,6 +5,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -1197,6 +1198,18 @@ def test_summary_and_milestone_done_at_is_latest_finish(tg, db):
     assert tg("show", str(m))["done_at"] == "2026-10-05T00:00:00Z"
 
 
+@pytest.mark.sqlite_only("sets done_at in the store; on GitHub a refresh reads the close time (test_cached_store covers it)")
+def test_done_again_keeps_done_at(tg, db):
+    a = add(tg, "A")
+    tg("done", str(a))
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET done_at='2026-10-01T00:00:00Z' WHERE id=?", (a,))
+    again = tg("done", str(a))
+    assert again["status"] == "done" and again["done_at"] == "2026-10-01T00:00:00Z"
+    tg("reopen", str(a))
+    assert tg("done", str(a))["done_at"] != "2026-10-01T00:00:00Z"
+
+
 def test_tree_roots_skip_isolated_leaves(tg):
     goal = add(tg, "goal")
     add(tg, "a", "--blocks", str(goal))
@@ -2009,3 +2022,182 @@ def test_priority_reaches_the_graph_payload(tg, tmp_path):
     tg("graph", "--no-open", "--out", str(out))
     html = out.read_text()
     assert '"priority": "P0"' in html and '"priority": null' in html
+
+
+def test_gate_set_update_clear(tg, fail):
+    a = add(tg, "A")
+    g = tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")["meta"]["gates"]
+    assert set(g) == {"release"} and g["release"]["label"] == "Review by legal" and g["release"]["ref"] == "https://example.com/review/7" and g["release"]["since"]
+    since = g["release"]["since"]
+    g = tg("gate", str(a), "release", "--label", "Review by finance")["meta"]["gates"]
+    assert g["release"] == {"label": "Review by finance", "ref": "https://example.com/review/7", "since": since}
+    fail("gate", str(a), "release", "--clear", "--label", "x")
+    cleared = tg("gate", str(a), "release", "--clear")
+    assert "gates" not in cleared["meta"] and cleared["cleared"] is True
+    assert "gates" not in tg("show", str(a))["meta"]
+
+
+def test_two_gates_on_one_task(tg):
+    a = add(tg, "A", "--meta", "owner=x")
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    tg("gate", str(a), "review", "--label", "legal review")
+    meta = tg("show", str(a))["meta"]
+    assert set(meta["gates"]) == {"release", "review"} and meta["owner"] == "x"
+    assert set(tg("gate", str(a), "release", "--clear")["meta"]["gates"]) == {"review"}
+
+
+def test_done_with_open_gate_warns_and_completes(tg, raw):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    p = raw("--project", "demo", "--json", "done", str(a))
+    assert p.returncode == 0 and f"warning: #{a} has open gates: Review by legal" in p.stderr
+    done = json.loads(p.stdout)
+    assert done["status"] == "done" and done["warnings"] == [f"#{a} has open gates: Review by legal"]
+
+
+def test_done_refuses_open_gate_in_strict_mode(tg, fail, monkeypatch):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    assert "open gates: Review by legal" in fail("done", str(a), "--require-gates").stderr
+    monkeypatch.setenv("TASKGRAPH_GATES", "refuse")
+    assert "open gates" in fail("done", str(a)).stderr
+    assert tg("show", str(a))["status"] == "open"
+    monkeypatch.delenv("TASKGRAPH_GATES")
+    tg("gate", str(a), "release", "--clear")
+    assert tg("done", str(a), "--require-gates")["status"] == "done"
+
+
+def test_gates_leave_status_and_ready_alone(tg):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    assert tg("show", str(a))["derived_status"] == "ready"
+    assert [t["id"] for t in tg("ready")] == [a]
+
+
+def test_ls_gated_and_show_display(tg, raw):
+    a = add(tg, "A")
+    b = add(tg, "B")
+    tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    assert [t["id"] for t in tg("ls", "--gated")] == [a]
+    assert [t["id"] for t in tg("ls")] == [a, b]
+    rows = text(raw, "ls")
+    assert "(waiting: Review by legal)" in rows[0] and "waiting" not in rows[1]
+    shown = "\n".join(text(raw, "show", str(a)))
+    assert "waiting: Review by legal (https://example.com/review/7)" in shown
+    assert text(raw, "ls", "--gated")[0].startswith(f"{a:>4}")
+
+
+def test_gates_reach_the_graph_payload(tg, tmp_path):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    out = tmp_path / "g.html"
+    tg("graph", "--no-open", "--out", str(out))
+    html = out.read_text()
+    start = html.index('{"nodes"')
+    payload, _ = json.JSONDecoder().raw_decode(html[start:])
+    node = next(n for n in payload["nodes"] if n["id"] == a)
+    assert node["meta"]["gates"]["release"]["label"] == "Review by legal" and node["meta"]["gates"]["release"]["ref"] == "https://example.com/review/7"
+
+
+def test_gate_clear_is_idempotent(tg, raw, db):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    assert tg("gate", str(a), "release", "--clear")["cleared"] is True
+    again = tg("gate", str(a), "release", "--clear")
+    assert again["cleared"] is False and "gates" not in again["meta"]
+    p = raw("--project", "demo", "gate", str(a), "release", "--clear")
+    assert p.returncode == 0 and p.stdout.strip() == f"#{a} gate release not set"
+    assert sum(1 for _, f, _, _ in events(db) if f == "meta.gates") == 2
+
+
+def test_gate_set_to_the_same_value_writes_nothing(tg, db):
+    a = add(tg, "A")
+    first = tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    n = len(events(db))
+    again = tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    assert again["updated_at"] == first["updated_at"] and again["meta"] == first["meta"]
+    assert tg("gate", str(a), "release", "--label", "Review by legal")["updated_at"] == first["updated_at"]
+    assert len(events(db)) == n
+
+
+def test_gate_no_ref_clears_the_ref(tg, fail):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    g = tg("gate", str(a), "release", "--no-ref")["meta"]["gates"]["release"]
+    assert g["ref"] is None and g["label"] == "Review by legal"
+    fail("gate", str(a), "release", "--ref", "https://x", "--no-ref")
+    fail("gate", str(a), "release", "--clear", "--no-ref")
+
+
+def test_edit_meta_refuses_gates_but_unset_works(tg, fail):
+    a = add(tg, "A")
+    assert "tg gate" in fail("edit", str(a), "--meta", "gates={}").stderr
+    assert "tg gate" in fail("add", "B", "--meta", "gates={}").stderr
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    assert "gates" not in tg("edit", str(a), "--unset-meta", "gates")["meta"]
+
+
+def test_gate_refused_on_summary_and_milestone(tg, fail):
+    p = add(tg, "P")
+    add(tg, "C", "--parent", str(p))
+    m = add(tg, "M", "--type", "milestone", "--meta", "date=2026-12-01")
+    assert "summary" in fail("gate", str(p), "release", "--label", "x").stderr
+    assert "milestone" in fail("gate", str(m), "release", "--label", "x").stderr
+    assert "gates" not in tg("show", str(p))["meta"]
+
+
+def test_export_keeps_gates(tg, raw):
+    a = add(tg, "A")
+    tg("gate", str(a), "release", "--label", "Review by legal", "--ref", "https://example.com/review/7")
+    exported = json.loads(raw("--project", "demo", "export").stdout)["tasks"][0]["meta"]["gates"]
+    assert exported == tg("show", str(a))["meta"]["gates"] and exported["release"]["ref"] == "https://example.com/review/7"
+
+
+@pytest.mark.sqlite_only("the test holds the SQLite lock itself")
+def test_done_strict_sees_a_gate_set_while_it_waits(tg, db):
+    # the strict check runs again inside the write lock
+    a = add(tg, "A")
+    with closing(sqlite3.connect(db, timeout=30)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        p = subprocess.Popen([sys.executable, str(SCRIPT), "--db", str(db), "--project", "demo", "--json", "done", str(a), "--require-gates"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1.5)  # the child has read the task without a gate and now waits for the lock
+        meta = json.dumps({"gates": {"release": {"label": "Review by legal", "ref": None, "since": "2026-10-13T00:00:00Z"}}})
+        conn.execute("UPDATE tasks SET meta=? WHERE id=?", (meta, a))
+        conn.commit()
+        err = p.communicate()[1]
+    assert p.returncode == 1 and "open gates: Review by legal" in err
+    assert tg("show", str(a))["status"] == "open"
+
+
+GATE_WORKERS = 4
+GATE_TASKS = 8
+
+
+@pytest.mark.sqlite_only("processes share one SQLite file")
+def test_concurrent_gates_and_meta_edits_lose_nothing(tg, raw, db):
+    ids_ = [add(tg, f"T{i}") for i in range(GATE_TASKS)]
+    script = ("import subprocess, sys\n"
+              "me, db, script, *ids = sys.argv[1:]\n"
+              "for i in ids:\n"
+              "    for args in (['gate', i, 'g' + me, '--label', 'L' + me], ['edit', i, '--meta', 'k' + me + '=1']):\n"
+              "        p = subprocess.run([sys.executable, script, '--db', db, '--project', 'demo', *args], capture_output=True, text=True)\n"
+              "        assert p.returncode == 0, p.stderr\n")
+    procs = [subprocess.Popen([sys.executable, "-c", script, str(w), str(db), str(SCRIPT), *map(str, ids_)]) for w in range(GATE_WORKERS)]
+    assert [p.wait() for p in procs] == [0] * GATE_WORKERS
+    for t in tg("ls"):
+        assert set(t["meta"]["gates"]) == {f"g{w}" for w in range(GATE_WORKERS)}, t
+        assert {k for k in t["meta"] if k.startswith("k")} == {f"k{w}" for w in range(GATE_WORKERS)}, t
+
+
+def test_gate_set_and_clear_show_in_changes(tg, raw, db):
+    a = add(tg, "A")
+    age_events(db)
+    tg("gate", str(a), "release", "--label", "Review by legal")
+    data = tg("changes", "--since", "2026-10-01")
+    assert [c["field"] for r in data["gated"] for c in r["changes"]] == ["meta.gates"] and data["rescoped"] == []
+    assert f"#{a} A — gates +release" in "\n".join(text(raw, "changes", "--since", "2026-10-01"))
+    assert "Re-scoped" not in "\n".join(text(raw, "changes", "--since", "2026-10-01"))
+    assert tg("report", "--since", "2026-10-01")["changes"]["rescoped"] == 0
+    tg("gate", str(a), "release", "--clear")
+    gates = [(o, n) for _, f, o, n in events(db) if f == "meta.gates"]
+    assert len(gates) == 2 and gates[0][0] is None and gates[1][1] is None

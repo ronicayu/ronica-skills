@@ -41,7 +41,7 @@ MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 LEVELS = {"low": 1, "medium": 2, "high": 3}
 CHANGE_BUCKETS = {
     "new": "New", "started": "Started", "completed": "Completed", "reopened": "Reopened",
-    "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "removed": "Removed",
+    "slipped": "Slipped", "pulled_in": "Pulled in", "rescoped": "Re-scoped", "gated": "Gated", "removed": "Removed",
 }
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
@@ -363,6 +363,19 @@ def parse_meta(pairs):
     return meta
 
 
+def open_gates(task):
+    gates = task["meta"].get("gates")
+    return {k: g for k, g in gates.items() if isinstance(g, dict)} if isinstance(gates, dict) else {}
+
+
+def gate_label(key, gate):
+    return gate.get("label") or key
+
+
+def waiting(task):
+    return "waiting: " + "; ".join(gate_label(k, g) for k, g in open_gates(task).items())
+
+
 def check_priority(value, filtering=False):
     if value not in PRIORITIES and not (filtering and value == "none"):
         raise Fail("priority must be P0, P1, P2, P3 or none" if filtering else "priority must be P0, P1, P2 or P3")
@@ -375,6 +388,8 @@ def rank(task):
 
 
 def check_meta(meta):
+    if "gates" in meta:
+        raise Fail("gates is not a plain meta key; use tg gate ID KEY [--label TEXT] [--ref URL] (--clear to remove one)")
     if "priority" in meta:
         raise Fail("priority is not a meta key; use --priority P0|P1|P2|P3 (edit: --no-priority to clear it)")
     if meta.get("type", "task") not in TYPES:
@@ -428,6 +443,8 @@ def line(task, with_project=False, with_priority=False):
         suffix += "  (chase due)"
     if task["conflicts"]:
         suffix += "  (conflict)"
+    if open_gates(task):
+        suffix += f"  ({waiting(task)})"
     details = [f"{due_word(task)} {task['due']}" if task["due"] else None, person(task), task["lane"]]
     details = " — " + " · ".join(str(d) for d in details if d) if any(details) else ""
     column = f"{task['priority'] or '':<3}" if with_priority else ""
@@ -643,6 +660,8 @@ def cmd_ls(store, conn, args):
         for value in args.priority:
             check_priority(value, filtering=True)
         tasks = [t for t in tasks if (t["priority"] or "none") in args.priority]
+    if args.gated:
+        tasks = [t for t in tasks if open_gates(t)]
     wanted = args.status
     if wanted:
         tasks = [t for t in tasks if t["derived_status"] in wanted or (t["status"] in wanted and not computed(t))]
@@ -671,6 +690,7 @@ def cmd_ready(store, conn, args):
     args.type = [t for t in TYPES if t != "risk"]
     args.parent = args.search = args.owner = args.lane = args.team = args.due_before = args.priority = None
     args.meta = []
+    args.gated = False
     args.sort = "ready"
     cmd_ls(store, conn, args)
 
@@ -725,6 +745,9 @@ def cmd_show(store, conn, args):
     if task["conflicts"]:
         out.append("conflicts:")
         out.extend(f"  {c['message']}" for c in task["conflicts"])
+    if open_gates(task):
+        out.append("gates:")
+        out.extend(f"  waiting: {gate_label(k, g)}" + (f" ({g['ref']})" if g.get("ref") else "") + f" [{k}, since {g.get('since') or '-'}]" for k, g in open_gates(task).items())
     if task["notes"]:
         out.append(f"notes:\n{task['notes']}")
     if task["meta"]:
@@ -750,13 +773,26 @@ def set_status(store, conn, args, status):
     if status == "done" and unfinished:
         warnings.append(f"#{task['id']} has unfinished dependencies: {', '.join(f'#{d}' for d in unfinished)}")
         print(f"warning: {warnings[0]}", file=sys.stderr)
+    strict = status == "done" and (args.require_gates or os.environ.get("TASKGRAPH_GATES") == "refuse")
+    if status == "done" and open_gates(task):
+        text = f"#{task['id']} has open gates: {waiting(task).removeprefix('waiting: ')}"
+        if strict:
+            raise Fail(text)
+        warnings.append(text)
+        print(f"warning: {text}", file=sys.stderr)
     ts = now()
     with store.write(conn):
+        if strict and open_gates(get(load(conn), args.id)):  # a gate set while this write waited for the lock
+            raise Fail(f"#{args.id} has open gates: {waiting(get(load(conn), args.id)).removeprefix('waiting: ')}")
         if status == "in_progress":
             store.claim(conn, args.id)
+        else:
+            store.restate(conn, args.id)
+        # a task that is done already keeps its done_at, so a repeated tg done changes no history
         conn.execute(
-            "UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?",
-            (status, ts if status == "done" else None, ts, args.id),
+            "UPDATE tasks SET done_at=CASE WHEN ?='done' THEN (CASE WHEN status='done' AND done_at IS NOT NULL THEN done_at ELSE ? END) END,"
+            " status=?, updated_at=? WHERE id=?",
+            (status, ts, status, ts, args.id),
         )
     data = load(conn)[args.id]
     holder = store.claimant_of(conn, args.id) if status == "in_progress" else None
@@ -765,6 +801,44 @@ def set_status(store, conn, args, status):
     if warnings:
         data = dict(data, warnings=warnings)
     emit(args, data, f"#{args.id} {status}" + (f" (claimed by {holder})" if holder else ""))
+
+
+def cmd_gate(store, conn, args):
+    if args.clear and (args.label is not None or args.ref is not None or args.no_ref):
+        raise Fail("--clear cannot be combined with --label, --ref or --no-ref")
+    if args.ref is not None and args.no_ref:
+        raise Fail("--ref and --no-ref cannot be combined")
+    cleared = False
+    with store.write(conn):
+        task = get(load(conn), args.id)  # read inside the write: only this one gate key changes
+        if computed(task):
+            raise Fail(f"#{args.id} is a {'summary' if is_summary(task) else 'milestone'}: its status is derived, so it takes no gate")
+        meta = dict(task["meta"])
+        gates = meta.get("gates", {})
+        if not isinstance(gates, dict):
+            raise Fail(f"meta key gates of #{args.id} is not an object")
+        gates = dict(gates)
+        if args.clear:
+            cleared = gates.pop(args.key, None) is not None
+            new = gates
+        else:
+            old = gates.get(args.key) if isinstance(gates.get(args.key), dict) else {}
+            new = dict(gates, **{args.key: {
+                "label": args.label if args.label is not None else old.get("label") or args.key,
+                "ref": None if args.no_ref else args.ref if args.ref is not None else old.get("ref"),
+                "since": old.get("since") or now(),
+            }})
+        if new != task["meta"].get("gates", {}):  # a repeat of the same call writes nothing
+            if new:
+                meta["gates"] = new
+            else:
+                meta.pop("gates", None)
+            conn.execute("UPDATE tasks SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta), now(), args.id))
+    data = load(conn)[args.id]
+    if args.clear:
+        emit(args, dict(data, cleared=cleared), f"#{args.id} gate {args.key} " + ("cleared" if cleared else "not set"))
+    else:
+        emit(args, data, f"#{args.id} gate {args.key} set")
 
 
 def cmd_start(store, conn, args):
@@ -1058,6 +1132,11 @@ def describe(field, old, new):
     if field == "depends_on":
         gone, came = sorted(set(old or []) - set(new or [])), sorted(set(new or []) - set(old or []))
         return "depends on " + " ".join([*(f"+#{i}" for i in came), *(f"-#{i}" for i in gone)])
+    if field == "meta.gates":
+        old, new = old or {}, new or {}
+        gone, came = sorted(old.keys() - new.keys()), sorted(new.keys() - old.keys())
+        moved = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
+        return "gates " + " ".join([*(f"+{k}" for k in came), *(f"~{k}" for k in moved), *(f"-{k}" for k in gone)])
     if field == "parent":
         return f"parent {f'#{old}' if old else '-'} → {f'#{new}' if new else '-'}"
     if field == "title":
@@ -1118,6 +1197,9 @@ def collect_changes(conn, tasks, args, since):
             else:
                 scope.append({"field": field, "from": old, "to": new})
         scope += [{"field": f, "from": net[f][0], "to": net[f][1]} for f in SCOPE_FIELDS if f in net]
+        if "meta.gates" in net:
+            found["gated"].append(dict(brief_task(task), changes=[{"field": "meta.gates", "from": net["meta.gates"][0], "to": net["meta.gates"][1]}]))
+            text["gated"].append(f"#{task_id} {marker(task)}{task['title']} — " + describe("meta.gates", *net["meta.gates"]))
         if scope:
             found["rescoped"].append(dict(brief_task(task), changes=scope))
             text["rescoped"].append(f"#{task_id} {marker(task)}{task['title']} — " + "; ".join(describe(c["field"], c["from"], c["to"]) for c in scope))
@@ -1899,7 +1981,7 @@ def cmd_projects(store, conn, args):
     emit(args, rows, "\n".join(map(text, rows)))
 
 
-WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date")
+WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date", "gate")
 COMMANDS = {
     "add": cmd_add,
     "dep add": cmd_dep_add,
@@ -1917,6 +1999,7 @@ COMMANDS = {
     "done": cmd_done,
     "reopen": cmd_reopen,
     "edit": cmd_edit,
+    "gate": cmd_gate,
     "rm": cmd_rm,
     "why": cmd_why,
     "date": cmd_date,
@@ -2009,6 +2092,7 @@ def build_parser():
     p.add_argument("--meta", nargs="+", action="extend", default=[])
     p.add_argument("--due-before")
     p.add_argument("--priority", nargs="+", action="extend")
+    p.add_argument("--gated", action="store_true", help="only tasks with open gates")
     p.add_argument("--sort", choices=SORTS, default="id")
     p.add_argument("--all-projects", action="store_true")
 
@@ -2020,6 +2104,16 @@ def build_parser():
         p.add_argument("id", type=int)
         if name == "rm":
             p.add_argument("--recursive", action="store_true")
+        if name == "done":
+            p.add_argument("--require-gates", action="store_true", help="refuse while the task has open gates (or set TASKGRAPH_GATES=refuse)")
+
+    p = command("gate")
+    p.add_argument("id", type=int)
+    p.add_argument("key")
+    p.add_argument("--label")
+    p.add_argument("--ref")
+    p.add_argument("--no-ref", action="store_true", help="clear the gate's ref")
+    p.add_argument("--clear", action="store_true")
 
     p = command("edit")
     p.add_argument("id", type=int)

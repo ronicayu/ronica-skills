@@ -118,11 +118,12 @@ class SqliteStore:
 
     @contextmanager
     def write(self, conn, *, journal=True):
-        if journal:
-            with conn, record(conn, self.load):
-                yield
-        else:
-            with conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")  # take the lock before any read: the journal's before-snapshot and the command's own reads are inside it
+            if journal:
+                with record(conn, self.load):
+                    yield
+            else:
                 yield
 
     def new_id(self, conn):
@@ -143,6 +144,9 @@ class SqliteStore:
             return dict(conn.execute("SELECT * FROM results WHERE id=?", (cur.lastrowid,)).fetchone())
 
     def claim(self, conn, task_id):
+        pass
+
+    def restate(self, conn, task_id):
         pass
 
     def claimant_of(self, conn, task_id):

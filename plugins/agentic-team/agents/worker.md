@@ -61,8 +61,16 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   otherwise stays at the head and unchanged.
 - **Scratch files.** Keep every temporary file and folder in `.agentic-team-scratch/` at the top
   of your worktree (git ignores it). Do not use `mktemp`, `/tmp` or another folder outside your
-  worktree. Leave what you put there in place: `run` removes the folder with the worktree after the
-  merge.
+  worktree. Delete nothing you put there; `run` removes the folder with the worktree after the
+  merge. The one exception: a worker may delete a cache folder in its own worktree that its own
+  run made. A verifier deletes nothing at all.
+  - A second copy of the tree (a base export, a mutation copy) goes in
+    `.agentic-team-scratch/<name>/`. Give tools its absolute path (`git -C`, `uv run --project`,
+    `pnpm -C`) and do not `cd` into it, so later commands still run in the worktree.
+  - For a run with a cold cache, point the tool at a new empty folder in
+    `.agentic-team-scratch/` (for example `--cache-location`, `VITEST_CACHE_DIR`,
+    `XDG_CACHE_HOME`) instead of deleting a cache. Never delete a shared cache or a cache outside
+    your worktree.
 - **One command per step.** Do not change directory: give the tool the path (`git -C <dir>`,
   `make -C <dir>`, `npm --prefix <dir>`, `pytest <dir>`, or an absolute path inside your
   worktree). If a tool has no such option, `cd` into the folder in its own call, run the tool,
@@ -70,12 +78,19 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   Bash call: no `&&`, `||` or `;` chains, and never a deletion together with another command. A
   pipe into a filter (`| tail`, `| grep`) is fine. A permission prompt
   stalls a session that nobody watches for hours.
+- **No wait loops.** Do not use `sleep`, countdowns or polling loops in Bash. Run a long
+  command in the foreground with a timeout, or start it in the background and wait for its
+  completion notification. To wait for a service you started, use the tool's own wait option
+  (`docker compose up --wait`, `pg_isready -t 30`, `npx wait-on -t 60000 <url>`), or run one
+  readiness check that has its own timeout (`curl --retry 30 --retry-connrefused --retry-delay 1
+  --max-time 60 <url>`) once. If it times out, the service is not ready: report that.
 - **Work alone.** If you use sub-agents, give each its own files. Two writers never
   share a file.
 - **Nothing irreversible.** Do not send messages or requests to people or outside
   parties; draft them and name the file. The notify line in REPORT, and the wake line after
   an ask that MAILBOX names, both to the Manager, are the only messages you may send. Do
-  not delete anything unless the brief allows it.
+  not delete anything unless the brief allows it, except the one exception in Scratch files (a worker's own cache
+  folder; a verifier deletes nothing).
 - **Processes.** Anything you start that outlives a command (a server, a watcher, an emulator) is
   stopped by you before your final commit. Record its pid when you start it, and stop it with
   `kill <pid>` in its own call. If the sandbox refuses the kill, list `leftover process: pid <pid> port <port>` under

@@ -41,6 +41,28 @@ prompt builds a command from a variable.
   the session had started, as Taskgraph tasks or integration steps, and then
   runs the Manager's Start steps. The role ends when you say so.
 
+After a context compaction, the Manager would have only a summary. The plugin
+ships a `SessionStart` hook with the matcher `compact` (`hooks/hooks.json`,
+`scripts/recompact`, `scripts/recompact.py`) that puts the role and the orders
+back, in the Manager session only. `run.py` writes the Manager's session id
+(`$CLAUDE_CODE_SESSION_ID`) to `.agentic-team/manager-session` in `notify-to` (with a name or `--clear`: Start step
+4), and in `record` only when the file does not exist yet, so a `record` in another Claude session never takes the
+Manager's place. The hook finds
+the project from the session's working directory (the nearest directory upward
+with `.agentic-team.toml`) and prints nothing unless the session id equals that
+file's. In the Manager session it adds to the context, in this order: an
+instruction to read `agents/manager.md` in full first (the hook does not inline
+it), `standing-orders.md`, `manager-orders.md` (when it exists), a short
+`run status --brief` (work not yet closed, and open decisions), and an
+instruction to run `run record` and start `run wait` again. The context is at
+most 9000 characters, because Claude Code replaces a longer one with a preview.
+An orders file that does not fit is not inlined: the hook gives its absolute
+path, and the Manager reads it in full. The status has a 5 second limit; when it
+is slow, the hook gives the rest without it. Workers and other sessions get
+nothing. On any error (no run directory, an unreadable file, bad input) the
+hook exits 0 with no output; it never blocks a session
+start. If you wrote a user-level hook for this, delete it after the upgrade.
+
 The Manager keeps the plan, launches and verifies work, and reports. It does
 not diagnose failures, edit the repository, review diffs, or run tests itself;
 each of those becomes a Taskgraph task for a worker or a verifier.
@@ -102,7 +124,7 @@ Three rules carry the rest:
 ### Task lifecycle
 
 Nothing is patched in place. A refused launch is fixed in Taskgraph, a retry
-or fix round renders a fresh brief, and a closed task unblocks the next. Only
+or fix round renders a fresh brief, and a merged task unblocks the next. Only
 calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 
 `run.py launch <id>` renders the brief and starts the worker in the task's one
@@ -194,16 +216,32 @@ inside the worker's worktree. For a `risk=high` task, `run.py verify` starts a
 verifier in a worktree of its own, created at the `Head` commit. A `schema` or
 `design-doc` task always goes to `run.py verify`, whatever its `risk`. The brief
 carries the method for the task's verify kind, names the base and head commits, and names the project verify skill (`.claude/skills/verify/SKILL.md` at the commit under review, else in the main checkout, else none). Only `artifact-verified` closes those two kinds. Then
-`run.py close` records the verdict and the token counts, runs `tg done`, and
-then follows `merge.mode`. In `local` mode it merges only when a standing-orders
-line starts with `MERGE:`, and only into the checked-out branch of a clean main
-checkout. Without that line, `close` lists the branch as ready to merge. On a
-conflict it aborts the merge and prints the decision to add, naming both
-branches. A confirmed merge is recorded as `merged_at` and `merged_by`. When the
-operator says a branch is merged, by any method including squash or rebase,
-`run.py merged <id>` records it. In `pr` mode `close` pushes the branch and
-opens a request instead (next section). A task that builds on a done but unmerged branch waits, and the Manager
-says so plainly in its replies and reports. After the merge, `run.py` removes
+`run.py close` records the verdict and the token counts, stops the task's
+sessions, and then follows `merge.mode`. A task is done only when its change is
+merged: until then it stays in progress in Taskgraph with the `phase`
+`awaiting_merge`, so the tasks that depend on it are not ready, and its session
+slot is free. In `local` mode `close` merges only when a standing-orders line
+starts with `MERGE:`, and only into the checked-out branch of a clean main
+checkout. Without that line, during a pause, on a dirty or detached main
+checkout, or on a conflict, the task waits: `close` lists the branch as ready
+to merge, and on a conflict it aborts the merge and prints the decision to add,
+naming both branches. Every merge record goes through one step: it writes
+`merged_at`, `merged_by` and `phase=merged`, then runs `tg done`. That happens
+when `close` merges, when `record` finds the branch in `HEAD` or the request
+merged, and when the operator says a branch is merged, by any method including
+squash or rebase, with `run.py merged <id>`. If a command stops between the two
+writes, the next `record` finishes it. While the task waits, it carries a
+Taskgraph gate `merge` that says what it waits for: `merge of <branch>` in
+`local` mode, the request (`PR #<n>` or `MR !<n>`, with its URL) in `pr` mode.
+`tg ls` shows it as `(waiting: ...)` and `tg ls --gated` lists those tasks. The
+merge record clears the gate before `tg done`, and `abandon` clears it too. Two closes are done at once, with no
+merge: output that is not a git commit, and a branch with no commit beyond its
+base (`merged_by=no-change`). In `pr` mode `close` pushes the branch and opens a
+request instead (next section). A task that depends on one that waits for its
+merge is not ready; `launch --base <its branch>` builds on it anyway (`adopt`
+takes only a branch that holds its commit), and the Manager says so plainly in its replies and reports. A task that waits for its
+merge refuses `launch`, `adopt`, `verify` and `stop`; `close` again resumes at
+the merge or the push, and `abandon` drops it. After the merge, `run.py` removes
 the worktrees of the task by default (`merge.remove_worktrees = true`). It
 works in two steps.
 
@@ -276,9 +314,8 @@ that may be data: <paths>`, `commit <short> is not merged`, or `pushed head
 <short> is not in this clone; fetch <remote>/<branch>`. If git refuses the removal (for example for a worktree with a
 submodule), the folder and its lock stay and the `kept` line quotes git's first
 line; `run.py` does not retry with force. `run.py` never deletes a file and
-never forces a worktree removal. A done task that is not merged yet (`local`
-mode, waiting for the operator) keeps its worktree, and so does an abandoned
-task. `run.py record` repeats this for every done task with `merged_at` that
+never forces a worktree removal. A closed task that waits for its merge keeps
+its worktree, and so does an abandoned task. `run.py record` repeats this for every done task with `merged_at` that
 still has a folder, so it also removes the leftovers of tasks closed under 0.4.0
 to 0.6.0. It prints a folder's `kept` line only when the reason differs from
 the last one (stored in the task's `cleanup_kept` meta); the merge and
@@ -314,7 +351,7 @@ or broke (`Reason: recover`), and the attempt counts toward the cap, as a
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
 
-The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
+The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, a task is done exactly when its change is merged, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. The model also names each state's `phase`, and a test checks that `run.py`'s table `TRANSITIONS` has the same phase changes as the model, apart from a short list of known differences, each with its reason. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
 
 ![The checked lifecycle of one task's attempts: launch, report, verify, verdict, close, merge, retry and abandon](assets/diagrams/attempt-statechart.svg)
 
@@ -326,8 +363,8 @@ the operator's standing permission for `run.py` to push task branches to
 `<remote>/task-<id>` and to open requests. Merging still needs a `MERGE:` line.
 `local` mode never pushes and never runs `gh` or `glab`.
 
-1. `run.py close` records the verdict, runs `tg done`, pushes the branch, and
-   opens a request against the target branch (`merge.base`, else the host's
+1. `run.py close` records the verdict, pushes the branch, and opens a request
+   against the target branch (`merge.base`, else the host's
    default branch). The task keeps one request across attempts: a fix round
    pushes `worktree-task-<id>` to the same `task-<id>`. Every push after the
    first carries a lease on the last pushed head (`--force-with-lease`), recorded
@@ -335,7 +372,12 @@ the operator's standing permission for `run.py` to push task branches to
    With `[merge] draft = true` the request opens as a draft (GitHub
    `gh pr create --draft`, GitLab a `Draft: ` title), so it starts no full
    CI run until someone marks it ready. `record` then reports `pr-draft`
-   until it is ready. The default is `false`.
+   until it is ready. The default is `false`. The task's `merge` gate says
+   `merge of <branch>` until the request exists, then `PR #<n>` (GitHub) or
+   `MR !<n>` (GitLab) with the request URL as its ref; a later publish or
+   `record` updates the same gate when the request changes. On the Taskgraph
+   GitHub backend the issue body then shows `Waiting for: [PR #<n>](<url>)`, and
+   GitHub lists the issue on the pull request. A GitLab URL is a plain link.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
    `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
    `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
@@ -348,8 +390,20 @@ the operator's standing permission for `run.py` to push task branches to
    `host-error` for that task, goes on with the others, and exits 1 at the end.
 3. A merge that anyone did on the host is recorded at the next drain from the
    request state (`merged_by=operator`), squash and rebase merges included.
-   `run.py merged <id> --by operator` is for a merge the host cannot show. A
-   request closed without a merge is reported at every drain (`pr-closed`).
+   `run.py merged <id> --by operator` is for a merge the host cannot show. The
+   task is done from that merge on; until then it stays in progress with
+   `phase=awaiting_merge`. On the Taskgraph GitHub backend the host may close
+   the task's issue at the merge first (a request or commit that says
+   `Closes #<n>`; `run.py`'s own request text does not). Taskgraph then reads
+   the task as done; `record` still records the merge, clears the gate and
+   runs `tg done`, which keeps the task's `done_at` and removes the
+   `tg:in-progress` label that the close left on the issue (Taskgraph 1.19.0).
+   In the other order, `tg done` before the host closes the issue, the host's
+   close is a no-op on GitHub. A request closed without a merge is reported at every
+   drain (`pr-closed`), and the task stays in progress: reopen the request, or
+   `run.py abandon <id> <mode>` (the request stays open on the host, and
+   `record` no longer follows it). To redo the task, abandon it, then
+   `run.py launch <id> --attempt <n+1>`.
 4. When the host reports the request behind its target, `run.py close <id>`
    catches it up. With `[merge] catch_up = "host"` (the default) it asks the
    host to rebase the request: GitHub `gh pr update-branch <n> --rebase`,
@@ -465,11 +519,11 @@ session's message or the end of `wait` wakes it.
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, runs `tg done`, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it if it stopped after `tg done`: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
-| `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), then removes its sessions and worktrees. |
+| `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
+| `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), marks the task done, then removes its sessions and worktrees. |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
-| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. |
-| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
+| `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. It also drops a task that waits for its merge: its branch stays unmerged, and in `pr` mode its request stays open on the host for the operator to close. |
+| `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its merge is listed under "Closed, awaiting merge" (`awaiting_merge` in `--json`), not under "In flight"; it is listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
 | `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, or `project, overrides plugin`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
 | `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
@@ -529,8 +583,8 @@ in either file.
 Model values are either a model id (`"opus"`) or a table
 (`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
 profile for the sessions of that tier (see [Workers on more than one Claude
-profile](#workers-on-more-than-one-claude-profile)). The config has 10 sections
-and 30 keys, and one optional table, `[profiles]`, whose names are your own.
+profile](#workers-on-more-than-one-claude-profile)). The config has 11 sections
+and 32 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -647,6 +701,13 @@ pattern.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `default` | string | `""` | The role of a task with no `role` meta: `"architect"`, `"software-engineer"`, or a project role. `""` means no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See [Roles](#roles). |
+
+### `[brief]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `carried_report_bytes` | positive integer | `3000` | The most UTF-8 bytes of one carried report (the previous attempt, an upstream dependency, the worker report in a verify brief) in a brief. A report over it is cut at a line boundary and ends with a line that names its result id and the command that prints it. |
+| `carried_total_bytes` | positive integer | `12000` | The most UTF-8 bytes of all carried reports of one brief together. It must be at least `carried_report_bytes`. |
 
 ### `[notifications]`
 
@@ -882,7 +943,7 @@ notes, ACCEPTANCE is the `- [ ]` items and `Exit test:` or `Acceptance:` lines,
 SCOPE and VERIFY are the `scope` and `verify` meta, and TIMEBOX is twice the
 `estimate` meta (2 hours without one). CONTEXT holds the base commit, the last
 checkpoint, the previous report of a fix round, and the latest report of each
-task this one depends on. To change the brief for every task, edit the
+task this one depends on (see "Carried reports" below). To change the brief for every task, edit the
 template. `run.py verify` fills the same template, with verifier values in
 GOAL, SCOPE, SETUP, UPSTREAM, and AUTONOMY, and a `Verdict:` line request in
 REPORT. `run.py verify` fills VERIFY with the task's VERIFY meta, then a `### Project verify skill` note (where `.claude/skills/verify/SKILL.md` is, or that it is missing), then
@@ -893,6 +954,37 @@ and the VERIFY commands), then exports the base with `git archive` into
 `.agentic-team-scratch/base` in its own worktree and runs only the base-side
 checks there. It leaves the export in place; `run.py` removes it with the
 worktree.
+
+Carried reports are short. Every carried report (the previous attempt, each
+upstream dependency, the worker report in a verify brief) drops its `Ran:`
+block and keeps every other section. A report section runs from its `Label:`
+line at column 0 to the next one, so a section of many lines is dropped or kept
+whole. The `Ran:` block ends earlier at a blank line followed by a line at column
+0 that reads `<label>:` (a few words, then an ASCII colon and a space or the
+line end, or a full-width colon), outside a ``` fence: what follows, such as a
+`Root cause:` paragraph, stays. A list item, an indented line, or a `Label:`
+line with no blank line before it (`Exit code: 0`) is still the log. An upstream
+report is a summary: the result line, then `Status`, `Head`, `Branch`, `Files`,
+`Issues`, `Findings`, `Follow-ups` and `Deviations`. Every carried report ends
+with a line that names the result id and the command that prints the full result
+with its `Ran:` log (`tg result ls <task> --kind task --attempt <n>`), cut or
+not. A decision's notes stay whole. Each report is at most
+`[brief] carried_report_bytes` UTF-8 bytes (default 3000); a report over it is
+cut at a line boundary, `Status`, `Head`, `Branch`, `Files`, `Issues`,
+`Findings`, `Follow-ups`, `Deviations` and `Evidence` first, and its last line
+says it was cut. All carried reports of one brief are at most
+`carried_total_bytes` (default 12000). Over that, the previous attempt keeps its
+place, then the upstream reports whose `Files:` share a path with SCOPE get the
+room, then the others in order; a report with too little room left becomes one
+line under "Reports not shown" (result id, status, attempt, and one shared print
+command). Those lines are not counted in the total. The previous attempt's
+`Issues`, `Findings` and `Checkpoint` are never cut, so that report may pass its
+cap; its other sections are cut first. When a verifier judged that attempt, the
+brief also carries the latest verifier report of the attempt (its `Status`,
+`Verdict`, `Issues`, `Findings` and `Follow-ups`), whose `Issues` and `Findings`
+are never cut either: after a `verify-failed` verdict on a worker's `PASS`, they
+are what the fix round must fix. In a verify brief the worker report's
+`Deviations` is never cut either: the verifier checks its `adjacent:` lines.
 
 The worker runs `mailbox.py report` and `run.py check-report` from its own session, so
 its permission mode must allow both. Allow only a `--body-file` path in the
@@ -976,6 +1068,8 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 |------|---------|
 | `standing-orders.md` | Numbered operator directives, pasted into every brief. `STOP: <reason>` as the first line halts launches. A line that starts with `MERGE:` lets the Manager merge verified branches into a clean main checkout, or (in `pr` mode) lets `record` merge a clean request. |
 | `briefs/task-<id>-<attempt>.md` | Every brief sent, as rendered (`-verify` for a verifier brief, `-verify-<k>` for a second one). A record only; never edited or read as a source. |
+| `manager-session` | The Manager's session id, one line, written by `run.py` from `$CLAUDE_CODE_SESSION_ID`: `notify-to` replaces it, `record` writes it only when there is none; the compaction hook gives the role and orders back only to the session it names. |
+| `manager-orders.md` | Optional. Orders for the Manager only (not pasted into briefs); the compaction hook shows it in full. |
 | `last-report` | Time of the last status report. |
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
 | `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
@@ -1003,6 +1097,35 @@ not ignore it shows as uncommitted and keeps the worktree. The folder is on the
 disposable list too. No session deletes what it put there, because a deletion
 can stall an unattended session on a permission prompt; `run.py` removes the
 folder with the worktree after the merge.
+
+### Auto-mode allow rules for workers
+
+A worker uses scratch folders and cold-cache runs, both inside its worktree's
+`.agentic-team-scratch/` (it never uses `/tmp` or `mktemp`). In auto
+mode, a prompt on these steps stalls a session nobody watches. Add rules like these
+to `autoMode.allow` in the Claude Code settings of the operator (`~/.claude/settings.json`),
+and change the paths to your own:
+
+```json
+{
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Scratch folders in worker worktrees: inside a git worktree under <repo>/.claude/worktrees/, creating folders under that worktree's .agentic-team-scratch/ and writing or copying files into them is routine and allowed. A worker may also delete a cache folder inside its own worktree that its own test or build run created, such as node_modules/.cache, .pytest_cache, .ruff_cache or a .vitest cache. Deleting scratch folders is not allowed."
+    ]
+  }
+}
+```
+
+A rule is free text that the auto-mode classifier reads. Keep `"$defaults"` first so the
+built-in rules stay. A rule must not allow deleting a shared cache or a path outside
+the worktrees. The rule allows what `agents/worker.md` needs and no more: a worker
+creates and writes scratch folders and leaves them in place (`run.py` removes them with
+the worktree), and deletes only a cache folder of its own run.
+
+A worker that runs under another Claude profile (a `CLAUDE_CONFIG_DIR`, see "Workers on
+more than one Claude profile") reads the settings of that profile, not
+`~/.claude/settings.json`. Put the rule in each such profile's `settings.json` too.
 
 ## Results
 
@@ -1034,7 +1157,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 29 keys:
+skill. Metadata holds everything else, 31 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1056,7 +1179,9 @@ skill. Metadata holds everything else, 29 keys:
 | `pushed` | publish, `adopt`, `record` | The request head SHA as `run.py` last pushed it or last saw it merged. The lease for every later push and the guard for every merge. |
 | `host_rebase` | `close` | The `pushed` head that `close` asked the host to rebase. It stays while the outcome is open (the host failed or is still busy), so that `record` reports a new head as `pr-rebased`, not as `pr-changed`, and the next `close` checks it. `close` removes it when the outcome is known. |
 | `caught_up_from` | `close` | The local branch's head when the host first rebased the request. The local branch and worktree stay there. `close` does not push it back over the host's head, and cleanup counts it as merged. |
-| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. A done task with a commit `verdict_ref` and no `merged_at` is listed as "Done, branch not merged", and tasks that depend on it do not launch. |
+| `merged_at`, `merged_by` | `close`, `merged`, `record` | Set when the task's branch is confirmed merged, in the same write as `phase=merged`, before `tg done`. `merged_by` is `manager`, `operator` or `no-change`. In `pr` mode `record` sets them from the request state. |
+| `phase` | `launch`, `adopt`, `verify`, `record`, `close`, `stop`, `merged`, `abandon` | Where the task is: `running` (a worker runs), `stopped` (the attempt ended with no report: `STOPPED`, `DIED`, or the Manager's `BLOCKED`), `reported` (the worker filed its result), `verifying` (a verifier or a CI run checks it), `verdict_failed` (a verdict that did not close it), `awaiting_merge` (closed, in progress until its change is merged), `merged` (merged, or closed with nothing to merge; done), `abandoned`. `record` writes it for a task that has none, from `abandoned`, `merged_at`, the status, `verdict`, `verdict_ref` and the result rows, and keeps the first four in step with the result rows. A done task that is merged (or closed with nothing to merge) and has no phase gets none written: `run.py` derives `merged` when it reads it. A done task whose stored phase is one of the first four (an older `run.py` closed it after a newer `record` wrote the phase) is derived again from those fields, as if it had none. When the stored phase and those fields disagree on anything else, `record` prints `phase-mismatch` and leaves the task alone until you fix the meta. Every change goes through the table `TRANSITIONS` in `run.py`; an event with no row for the task's phase stops the command with an internal error, except in `record`, which prints `transition-error` for that task, goes on with the others, and exits 1. |
+| `gates` (key `merge`) | `close`, `record`, `merged`, `abandon` | Taskgraph's completion gates (`tg gate`, Taskgraph 1.19.0). `run.py` owns the gate `merge` and sets it while the task waits for its merge: label `merge of <branch>` with no ref (local mode, or pr mode before the request opens), else `PR #<n>` or `MR !<n>` with the request URL as ref. `run.py` clears it, with `tg gate <id> merge --clear`, in the merge record before `tg done`, and in `abandon`. A task that is done in Taskgraph (closed by 0.18.0) gets no gate. Other gates on the task are not `run.py`'s. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
@@ -1070,6 +1195,38 @@ A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Upgrading from 0.19.0
+
+Version 0.20.0 (issues #104, #106 and #107) makes the reports in a brief shorter, moves four generic worker rules into the plugin, and gives the Manager its role and orders again after a compaction. No data migration, but roll it out in this order:
+
+1. Stop the Manager: let it finish its drain, and stop its background `run wait`.
+2. Upgrade `agentic-team` and `taskgraph` together.
+3. Start a new Manager session. Claude Code loads plugin hooks when a session starts, so a Manager session that was open during the upgrade has no compaction hook, and its context still names the old plugin path. Its Start step 4 (`run notify-to`) writes `manager-session`.
+
+Then clean the project's own files: remove from `standing-orders.md` and `manager-orders.md` the rules that `agents/worker.md` now has (wait loops, scratch copies, cold caches, deletions) and any rule that contradicts them, such as one that allows `mktemp` or deleting the scratch folder. The compaction hook puts `manager-orders.md` back in full after every compaction, so a stale rule there wins over the playbooks.
+
+- **Worker rules.** `agents/worker.md` now forbids wait loops (`sleep`, countdowns, polling) and sets the rules for scratch copies of the tree and for cold-cache runs. The `architect` role now requires a `stateDiagram-v2` and a transition table for each lifecycle, and its Review checks them. A project can remove its matching standing orders.
+- **Allow rules.** See "Auto-mode allow rules for workers". Add them to your settings if workers stop on a prompt for scratch folders or caches.
+- **Compaction hook.** The plugin now ships a `SessionStart` hook (matcher `compact`). In the Manager session only, it tells the Manager to read `agents/manager.md` in full, then gives the standing orders, `manager-orders.md` and a short `run status --brief` (see "Start a Manager"). It shows at most 9000 characters; an orders file that does not fit is named by its path, to read in full. `run.py` writes `.agentic-team/manager-session` at `notify-to`, and at `record` only when the file does not exist, so a `record` from another session never takes the Manager's place. The hook loads at session start: a Manager session started before the upgrade has none. A user-level hook that does the same can be deleted. `run.py status --brief` is new.
+- **Briefs get shorter.** The previous attempt, each upstream report and the worker report of a verify brief lose their `Ran:` block (see "Carried reports are short" for where it ends). An upstream report is a summary (`Status`, `Head`, `Branch`, `Files`, `Issues`, `Findings`, `Follow-ups`, `Deviations`). Each carried report is at most 3000 bytes and all of them 12000 bytes; every carried report ends with the result id and the command that prints it in full. Decision notes are not cut.
+- **See a full report.** Run the command at the end of the carried report, `tg result ls <task id> --kind task --attempt <n>`; it prints every report of that attempt with its `Ran:` log. `tg result ls <task id>` lists them all.
+- **New keys.** `[brief] carried_report_bytes` and `carried_total_bytes` change the caps; `config.py check` validates them. Raise them to get longer reports back.
+- **A worker that depended on a log.** A worker no longer sees the `Ran:` lines of earlier attempts. The previous attempt's `Issues`, `Findings` and `Checkpoint` stay whole, and so do the `Issues` and `Findings` of the latest verifier report on that attempt, so a fix round after `verify-failed` has what it needs; it prints the full report when it wants the log.
+- **A redo of a closed task.** `pr-blocked` (a required check failed) and the refusal of a task that waits for its merge now name the way to a new attempt on the same branch and request: `run.py abandon <id> <mode>`, then `run.py launch <id> --attempt <n>`. A fix task on another branch never turns the request green.
+- **Phases of done tasks.** `record` no longer writes a `phase` for a done task that is merged or has nothing to merge; it derives it. A done task with an in-flight phase (closed by a Manager still on 0.18.0) is derived again from its fields, not a `phase-mismatch`, and `run.py merged` accepts it.
+
+### Upgrading from 0.18.0
+
+Version 0.19.0 (issue #97) marks a task done only when its change is merged. Roll it out in this order: stop the Manager and its background `run wait`, upgrade `agentic-team` and `taskgraph` together, then start a new Manager session. A Manager session left open on 0.18.0 still closes tasks the old way (done at once), while a newer `record` in another session writes their `phase`; `record` reads such a task from its fields again (see `phase` in [Task metadata](#task-metadata)), but two versions should not drive one project. The first `record` writes the `phase` of each task it must act on; a finished task gets none, so it stays quick on a project with many done tasks.
+
+- **Done means merged.** A passing `close` that merges at once (a local merge under a `MERGE:` line, a branch with no commit beyond its base, output outside git) still ends with the task done. A close that opens a request, or a local merge that waits, leaves the task in progress with `phase=awaiting_merge`. `tg ready` no longer lists the tasks that depend on it, and the `tg done` comes from the merge record: `record` (the request merged, or the commit in `HEAD`), `close` (a merge), or `run.py merged`. `done_at` is the merge time, so "Done since last report" and the mean attempts count a task when it merges. On the Taskgraph GitHub backend the issue now closes at the merge, not when the request opens.
+- **Tasks closed by 0.18.0.** A task that 0.18.0 closed and that is not merged yet (done, a commit `verdict_ref`, no `merged_at`) reads as `awaiting_merge`. `record` writes its `phase`, follows its request or its branch as before, and records the merge; it stays done in Taskgraph meanwhile. Every task in progress, and every done task that waits for its merge, gets its `phase` at the next `record`; a done task that is merged gets none (its phase is derived).
+- **The Manager's workaround is gone.** The workaround from #97, a "待合并 #PR：" title prefix and an `awaiting_merge=<PR>` meta on a done task with an open request, is no longer needed: such a task is now in progress with `phase=awaiting_merge`, and `status` lists it under "Closed, awaiting merge". Remove the prefix and the `awaiting_merge` meta key from the tasks that still carry them (`run.py` reads neither).
+- **The merge gate.** A task that waits for its merge carries the Taskgraph gate `merge` (see [Task metadata](#task-metadata)). This needs Taskgraph 1.19.0 (`tg gate`); with an older Taskgraph `run.py` prints one `warn` line per command and goes on without the gate. A task that waits and has no gate (closed before this gate existed, or by a close that stopped before it) gets it at the next `record`, once: a later `record` writes nothing when the gate already says the same. A task that 0.18.0 closed is done in Taskgraph and gets no gate; `record` still follows it and records its merge.
+- **`status`.** The "Done, branch not merged" table is now "Closed, awaiting merge"; its `--json` key is `awaiting_merge` (was `unmerged`).
+- **Refusals.** `launch`, `adopt`, `verify`, `answer`, `steer` and `stop` refuse a task that waits for its merge. `abandon` accepts it and says what happens to its branch or request.
+- **`phase-mismatch`.** `record` prints it when a task's stored `phase` disagrees with its fields on whether it is closed, merged or abandoned, and does nothing else for that task. Fix the meta with `tg edit <id> --meta phase=<phase>`. A done task with an in-flight phase is not a mismatch: `record` and `run.py merged` derive its phase again.
 
 ### Upgrading from 0.17.0
 
@@ -1190,6 +1347,7 @@ other safe folder.
 | `templates/` | Project config (`agentic-team.toml`), the brief, the verifier method per kind (`verify-<kind>.md`), the task roles (`roles/<name>.md`), the project verify skill skeletons (`project-verify-skill-{code,document}.md`), and standing orders |
 | `assets/diagrams/` | Mermaid sources for the README diagrams, their SVGs, and `render.mjs` (Pele) |
 | `scripts/run`, `scripts/config`, `scripts/tg` | Wrappers that run `run.py`, `config.py`, and `tg.py` with a Python 3.11 or later, from any directory. Prompts use these and never a variable. |
+| `hooks/hooks.json`, `scripts/recompact`, `scripts/recompact.py` | The `SessionStart` (`compact`) hook that gives the Manager its role and orders again after a compaction |
 | `scripts/tg-path.sh` | Finds the installed Taskgraph CLI. `TASKGRAPH_TG` overrides it. |
 | `scripts/python-path.sh` | Finds a Python 3.11 or later. `AGENTIC_TEAM_PYTHON` overrides it. |
 | `scripts/config.py` | Reads, merges, and validates the project config; holds every default |

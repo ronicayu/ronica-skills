@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -37,7 +38,7 @@ import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, re, subprocess, sys
+import json, os, re, signal, subprocess, sys
 
 argv = sys.argv[1:]
 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")  # the Claude profile of this call; None is the default profile
@@ -152,6 +153,9 @@ elif cmd == "--bg":
                 % (name, name, name))
     sys.stdout.write(said)
 elif cmd == "stop":
+    if os.environ.get("FAKE_CLAUDE_STOP_KILLS_CALLER"):  # the command that runs `claude stop` dies there
+        os.kill(os.getppid(), signal.SIGKILL)
+        sys.exit(1)
     if os.environ.get("FAKE_CLAUDE_STOP_FAIL"):
         sys.stderr.write("boom\n")
         sys.exit(1)
@@ -623,6 +627,26 @@ class Base(unittest.TestCase):
         for block in re.split(r"(?m)^## ", out.stdout)[1:]:
             sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
         return sections
+
+    def hold_lock(self, name, seconds=2.5):
+        """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
+        lock = os.path.join(self.root, ".agentic-team", "locks", name)
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
+                                   "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
+                                   "fh = open(sys.argv[1], 'a+'); fcntl.flock(fh, fcntl.LOCK_EX)\n"
+                                   "print('locked', flush=True); time.sleep(float(sys.argv[2]))", lock, str(seconds)],
+                                  stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "locked")
+        return holder
+
+    @staticmethod
+    def release(holder):
+        holder.wait()
+        holder.stdout.close()
+
+    def assert_awaiting(self, task):
+        """Closed by run.py and not merged: in progress in Taskgraph, phase awaiting_merge."""
+        self.assertEqual((self.status_of(task), self.meta(task).get("phase")), ("in_progress", "awaiting_merge"))
 
     def verified_by(self, verdict, task=None):
         task = task or self.running_task()
@@ -1843,7 +1867,8 @@ class RunTest(Base):
                                      "--model", "opus", "--permission-mode", "auto", "--name", "verify-1-1"])
         with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-1-verify.md")) as fh:
             self.assertEqual(fh.read(), argv[-1])
-        self.assertEqual(self.meta(task), {**before, "sessions": before["sessions"] + [self.entry(task, 1, "verify")]})
+        self.assertEqual(self.meta(task), {**before, "sessions": before["sessions"] + [self.entry(task, 1, "verify")],
+                                           "phase": "verifying"})
         self.assertEqual(self.status_of(task), "in_progress")
 
     def test_25_verifier_model_choice(self):
@@ -2604,7 +2629,7 @@ class RunTest(Base):
         self.assertEqual((filed["status"], filed["author"]), ("PASS", "manager"))
         self.assertIn("Verdict: test-verified", filed["body"])
         self.assertIn("Ran: pytest ok", filed["body"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_45_failed_and_blocked_verdicts_map_to_statuses(self):
         task = self.running_task()
@@ -2681,7 +2706,7 @@ class RunTest(Base):
                 other = self.verified_by("artifact-verified", task=self.running_task(verify_kind=kind))
                 closed = self.events("close", str(other))
                 self.one(closed, "closed")
-                self.assertEqual(self.status_of(other), "done")
+                self.assert_awaiting(other)
 
     def test_48_a_manager_verdict_test_verified_does_not_close_a_schema_task(self):
         task = self.running_task(verify_kind="schema")
@@ -2697,14 +2722,14 @@ class RunTest(Base):
         self.assertIn("no verifier verdict to override; pass --verdict alone", out.stderr)
         events = self.events("close", str(task), "--verdict", "artifact-verified", "--ran", "recomputed 182 columns")
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
 
     def test_48_a_code_task_still_closes_on_test_verified(self):
         task = self.verified_by("test-verified")
         events = self.events("close", str(task))
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_90_an_unknown_verify_kind_is_refused_everywhere(self):
         for bad in ("Code", "doc", "design_doc"):
@@ -2827,17 +2852,18 @@ class RunTest(Base):
                                                    [("abc123.jsonl", {"folder": "/work/elsewhere"})])
         self.assertEqual((detail, tokens), (f"transcript folder {folder} not found; none recorded", None))
 
-    def test_50_close_marks_done_and_stops_the_session(self):
+    def test_50_close_stops_the_session_and_waits_for_the_merge(self):
         task = self.running_task()
         self.pass_report(task)
         self.agents(self.row("task-1"))
         later = self.add_task("Next", depends=(task,))
         events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
         closed = self.one(events, "closed")
-        self.assertEqual(self.one(events, "waits")["task"], later)
+        self.assertEqual(self.named(events, "waits"), [])
+        self.assertNotIn(later, [t["id"] for t in self.tg("ready")])
         self.assertIn("test-verified at", closed["detail"])
         self.assertIn("branch worktree-task-1", closed["detail"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         stopped = [r for r in self.results(task) if r["status"] == "STOPPED"]
         self.assertEqual(len(stopped), 1)
@@ -2895,7 +2921,7 @@ class RunTest(Base):
         events = self.events("close", str(task), "--verdict", "test-verified")
         self.assertIn("not merged during a pause", self.one(events, "ready-to-merge")["detail"])
         self.assertEqual(self.merges(), "")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_51_conflict_is_aborted(self):
         with open(os.path.join(self.root, "f.txt"), "w") as fh:
@@ -3065,7 +3091,7 @@ class RunTest(Base):
         env = dict(self.env, FAKE_CLAUDE_STOP_FAIL="1")
         events = self.events("close", str(task), "--verdict", "test-verified", env=env)
         self.assertIn("still live; claude stop said: boom", self.one(events, "kept")["detail"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertIn("main checkout is not clean", self.one(events, "ready-to-merge")["detail"])
         self.assertEqual([r for r in self.results(task) if r["status"] == "STOPPED"], [])
         os.remove(os.path.join(self.root, "dirty.txt"))
@@ -3074,6 +3100,7 @@ class RunTest(Base):
         self.assertEqual(self.one(again, "merged")["task"], task)
         self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
         self.assertEqual(self.meta(task)["merged_by"], "manager")
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("done", "merged"))
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
         self.assertEqual(self.run_cmd("close", str(task)).returncode, 2)
 
@@ -3216,8 +3243,8 @@ class RunTest(Base):
         outside = self.add_task("Notes", attempt=1, verdict_ref='"abc123  out.txt"', verdict="artifact-verified")
         for task in (unmerged, merged, outside):
             self.tg("done", str(task))
-        section = self.status_sections("--since", "2099-01-01")["Done, branch not merged"]
-        self.assertEqual(section.splitlines()[0], "Done, branch not merged (1)")
+        section = self.status_sections("--since", "2099-01-01")["Closed, awaiting merge"]
+        self.assertEqual(section.splitlines()[0], "Closed, awaiting merge (1)")
         self.assertIn(f"#{unmerged} ", section)
         self.assertNotIn(f"#{merged} ", section)
         self.assertNotIn(f"#{outside} ", section)
@@ -3368,7 +3395,7 @@ class RunTest(Base):
         self.assertIn(rebased, self.one(events, "closed")["detail"])
         filed = [r for r in self.results(task) if r["kind"] == "verify"][-1]
         self.assertIn(f"Head: {rebased}", filed["body"])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     def test_70_a_rebased_branch_with_an_extra_commit_is_refused(self):
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
@@ -3473,7 +3500,7 @@ class RunTest(Base):
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
         self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
                                                         "tier": "implementation", "verify_kind": "code"}])
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
     def test_74_adopt_refusals(self):
@@ -3656,6 +3683,7 @@ class RunTest(Base):
         self.assertIn("claude logs sess-task-1-1", stuck["next"])
         body = self.stuck_row(task)["body"]
         self.assertTrue(body.endswith("Last output:\n    claude logs failed: no such session"), body)
+        self.assertEqual(self.meta(task)["phase"], "stopped")  # the BLOCKED row ends the run in this record
         self.assertNotIn("try claude agents", body)
 
     def test_84_an_empty_log_says_so(self):
@@ -4744,6 +4772,7 @@ class RunTest(Base):
         events = self.events("record")
         self.assertEqual(self.one(events, "salvaged")["detail"], "ISSUES from report file report-task-1-1.md (result #1)")
         self.one(events, "arrived")
+        self.assertEqual(self.meta(task)["phase"], "reported")
         self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
 
     def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
@@ -4764,6 +4793,7 @@ class RunTest(Base):
         self.one(events, "died")
         self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
         self.assertEqual(self.results(task)[0]["status"], "DIED")
+        self.assertEqual(self.meta(task)["phase"], "stopped")
 
     def test_101_the_brief_names_the_report_file(self):
         task = self.add_task()
@@ -4782,8 +4812,8 @@ class RunTest(Base):
         text = self.ok("verify", str(task), "--dry-run").stdout
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertEqual(self.section(text, "SCOPE"), "Read only. You run in your own worktree. Change nothing: do not "
-                         "edit, commit, or delete anything. The exceptions are your report file, which REPORT names, and "
-                         ".agentic-team-scratch/.")
+                         "edit, commit, or delete anything. You may write only your report file, which REPORT names, and new "
+                         "files and folders in .agentic-team-scratch/; delete nothing there either.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
         self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
@@ -5252,6 +5282,22 @@ class RunTest(Base):
         self.agents(self.row("task-2", status="waiting", waitingFor="a permission"))
         self.one(self.events("record"), "stuck")
         self.assertEqual([e["id"] for e in self.meta(stuck_task)["sessions"]], ["sess-task-2-1"])
+
+    def test_99_a_transition_error_in_record_stays_with_its_task(self):
+        odd = self.running_task(phase="reported")  # a hand edit: the attempt has no row, so the rows say running
+        other = self.running_task()
+        self.agents(self.finished(f"task-{other}"))
+        out = self.run_cmd("record", pre=["--json"])
+        self.assertEqual(out.returncode, 1, out.stderr)
+        events = json.loads(out.stdout)
+        error = self.one(events, "transition-error")
+        self.assertEqual((error["task"], error["attempt"]), (odd, 1))
+        self.assertEqual(error["detail"], f"internal error: #{odd} has no transition for event seen_running from phase reported")
+        self.assertEqual(error["next"], f"check #{odd}; if its phase is wrong, tg edit {odd} --meta phase=<the right phase> "
+                         "and run.py record, else report the bug in run.py")
+        self.assertEqual(self.one(events, "died")["task"], other)  # the drain goes on with the next task
+        self.assertEqual((self.meta(odd)["phase"], self.meta(other)["phase"]), ("reported", "stopped"))
+        self.assertEqual([e["event"] for e in events if e["task"] == odd], ["transition-error"])
 
     def test_23_a_locked_stale_registration_gets_the_unlock_fix(self):
         task, wt, head = self.retry_ready()
@@ -5932,6 +5978,35 @@ class RoleTest(Base):
 
     # --- size
 
+    def test_09b_every_shipped_role_is_within_the_word_limit(self):
+        rows = [r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["source"] == "plugin"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertIsNone(row["error"], row["name"])
+            self.assertLessEqual(row["words"], 580, f"{row['name']} leaves no room under the 600 word limit")
+
+    def test_09c_the_architect_role_has_the_lifecycle_rule_in_its_method_and_review(self):
+        folder = os.path.join(os.path.dirname(HERE), "templates", "roles")
+        with open(os.path.join(folder, "architect.md"), encoding="utf-8") as fh:
+            method, review = fh.read().split("## Review")
+        self.assertIn("stateDiagram-v2", method)
+        self.assertIn("transition table", method)
+        self.assertIn("stateDiagram-v2", review)
+
+    def test_09d_the_worker_instructions_forbid_wait_loops_and_scratch_deletion(self):
+        with open(os.path.join(os.path.dirname(HERE), "agents", "worker.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("**No wait loops.**", text)
+        self.assertIn("`sleep`", text)
+        flat = re.sub(r"\s+", " ", text)
+        self.assertIn("Delete nothing you put there; `run` removes the folder with the worktree after the merge. The one "
+                      "exception: a worker may delete a cache folder in its own worktree that its own run made. A verifier "
+                      "deletes nothing at all.", flat)
+        self.assertIn("unless the brief allows it, except the one exception in Scratch files", flat)
+        self.assertNotIn("Leave what you put there", flat)  # one rule, not two readings
+        self.assertIn("To wait for a service you started, use the tool's own wait option", flat)
+        self.assertIn("readiness check that has its own timeout", flat)
+
     def test_09_a_long_project_role_warns_and_the_shipped_roles_do_not(self):
         words = lambda n: " ".join(["word"] * n)  # noqa: E731
         self.role_file("long", method=words(400), review=words(201))
@@ -6226,7 +6301,7 @@ class PrTest(Base):
         self.assertEqual(self.remote_sha(), head)
         meta = self.meta(task)
         self.assertEqual((meta["pr"], meta["pr_branch"], meta["pushed"]), (1, "task-1", head))
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.merges(), "")
         self.assertEqual(self.checkout(), before)
         (create,) = self.create_calls()
@@ -6238,7 +6313,7 @@ class PrTest(Base):
             for field in ("source_branch=task-1", "target_branch=main", "remove_source_branch=false"):
                 self.assertIn(field, create)
         request = "#1" if self.host == "github" else "!1"
-        self.assertRegex(self.status_sections()["Done, branch not merged"], rf"{head}\s*\|\s*{re.escape(request)}\s*\|")
+        self.assertRegex(self.status_sections()["Closed, awaiting merge"], rf"{head}\s*\|\s*{re.escape(request)}\s*\|")
         self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
         blocked = self.one(self.events("record"), "pr-blocked")
         self.assertIn("1 fail" if self.host == "github" else "pipeline failed", blocked["detail"])
@@ -6259,6 +6334,7 @@ class PrTest(Base):
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "manager")
         self.assertIn("merged_at", meta)
+        self.assertEqual((self.status_of(task), meta["phase"]), ("done", "merged"))
         self.assertIn(["rm", "sess-task-1-1"], self.calls("rm"))
         self.assertEqual(self.merges(), "")
 
@@ -6310,7 +6386,7 @@ class PrTest(Base):
             self.assertIn(want, body)
         self.assertNotIn("Branch: None", body)
         self.assertEqual(self.checkout(), before)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     @both_hosts
     def test_97_a_later_verdict_replaces_the_comment(self):
@@ -6343,7 +6419,7 @@ class PrTest(Base):
         for want in ("**Verdict: artifact-verified**", "by manager (verify result #3)", "The task is closed.",
                      "Overrides: verify-blocked (result #2 by ci)", "Reason: drove it", "Ran: https://ci.example/runs/11"):
             self.assertIn(want, last)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
 
     @both_hosts
     def test_97_a_failed_comment_does_not_block_close(self):
@@ -6361,7 +6437,7 @@ class PrTest(Base):
         self.assertIn("HTTP 403", failed["detail"])
         self.assertEqual(failed["next"], f"fix the cause, then run.py close 1 (it posts the verdict again while the task is not merged); "
                                          f"else tell the operator to post it on {self.label()} by hand")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.remote_sha(), head)
         self.assertEqual(self.meta(task)["pr"], 1)
         self.fake_host(head=head, merge_state="UNKNOWN")
@@ -6693,7 +6769,7 @@ class PrTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("delete or rename it on the host", out.stderr)
         self.assertIn("run.py adopt 1 --branch", out.stderr)
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.create_calls(), [])
         self.git("push", "-q", "-f", "origin", f"{head}:refs/heads/task-1")
         self.assertIn("published", [e["event"] for e in self.events("close", str(task))])
@@ -6904,7 +6980,8 @@ class PrTest(Base):
         else:
             self.assertEqual(call[-2:], ["-f", "ref=task-1"])
         self.assertEqual(self.remote_sha(), head)
-        self.assertEqual(set(self.meta(task)) - keys, {"pr", "pr_branch", "pushed"})
+        self.assertEqual(set(self.meta(task)) - keys, {"pr", "pr_branch", "pushed", "phase"})
+        self.assertEqual(self.meta(task)["phase"], "verifying")
         self.assertEqual(self.calls("--bg"), [])
         self.assertEqual(self.status_of(task), "in_progress")
         self.assertEqual(self.checkout(), before)
@@ -6965,7 +7042,7 @@ class PrTest(Base):
                              "CI recomputed the numbers", "--ran", "https://ci.example/runs/11")
         self.one(events, "override")
         self.one(events, "closed")
-        self.assertEqual(self.status_of(task), "done")
+        self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict"], "artifact-verified")
 
     @both_hosts
@@ -8750,22 +8827,6 @@ class DeliveryTest(Base):
         events = self.events("steer", str(parked), "--file", self.text_file("note"))
         self.assertIn("the session was resumed with the doorbell", self.one(events, "steered")["detail"])
 
-    def hold_lock(self, name, seconds=2.5):
-        """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
-        lock = os.path.join(self.root, ".agentic-team", "locks", name)
-        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
-                                   "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
-                                   "fh = open(sys.argv[1], 'a+'); fcntl.flock(fh, fcntl.LOCK_EX)\n"
-                                   "print('locked', flush=True); time.sleep(float(sys.argv[2]))", lock, str(seconds)],
-                                  stdout=subprocess.PIPE, text=True)
-        self.assertEqual(holder.stdout.readline().strip(), "locked")
-        return holder
-
-    @staticmethod
-    def release(holder):
-        holder.wait()
-        holder.stdout.close()
-
     def test_fix10_every_command_that_changes_a_task_waits_for_its_lock(self):
         task = self.worker(status="busy", state="working", pid=4242)
         text = self.text_file("x")
@@ -9517,6 +9578,1372 @@ class DeliveryTest(Base):
 
 def transcript_text(tokens):
     return transcript(tokens)
+
+
+
+class PhaseTest(Base):
+    """0.19.0 (#97): a closed task is done only once its change is merged, and the `phase` meta says where a task is.
+    The test names follow the cases of the design review."""
+
+    def passed(self, row=None):
+        """A running task whose worker passed, local mode. Returns (task, worktree, head)."""
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        self.agents(row or self.finished("task-1"))
+        return task, wt, head
+
+    def closed_local(self):
+        """Closed with no MERGE order: it waits for the merge."""
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        return task, wt, head
+
+    def closed_pr(self, later=False):
+        """Closed in pr mode with an open request (state UNKNOWN). Returns (task, head, dependent task or None)."""
+        task, wt, head = self.pr_task()
+        dependent = self.add_task("Next", depends=(task,)) if later else None
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        return task, head, dependent
+
+    def ready_ids(self):
+        return [t["id"] for t in self.tg("ready")]
+
+    def assert_merged(self, task, by):
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"]), ("done", "merged", by))
+        self.assertTrue(meta["merged_at"])
+
+    # 1
+    def test_close_pr_keeps_in_progress_until_merge(self):
+        task, wt, head = self.pr_task()
+        later = self.add_task("Next", depends=(task,))
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        for name in ("closed", "published", "pr-pending"):
+            self.one(events, name)
+        self.assertEqual(self.one(events, "ready")["detail"], "none")
+        self.assert_awaiting(task)
+        meta = self.meta(task)
+        self.assertEqual((meta["pr"], meta["verdict"], meta["verdict_ref"]), (1, "test-verified", head))
+        self.assertNotIn("merged_at", meta)
+        self.assertNotIn(later, self.ready_ids())
+        self.assertEqual(self.named(self.events("record"), "waits"), [])
+
+    # 2
+    def test_record_pr_merged_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        events = self.events("record")
+        self.assertIn("recorded merged_by=operator", self.one(events, "merged")["detail"])
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.meta(task)["pushed"], head)
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_record_manager_merge_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+        events = self.events("record")
+        self.assertIn("merged (merge)", self.one(events, "merged")["detail"])
+        self.assertEqual(len(self.merge_calls()), 1)
+        self.assert_merged(task, "manager")
+        self.assertIn(later, self.ready_ids())
+
+    # 3
+    def test_merged_command_marks_done(self):
+        task, wt, head = self.closed_local()
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(self.events("merged", str(task)), "merged")["detail"], "recorded merged_by=operator")
+        self.assert_merged(task, "operator")
+        done_at = self.tg("show", str(task))["done_at"]
+        again = self.events("merged", str(task), "--by", "manager")
+        self.assertIn("already recorded", self.one(again, "merged")["detail"])
+        self.assertNotIn("marked it done", self.one(again, "merged")["detail"])
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
+        out = self.run_cmd("merged", str(self.running_task()))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("is not a closed task", out.stderr)
+
+    # 4
+    def test_close_twice_resumes_not_reverdicts(self):
+        task, wt, head = self.closed_local()
+        verify_rows = [r for r in self.results(task) if r["kind"] == "verify"]
+        events = self.events("close", str(task))
+        self.one(events, "resumed")
+        for name in ("closed", "tokens", "verdict"):
+            self.assertEqual(self.named(events, name), [])
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "verify"], verify_rows)
+        self.one(events, "ready-to-merge")
+        self.assert_awaiting(task)
+
+    # 5
+    def test_record_closed_task_not_died_or_wip_committed(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        (stopped,) = [r for r in self.results(task) if r["status"] == "STOPPED"]
+        self.assertIn("Reason: close", stopped["body"])
+        self.assertNotIn("Head:", stopped["body"])
+        self.agents(self.finished("task-1"))
+        with open(os.path.join(wt, "left.txt"), "w") as fh:
+            fh.write("x\n")
+        rows = self.results(task)
+        events = [e for e in self.events("record") if e["task"] == task]
+        self.assertEqual([e["event"] for e in events], ["unmerged"])
+        self.assertFalse(any("run.py close" in (e["next"] or "") for e in events))
+        self.assertEqual(self.results(task), rows)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertTrue(os.path.isfile(os.path.join(wt, "left.txt")))
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? left.txt")
+        self.assert_awaiting(task)
+
+    # 6
+    def test_local_merge_done_immediately(self):
+        task, wt, head = self.passed()
+        later = self.add_task("Next", depends=(task,))
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.one(events, "merged")
+        self.assertEqual(self.merges(), "Merge worktree-task-1 (task #1)")
+        self.assert_merged(task, "manager")
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_local_no_merge_order_waits_then_record_detects(self):
+        task, wt, head = self.closed_local()
+        self.assert_awaiting(task)
+        unmerged = self.one(self.events("record"), "unmerged")
+        self.assertEqual(unmerged["task"], task)
+        self.assert_awaiting(task)
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        events = self.events("record")
+        self.assertEqual(self.one(events, "merged")["detail"], f"{head} is in HEAD; recorded merged_by=operator")
+        self.assert_merged(task, "operator")
+
+    def test_local_merge_that_waits_on_a_dirty_checkout_is_detected_by_record(self):
+        task, wt, head = self.passed()
+        later = self.add_task("Next", depends=(task,))
+        self.orders("MERGE: verified branches into main\n")
+        with open(os.path.join(self.root, "dirty.txt"), "w") as fh:
+            fh.write("x\n")
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertIn("main checkout is not clean", self.one(events, "ready-to-merge")["detail"])
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(events, "ready")["detail"], "none")
+        os.remove(os.path.join(self.root, "dirty.txt"))
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        events = self.events("record")
+        self.one(events, "merged")
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    # 7
+    def test_no_change_close_done_immediately(self):
+        base = self.git("rev-parse", "HEAD")
+        task = self.running_task(base=json.dumps(base))
+        self.pass_report(task, head=base)
+        self.agents(self.finished("task-1"))
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.one(events, "no-change")
+        self.assert_merged(task, "no-change")
+
+    def test_non_git_close_done_immediately(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFiles: sums.txt\n")
+        self.one(self.events("close", str(task), "--verdict", "artifact-verified", "--ref", "abc123  out.txt"), "closed")
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"]), ("done", "merged"))
+        self.assertNotIn("merged_at", meta)
+        self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
+
+    # 8
+    def test_failed_verdict_stays_unclosed(self):
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "verify-failed")
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["verdict_ref"]), ("in_progress", "verdict_failed", head))
+        self.assertIn("verdict verify-failed", self.one(self.events("record"), "unclosed")["detail"])
+        sections = self.status_sections()
+        self.assertIn(f"#{task} ", sections["Verdict recorded, not closed"])
+        self.assertIn("None.", sections["Closed, awaiting merge"])
+        self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
+
+    # 9
+    def test_launch_on_awaiting_merge_refused(self):
+        task, wt, head = self.closed_local()
+        for args in (("launch", str(task)), ("launch", str(task), "--attempt", "2"), ("verify", str(task))):
+            out = self.run_cmd(*args)
+            self.assertEqual(out.returncode, 2, args)
+            self.assertIn(f"#{task} is closed and waits for the merge of its change", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+        self.assert_awaiting(task)
+        self.assertEqual(self.meta(task)["verdict_ref"], head)
+
+    def test_adopt_on_awaiting_merge_refused(self):
+        task, wt, head = self.closed_local()
+        tip = self.feature_branch("feat")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:10])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} is closed and waits for the merge of its change", out.stderr)
+        self.assertEqual(self.meta(task)["attempt"], 1)
+
+    # 10
+    def test_launch_stacked_base_on_awaiting_dep_allowed(self):
+        dep, wt, head = self.closed_local()
+        task = self.add_task("Use it", "Why: needs it.\n- [ ] used", depends=(dep,))
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} depends on #{dep}, whose branch worktree-task-{dep} is not merged", out.stderr)
+        self.assertIn("pass --base <its branch>", out.stderr)
+        self.assertEqual(self.run_cmd("launch", str(task), "--base", "main").returncode, 2)
+        self.one(self.events("launch", str(task), "--base", f"worktree-task-{dep}"), "launched")
+        self.assertEqual((self.meta(task)["base"], self.meta(task)["phase"]), (head, "running"))
+        self.assert_awaiting(dep)
+
+    # 11
+    def test_wait_watches_awaiting_merge_request(self):
+        task, head, _ = self.closed_pr()
+        self.agents()
+        (event,) = self.events("wait", "--timeout", "1", "--interval", "0.2")
+        self.assertEqual(event["event"], "timeout")
+
+    # 12
+    def test_status_lists_awaiting_merge_separately(self):
+        task, wt, head = self.closed_local()
+        sections = self.status_sections("--since", "2000-01-01")
+        self.assertIn(f"#{task} ", sections["Closed, awaiting merge"])
+        self.assertIn(head, sections["Closed, awaiting merge"])
+        for name in ("In flight", "Verdict recorded, not closed", "Waiting for verification or triage", "Done since last report"):
+            self.assertIn("None.", sections[name], name)
+        before = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        self.ok("merged", str(task))
+        done_at = datetime.datetime.fromisoformat(self.tg("show", str(task))["done_at"].replace("Z", "+00:00"))
+        self.assertGreaterEqual(done_at, before)
+        sections = self.status_sections("--since", "2000-01-01")
+        self.assertIn(f"#{task} ", sections["Done since last report"])
+        self.assertIn("None.", sections["Closed, awaiting merge"])
+
+    def test_status_brief_shows_only_the_work_not_yet_closed_and_the_open_decisions(self):
+        task, wt, head = self.closed_local()
+        self.tg("add", "Which cache?", "--type", "decision", "--meta", "decider=operator")
+        out = self.ok("status", "--brief", "--since", "2000-01-01").stdout
+        sections = self.status_sections("--brief", "--since", "2000-01-01")
+        self.assertEqual(list(sections), ["In flight", "Waiting for verification or triage", "Verdict recorded, not closed",
+                                          "Failed or abandoned", "Closed, awaiting merge", "Open decisions"])
+        self.assertIn(f"#{task} ", sections["Closed, awaiting merge"])
+        self.assertIn("Which cache?", sections["Open decisions"])
+        self.assertNotIn("Overall:", out)  # the report is not computed
+
+    def manager_session_file(self):
+        return os.path.join(self.root, ".agentic-team", "manager-session")
+
+    def with_session(self, session=None):
+        env = {k: v for k, v in self.env.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        if session:
+            env["CLAUDE_CODE_SESSION_ID"] = session
+        return env
+
+    def test_record_and_notify_to_write_the_manager_session_id_only_when_it_is_set(self):
+        path = self.manager_session_file()
+        self.ok("record", env=self.with_session())
+        self.assertFalse(os.path.exists(path))
+        self.ok("record", env=self.with_session("sess-aaa"))
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-aaa\n")
+        self.ok("record", env=self.with_session())  # no variable: the file stays
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-aaa\n")
+        self.ok("notify-to", "mgr", env=self.with_session("sess-bbb"))  # a new Manager session replaces the id
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-bbb\n")
+        before = os.stat(path).st_mtime_ns
+        self.ok("record", env=self.with_session("sess-bbb"))  # the same id: the file is not rewritten
+        self.assertEqual(os.stat(path).st_mtime_ns, before)
+
+    def test_a_record_from_another_session_does_not_take_the_manager_session(self):
+        path = self.manager_session_file()
+        self.ok("notify-to", "mgr", env=self.with_session("sess-manager"))
+        self.ok("record", env=self.with_session("sess-operator"))  # an operator's record in a second Claude session
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-manager\n")
+        self.ok("notify-to", env=self.with_session("sess-operator"))  # printing the name replaces nothing
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-manager\n")
+        self.ok("notify-to", "mgr2", env=self.with_session("sess-new"))  # a new Manager's Start step 4 does
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-new\n")
+        with open(path, "w") as fh:
+            fh.write("\n")
+        self.ok("record", env=self.with_session("sess-x"))  # an empty file counts as none
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "sess-x\n")
+
+    # 13
+    def test_merge_recorded_under_stop_marks_done(self):
+        task, head, later = self.closed_pr(later=True)
+        self.orders("STOP: paused\nMERGE: verified branches into main\n")
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+        self.assertEqual(self.merge_calls(), [])
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual(self.run_cmd("launch", str(later)).returncode, 3)  # the pause still holds the launch
+
+    # 14
+    def test_pr_closed_unmerged_stays_in_progress_and_abandonable(self):
+        task, head, later = self.closed_pr(later=True)
+        self.fake_host(head=head, state="CLOSED")
+        self.assertEqual(self.one(self.events("record"), "pr-closed")["task"], task)
+        self.assert_awaiting(task)
+        self.assertNotIn(later, self.ready_ids())
+        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        self.assertIn(f"request {self.label()} stays open and record no longer follows it", abandoned["detail"])
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "unknown"))
+        self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
+        self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
+
+    def test_pr_blocked_and_the_closed_refusal_name_abandon_then_launch(self):
+        task, head, _ = self.closed_pr()
+        self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
+        blocked = self.one(self.events("record"), "pr-blocked")
+        self.assertEqual(blocked["next"], f"run.py record later; if a required check failed, to redo it, "
+                                          f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+        self.assertNotIn("fix task", blocked["next"])
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", out.stderr)
+        self.ok("abandon", str(task), "unknown")  # the hint's commands work: abandon, then the next attempt
+        self.ok("launch", str(task), "--attempt", "2", "--dry-run")
+
+    def test_pr_blocked_on_a_task_closed_by_0_18_0_says_a_fix_is_a_new_task(self):
+        import run as runner
+        self.assertEqual(runner.redo_text({"id": 4, "status": "done", "meta": {"attempt": 1}}),
+                         "#4 is done (closed by 0.18.0), so a fix is a new task")
+
+    def test_abandon_a_local_task_that_waits_for_its_merge(self):
+        task, wt, head = self.closed_local()
+        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        self.assertIn(f"branch worktree-task-1 at {head[:7]} is not merged and stays", abandoned["detail"])
+        self.assertEqual(self.git("rev-parse", "worktree-task-1"), head)
+
+    # 15
+    def test_legacy_done_unmerged_still_reconciled(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.tg("done", str(task))  # as 0.18.0 left it: done at close, not merged
+        self.assertEqual(self.one(self.events("record"), "unmerged")["task"], task)
+        self.assertIn(f"#{task} ", self.status_sections()["Closed, awaiting merge"])
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+
+    def test_legacy_done_unmerged_resumes_at_close_and_accepts_merged(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nBranch: worktree-task-1\nHead: {tip}\n")
+        self.tg("done", str(task))
+        self.one(self.events("close", str(task)), "resumed")
+        self.one(self.events("merged", str(task)), "merged")
+        self.assert_merged(task, "operator")
+
+    # 16
+    def test_crash_between_merged_at_and_done_healed(self):
+        for phase in ("merged", "awaiting_merge"):  # mark_merged writes both; a hand edit may write merged_at alone
+            with self.subTest(phase):
+                self.fresh()
+                task = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A,
+                                     phase=phase, merged_at='"2026-11-13 10:00 UTC"', merged_by="manager")
+                events = [e for e in self.events("record") if e["task"] == task]
+                self.assertEqual([e["event"] for e in events], ["merged"])
+                self.assertIn("but the task was not done; marked it done", events[0]["detail"])
+                self.assert_merged(task, "manager")
+                self.assertEqual(self.meta(task)["merged_at"], "2026-11-13 10:00 UTC")
+
+    # 17
+    def test_slots_free_after_close(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.write_config(sessions="max_parallel = 1\n")
+        events = self.events("close", str(task), "--verdict", "test-verified", env=dict(self.env, FAKE_CLAUDE_STOP_STOPS_ROW="1"))
+        self.one(events, "closed")
+        self.assert_awaiting(task)
+        self.assertEqual(self.one(self.events("record"), "slots")["detail"], "0/1 live")
+
+    # the phase meta
+    def test_phase_backfill_of_a_0_18_0_done_unmerged_task(self):
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        unmerged = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        merged = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]",
+                               merged_at='"2026-10-26 10:00 UTC"', merged_by="operator")
+        outside = self.add_task(attempt=1, verdict_ref='"abc123  out.txt"', verdict="artifact-verified", sessions="[]")
+        by_hand = self.add_task()
+        for task in (unmerged, merged, outside, by_hand):
+            self.tg("done", str(task))
+        running = self.running_task()
+        self.agents(self.row("task-5"))
+        failed = self.running_task(verdict="verify-failed", verdict_ref=SHA_A)
+        self.add_result(failed, "PASS", "Task: 6\n")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.one(events, "unmerged")["task"], unmerged)
+        phases = {t: self.meta(t).get("phase") for t in (unmerged, merged, outside, by_hand, running, failed)}
+        self.assertEqual(phases, {unmerged: "awaiting_merge", merged: None, outside: None, by_hand: None,
+                                  running: "running", failed: "verdict_failed"})  # a finished task's phase is derived
+        self.assertEqual(self.status_of(unmerged), "done")  # backfill writes the phase only
+        self.add_result(running, "PASS", "Task: 5\n")
+        self.events("record")
+        self.assertEqual(self.meta(running)["phase"], "reported")  # the worker filed: the phase follows the rows
+
+    def test_phase_mismatch_reported_by_record(self):
+        closed = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A, phase="running")
+        self.add_result(closed, "PASS", "Task: 1\n")
+        events = self.events("record")
+        found = {e["task"]: e for e in self.named(events, "phase-mismatch")}
+        self.assertEqual(sorted(found), [closed])
+        self.assertIn("stored phase running, but the fields say awaiting_merge (status in_progress", found[closed]["detail"])
+        self.assertEqual(found[closed]["next"], f"check #{closed}, then tg edit {closed} --meta phase=<the right phase>")
+        self.assertEqual([e["event"] for e in events if e["task"] == closed], ["phase-mismatch"])
+        self.assertEqual(self.meta(closed)["phase"], "running")
+        self.tg("edit", str(closed), "--meta", "phase=awaiting_merge")
+        events = self.events("record")
+        self.assertEqual([e["event"] for e in events if e["task"] == closed], ["unmerged"])
+
+    # review of PR #105, finding 1: a Manager still on 0.18.0 closes a task that a newer record gave a flight phase
+    def test_a_done_task_with_a_flight_phase_is_derived_again_not_a_mismatch(self):
+        for phase in ("running", "stopped", "reported", "verifying"):
+            with self.subTest(phase):
+                self.fresh()
+                wt = self.worktree("task-1")
+                tip = self.wt_commit(wt)
+                task = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]", phase=phase)
+                self.tg("done", str(task))  # what 0.18.0's close leaves: done, not merged, the phase untouched
+                events = self.events("record")
+                self.assertEqual(self.named(events, "phase-mismatch"), [])
+                self.assertEqual(self.one(events, "unmerged")["task"], task)  # followed again
+                self.assertEqual(self.meta(task)["phase"], "awaiting_merge")
+                self.assertIn(f"#{task} ", self.status_sections()["Closed, awaiting merge"])
+
+    def test_merged_accepts_a_done_task_with_a_flight_phase(self):
+        for phase in ("running", "stopped", "reported", "verifying"):
+            with self.subTest(phase):
+                self.fresh()
+                task = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]", phase=phase)
+                self.tg("done", str(task))
+                out = self.run_cmd("merged", str(task), "--by", "operator")
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertNotIn("internal error", out.stderr)
+                self.assert_merged(task, "operator")
+                self.assertEqual(self.meta(task)["phase"], "merged")
+
+    def test_a_done_merged_task_with_a_flight_phase_is_derived_as_merged(self):
+        task = self.add_task(attempt=1, verdict_ref=SHA_A, verdict="test-verified", sessions="[]", phase="verifying",
+                             merged_at='"2026-11-13 10:00 UTC"', merged_by="operator")
+        self.tg("done", str(task))
+        events = self.events("record")
+        self.assertEqual([e for e in events if e["task"] == task], [])
+        self.assertEqual(self.meta(task)["phase"], "merged")  # the wrong stored value is corrected once
+
+    # review of PR #105, finding 2: the first record after the upgrade
+    def test_the_first_record_writes_no_phase_for_finished_tasks(self):
+        log = os.path.join(self.dir, "tg-calls.jsonl")
+        wrapper = os.path.join(self.dir, "logging-tg.py")
+        with open(wrapper, "w") as fh:
+            fh.write("import json, os, runpy, sys\n"
+                     f"sys.path.insert(0, {os.path.dirname(TG)!r})\n"
+                     f"with open({log!r}, 'a') as fh:\n"
+                     "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                     f"sys.argv[0] = {TG!r}\n"
+                     f"runpy.run_path({TG!r}, run_name='__main__')\n")
+        finished = []
+        for i in range(12):
+            merged = i % 2 == 0
+            task = self.add_task(attempt=1, verdict="test-verified" if merged else "artifact-verified", sessions="[]",
+                                 verdict_ref=SHA_A if merged else '"abc123  out.txt"',
+                                 **({"merged_at": '"2026-10-26 10:00 UTC"', "merged_by": "operator"} if merged else {}))
+            self.tg("done", str(task))
+            finished.append(task)
+        wt = self.worktree(f"task-{len(finished) + 1}")
+        waiting = self.add_task(attempt=1, verdict_ref=self.wt_commit(wt), verdict="test-verified", sessions="[]")
+        self.tg("done", str(waiting))  # done by 0.18.0, not merged: record follows it, so it gets its phase
+        events = self.events("record", tg=wrapper)
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        with open(log) as fh:
+            calls = [json.loads(line) for line in fh]
+        edits = [c for c in calls if "edit" in c]
+        edited = {int(c[c.index("edit") + 1]) for c in edits}
+        self.assertEqual(edited & set(finished), set())
+        self.assertEqual(edited, {waiting})
+        self.assertEqual([self.meta(t).get("phase") for t in finished], [None] * len(finished))
+        self.assertEqual(self.meta(waiting)["phase"], "awaiting_merge")
+        import run as runner
+        for t in finished:
+            self.assertEqual(runner.task_phase(self.tg("show", str(t))), "merged")  # derived when read
+
+    # review of PR #102
+    def test_verify_again_after_a_failed_verdict_reports_the_new_verdict(self):
+        task, wt, head = self.passed()
+        self.ok("close", str(task), "--verdict", "check-only")
+        self.assertEqual(self.meta(task)["phase"], "verdict_failed")
+        self.ok("verify", str(task), "--again")
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: test-verified\n", kind="verify", by="verify-1-1")
+        self.agents(self.finished("task-1"), self.finished("verify-1-1"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("Verdict test-verified by verify-1-1", self.one(events, "verified")["detail"])
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.one(self.events("close", str(task)), "closed")
+        self.assert_awaiting(task)
+
+    def test_stop_after_a_failed_verdict_is_no_phase_mismatch(self):
+        task, wt, head = self.passed(row=self.row("task-1"))
+        self.ok("close", str(task), "--verdict", "verify-failed")
+        self.one(self.events("stop", str(task)), "stopped")
+        self.assertEqual(self.meta(task)["phase"], "stopped")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.one(events, "stopping")["task"], task)  # record still acts on the task
+
+    def test_ci_verify_again_after_a_blocked_verdict_reports_the_new_verdict(self):
+        task, wt, head = self.pr_task(verify_mode="ci:ci.yml")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("verify", str(task))
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}])
+        self.assertIn("Verdict verify-blocked by ci", self.one(self.events("record"), "verified")["detail"])
+        self.assertIn("verify-blocked; not closed", self.one(self.events("close", str(task)), "verdict")["detail"])
+        self.assertEqual(self.meta(task)["phase"], "verdict_failed")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "cancelled"}], dispatch="ok")
+        self.one(self.events("verify", str(task), "--again"), "ci-dispatched")
+        self.assertEqual(self.meta(task)["phase"], "verifying")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 12, "state": "success"}, {"id": 11, "state": "cancelled"}])
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("Verdict test-verified by ci", self.one(events, "verified")["detail"])
+
+    def test_non_git_close_that_dies_in_the_stop_is_finished_by_record(self):
+        task = self.running_task()
+        later = self.add_task("Next", depends=(task,))
+        self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFiles: sums.txt\n")
+        self.agents(self.row("task-1"))  # a live worker: close stops it, and dies in `claude stop`
+        out = self.run_cmd("close", str(task), "--verdict", "artifact-verified", "--ref", "abc123  out.txt",
+                           env=dict(self.env, FAKE_CLAUDE_STOP_KILLS_CALLER="1"))
+        self.assertEqual(out.returncode, -signal.SIGKILL)
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("in_progress", "merged"))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertIn("with nothing to merge, but the task was not done; marked it done", self.one(events, "merged")["detail"])
+        self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("done", "merged"))
+        self.assertEqual(self.one(events, "ready")["detail"], f"#{later}")
+
+    def test_phase_backfill_reads_the_verify_kind_of_the_config(self):
+        self.write_config('[verify]\nkind = "schema"\n')
+        old = self.running_task(sessions=[], verdict="test-verified", verdict_ref=SHA_A)  # no phase, no stored kind
+        self.add_result(old, "PASS", f"Task: {old}\n")
+        new = self.running_task(sessions=[], verdict="test-verified", verdict_ref=SHA_A, phase="verdict_failed")
+        self.add_result(new, "PASS", f"Task: {new}\n")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.assertEqual(self.named(events, "unmerged"), [])
+        self.assertEqual(sorted(e["task"] for e in self.named(events, "unclosed")), [old, new])
+        self.assertEqual((self.meta(old)["phase"], self.meta(new)["phase"]), ("verdict_failed", "verdict_failed"))
+
+    def test_merged_command_makes_dependents_ready(self):
+        task, wt, head = self.closed_local()
+        later = self.add_task("Next", depends=(task,))
+        self.assertEqual(self.one(self.events("merged", str(task)), "ready")["detail"], f"#{later}")
+
+    def test_pr_closed_hint_names_abandon_then_launch(self):
+        task, head, _ = self.closed_pr()
+        self.fake_host(head=head, state="CLOSED")
+        hint = self.one(self.events("record"), "pr-closed")["next"]
+        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", hint)
+        self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
+        self.ok("abandon", str(task), "unknown")
+        self.one(self.events("launch", str(task), "--attempt", "2"), "launched")
+
+    def test_adopt_with_an_awaiting_dependency_needs_its_commit(self):
+        dep, wt, head = self.closed_local()
+        task = self.add_task("Use it", "Why: needs it.\n- [ ] used", depends=(dep,))
+        tip = self.feature_branch("feat")
+        out = self.run_cmd("adopt", str(task), "--branch", "feat", "--head", tip[:10])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn(f"#{task} depends on #{dep}, whose branch worktree-task-{dep} is not merged", out.stderr)
+        self.assertIn("or adopt a branch built on it", out.stderr)
+        self.assertEqual(self.status_of(task), "open")
+        self.git("branch", "stacked", f"worktree-task-{dep}")
+        self.one(self.events("adopt", str(task), "--branch", "stacked", "--head", head[:10]), "adopted")
+        self.assertEqual(self.meta(task)["phase"], "reported")
+        self.assert_awaiting(dep)
+
+    def test_record_skips_a_closed_task_merged_while_it_waited_for_the_lock(self):
+        task, wt, head = self.closed_local()
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")  # the old snapshot would record this merge
+        holder = self.hold_lock(f"task-{task}.lock", 3)  # `merged` holds the task
+        proc = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--tg", TG, "--json", "record"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.dir, env=self.env)
+        time.sleep(1)
+        self.tg("edit", str(task), "--meta", 'merged_at="2026-11-13 10:00 UTC"', "merged_by=manager", "phase=merged")
+        self.tg("done", str(task))
+        done_at = self.tg("show", str(task))["done_at"]
+        self.release(holder)
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual([e["event"] for e in json.loads(out) if e["task"] == task], [])
+        meta = self.meta(task)
+        self.assertEqual((meta["merged_at"], meta["merged_by"]), ("2026-11-13 10:00 UTC", "manager"))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
+
+    # the merge gate (#100)
+    def gate(self, task):
+        """The merge gate as (label, ref), or None."""
+        found = (self.meta(task).get("gates") or {}).get("merge")
+        return (found["label"], found["ref"]) if found else None
+
+    def request_url(self, number=1):
+        return (f"https://github.com/o/r/pull/{number}" if self.host == "github"
+                else f"https://gitlab.example.com/g/p/-/merge_requests/{number}")
+
+    @both_hosts
+    def test_gate_close_in_pr_mode_sets_the_request_gate(self):
+        task, head, _ = self.closed_pr()
+        self.assertEqual(self.gate(task), (self.label(), self.request_url()))
+        self.assertEqual([t["id"] for t in self.tg("ls", "--gated")], [task])
+
+    def test_gate_local_wait_names_the_branch(self):
+        task, wt, head = self.closed_local()
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))
+
+    def test_gate_publish_after_a_failed_one_updates_the_same_gate(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN", extra={"pr create": {"stdout": "", "stderr": "HTTP 502\n", "exit": 1}})
+        self.assertNotEqual(self.run_cmd("close", str(task), "--verdict", "test-verified", "--ran", "make test").returncode, 0)
+        self.assert_awaiting(task)
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))  # no request yet
+        since = self.meta(task)["gates"]["merge"]["since"]
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.one(self.events("close", str(task)), "published")
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.assertEqual((list(self.meta(task)["gates"]), self.meta(task)["gates"]["merge"]["since"]), (["merge"], since))
+
+    def test_gate_cleared_on_every_merge_path(self):
+        def host_merged():
+            task, head, _ = self.closed_pr()
+            self.assertIsNotNone(self.gate(task))
+            self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+            self.one(self.events("record"), "merged")
+            return task
+
+        def manager_merges_the_request():
+            task, head, _ = self.closed_pr()
+            self.assertIsNotNone(self.gate(task))
+            self.orders("MERGE: verified branches into main\n")
+            self.fake_host(head=head, merge_state="CLEAN", then={"state": "MERGED", "merge_commit": "c" * 40})
+            self.one(self.events("record"), "merged")
+            return task
+
+        def manager_merges_the_branch():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.orders("MERGE: verified branches into main\n")
+            self.one(self.events("close", str(task)), "merged")
+            return task
+
+        def record_finds_the_commit_in_head():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+            self.one(self.events("record"), "merged")
+            return task
+
+        def merged_command():
+            task, wt, head = self.closed_local()
+            self.assertIsNotNone(self.gate(task))
+            self.one(self.events("merged", str(task)), "merged")
+            return task
+
+        def no_change():
+            base = self.git("rev-parse", "HEAD")
+            task = self.running_task(base=json.dumps(base))
+            self.pass_report(task, head=base)
+            self.agents(self.finished("task-1"))
+            self.tg("gate", str(task), "merge", "--label", "merge of worktree-task-1")  # as a close that stopped after the gate
+            self.one(self.events("close", str(task), "--verdict", "test-verified"), "no-change")
+            return task
+
+        for path in (host_merged, manager_merges_the_request, manager_merges_the_branch, record_finds_the_commit_in_head,
+                     merged_command, no_change):
+            with self.subTest(path.__name__):
+                self.fresh()
+                task = path()
+                self.assertEqual((self.status_of(task), self.meta(task)["phase"], self.gate(task)), ("done", "merged", None))
+                self.assertEqual([t["id"] for t in self.tg("ls", "--gated")], [])
+
+    def test_gate_cleared_by_abandon_of_a_waiting_task(self):
+        for close in (self.closed_local, self.closed_pr):
+            with self.subTest(close.__name__):
+                self.fresh()
+                task = close()[0]
+                self.assertIsNotNone(self.gate(task))
+                self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+                self.assertEqual((self.meta(task)["phase"], self.gate(task)), ("abandoned", None))
+
+    def test_gate_crash_between_clear_and_done_heals(self):
+        # the command stopped before the clear, or between the clear and `tg done`; done: the host closed the issue first
+        for gated, done in ((True, False), (False, False), (True, True)):
+            with self.subTest(gated=gated, done=done):
+                self.fresh()
+                task = self.add_task(start=True, attempt=1, sessions="[]", verdict="test-verified", verdict_ref=SHA_A,
+                                     phase="merged", merged_at='"2026-11-14 10:00 UTC"', merged_by="manager")
+                if gated:
+                    self.tg("gate", str(task), "merge", "--label", "PR #1", "--ref", "https://github.com/o/r/pull/1")
+                if done:
+                    self.tg("done", str(task))
+                events = [e for e in self.events("record") if e["task"] == task]
+                self.assertEqual([e["event"] for e in events], ["merged"])
+                self.assertIn("cleared it" if done else "marked it done", events[0]["detail"])
+                self.assert_merged(task, "manager")
+                self.assertIsNone(self.gate(task))
+                self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], [])
+
+    def tg_shim(self, gate_error=None):
+        """A tg.py that logs each command and runs the real one; with gate_error, `tg gate` fails with that stderr and
+        exit 2, as an older Taskgraph does. Returns its path and a function that lists the logged [command, id]."""
+        path, log = os.path.join(self.dir, "tg-shim.py"), os.path.join(self.dir, "tg-calls.jsonl")
+        with open(path, "w") as fh:
+            fh.write("import json, subprocess, sys\n"
+                     "cmd = sys.argv[sys.argv.index('--json') + 1:]\n"
+                     f"with open({log!r}, 'a') as fh:\n"
+                     "    fh.write(json.dumps(cmd) + '\\n')\n"
+                     f"if cmd[:1] == ['gate'] and {gate_error!r} is not None:\n"
+                     f"    sys.stderr.write({gate_error!r})\n"
+                     "    sys.exit(2)\n"
+                     f"sys.exit(subprocess.run([sys.executable, {TG!r}, *sys.argv[1:]]).returncode)\n")
+        if os.path.exists(log):
+            os.remove(log)
+
+        def calls():
+            if not os.path.exists(log):
+                return []
+            with open(log) as fh:
+                return [json.loads(line)[:2] for line in fh]
+        return path, calls
+
+    @both_hosts
+    def test_gate_the_host_closes_first_then_record_clears_the_gate_and_runs_tg_done(self):
+        # run.py's order on the GitHub backend: the host closed the issue, then gate --clear, then tg done, which removes
+        # the tg:in-progress label the close left (Taskgraph's test_the_host_closes_the_issue_before_the_gate_clear_and_done)
+        task, head, _ = self.closed_pr()
+        self.tg("done", str(task))
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        tg, calls = self.tg_shim()
+        self.one(self.events("record", tg=tg), "merged")
+        self.assertEqual([c for c in calls() if c[0] in ("gate", "done")], [["gate", str(task)], ["done", str(task)]])
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+
+    def test_gate_finish_runs_no_tg_gate_for_a_task_without_one(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")
+        tg, calls = self.tg_shim()
+        self.one(self.events("merged", str(task), tg=tg), "merged")
+        self.assertEqual([c for c in calls() if c[0] in ("gate", "done")], [["done", str(task)]])
+        self.assert_merged(task, "operator")
+
+    def test_gate_an_older_taskgraph_without_tg_gate_gets_one_warn(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")
+        old = ("usage: tg.py [-h] ...\ntg.py: error: argument command: invalid choice: 'gate' "
+               "(choose from 'add', 'ls', 'show')\n")
+        tg, calls = self.tg_shim(gate_error=old)
+        events = [e for e in self.events("record", tg=tg) if e["task"] == task]
+        self.assertEqual([e["event"] for e in events], ["warn", "unmerged"])
+        self.assertIn("this Taskgraph has no tg gate", events[0]["detail"])
+        self.assertEqual([c for c in calls() if c[0] == "gate"], [["gate", str(task)]])
+        self.assertIsNone(self.gate(task))
+        tg, calls = self.tg_shim(gate_error="error: database is locked\n")  # any other failure is not swallowed
+        out = self.run_cmd("record", tg=tg)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("database is locked", out.stderr + out.stdout)
+        self.assertNotIn("this Taskgraph has no tg gate", out.stdout)
+
+    def test_gate_backfill_of_a_gateless_waiting_task_happens_once(self):
+        task, wt, head = self.closed_local()
+        self.tg("gate", str(task), "merge", "--clear")  # as 0.18.0 or a close before the gate left it
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], ["unmerged"])
+        self.assertEqual(self.gate(task), ("merge of worktree-task-1", None))
+        node = self.tg("show", str(task))
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task], ["unmerged"])
+        self.assertEqual(self.tg("show", str(task))["updated_at"], node["updated_at"])  # the second record writes nothing
+        self.assertEqual(self.meta(task)["gates"], node["meta"]["gates"])
+
+    def test_gate_backfill_of_a_request_and_of_a_0_18_0_task(self):
+        task, head, _ = self.closed_pr()
+        self.tg("gate", str(task), "merge", "--clear")
+        self.one(self.events("record"), "pr-pending")
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.fresh()
+        wt = self.worktree("task-1")
+        tip = self.wt_commit(wt)
+        old = self.add_task(attempt=1, verdict_ref=tip, verdict="test-verified", sessions="[]")
+        self.tg("done", str(old))  # closed by 0.18.0: done, not merged
+        self.one(self.events("record"), "unmerged")
+        self.assertIsNone(self.gate(old))  # done in Taskgraph: it waits for nothing there
+        self.git("merge", "-q", "--no-ff", "-m", "by hand", "worktree-task-1")
+        self.one(self.events("record"), "merged")
+        self.assert_merged(old, "operator")
+        self.assertIsNone(self.gate(old))
+
+    @both_hosts
+    def test_gate_none_for_a_0_18_0_task_with_a_request(self):
+        task, head, _ = self.closed_pr()
+        self.tg("gate", str(task), "merge", "--clear")
+        self.tg("done", str(task))  # as 0.18.0 left it: done at publish
+        self.one(self.events("record"), "pr-pending")
+        self.assertIsNone(self.gate(task))
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.one(self.events("record"), "merged")
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+
+    @both_hosts
+    def test_gate_the_host_closes_the_issue_before_record_sees_the_merge(self):
+        # On the taskgraph GitHub backend a request that says "Closes #N" closes the task's issue at the merge, so tg
+        # reads the task as done before run.py records the merge.
+        task, head, later = self.closed_pr(later=True)
+        self.assertEqual(self.gate(task), (self.label(), self.request_url()))
+        self.tg("done", str(task))
+        done_at = self.tg("show", str(task))["done_at"]
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        events = [e["event"] for e in self.events("record") if e["task"] == task]
+        self.assertEqual([e for e in events if e != "removed"], ["merged"])  # "removed": the cleanup of its worktree
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)  # done once
+        self.assertIn(later, self.ready_ids())
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task and e["event"] != "removed"], [])
+
+    def test_gate_done_recorded_before_the_host_merges(self):
+        task, head, _ = self.closed_pr()
+        self.assertEqual(self.gate(task), ("PR #1", self.request_url()))
+        self.one(self.events("merged", str(task)), "merged")  # the operator merged by hand and said so
+        done_at = self.tg("show", str(task))["done_at"]
+        self.fake_host(head=head, state="MERGED", merge_commit="c" * 40)
+        self.assertEqual([e["event"] for e in self.events("record") if e["task"] == task and e["event"] != "removed"], [])
+        self.assert_merged(task, "operator")
+        self.assertIsNone(self.gate(task))
+        self.assertEqual(self.tg("show", str(task))["done_at"], done_at)
+
+
+class BriefSizeTest(Base):
+    """agentic-team 0.20.0 (issue #104): a carried report in a brief has no `Ran:` log, an upstream report is a summary, and
+    the carried reports have a per-report cap and a total cap in UTF-8 bytes."""
+
+    def body(self, task, files="out.txt", ran=3, extra="", evidence="- criterion: `make test` printed OK", issues="None"):
+        ran_lines = "\n".join(f"- RANLINE{i}: `make step{i}` printed ok" for i in range(ran))
+        return (f"Task: {task}\nStatus: PASS\nBranch: worktree-task-{task}\nHead: {SHA_A}\n"
+                f"Ran:\n{ran_lines}\nEvidence:\n{evidence}\nFiles: {files}\nIssues: {issues}\n"
+                f"Follow-ups: none\n{extra}Checkpoint: {CHECKPOINT}\n")
+
+    def with_upstreams(self, bodies, scope="src/", title="Use base", prev=None):
+        """A task in attempt 2 with one done upstream task for each body. Returns (task, [upstream ids])."""
+        ups = [self.add_task(f"Base {i}", "Why: base.\n- [ ] built") for i in range(len(bodies))]
+        task = self.add_task(title, "Why: needs base.\n- [ ] used", scope=scope, depends=ups, attempt=1)
+        for up, body in zip(ups, bodies):
+            self.add_result(up, "PASS", body, attempt=1)
+            self.tg("done", str(up))
+        self.add_result(task, "ISSUES", prev or self.body(task, issues="blocking: broken"), attempt=1)
+        self.add_result(task, "DIED", "manager saw no session", attempt=2, by="manager")
+        self.worktree(f"task-{task}")
+        return task, ups
+
+    def context(self, task):
+        return self.section(self.brief(task), "CONTEXT")
+
+    def test_i104_an_upstream_report_is_a_summary_with_the_command_that_prints_it(self):
+        task, (up,) = self.with_upstreams([self.body(1, files="base.txt", issues="blocking: slow",
+                                                     extra="Notes: UNKNOWN-NOTE\n")])
+        context = self.context(task)
+        upstream = context[context.index("### Upstream"):]
+        for kept in ("result #1, PASS, attempt 1", "Status: PASS", f"Head: {SHA_A}", "Branch: worktree-task-1",
+                     "Files: base.txt", "Issues: blocking: slow", "Follow-ups: none"):
+            self.assertIn(kept, upstream)
+        self.assertIn("Notes: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
+        for left in ("Task: 1", "criterion", f"Checkpoint: {CHECKPOINT}"):
+            self.assertNotIn(left, upstream)
+        self.assertIn(f"result ls {up} --kind task --attempt 1", upstream)
+        self.assertIn(f"[full report, with any Ran log: result #1; print it with `", upstream)
+        self.assertNotIn("[cut:", upstream)
+
+    def test_i104_a_decision_note_stays_whole(self):
+        note = "Options: REST or RPC.\n" + "\n".join(f"Line {i} of the answer." for i in range(400))
+        gate = self.tg("add", "Which API?", "--type", "decision", "--meta", "decider=operator", "--notes", note)["id"]
+        self.tg("done", str(gate))
+        task = self.add_task("Use API", "Why: needs it.\n- [ ] used", depends=(gate,))
+        self.worktree(f"task-{task}")
+        context = self.context(task)
+        self.assertIn("Line 399 of the answer.", context)
+        self.assertNotIn("the full report is", context)
+
+    def test_i104_ran_is_dropped_from_the_previous_attempt_the_upstream_report_and_the_worker_report_of_a_verify_brief(self):
+        task, _ = self.with_upstreams([self.body(1)])
+        context = self.context(task)
+        self.assertNotIn("RANLINE", context)
+        previous = context[context.index("### Previous attempt"):context.index("### Upstream")]
+        self.assertIn("criterion: `make test` printed OK", previous)
+        self.assertIn("Evidence:", previous)
+        self.assertNotIn("Ran:", context)
+        worker = self.running_task()
+        self.add_result(worker, "PASS", self.body(worker, ran=5, files="a.py"), attempt=1)
+        verify = self.section(self.ok("verify", str(worker), "--dry-run").stdout, "CONTEXT")
+        self.assertIn("### Worker report (result", verify)
+        self.assertIn("criterion: `make test` printed OK", verify)
+        self.assertIn("Files: a.py", verify)
+        self.assertNotIn("RANLINE", verify)
+        self.assertNotIn("\nRan:", verify)
+
+    def test_i104_a_section_of_many_lines_runs_to_the_next_label(self):
+        import run as runner
+        body = ("Task: 1\nStatus: PASS\nRan:\n- first `cmd`\n  - nested line\n\nStill the log, after a blank line\n"
+                "Acceptance evidence:\n- one\n- two\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept in Issues\n")
+        self.assertEqual([label for label, _ in runner.report_sections(body)],
+                         ["Task", "Status", "Ran", "Acceptance evidence", "Issues"])
+        out = runner.carried_body(body, ("[cut]", "[full]"), 10_000)
+        for gone in ("first", "nested", "Still the log", "Ran:"):
+            self.assertNotIn(gone, out)
+        for kept in ("Acceptance evidence:\n- one\n- two", "Issues: blocking: a\n  continues here\n- and here", "Odd label: kept in Issues"):
+            self.assertIn(kept, out)
+        self.assertNotIn("[cut]", out)
+        only = runner.carried_body(body, ("[cut]", "[full]"), 10_000, only=("Status", "Issues"), always=True)
+        self.assertEqual(only, "Status: PASS\nIssues: blocking: a\n  continues here\n- and here\nOdd label: kept in Issues\n[full]")
+
+    def test_i104_a_report_over_the_per_report_cap_is_cut_at_a_line_and_ends_with_the_pointer(self):
+        self.write_config("[brief]\ncarried_report_bytes = 600\n")
+        files = "\n".join(f"  - `src/module{i}/file_with_a_long_name.py`" for i in range(60))
+        task, (up,) = self.with_upstreams([self.body(1, files="\n" + files)])
+        context = self.context(task)
+        block = context[context.index("### Upstream"):]
+        block = block[:block.index("\n\n- Last") if "\n\n- Last" in block else len(block)]
+        self.assertIn(f"result ls {up} --kind task --attempt 1`]", block)
+        self.assertIn("[cut: the full report is result #1;", block)
+        lines = block.splitlines()
+        self.assertTrue(lines[-1].startswith("[cut:"))
+        kept = [line for line in lines if line.startswith("  - `src/module")]
+        self.assertTrue(kept and all(line.endswith(".py`") for line in kept))  # whole lines, not half of one
+        self.assertNotIn("module59", block)
+        body = block[block.index("Status:"):]
+        self.assertLessEqual(len(body.encode()), 600)
+
+    def test_i104_over_the_total_cap_the_reports_that_share_files_with_scope_come_first(self):
+        self.write_config("[brief]\ncarried_report_bytes = 1000\ncarried_total_bytes = 2000\n")
+        bodies = [self.body(i + 1, files=f"docs/other{i}.md", issues="blocking: " + "o" * 700) for i in range(3)]
+        bodies.append(self.body(4, files="src/api/shared.py", issues="blocking: " + "s" * 700))  # last in order
+        task, ups = self.with_upstreams(bodies, scope="Write src/api/. Do not touch docs/.", prev="Task: 9\nStatus: ISSUES\nCheckpoint: c\n")
+        context = self.context(task)
+        self.assertIn("s" * 700, context)
+        self.assertNotIn("o" * 700, context)
+        self.assertIn("### Reports not shown", context)
+        omitted = context[context.index("### Reports not shown"):]
+        for i in range(3):
+            self.assertIn(f"Upstream #{ups[i]}: Base {i}: result #{i + 1}, PASS, attempt 1", omitted)
+        self.assertNotIn(f"Upstream #{ups[3]}: Base 3: result", omitted)
+        self.assertIn("result ls <task id> --kind task --attempt <attempt>", omitted)
+        self.assertIn("brief.carried_total_bytes", omitted)
+
+    def test_i104_the_previous_attempts_issues_findings_and_checkpoint_are_never_cut(self):
+        self.write_config("[brief]\ncarried_report_bytes = 300\n")
+        issues = "blocking: " + "\n".join(f"- ISSUE-{i} " + "i" * 40 for i in range(30))
+        findings = "\n".join(f"- FINDING-{i} " + "f" * 40 for i in range(30))
+        prev = ("Task: 2\nStatus: ISSUES\nEvidence:\n" + "\n".join(f"- EVID-{i} " + "e" * 40 for i in range(30))
+                + f"\nIssues: {issues}\nFindings:\n{findings}\nCheckpoint: {CHECKPOINT}\n")
+        task, _ = self.with_upstreams([self.body(1)], prev=prev)
+        context = self.context(task)
+        previous = context[context.index("### Previous attempt"):context.index("### Upstream")]
+        self.assertIn("ISSUE-29 " + "i" * 40, previous)
+        self.assertIn("FINDING-29 " + "f" * 40, previous)
+        self.assertIn(f"Checkpoint: {CHECKPOINT}", previous)
+        self.assertNotIn("EVID-", previous)  # the other sections are cut: the three kept ones left no room
+        self.assertIn("[cut: the full report is result #", previous)
+
+    CUT = ("[cut]", "[full]")
+
+    def test_i104_a_word_and_colon_line_in_a_section_does_not_start_a_section(self):
+        import run as runner
+        issues = "Issues:\n- test_a fails\nNote: flaky\n- test_b fails\n- test_c fails\n"
+        out = runner.carried_body("Status: ISSUES\n" + issues + "Checkpoint: c\n", self.CUT, 120, keep=("Issues", "Checkpoint"))
+        self.assertIn("- test_c fails", out)
+        self.assertIn("Note: flaky", out)
+        files = "Status: PASS\nFiles:\nNew: a/b.py\nChanged: apps/x/y.py\nIssues: None\n"
+        summary = runner.carried_body(files, self.CUT, 10_000, only=runner.UPSTREAM_FIELDS)
+        self.assertIn("Changed: apps/x/y.py", summary)
+        self.assertTrue(runner.shares_scope(files, "Write apps/x/."))  # the same parser finds the files
+        self.assertFalse(runner.shares_scope(files, "Write docs/."))
+
+    def test_i104_a_verify_briefs_deviations_with_a_sub_heading_keep_their_adjacent_lines(self):
+        worker = self.running_task()
+        lines = "".join(f"- adjacent: own-lint: src/f{i}.py\n" for i in range(150))
+        self.add_result(worker, "PASS", self.body(worker) + f"Deviations:\nOther changes:\n{lines}", attempt=1)
+        self.write_config("[brief]\ncarried_report_bytes = 600\n")
+        verify = self.section(self.ok("verify", str(worker), "--dry-run").stdout, "CONTEXT")
+        self.assertIn("- adjacent: own-lint: src/f149.py", verify)
+        self.assertIn("Other changes:", verify)
+
+    def test_i104_a_ran_block_with_a_label_like_line_and_a_fence_is_dropped_whole(self):
+        import run as runner
+        body = ("Status: PASS\nRan:\nmake test\nExit code: 0\n```\nStatus: 200\nbody\n```\nafter fence\nFiles: a.py\n")
+        self.assertEqual([label for label, _ in runner.report_sections(body)], ["Status", "Ran", "Files"])
+        out = runner.carried_body(body, self.CUT, 10_000)
+        self.assertEqual(out, "Status: PASS\nFiles: a.py")
+        for text in out.splitlines():
+            self.assertNotIn("```", text)
+
+    def test_i104_the_never_cut_sections_have_a_hard_cap(self):
+        import run as runner
+        body = "Status: ISSUES\nIssues:\n" + "\n".join(f"- issue {i:04d} " + "x" * 20 for i in range(3000)) + "\nCheckpoint: c\n"
+        out = runner.carried_body(body, self.CUT, 300, keep=("Issues", "Findings", "Checkpoint"), hard=2000)
+        self.assertLessEqual(runner.utf8(out), 2000)
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertIn("- issue 0000", out)
+        self.assertNotIn("- issue 2999", out)
+        self.write_config("[brief]\ncarried_report_bytes = 300\ncarried_total_bytes = 2000\n")
+        task, _ = self.with_upstreams([self.body(1)], prev=body)
+        context = self.context(task)
+        previous = context[context.index("### Previous attempt"):].split("\n### ")[0]
+        self.assertLess(runner.utf8(previous), 2400)
+        self.assertIn("[cut: the full report is result #", previous)
+
+    def test_i104_a_cut_keeps_status_files_and_issues_before_evidence(self):
+        import run as runner
+        body = ("Status: PASS\nEvidence:\n" + "\n".join(f"- evidence line {i} " + "e" * 40 for i in range(40))
+                + "\nFiles: a.py\nIssues: blocking: real\nFollow-ups: none\n")
+        out = runner.carried_body(body, self.CUT, 400)
+        for kept in ("Status: PASS", "Files: a.py", "Issues: blocking: real", "Follow-ups: none"):
+            self.assertIn(kept, out)
+        self.assertLess(out.index("Status:"), out.index("Evidence:"))
+        self.assertLess(out.index("Evidence:"), out.index("Files:"))  # the original order is kept
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertLess(out.count("evidence line"), 40)
+
+    def test_i104_the_pointer_of_a_result_without_an_attempt_has_no_attempt_option(self):
+        import run as runner
+        command, cut, full = runner.result_pointer("TG", 7, {"id": 12, "kind": "task", "attempt": None})
+        self.assertEqual(command, "TG result ls 7 --kind task")
+        self.assertIn("result #12", cut)
+        self.assertTrue(full.startswith("[full report, with any Ran log: result #12;"))
+        self.assertEqual(runner.result_pointer("TG", 7, {"id": 12, "kind": "task", "attempt": 2})[0],
+                         "TG result ls 7 --kind task --attempt 2")
+
+    def test_i104_the_caps_count_utf8_bytes(self):
+        import run as runner
+        line = "这是一个中文检查行的内容"  # 12 characters, 36 bytes
+        body = "Status: PASS\nIssues:\n" + "\n".join(f"- {line}{i:03d}" for i in range(100))
+        self.assertLess(len(body), 3000)
+        self.assertGreater(len(body.encode()), 3000)
+        self.assertEqual(runner.utf8(line), 36)
+        out = runner.carried_body(body, ("[cut]", "[full]"), 3000)
+        self.assertEqual(runner.carried_body(body, ("[cut]", "[full]"), 10_000).count("\n"), body.count("\n"))
+        self.assertTrue(out.endswith("[cut]"))
+        self.assertLessEqual(len(out.encode()), 3000)
+        self.assertGreater(len(out), 1000)  # characters would let it hold about 3 times as much
+        for line_out in out.splitlines()[:-1]:
+            self.assertIn(line_out, body.splitlines())  # cut at a line boundary
+
+    def test_i104_a_brief_shaped_like_task_646_2_stays_under_the_total_cap(self):
+        files = "\n" + "\n".join(f"  - `apps/api/app/modules/generation/part{i}.py`" for i in range(40))
+        bodies = [self.body(i + 1, ran=60, files=files, issues="None", evidence="\n".join(
+            f"- 验收 {j}: `make test-pg` 输出 \"1152 passed\" 并且没有失败" for j in range(40))) for i in range(14)]
+        prev = self.body(99, ran=80, issues="blocking: broken", evidence="- 验收: " + "测试" * 200)
+        task, _ = self.with_upstreams(bodies, scope="apps/api/app/modules/generation/", prev=prev)
+        text = self.brief(task)
+        context = self.section(text, "CONTEXT")
+        carried = context[context.index("### Previous attempt"):]
+        self.assertNotIn("RANLINE", text)
+        shown = carried.count("### Upstream #")
+        self.assertLess(shown, 14)  # the rest are named under "Reports not shown"
+        self.assertIn("### Reports not shown", carried)
+        shown_part = carried[:carried.index("### Reports not shown")]
+        self.assertLessEqual(len(shown_part.encode()), 12000)
+        self.assertLess(len(text.encode()), 12000 + 14 * 200 + 20000)  # the carried part, the omitted lines, the fixed sections
+
+    def test_i104_the_report_caps_are_validated_by_config_check(self):
+        self.assertEqual(config.load(self.root)["brief"], {"carried_report_bytes": 3000, "carried_total_bytes": 12000})
+        for bad, text in (("carried_report_bytes = 0", "brief.carried_report_bytes must be a positive integer"),
+                          ("carried_total_bytes = -5", "brief.carried_total_bytes must be a positive integer"),
+                          ('carried_report_bytes = "big"', "brief.carried_report_bytes must be a positive integer"),
+                          ("carried_total_bytes = 100", "carried_total_bytes must be at least brief.carried_report_bytes"),
+                          ("carried_bytes = 5", "unknown key brief.carried_bytes")):
+            self.write_config(f"[brief]\n{bad}\n")
+            self.assertIn(text, " ".join(config.problems(config.load(self.root))), bad)
+        self.write_config("[brief]\ncarried_report_bytes = 500\ncarried_total_bytes = 500\n")
+        self.assertEqual(config.problems(config.load(self.root)), [])
+
+
+    # review of PR #105, finding 4: the fix round after a verify-failed verdict
+    def test_the_fix_round_carries_the_verifiers_issues_and_findings_never_cut(self):
+        self.write_config("[brief]\ncarried_report_bytes = 300\n")
+        task = self.add_task("Fix it", "Why: x.\n- [ ] works", attempt=1)
+        self.add_result(task, "PASS", self.body(task), attempt=1)  # the worker says PASS, Issues: None
+        self.add_result(task, "ISSUES", "Status: ISSUES\nVerdict: test-verified\nIssues: blocking: an older run\n",
+                        kind="verify", attempt=1, by="verify-1-1")
+        issues = "\n".join(f"- blocking: VISSUE-{i} " + "v" * 40 for i in range(20))
+        findings = "\n".join(f"- VFINDING-{i} " + "w" * 40 for i in range(20))
+        latest = self.add_result(task, "ISSUES", f"Task: {task}\nStatus: ISSUES\nVerdict: verify-failed\nRan:\n- VRAN `make`\n"
+                                 f"Issues:\n{issues}\nFindings:\n{findings}\nFollow-ups: none\n",
+                                 kind="verify", attempt=1, by="verify-1-2")
+        self.add_result(task, "DIED", "manager saw no session", attempt=2, by="manager")
+        self.worktree(f"task-{task}")
+        context = self.context(task)
+        self.assertIn("### Previous attempt", context)
+        verifier = context[context.index("### Verifier report on the previous attempt"):]
+        self.assertIn(f"result #{latest['id']}, ISSUES, attempt 1", verifier)
+        self.assertIn("Verdict: verify-failed", verifier)
+        self.assertIn("VISSUE-19 " + "v" * 40, verifier)  # over the 300-byte cap, and still whole
+        self.assertIn("VFINDING-19 " + "w" * 40, verifier)
+        self.assertNotIn("an older run", context)  # only the latest verifier report of that attempt
+        self.assertNotIn("VRAN", context)
+        self.assertIn(f"result ls {task} --kind verify --attempt 1`]", verifier)
+
+    def test_a_first_attempt_after_no_verifier_has_no_verifier_report(self):
+        task, _ = self.with_upstreams([self.body(1)])
+        self.assertNotIn("### Verifier report", self.context(task))
+
+    # review of PR #105, finding 5: carried reports
+    def test_every_carried_report_ends_with_the_print_command(self):
+        task, (up,) = self.with_upstreams([self.body(1)])
+        context = self.context(task)
+        previous = context[context.index("### Previous attempt"):context.index("### Upstream")].rstrip()
+        self.assertTrue(previous.splitlines()[-1].startswith("[full report, with any Ran log: result #"), previous)
+        self.assertIn(f"result ls {task} --kind task --attempt 1`]", previous)
+        upstream = context[context.index("### Upstream"):].rstrip()
+        self.assertTrue(upstream.splitlines()[-1].startswith("[full report, with any Ran log: result #"), upstream)
+        worker = self.running_task()
+        self.add_result(worker, "PASS", self.body(worker, files="a.py"), attempt=1)
+        verify = self.section(self.ok("verify", str(worker), "--dry-run").stdout, "CONTEXT")
+        report = verify[verify.index("### Worker report"):].split("\n### ")[0].rstrip()
+        self.assertTrue(report.splitlines()[-1].startswith("[full report, with any Ran log: result #"), report)
+
+    def test_a_label_after_the_ran_block_and_a_blank_line_is_kept(self):
+        import run as runner
+        body = ("Status: PASS\nRan:\n- `make test`: ok\nExit code: 0\n\nRoot cause: the cache key missed the locale\n"
+                "  and the second line of it\n\n根因：缓存键\nFiles: a.py\n")
+        out = runner.carried_body(body, self.CUT, 10_000, always=True)
+        self.assertEqual(out, "Status: PASS\nRoot cause: the cache key missed the locale\n  and the second line of it\n\n"
+                              "根因：缓存键\nFiles: a.py\n[full]")
+        fenced = "Status: PASS\nRan:\n```\n\nStatus: 200\n```\nFiles: a.py\n"
+        self.assertEqual(runner.carried_body(fenced, self.CUT, 10_000), "Status: PASS\nFiles: a.py")  # inside a fence: log
+        chinese = "Status: PASS\nRan:\n- `make`: ok\n\n根因：缓存键没有区分语言\nFiles: a.py\n"
+        self.assertEqual(runner.carried_body(chinese, self.CUT, 10_000), "Status: PASS\n根因：缓存键没有区分语言\nFiles: a.py")
+        listed = "Status: PASS\nRan:\n- one\n\n- `pytest`: 3 passed\n\n  Note: indented\nFiles: a.py\n"
+        self.assertEqual(runner.carried_body(listed, self.CUT, 10_000), "Status: PASS\nFiles: a.py")  # list items, indented
+
+    def test_evidence_is_cut_after_the_priority_sections_and_before_the_others(self):
+        import run as runner
+        self.assertIn("Evidence", runner.PRIORITY)
+        self.assertNotIn("Evidence", runner.UPSTREAM_FIELDS)
+        body = ("Status: PASS\nWorktree: /w\n" + "\n".join(f"  WT{i} " + "w" * 24 for i in range(10))
+                + "\nEvidence:\n- criterion: `make test` printed OK\nFiles: a.py\nIssues: None\n")
+        out = runner.carried_body(body, self.CUT, 140)  # the Worktree lines alone would fill the room
+        self.assertIn("- criterion: `make test` printed OK", out)
+        self.assertNotIn("WT9", out)
+        self.assertTrue(out.endswith("[cut]"))
+
+
+class TransitionTest(unittest.TestCase):
+    """#99: run.py changes the phase only through TRANSITIONS."""
+
+    def test_the_table_names_known_phases(self):
+        import run as runner
+        for (before, event), after in runner.TRANSITIONS.items():
+            self.assertIn(before, (None,) + runner.PHASES)
+            self.assertIn(after, runner.PHASES)
+            if event.startswith("seen_"):
+                self.assertEqual(event, f"seen_{after}")
+
+    def test_a_pair_not_in_the_table_raises(self):
+        import run as runner
+        with self.assertRaisesRegex(runner.TransitionError, "#7 has no transition for event launch from phase merged"):
+            runner.next_phase({"id": 7, "meta": {"phase": "merged"}}, "launch")
+        with self.assertRaisesRegex(runner.TransitionError, "event died from phase verdict_failed"):
+            runner.next_phase({"id": 7, "meta": {"phase": "verdict_failed"}}, "died")
+        with self.assertRaises(runner.TransitionError):
+            runner.next_phase({"id": 7, "meta": {}}, "no_such_event")
+
+    def test_no_phase_is_none(self):
+        import run as runner
+        self.assertEqual(runner.next_phase({"id": 7}, "launch"), "running")
+        self.assertEqual(runner.next_phase({"id": 7, "meta": {}}, "seen_awaiting_merge"), "awaiting_merge")  # backfill
+        self.assertEqual(runner.next_phase({"id": 7, "meta": {"phase": "odd"}}, "launch"), "running")
+        with self.assertRaises(runner.TransitionError):
+            runner.next_phase({"id": 7, "meta": {"phase": "odd"}}, "seen_odd")
+
+    def test_transition_writes_the_phase_with_its_meta_in_one_edit(self):
+        import run as runner
+        edits = []
+        fake = types.SimpleNamespace(set_meta=lambda task, **meta: (edits.append(meta), task["meta"].update(meta)))
+        task = {"id": 7, "meta": {"phase": "awaiting_merge"}}
+        runner.transition(fake, task, "merged", merged_at="t", merged_by="operator")
+        runner.transition(fake, task, "merged")  # the phase stays and there is no meta: nothing is written
+        self.assertEqual(edits, [{"merged_at": "t", "merged_by": "operator", "phase": "merged"}])
+        with self.assertRaises(runner.TransitionError):
+            runner.transition(fake, task, "launch")
+        self.assertEqual(len(edits), 1)
+
+    def test_every_phase_write_takes_its_value_from_the_table(self):
+        import ast
+        with open(RUN) as fh:
+            tree = ast.parse(fh.read())
+
+        def from_table(node):
+            return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "next_phase"
+
+        bad = []
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            names = set()  # the local names that hold a next_phase result
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    target, value = node.targets[0], node.value
+                    pairs = (zip(target.elts, value.elts) if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
+                             else [(target, value)])
+                    names |= {t.id for t, v in pairs if isinstance(t, ast.Name) and from_table(v)}
+            for node in ast.walk(fn):
+                values = []
+                if isinstance(node, ast.Call):
+                    values += [k.value for k in node.keywords if k.arg == "phase"]
+                    if isinstance(node.func, ast.Name) and node.func.id == "meta_arg" and \
+                            isinstance(node.args[0], ast.Constant) and node.args[0].value == "phase":
+                        values.append(node.args[1])
+                elif isinstance(node, ast.Dict):
+                    values += [v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == "phase"]
+                elif isinstance(node, ast.Assign):
+                    if any(isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and t.slice.value == "phase"
+                           for t in node.targets):
+                        values.append(node.value)
+                bad += [f"{fn.name}:{v.lineno}" for v in values
+                        if not (from_table(v) or isinstance(v, ast.Name) and v.id in names)]
+        self.assertEqual(bad, [])
+
+    def test_the_table_has_the_edges_of_the_model(self):
+        """model/phase-edges.json holds the steps between phases of Lifecycle.tla (phase-view.mjs, written by
+        phase-edges.mjs from TLC's graph; NOTES.md, "The phase edges"). TRANSITIONS has the same edges, apart from
+        model/phase-edges-exclusions.json, and each exclusion explains at least one edge. No TLC is run here."""
+        import fnmatch
+        import run as runner
+        model_dir = os.path.join(os.path.dirname(HERE), "model")
+        with open(os.path.join(model_dir, "phase-edges.json")) as fh:
+            fixture = json.load(fh)["edges"]
+        with open(os.path.join(model_dir, "phase-edges-exclusions.json")) as fh:
+            exclusions = json.load(fh)
+
+        def name(phase):
+            return "none" if phase is None else phase
+
+        code = {(name(before), event, after) for (before, event), after in runner.TRANSITIONS.items()}
+        model = set()
+        for before, events, after in fixture:
+            self.assertIn(before, ("none",) + runner.PHASES)
+            self.assertIn(after, runner.PHASES)
+            self.assertNotEqual(before, after)  # the view drops a step that keeps the phase
+            # One model step that run.py makes in two writes has both events: the first goes through the table
+            phase, steps = before, events.split(", ")
+            for i, event in enumerate(steps):
+                to = after if i == len(steps) - 1 else name(runner.TRANSITIONS.get((None if phase == "none" else phase, event), "?"))
+                model.add((phase, event, to))
+                phase = to
+
+        def explain(edges, entries):
+            """(edges no entry explains, entries that explain none); the first entry that matches an edge explains it."""
+            used = [0] * len(entries)
+            unexplained = []
+            for edge in sorted(edges):
+                hit = next((i for i, x in enumerate(entries)
+                            if all(fnmatch.fnmatchcase(part, pattern) for part, pattern in zip(edge, x["edge"]))), None)
+                if hit is None:
+                    unexplained.append(edge)
+                else:
+                    used[hit] += 1
+            return unexplained, [x["edge"] for x, n in zip(entries, used) if not n]
+
+        for side in ("code", "model"):
+            for x in exclusions[side]:
+                self.assertEqual((len(x["edge"]), bool(x["why"].strip())), (3, True), x)
+        self.assertEqual(explain(code - model, exclusions["code"]), ([], []))
+        self.assertEqual(explain(model - code, exclusions["model"]), ([], []))
+
+
+class LoggedTransitions:
+    """Runs run.py through a wrapper that logs each (phase, event, phase) that next_phase looks up, and checks at the end
+    of the test that each one is a row of TRANSITIONS. A pair the table lacks is logged with no phase after it."""
+
+    def setUp(self):
+        super().setUp()
+        folder = os.path.join(self.dir, "logged")
+        os.makedirs(folder)
+        self.transitions, self.logged_run = os.path.join(folder, "transitions.jsonl"), os.path.join(folder, "run.py")
+        with open(self.logged_run, "w") as fh:
+            fh.write(textwrap.dedent(f"""\
+                import json, sys
+                sys.path.insert(0, {os.path.dirname(RUN)!r})
+                import run
+                lookup = run.next_phase
+                def logged(task, event):
+                    step = [run.stored_phase(task), event, None]
+                    try:
+                        step[2] = lookup(task, event)
+                        return step[2]
+                    finally:
+                        with open({self.transitions!r}, "a") as fh:
+                            fh.write(json.dumps(step) + "\\n")
+                run.next_phase = logged
+                run.main()
+                """))
+
+    def run_cmd(self, *args, pre=(), tg=TG, env=None, root=None):
+        cmd = [sys.executable, self.logged_run, "--root", root or self.root]
+        if tg:
+            cmd += ["--tg", tg]
+        return subprocess.run(cmd + list(pre) + list(args), capture_output=True, text=True,
+                              cwd=self.dir, env=env or self.env)
+
+    def tearDown(self):
+        import run as runner
+        steps = []
+        if os.path.isfile(self.transitions):
+            with open(self.transitions) as fh:
+                steps = [tuple(json.loads(line)) for line in fh]
+        super().tearDown()
+        self.assertEqual([s for s in steps if runner.TRANSITIONS.get((s[0], s[1])) != s[2] or s[2] is None], [])
+
+
+def logged(cls, *names):
+    """`cls` through LoggedTransitions, with only the tests `names`, or all of them when none is given."""
+    skip = {n: None for n in unittest.TestLoader().getTestCaseNames(cls) if names and n not in names}
+    return type(f"Logged{cls.__name__}", (LoggedTransitions, cls), {"__module__": __name__, **skip})
+
+
+LoggedPhaseTest = logged(PhaseTest)
+# The tests below send the (phase, event) pairs that PhaseTest does not.
+LoggedRunTest = logged(
+    RunTest, "test_105_an_old_ghost_worker_counts_as_ended", "test_78_a_stuck_session_gets_the_prompt_hint_not_a_model_change",
+    "test_36_stop_stops_the_live_session_of_a_shared_folder_only", "test_104_abandon_stops_a_live_verifier",
+    "test_101_verify_again_stops_an_idle_verifier", "test_62_repeating_a_close_files_one_manager_verdict",
+    "test_87_filed_earlier_reads_the_model_from_the_session_when_the_row_has_none",
+    "test_59_launch_repairs_an_open_task_with_a_live_session", "test_43_abandoned_tasks_are_skipped",
+    "test_34_finished_session_with_a_complete_report_is_salvaged",
+    "test_23_a_missing_worktree_and_branch_start_again_at_the_last_head",
+    "test_106_close_then_launch_after_a_verify_failed_verdict", "test_88_launch_and_verify_record_the_model_of_the_session",
+    "test_74_adopt_brings_a_branch_under_run_py", "test_101_status_shows_a_verifier_with_no_result",
+    "test_101_a_verifier_that_ended_is_salvaged_from_its_report_file",
+    "test_36_an_unrecorded_row_is_recorded_for_the_attempt_it_was_filed_for")
+LoggedRoleTest = logged(
+    RoleTest, "test_03_adopt_stores_the_role_and_close_still_finds_no_session",
+    "test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind",
+    "test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify")
+LoggedDeliveryTest = logged(
+    DeliveryTest, "test_b2_a_settled_ask_of_an_earlier_attempt_is_not_pasted_as_open",
+    "test_fix10_every_command_that_changes_a_task_waits_for_its_lock")
 
 
 if __name__ == "__main__":
