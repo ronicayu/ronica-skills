@@ -20,7 +20,7 @@ Usage:
                    pr mode: a task that waits for its merge follows request
                    <n>, which carries its change (the request of another
                    task); closes the task's own request unless --keep-old;
-                   `record` marks it done once <n> merged with its commit
+                   `record` marks it done once <n> is merged
     stop <id>      stop a worker for a pause and file a STOPPED result
     abandon <id>   mark a task abandoned after attempt 3 failed
     status         print the status report (tables), with the Follow-ups
@@ -4301,7 +4301,7 @@ def not_merged_reason(run, task, head):
         if head == meta.get("caught_up_from"):
             return None  # the host rebased this commit into the pushed head, with the same change
         if repointed(task) and is_sha(meta.get("verdict_ref")) and head == commit_of(run, str(meta["verdict_ref"])):
-            return None  # record found the change in the target (in_target), or the operator said it is merged
+            return None  # the merge of the request it follows completes it (merged_by=repoint), or the operator's word
         pushed = meta.get("pushed")
         if pushed and not commit_of(run, str(pushed)):
             branch = meta.get("pr_branch") or "task-" + str(task["id"])
@@ -5124,7 +5124,8 @@ def in_target(run, task):
     target (a merge commit, or a rebase merge of a one-commit change; `pushed` is unset on a repointed task, so only
     the target counts). Else `git merge-tree --write-tree <target> <commit>`: when merging the commit into the target
     gives the target's own tree, the target holds the change already (a squash merge, or a rebase merge of several
-    commits). A conflict, or a change the target does not have, is no proof."""
+    commits). A conflict, or a change the target does not have, is no proof. follow_request prints the answer and marks
+    the task merged either way."""
     sha = str(task["meta"]["verdict_ref"])
     ref = run.target_ref(task)
     if not commit_of(run, sha):
@@ -5142,25 +5143,25 @@ def in_target(run, task):
 
 def follow_request(run, task, p):
     """record for a repointed task. The request belongs to another task, which merges it: its state is information only.
-    No decision, rebase, push or merge, and its head is not compared with anything. Once it merged, the task is merged
-    when its verified commit is in the target (in_target)."""
+    No decision, rebase, push or merge, and its head is not compared with anything. Its merge completes the task
+    (#111, Decision): the repoint is the operator's word that the change goes in through it, like `run.py merged --by
+    operator`, so the task is merged with merged_by=repoint and merged_via=<n>. in_target is information only: the
+    request may have been redone and rebased, so the task's commits, even their content, need not be in the target."""
     tid, meta = task["id"], task["meta"]
     label = run.host().label(p.number)
     origin = f" (repointed from {run.host().label(meta['repointed_from'])})" if meta.get("repointed_from") else " (repointed)"
     if p.state == "MERGED":
+        sha = str(meta["verdict_ref"])[:7]
         try:
             ok, how = in_target(run, task)
-        except Refused as exc:  # a failed fetch of the target is this task's host-error line, not the end of the drain
-            raise codehost.HostError(str(exc))
-        if ok:
-            mark_merged(run, task, "operator")
-            run.emit("merged", tid, None, None, f"{label}, which #{tid} follows, merged at "
-                     f"{p.merge_commit or 'unknown commit'}; {how}; recorded merged_by=operator")
-            cleanup(run, task)
-        else:
-            run.emit("not-in-target", tid, None, None, f"{label}, which #{tid} follows, merged, but {how}; #{tid} is not done",
-                     f"if the change is in {p.base_branch} after all, run.py merged {tid} --by operator; else run.py repoint "
-                     f"{tid} --pr <n> to a request that carries it, or {redo_text(task)}")
+        except Refused as exc:  # a failed fetch: the check is information, so it is not a host-error
+            ok, how = False, str(exc)
+        run.emit("target-check", tid, None, None, f"{sha} in target: {how}" if ok else
+                 f"{sha} not proven in target ({how}): its content may have been redone in {label}")
+        mark_merged(run, task, "repoint", merged_via=p.number)
+        run.emit("merged", tid, None, None, f"{label}, which #{tid} follows, merged at "
+                 f"{p.merge_commit or 'unknown commit'}; recorded merged_by=repoint")
+        cleanup(run, task)
     elif p.state == "CLOSED":
         run.emit("pr-closed", tid, None, None, f"{label}, which #{tid} follows{origin}, closed without a merge",
                  f"run.py repoint {tid} --pr <n> to follow another request, or {redo_text(task)}")
@@ -5207,7 +5208,7 @@ def cmd_repoint(run, args):
     was = f"its own request {old_label}" if own else "no request of its own"
     run.emit("repointed", tid, wanted_attempt(task), None,
              f"#{tid} follows {label} {p.url} ({p.state.lower()}, into {target}); it had {was}; the head of {label} is not "
-             "pinned", f"run.py record checks that {str(meta['verdict_ref'])[:7]} is in {target} once {label} is merged"
+             "pinned", f"run.py record marks #{tid} merged (merged_by=repoint), since {label} is merged"
              if p.state == "MERGED" else f"run.py record follows {label}; the task that owns it merges it")
     if old and old.state == "OPEN":
         if args.keep_old:

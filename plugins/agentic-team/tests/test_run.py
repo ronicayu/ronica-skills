@@ -10977,12 +10977,15 @@ class RepointTest(Base):
         events = self.events("record")
         for task, head in tasks:
             with self.subTest(task=task):
-                self.assertEqual(self.task_events(events, task), ["merged"])
+                self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+                check = next(e["detail"] for e in events if e["event"] == "target-check" and e["task"] == task)
+                self.assertEqual(check, f"{head[:7]} in target: origin/main holds the change of {head[:7]}")
+                self.assertIn("recorded merged_by=repoint", next(e["detail"] for e in events
+                                                                if e["event"] == "merged" and e["task"] == task))
                 meta = self.meta(task)
-                self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"]), ("done", "merged", "operator"))
+                self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"], meta["merged_via"]),
+                                 ("done", "merged", "repoint", 9))
                 self.assertIsNone(self.gate(task))
-        detail = [e["detail"] for e in events if e["event"] == "merged"][0]
-        self.assertIn(f"holds the change of {tasks[0][1][:7]}", detail)
         self.assertIn(later, [t["id"] for t in self.tg("ready")])
         self.assertEqual(self.merge_calls(), [])
 
@@ -11003,27 +11006,34 @@ class RepointTest(Base):
                 self.push_main()
                 self.requests(own=(1,), state="MERGED", merge_commit=self.git("rev-parse", "HEAD"))
                 events = self.events("record")
-                self.assertEqual(self.task_events(events, task), ["merged"])
-                self.assertIn(f"{head[:7]} is in origin/main", self.one(events, "merged")["detail"])
-                self.assertEqual((self.status_of(task), self.meta(task)["phase"]), ("done", "merged"))
+                self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+                self.assertEqual(self.one(events, "target-check")["detail"], f"{head[:7]} in target: {head[:7]} is in origin/main")
+                self.assertEqual((self.status_of(task), self.meta(task)["phase"], self.meta(task)["merged_by"]),
+                                 ("done", "merged", "repoint"))
 
     @both_hosts
-    def test_111_record_does_not_mark_done_a_task_whose_commit_the_request_left_out(self):
+    def test_111_record_marks_done_a_task_whose_commit_the_request_left_out(self):
+        # #111 Decision: the request was redone and rebased, so the task's commit is not provably in the target; the
+        # repoint is the operator's word, and the merge of the request completes the task all the same
         tasks = self.repointed(1, 2, 3)
+        later = self.add_task("Next", depends=tuple(t for t, _ in tasks))
         (one, h1), (two, h2), (left, h3) = tasks
         merge_commit = self.squash(h1, h2)
         self.requests(own=(1, 2, 3), state="MERGED", merge_commit=merge_commit)
         events = self.events("record")
-        self.assertEqual([self.task_events(events, t) for t in (one, two)], [["merged"], ["merged"]])
-        self.assertEqual(self.task_events(events, left), ["not-in-target"])
-        line = self.one(events, "not-in-target")
-        self.assertIn(f"origin/main does not hold the change of {h3[:7]}; #{left} is not done", line["detail"])
-        self.assertIn(f"run.py merged {left} --by operator", line["next"])
-        self.assertIn(f"run.py repoint {left} --pr <n>", line["next"])
-        self.assertIn(f"run.py abandon {left} <mode>", line["next"])
-        self.assert_awaiting(left)
-        self.assertEqual(self.gate(left), (self.label(9), self.url(9)))
-        self.assertEqual(self.task_events(self.events("record"), left), ["not-in-target"])  # it stays until someone acts
+        for task in (one, two, left):
+            self.assertEqual(self.task_events(events, task), ["target-check", "merged"])
+            meta = self.meta(task)
+            self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"], meta["merged_via"]),
+                             ("done", "merged", "repoint", 9))
+            self.assertIsNone(self.gate(task))
+        check = next(e for e in events if e["event"] == "target-check" and e["task"] == left)
+        self.assertEqual(check["detail"], f"{h3[:7]} not proven in target (origin/main does not hold the change of "
+                                          f"{h3[:7]}): its content may have been redone in {self.label(9)}")
+        self.assertIsNone(check["next"])
+        self.assertNotIn("not-in-target", [e["event"] for e in events])
+        self.assertIn(later, [t["id"] for t in self.tg("ready")])
+        self.assertEqual(self.task_events(self.events("record"), left), [])  # done: record has nothing more to say
 
     @both_hosts
     def test_111_record_hints_repoint_or_redo_when_the_request_closed(self):
