@@ -36,6 +36,8 @@ A participle attaches to the subject that follows it:
 
 **Loose word choice.** Where a distinction carries weight, keep it: *may* is permission and *might* is possibility; *fewer* counts and *less* measures; *ensure* guarantees, *insure* indemnifies, *assure* reassures. Do not write *significant* for *large*, *literally* for *figuratively*, or *impact* where *effect* or a verb is meant.
 
+**Negative form.** State what is. A negative leaves the reader to work out what does happen, keeps the rejected idea in mind, and often hides the evidence: "We found no issues" → "All 40 checks passed"; "This is not a breaking change" → "Existing callers work unchanged." Use a negative when the reader expected the thing (a date that slipped, a feature left out), to rule out an option the reader is weighing, for a prohibition, or when the absence is the finding.
+
 **Sentences that do not follow.** Read consecutive sentences as an argument. If sentence two does not follow from sentence one, either a step is missing or the connective is wrong. *Therefore*, *however*, and *because* make claims — check that each is true.
 
 ## Concision
@@ -120,6 +122,8 @@ Passive is right when the actor is unknown, irrelevant, or genuinely not the sub
 
 **Clichés.** *Low-hanging fruit*, *move the needle*, *boil the ocean*, *the elephant in the room*, *a perfect storm*, *tip of the iceberg*. A dead metaphor makes the reader skim.
 
+**Analogy.** Keep an analogy that maps an unfamiliar mechanism onto a familiar one, part for part, for a reader new to the field: a reversible decision is a two-way door, so it gets a light process; an irreversible one is a one-way door. Cut an idiom that carries only an attitude ("eat the elephant one bite at a time"). Then find what the idiom stood in for, often an unstated conclusion ("so the team replaced the system one feature at a time"), and write that literally. Readers of Global English may not know the idiom at all.
+
 **Tense consistency.** Pick a frame and hold it. Standing behaviour in the present (*the service retries*), completed events in the past (*the migration ran overnight*), planned work in the future or a modal (*the team will*, *the team must*). Drifting between them makes a plan read as a report.
 
 **Pronoun consistency.** Decide who *we* is and keep it. Do not switch between *we*, *the team*, and *one* for the same actor. Use *they* for a singular person of unstated gender rather than *he or she*, and never infer someone's pronouns from their name.
@@ -154,6 +158,8 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 > "This isn't just a migration — it's a re-architecture."
 > → "The migration also replaces the scheduler."
 
+The same goes for *X, not Y* where no one proposed Y: "The fix is a rename, not a rewrite" → "The fix renames one function."
+
 **3. Heading echo.** The first sentence restates the heading in different words, spending the most-read line in the section on nothing.
 
 > "## Rollback is untested
@@ -187,7 +193,7 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 
 **20. Abstract metaphor nouns.** *Substrate*, *surface* (as in "API surface"), *primitive*, *harness*, *vector*, *wedge*, *locus*, *nexus*, *scaffolding*, *ratchet*, *north star*, *flywheel*, *endgame*. They sound technical and name nothing. Use the concrete word: base, add, method, the mechanism's real name.
 
-**21. Mannered prose.** Aphorisms ("wire it or delete it"), fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"). Say it literally.
+**21. Mannered prose.** Aphorisms ("wire it or delete it"), fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"). Say it literally. One exception, for this tell and tell 20: a single image that names the governing thought, used throughout and backed by evidence wherever it appears, such as "peanut butter" for investment spread thin across every opportunity. Keep it if a reader could repeat it in a meeting to mean the whole argument. A second image is decoration.
 
 **22. A fancy way to say "is".** *Serves as*, *stands as*, *boasts*, *features*. Write "is" or "has".
 
@@ -197,9 +203,18 @@ Retired numbers, each covered elsewhere: 6 (Throat-clearing), 11 (*Restraint* in
 
 **25. False ranges.** "From X to Y" where X and Y sit on no real scale. List the items.
 
-**28. Meta-commentary.** A heading or sentence that tells the reader how to read the text instead of saying something: *Why this matters*, *Key takeaways*, *What this means for you*, *The evidence is strongest where…*. Put the implication into the sentence that carries the fact, and give the section a heading that states its message.
+**28. Meta-commentary.** A heading or sentence that tells the reader how to read the text instead of saying something: *Why this matters*, *Key takeaways*, *What this means for you*, *The evidence is strongest where…*. Put the implication into the sentence that carries the fact, and give the section a heading that states its message. Addressing an audience about its own interest (*What this means for executives*) is the same fault: choose the content for that reader and leave the label out.
 
-**29. Telling the reader what to think.** Two forms. Addressing an audience about its own interest (*What this means for executives*, *Why engineers should care*): choose the content for that reader and leave the label out. Commenting on evidence (*This is a striking result*, *which shows how compelling…*): keep the fact or number and cut the comment.
+**29. The add-on explanation.** A clause or sentence after a fact that explains it unasked and weakens it:
+
+- *Overreach:* the explanation claims more than the fact shows. "All 212 tests pass, so the change is safe." The reader doubts the inference, then the fact.
+- *Generic reason:* a reason any project could give. "We chose Postgres because it is reliable and widely used."
+- *Reassurance:* "This is a small change and should not affect anything else." It raises the doubt it means to settle.
+- *Self-justification:* explaining a routine choice whose reason the reader knows.
+- *Disclaimer:* a sentence saying what a fact is not. "That duration reflects the team's previous experience; it was not recorded as a formal baseline for system-wide discovery." It names concepts the reader never raised and leaves doubt where the fact was. Put the basis in the fact's own sentence: "In the team's experience, discovery took three to six months."
+- *Comment on evidence:* "This is a striking result."
+
+Test: delete the add-on. If the reader loses nothing they need, leave it deleted. If they would ask "so what?", answer with a specific consequence in their terms (a number, a decision, who acts), not an interpretation. "A replacement without this rule could allow a transaction the existing system rejects" stays.
 
 ## Swap tables
 
