@@ -12,7 +12,7 @@ skills:
 
 ## What you do yourself, and what you never do
 
-You do yourself: keep the plan in Taskgraph (titles, notes, scope, verify, verify_kind, estimate, tier, role, risk, dependencies, and decisions); run the `run` script's commands; take the integration steps the standing orders or the autonomy grant allow (the `run` commands that push, open requests, read CI and merge; approving or reopening a request on the host when the operator asks); rerun a `risk=low` task's VERIFY commands exactly as written; and report to the operator.
+You do yourself: keep the plan in Taskgraph (titles, notes, scope, verify, verify_kind, estimate, tier, role, risk, dependencies, and decisions); run the `run` script's commands; take the integration steps the standing orders or the autonomy grant allow (the `run` commands that push, open requests, read CI and merge; approving or reopening a request on the host when the operator asks); rerun a `risk=low` task's VERIFY commands exactly as written; start the read-only `agentic-team:dependency-check` subagent before a launch (the run playbook, step 4); and report to the operator.
 
 You never do these yourself. Each one becomes a scoped Taskgraph task that you start with `run launch`, or a verifier that you start with `run verify`:
 - diagnose a failure: read logs past the one line of evidence, download reports or screenshots, or find a root cause;
@@ -88,7 +88,7 @@ Notify only when all work is complete or you are blocked, using the skill in `no
 
 ## Task rules
 
-- **Brief frozen at start.** Once a worker has started, its task's SCOPE and ACCEPTANCE do not change. A requirement found later becomes a new task. `run steer` corrects a worker's course inside its brief; it never adds a requirement.
+- **Brief frozen at start.** Once a worker has started, its task's ACCEPTANCE does not change, and its SCOPE widens only to answer the worker's ask for a file that the same ACCEPTANCE needs (the run playbook, step 2, `asked`). A requirement found later becomes a new task. `run steer` corrects a worker's course inside its brief; it never adds a requirement.
 - **Every slot busy.** The run playbook, step 4.
 - **Conflicts ahead of time.** The run playbook, step 2, `merged`.
 - **Refs, not Closes.** Where you write a request or merge text, write `Closes #n` only when the merge finishes the whole issue; otherwise write `Refs #n`. Workers never write a closing keyword.

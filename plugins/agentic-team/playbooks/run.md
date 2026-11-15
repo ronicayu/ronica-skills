@@ -14,7 +14,7 @@ every report, and on every wake (step 6).
      carries the previous report, and the cap is enforced.
    - `arrived ISSUES` because the timebox or context ran out: split the work
      in Taskgraph and launch the smaller task.
-   - `arrived BLOCKED` or `gated`: apply the decision-forks principle. When
+   - `arrived BLOCKED` or `gated`: read its `Asked:` line first: the asks it relied on, or why it asked none. Apply the decision-forks principle. When
      evidence can answer it, answer in the task notes or the standing orders
      and relaunch. Otherwise add a decision with `--blocks <id>`. A done
      decision's notes are pasted into the next brief.
@@ -38,6 +38,9 @@ every report, and on every wake (step 6).
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --file <file>`. When only the operator can, add a decision as in Escalation (Manager index) with
      `--meta ask=<n>` (the worker's `Default:` in its notes), and after it is done run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --decision <decision id>`. The worker waits idle at no cost; it is not stuck and not dead.
+     Workers ask before they report `ISSUES` or `BLOCKED` (Ask first in `agents/worker.md`), so answer what one answer can settle:
+     when the worker needs a file outside SCOPE to meet the same ACCEPTANCE, widen the task's `scope` meta with `tg edit` and
+     answer (its inbox prints the new SCOPE); a new requirement is still a new task (Brief frozen at start).
      `asking`: the same ask still has no answer; nothing new to do. `ask-due`: the ask passed `[messaging] ask_due_minutes`;
      apply its default yourself with `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --default` (or a better answer): `run` never decides or answers for you.
    - `answer-seen`, `steer-seen`: the worker acked the message (the line names the transport and its one-line action). Nothing to do.
@@ -144,7 +147,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - Before you close a task, triage every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes: a new task, the tail of a later task's notes, or won't-fix with a one-line reason in the task's notes. Never leave one untriaged. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is triaged the same way and never opens a fix round.
+   - Before you close a task, triage every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes: a new task, the tail of a later task's notes, or won't-fix with a one-line reason in the task's notes. Never leave one untriaged. A `flake:` line becomes a task to fix the flaky check, or won't-fix with a reason; it never opens a fix round of this task. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is triaged the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, and then follows `merge.mode`. The task is done only
      when its change is merged; until then it stays in progress with
@@ -167,7 +170,23 @@ every report, and on every wake (step 6).
    lists them (that is `tg ready` order: priority first, P0 to P3, then tasks
    without one; ties by id), while `slots` has
    room: skip a task whose work needs a person or an outside party (a drafting
-   task may prepare a request but never send it). Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
+   task may prepare a request but never send it).
+   - **Dependency check.** Before the first attempt of a task (attempt 1), and before
+     a later attempt that starts on a different base than the attempt before it, start the
+     subagent `agentic-team:dependency-check` with the Agent tool. Never start it in a
+     session of its own (`claude --bg`): that costs a session slot, and you need only
+     its verdict. Give it in the prompt: the task id and title, its SCOPE and notes
+     (`tg show <id>`), the base (the target branch, or the `--base` you will pass), the
+     target branch, its current dependencies, and the Taskgraph command with the real
+     plugin path and project. For several tasks, start one subagent per task in one
+     message. A retry on the same base needs no check. Do the check for docs-only
+     tasks too: a document often describes code that is not merged yet.
+   - Act on the verdict. `ok`: launch. A `missing:` line: add the dependency
+     (`"${CLAUDE_PLUGIN_ROOT}/scripts/tg" --project <project> dep add <id> <n>`; the task leaves
+     `ready`), wait for the request it names, or launch with `--base <branch>` on
+     purpose. A `not checked:` or `ask:` line: decide from the evidence you have, as
+     the decision-forks principle says; never launch the check a second time for it.
+   - Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - Exit 2: fix what the message names (the task, the config, or the state),
      then rerun. Exit 3: `STOP`; launch nothing.
    - "Workspace not trusted": tell the operator to run `claude` once there and

@@ -20,7 +20,8 @@
   ],
   "agents": [
     "./agents/manager.md",
-    "./agents/worker.md"
+    "./agents/worker.md",
+    "./agents/dependency-check.md"
   ],
   "icon": "./assets/icon.png"
 }

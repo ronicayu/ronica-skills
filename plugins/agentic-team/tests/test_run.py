@@ -12834,6 +12834,19 @@ class Issue130Test(Base):
         self.assertRegex(block, r"(?m)^Issues: .*\nAsked: ")
         self.assertIn("`flake`", text)
 
+    def test_130_the_dependency_check_agent_ships_read_only(self):
+        base = os.path.dirname(HERE)
+        with open(os.path.join(base, "agents", "dependency-check.md"), encoding="utf-8") as fh:
+            front = fh.read().split("---\n")[1]
+        fields = dict(line.split(": ", 1) for line in front.strip().splitlines())
+        self.assertEqual(fields["name"], "dependency-check")
+        self.assertIn(fields["model"], ("haiku", "sonnet"))
+        self.assertEqual({t.strip() for t in fields["tools"].split(",")}, {"Read", "Grep", "Glob", "Bash"})
+        with open(os.path.join(base, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            self.assertIn("./agents/dependency-check.md", json.load(fh)["agents"])
+        with open(os.path.join(base, "playbooks", "run.md"), encoding="utf-8") as fh:
+            self.assertIn("agentic-team:dependency-check", fh.read())
+
 
 class TransitionTest(unittest.TestCase):
     """#99: run.py changes the phase only through TRANSITIONS."""
