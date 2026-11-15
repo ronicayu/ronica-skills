@@ -152,8 +152,9 @@ the previous report. `launch --base` on a retry is refused while the worktree
 exists, and the message gives the by-hand reset; `run.py` never resets,
 rebases, or checks out another commit in place, except the `close` catch-up with
 `catch_up = "local"` (it rebases the idle worktree, and puts the old head back
-when the change differs) and `round --cancel` (it keeps the round's head in a
-ref, then resets to the verified head). Before a retry the worktree
+when the change differs), `round` on a branch that stayed at `caught_up_from`
+(it moves it to the host's head, the same change), and `round --cancel` (it
+keeps the round's head in a ref, then resets to the verified head). Before a retry the worktree
 must be clean. `launch` refuses a `STOPPED` attempt whose WIP commit is not made
 yet (run `record` first). When a dead or stuck attempt left uncommitted files,
 `launch` commits them as `WIP task <id> attempt <n>: <status>` and says so in
