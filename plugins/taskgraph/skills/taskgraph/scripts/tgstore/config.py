@@ -4,7 +4,7 @@ import hashlib
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tgstore.base import StoreError
@@ -63,6 +63,26 @@ def find_config(cwd=None, env=None):
         if (root / NAME).is_file():
             return root / NAME
     return None
+
+
+def main_folder(folder):
+    """The folder in the main checkout that matches `folder` in a git worktree (the same folder outside one): each
+    worktree has its own copy of a committed .taskgraph.toml, and they must share one cache."""
+    common = git_common_dir(folder)
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=folder, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return folder
+    if common is None or common.name != ".git" or not top:
+        return folder
+    return common.parent / folder.relative_to(Path(top).resolve())
+
+
+def anchored(entry, folder):
+    # a relative cache path is read from the .taskgraph.toml's folder, not from the current folder
+    if entry.cache and not Path(entry.cache).expanduser().is_absolute():
+        return replace(entry, cache=str(main_folder(folder) / entry.cache))
+    return entry
 
 
 def checkout_id(cwd=None):
@@ -138,7 +158,8 @@ def load_config(path):
     projects = data.get("projects", {})
     if not isinstance(projects, dict):
         raise StoreError(f"{NAME}: projects must be a table")
-    return Config(path, {name: entry_from(name, table) for name, table in projects.items()})
+    folder = path.resolve().parent
+    return Config(path, {name: anchored(entry_from(name, table), folder) for name, table in projects.items()})
 
 
 def project_entry(config, project):

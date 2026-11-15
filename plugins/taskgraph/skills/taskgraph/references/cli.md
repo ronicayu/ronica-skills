@@ -76,7 +76,7 @@ repo = "owner/name"
 label = "taskgraph"                # optional, default "taskgraph"
 cache_ttl = 30                     # optional, seconds a read may use the cache
 full_every = 600                   # optional, seconds between full pulls (at least 60)
-cache = "~/.taskgraph/cache/github/owner/name.db"   # optional
+cache = "~/.taskgraph/cache/github/owner/name.db"   # optional; a relative path is read from this file's folder, in the main checkout of a git worktree
 claimant = "me@laptop"             # optional; default "<gh login>@<host>:<checkout id>"; TASKGRAPH_CLAIMANT overrides
 
 [projects."my-project".meta]

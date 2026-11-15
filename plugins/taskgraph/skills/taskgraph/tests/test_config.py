@@ -92,6 +92,28 @@ def test_find_config_uses_the_main_checkout_of_a_worktree(tmp_path, monkeypatch)
     assert checkout_id(sub) == checkout_id(main)
 
 
+def test_a_relative_cache_is_read_from_the_config_folder_and_shared_by_worktrees(tmp_path, monkeypatch):
+    monkeypatch.delenv("TASKGRAPH_CONFIG", raising=False)
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", cwd=main)
+    text = GOOD.replace('repo = "acme/plan"', 'repo = "acme/plan"\ncache = ".cache/plan.db"')
+    write(main, text)
+    git("add", ".taskgraph.toml", cwd=main)
+    git("commit", "-q", "-m", "x", cwd=main)
+    git("worktree", "add", "-q", str(main / ".claude" / "worktrees" / "task-1"), cwd=main)
+    want = main.resolve() / ".cache" / "plan.db"
+    (main / "sub").mkdir()
+    for cwd in (main / "sub", main / ".claude" / "worktrees" / "task-1", tmp_path):
+        monkeypatch.chdir(cwd)
+        path = find_config(main / ".claude" / "worktrees" / "task-1" if cwd == tmp_path else cwd)
+        assert cache_path(load_config(path).projects["demo"]) == want, cwd
+    plain = tmp_path / "plain"
+    write(plain, text)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    assert cache_path(load_config(plain / ".taskgraph.toml").projects["demo"]) == plain.resolve() / ".cache" / "plan.db"
+
+
 def test_find_config_none_without_a_file(tmp_path, monkeypatch):
     monkeypatch.delenv("TASKGRAPH_CONFIG", raising=False)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
