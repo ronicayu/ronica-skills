@@ -173,12 +173,17 @@ is written once and a retry does not change it.
 
 `run.py verify` starts the verifier in the task worktree, read only, once the
 worker's turn is over (`[verify] seat = "task"`, the default): no new folder.
+A worker row with status `idle` that waits on nothing counts as over once the
+worker's report of its revision is filed: a resumed session that ended its turn
+reads `idle/working`.
 It falls back to a worktree of its own (`verify-<id>-<attempt>`, then `-2`,
 `-3` for a second verifier), fresh at the commit under review, with a
 `seat-fallback` line, when the task folder is dirty, is not at the worker's
 `Head`, or the worker is still busy `[verify] seat_wait_minutes` after its
 report (before that, `verify` refuses and names the busy session), and always
-with `seat = "own"`. A verifier folder goes when its verdict is recorded:
+with `seat = "own"`. In a revision the same wait applies before the kept
+verifier is resumed in the task worktree; after it, a new verifier starts in a
+folder of its own (a session resumes only in the folder of its conversation). A verifier folder goes when its verdict is recorded:
 `close`, the next `launch`, `round`, `round --cancel` and `abandon` remove each
 clean `verify-*` folder that no session uses and whose `HEAD` and branch tip are
 the `Head` of a worker or `STOPPED` row, with its branch; else one `kept` line
@@ -917,7 +922,7 @@ pattern.
 | `revisions_per_attempt` | integer, 0 or more | `2` | The revisions (`run.py revise`) one attempt may have. `0` turns revisions off: the lifecycle of 0.23.0. The task's plan key `revisions` overrides it. See [Revisions](#revisions-fix-in-place). |
 | `keep_sessions_minutes` | positive integer | `60` | How long the worker and the verifier stay idle after their newest row of the revision, waiting for a revision; then `record` stops them. |
 | `seat` | `"task"`, `"own"` | `"task"` | Where the verifier runs: `"task"`, the task worktree, read only, after the worker's turn; `"own"`, a `verify-<id>-<n>` folder, as before 0.24.0. |
-| `seat_wait_minutes` | positive integer | `5` | How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) before the verifier gets a folder of its own. |
+| `seat_wait_minutes` | positive integer | `5` | How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) before the verifier gets a folder of its own. In a revision, a new verifier then replaces the kept one. |
 
 ### `[scope]`
 
@@ -1588,6 +1593,10 @@ The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
 the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
+
+### Upgrading from 0.25.0
+
+Version 0.25.1 (issue #137) fixes a `verify` in a revision that refused for good: a resumed worker that ended its turn reads `idle/working`, and `verify` counted it as busy. A live row with status `idle` that waits on nothing now counts as turn over once its work of its revision is filed (a worker report for a worker, a verify row under its name for a verifier); with nothing filed it still works. This applies to `verify` (both seats, attempt 1 too), `revise` and the checks for a later revision. In a revision with seat `task`, `verify` now waits `[verify] seat_wait_minutes` after the worker's report for a worker that is still busy, then starts a new verifier in a folder of its own. A revision's resume no longer counts the session it replaces against `[sessions] max_parallel`. No migration.
 
 ### Upgrading from 0.24.1
 

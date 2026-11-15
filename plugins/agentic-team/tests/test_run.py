@@ -12746,6 +12746,73 @@ class RevisionTest(Base):
         self.assertIn("no revision follows a worker ISSUES", stopped["detail"])
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
 
+    # --- #137: a resumed session that ended its turn reads idle/working
+
+    def set_row(self, sid, **fields):
+        rows = json.load(open(self.agents_file))
+        for row in rows:
+            if row["id"] == sid:
+                row.update(fields)
+        self.agents(*rows)
+
+    def test_137_verify_resumes_after_idle_working_worker_report(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.set_row("sess-copy", status="idle", state="working")
+        events = self.events("verify", str(task))
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", self.V, "--name", "verify-1-1-r1"])
+        self.assertIn("seat task-1", self.one(events, "verifying")["detail"])
+        self.assertEqual(self.named(events, "seat-fallback"), [])
+        self.assertNotIn(["stop", "sess-copy"], self.calls("stop"))
+
+    def test_137_idle_working_worker_with_no_report_is_not_verified(self):
+        task, wt, head, _ = self.revised()
+        self.set_row("sess-copy", status="idle", state="working")
+        self.assertIn("no worker result", self.refused("verify", str(task)))
+        self.assertEqual([c for c in self.calls("--bg") if c[:3] == ["--bg", "--resume", self.V]], [])
+
+    def test_137_busy_worker_after_report_falls_back_after_seat_wait(self):
+        task, wt, head, _ = self.revised()
+        new = self.commit_file("fix.txt", "fixed\n", cwd=wt)
+        worker = self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {new}\nCheckpoint: {CHECKPOINT}\n",
+                                 by="task-1-1")["id"]
+        self.set_row("sess-copy", status="busy", state="working")
+        out = self.refused("verify", str(task))
+        self.assertIn("the worker's turn is not over: sess-copy", out)
+        self.assertIn("after 5 minutes a new verifier gets a folder of its own", out)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE id=?", (RevisionTest.old(6), worker))
+        events = self.events("verify", str(task))
+        self.assertIn("still busy", self.one(events, "seat-fallback")["detail"])
+        self.assertIn("cannot be resumed", self.one(events, "verifying")["detail"])
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-verify-1-1"])
+        self.assertEqual([c for c in self.calls("--bg") if c[:3] == ["--bg", "--resume", self.V]], [])
+        started = [c for c in self.calls("--bg") if "--resume" not in c][-1]
+        self.assertEqual(started[started.index("--worktree") + 1], "verify-1-1-2")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("verify-1-1-2")), new)
+
+    def test_137_second_revision_resumes_idle_working_sessions(self):
+        task, wt, head, _ = self.failed()
+        self.one(self.events("revise", str(task)), "revised")
+        self.second_pass(task, wt, text="fix 1\n")
+        self.set_row("sess-copy", status="idle", state="working")
+        self.ok("verify", str(task))
+        for entry in self.meta(task)["sessions"]:
+            if entry.get("sessionId"):
+                self.transcript("task-1", entry["sessionId"])
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.add_result(task, "ISSUES", self.issues(("src/a.py:1: still wrong",)), kind="verify", by="verify-1-1")
+        self.assertEqual(self.one(self.events("close", str(task)), "verdict")["next"], "revise: run.py revise 1")
+        self.one(self.events("revise", str(task)), "revised")
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", "copy-" + self.W, "--name", "task-1-1-r2"])
+        self.second_pass(task, wt, text="fix 2\n")
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.ok("verify", str(task))
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", "copy-" + self.V, "--name", "verify-1-1-r2"])
+
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
