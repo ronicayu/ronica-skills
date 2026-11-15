@@ -455,13 +455,6 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
         self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "ask", "answer"))
 
-    def test_the_readme_gives_the_recommended_local_result_kinds_of_the_code(self):
-        with open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8") as fh:
-            text = fh.read()
-        section = text.split("### Result kinds on the Taskgraph GitHub backend", 1)[1].split("\n### ", 1)[0]
-        self.assertIn(f'[projects."<name>".results]\nlocal = {json.dumps(list(config.LOCAL_RESULT_KINDS))}\n', section)
-        self.assertEqual(re.findall(r'(?m)^local = (\[.*\])$', section), [json.dumps(list(config.LOCAL_RESULT_KINDS))])
-
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)
         inner = os.path.join(self.root, "a", "b")

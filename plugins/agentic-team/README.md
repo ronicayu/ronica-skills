@@ -1619,7 +1619,10 @@ local = ["ack", "steer"]
 ```
 
 A row of a `local` kind is never posted; `tg result add` and `tg result ls` work as before, and the worker's
-`mailbox.py`, which runs `tg` on the same machine, reads the same cache. `config.py check` prints a warning (and still
+`mailbox.py`, which runs `tg` on the same machine, reads the same cache: tg finds the main checkout's
+`.taskgraph.toml` (or the worktree's committed copy) and reads a relative `cache` path from the main checkout's folder,
+so the default `~/.taskgraph/cache/...` path and a relative one are shared by every worktree; an absolute path must be
+the same for all of them. `config.py check` prints a warning (and still
 exits 0) for each of these kinds that the project's entry does not list. `ask` and `answer` stay on the issue by
 default: they hold the worker's question and the Manager's decision, which a person or another machine may want to
 read. A project may add them to `local` too; then a lost cache also loses the questions and the answers, and an answer
@@ -1631,6 +1634,8 @@ the handshake history, which `run.py inbox` showed, and the evidence behind the 
 `mailbox_ids` meta, which are local keys and are lost at the same time: with no listed steer, no steer waits for an
 ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is what the meta table above already
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
+Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
+may match a new steer.
 
 ### Upgrading from 0.25.0
 

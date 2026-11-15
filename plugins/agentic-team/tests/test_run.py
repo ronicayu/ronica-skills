@@ -9241,6 +9241,25 @@ class DeliveryTest(Base):
         self.assertEqual([r for r in self.results(second) if r["kind"] == "task"], [])
         self.assertEqual({e["task"] for e in self.named(events, "running")}, {first, second})
 
+    def test_b4_the_salvage_refusal_names_the_findings_an_ack_leaves_out(self):
+        task = self.worker(status="busy", state="working", pid=4242)
+        self.ok("steer", str(task), "--file", self.text_file("x"), "--interrupt")
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        with sqlite3.connect(self.db) as conn:  # the shape of the one steer that run.py revise files
+            conn.execute("UPDATE results SET body=? WHERE id=?", ("Steer: 2 blocking findings of verify #9\nKind: finding\n"
+                         "Revision: 1 (verify #9)\nF1: blocking: a\nF2: blocking: b\n", steer["id"]))
+        self.add_result(task, "SEEN", f"Re: #{steer['id']}\nAction: one line per finding: F1\nF1: fix a\n", kind="ack",
+                        by="task-1-1")
+        report = os.path.join(self.wt_path("task-1"), ".agentic-team", "report-task-1-1.md")
+        os.makedirs(os.path.dirname(report), exist_ok=True)
+        with open(report, "w") as fh:
+            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+        self.c2_agents(self.row("task-1", status=None, state="done", sessionId=UUID1))
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.assertIn(f"a report was found, but steer #{steer['id']} has no ack that names each of its findings "
+                      "(missing: F2;", self.results(task)[-1]["body"])
+
     def test_b4_a_report_is_not_salvaged_while_a_steer_has_no_ack(self):
         task = self.worker(status="busy", state="working", pid=4242)
         self.ok("steer", str(task), "--file", self.text_file("x"), "--interrupt")  # resumed: delivered, not acked

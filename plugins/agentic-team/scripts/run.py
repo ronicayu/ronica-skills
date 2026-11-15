@@ -3620,7 +3620,6 @@ class Thread:
         self.steers = [r for r in mine if r["kind"] == mbx.STEER and r.get("author") in mbx.SENDERS and r["id"] in listed]
         self.sent = [r for r in mine if r in self.answers or r in self.steers]  # in the order of `tg result ls`
         self.acks = [r for r in mine if r["kind"] == mbx.ACK]
-        self.acked = {mbx.ref_of(r.get("body")) for r in self.acks} - {None}
         self.open = mbx.open_messages(rows, task.get("meta"), attempt, listed)  # what the worker's inbox prints
 
     def answer_of(self, ask_id):
@@ -4787,7 +4786,7 @@ def record_in_progress(run, snap, task, unmanaged):
             if s is not None:  # filed for this attempt, either way
                 record_row(run, task, s, attempt)
             if found and open_steers:  # the same rule as `mailbox.py report`: no report while a steer has no ack
-                found, where_steer = None, f"a report was found, but steer #{open_steers[0]['id']} has no ack"
+                found, where_steer = None, f"a report was found, but {mbx.unacked_text(open_steers[0], rows)}"
             else:
                 where_steer = ""
             if found:
