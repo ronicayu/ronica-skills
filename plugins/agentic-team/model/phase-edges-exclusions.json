@@ -17,7 +17,7 @@
     {"edge": ["*", "stopped", "stopped"], "why": "the operator's pause after a report or a verdict (pause.cfg has it, the check configs do not), or a second stop while the stopped worker still runs"},
     {"edge": ["verdict_failed", "verify", "verifying"], "why": "verify --again after a verdict: derive_phase reads verdict_failed while the verdict stands, so the model's step keeps the phase (settle_phase allows the code's verifying)"},
     {"edge": ["verifying", "verify", "verifying"], "why": "verify --again while verifying keeps the phase, and the view drops such a step"},
-    {"edge": ["*", "launch", "running"], "why": "launch accepts a phase no hint names it from once every live session is idle with its work filed: a report not recorded yet (running), a verdict not closed (verifying)"},
+    {"edge": ["*", "launch", "running"], "why": "launch accepts a phase no hint names it from once every live session is idle with its work filed: a report not recorded yet (running), a verdict not closed (verifying); outside a round only (refuse_round)"},
     {"edge": ["*", "verify", "verifying"], "why": "verify and close take the attempt's newest PASS row whatever the phase: before record saw it (running), or after a pause (stopped)"},
     {"edge": ["*", "close_*", "*"], "why": "as verify; also close --verdict on a report no verifier saw (reported: HIGH_RISK = FALSE, not in the check configs); close_failed from verdict_failed keeps the phase"}
   ],

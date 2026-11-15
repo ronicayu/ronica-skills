@@ -5960,7 +5960,8 @@ class RoleTest(Base):
         self.assertTrue(self.section(self.brief(self.add_task(role="solo")), "ROLE").endswith("Method text of solo."))
         rows = {r["name"]: r for r in json.loads(self.ok("roles", pre=["--json"]).stdout)}
         self.assertEqual({n: r["source"] for n, r in rows.items()},
-                         {"architect": "project, overrides plugin", "solo": "project", "software-engineer": "plugin"})
+                         {"architect": "project, overrides plugin", "rebase": "plugin", "solo": "project",
+                          "software-engineer": "plugin"})
         self.assertEqual(rows["architect"]["fits"], "the project's own architect")
         text = self.ok("roles").stdout
         self.assertIn("role: architect (project, overrides plugin); fits: the project's own architect; tier -; verify kind -; skills -", text)
@@ -5978,7 +5979,7 @@ class RoleTest(Base):
         task = self.add_task(role="nosuch")
         err = self.refused("launch", str(task))
         self.assertIn("no role named 'nosuch'", err)
-        self.assertIn("available roles: architect (plugin), known (project), software-engineer (plugin)", err)
+        self.assertIn("available roles: architect (plugin), known (project), rebase (plugin), software-engineer (plugin)", err)
         self.assertEqual(self.calls("--bg"), [])
         running = self.running_task(role="nosuch")
         self.pass_report(running)
@@ -6184,7 +6185,7 @@ class RoleTest(Base):
         fake = types.SimpleNamespace(config=config.load(self.root))
         folder = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles")
         names = sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md"))
-        self.assertEqual(names, ["architect", "software-engineer"])
+        self.assertEqual(names, ["architect", "rebase", "software-engineer"])
         for name in names:
             with self.subTest(name):
                 role = runner.Role(name, os.path.join(folder, name + ".md"), "plugin")
@@ -11366,6 +11367,399 @@ class RepointTest(Base):
         self.assertFalse({"repointed_at", "repointed_from", "repointed_branch", "repointed_pushed"} & set(meta))
 
 
+class RoundTest(Base):
+    """run.py round (#119): a new attempt of a task that waits for its merge, on the same branch and request."""
+
+    def advance_main(self, name="moved.txt", text="x\n"):
+        """Commit on origin's main from a clone of its own, as another merged request does. Returns the new head."""
+        clone = os.path.join(self.dir, "clone")
+        if not os.path.isdir(clone):
+            subprocess.run(["git", "clone", "-q", self.origin, clone], check=True)
+            for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+                self.git("config", key, value, cwd=clone)
+        else:
+            self.git("pull", "-q", "origin", "main", cwd=clone)
+        head = self.commit_file(name, text, cwd=clone)
+        self.git("push", "-q", "origin", "HEAD:main", cwd=clone)
+        return head
+
+    def waiting(self, conflict=True, **meta):
+        """A task closed and published in pr mode (its request open), whose target then moved: with a change to the
+        task's own file when `conflict`, else to another file. Returns (task, worktree, verified head, target head)."""
+        self.commit_file("f.txt", "one\n")
+        task, wt, head = self.pr_task(files=("f.txt", "theirs\n"), **meta)
+        if meta.get("attempt", 1) != 1:
+            self.pass_report(task, attempt=meta["attempt"], wt=wt, head=head)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assert_awaiting(task)
+        onto = self.advance_main("f.txt", "ours\n") if conflict else self.advance_main("other.txt", "x\n")
+        self.fake_host(head=head, merge_state="DIRTY")
+        return task, wt, head, onto
+
+    def resolve(self, wt, onto, text="ours\ntheirs\n"):
+        """What the round's worker does: the branch onto the target, with the conflict resolved into `text`."""
+        if subprocess.run(["git", "-C", self.root, "cat-file", "-e", onto]).returncode:
+            self.git("fetch", "-q", "origin", "main")
+        self.git("reset", "-q", "--hard", onto, cwd=wt)
+        return self.commit_file("f.txt", text, cwd=wt, message="resolve f.txt")
+
+    def started(self, task=1):
+        return self.one(self.events("round", str(task), "rebase"), "round-started")
+
+    def refused(self, *args, code=2):
+        out = self.run_cmd(*args)
+        self.assertEqual(out.returncode, code, out.stdout + out.stderr)
+        return out.stderr
+
+    @both_hosts
+    def test_119_round_starts_on_a_conflicting_request(self):
+        task, wt, head, onto = self.waiting()
+        before = self.meta(task)
+        event = self.started(task)
+        self.assertEqual((event["task"], event["attempt"]), (task, 2))
+        self.assertIn(f"rebase round 1 of 3 of {self.label()}", event["detail"])
+        self.assertIn(f"at {head[:7]}, onto {onto[:7]}", event["detail"])
+        meta = self.meta(task)
+        self.assertEqual({k: meta.get(k) for k in ("phase", "attempt", "round", "round_from", "round_verdict", "round_onto",
+                                                    "rounds")},
+                         {"phase": "running", "attempt": 2, "round": "rebase", "round_from": head,
+                          "round_verdict": "test-verified", "round_onto": onto, "rounds": 1})
+        self.assertNotIn("verdict", meta)
+        self.assertNotIn("verdict_ref", meta)
+        for key in ("pr", "pr_branch", "pushed", "base", "gates"):
+            self.assertEqual(meta.get(key), before.get(key), key)
+        entry = meta["sessions"][-1]
+        self.assertEqual((entry["round"], entry["role"], entry["attempt"], entry["verify_kind"]), ("rebase", "rebase", 2, "code"))
+        self.assertEqual(len(self.create_calls()), 1)  # the close's; the round opens no request
+        with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-2.md")) as fh:
+            brief = fh.read()
+        self.assertIn(f"Your worktree is at `{head}` on branch `worktree-task-1`: the head that passed.", brief)
+        self.assertIn("ROLE names the one command that moves the branch in this round", brief)
+        self.assertIn(f"Run `git rebase {onto}`.", self.section(brief, "ROLE"))
+        self.assertIn("Files that both sides changed: `f.txt`.", self.section(brief, "ROLE"))
+        self.assertIn("Do not push.", brief)
+        self.assertIn("### The verified attempt (result #1, PASS, attempt 1)", brief)
+        self.assertIn(f"This change passed with verdict test-verified at `{head}`.", brief)
+        self.assertNotIn("{{ROUND_", brief)
+        self.assertIn("task-1-2 (rebase round)", self.status_sections()["In flight"])
+
+    def test_119_round_refusals(self):
+        task, wt, head, onto = self.waiting()
+        before = self.meta(task)
+        self.orders("STOP: hold\n")
+        self.assertIn("start no round", self.refused("round", str(task), "rebase", code=3))
+        self.orders("# Standing orders\n")
+        self.assertIn("name the kind: run.py round 1 <rebase>, or --cancel", self.refused("round", str(task)))
+        self.assertIn("drop rebase", self.refused("round", str(task), "rebase", "--cancel"))
+        self.tg("edit", str(task), "--meta", "rounds=3")
+        self.assertIn("has had 3 rounds, the cap ([rounds] cap = 3)", self.refused("round", str(task), "rebase"))
+        self.tg("edit", str(task), "--meta", "repointed_at=now")
+        self.assertIn("(run.py repoint), which another task owns", self.refused("round", str(task), "rebase"))
+        self.tg("edit", str(task), "--unset-meta", "repointed_at", "rounds")
+        for state, want in (({"state": "MERGED"}, "is merged; run.py record records it"),
+                            ({"state": "CLOSED"}, "is closed without a merge; reopen it"),
+                            ({"head": "e" * 40, "merge_state": "DIRTY"}, "someone else pushed")):
+            self.fake_host(**{"head": head, **state})
+            self.assertIn(want, self.refused("round", str(task), "rebase"))
+        self.fake_host(head=head, merge_state="DIRTY")
+        self.agents(self.row("task-1", 1))
+        self.assertIn("has a live session", self.refused("round", str(task), "rebase"))
+        self.agents()
+        with open(os.path.join(wt, "junk.txt"), "w") as fh:
+            fh.write("x\n")
+        self.assertIn("has uncommitted changes (junk.txt)", self.refused("round", str(task), "rebase"))
+        os.remove(os.path.join(wt, "junk.txt"))
+        running = self.running_task()
+        self.assertIn(f"#{running} does not wait for its merge", self.refused("round", str(running), "rebase"))
+        done = self.add_task("Done one")
+        self.tg("done", str(done))
+        self.assertIn(f"#{done} is done", self.refused("round", str(done), "rebase"))
+        self.assertEqual(self.meta(task), before)
+        self.assertEqual([c for c in self.calls("--bg")], [])
+        self.started(task)
+        self.assertIn("is already in a rebase round (attempt 2); run.py round 1 --cancel ends it",
+                      self.refused("round", str(task), "rebase"))
+        self.ok("abandon", str(task), "died")
+        self.assertIn("is not in a round (abandoned: died)", self.refused("round", str(task), "--cancel"))
+        self.assertIn("is abandoned (died)", self.refused("round", str(task), "rebase"))
+
+    def test_119_a_request_with_no_conflict_names_close_or_record(self):
+        task, wt, head, onto = self.waiting(conflict=False)
+        self.fake_host(head=head, merge_state="BEHIND")
+        err = self.refused("round", str(task), "rebase")
+        self.assertIn(f"no rebase round is needed: {head[:7]} merges into main at {onto[:7]} with no conflict; "
+                      "run.py close 1 catches it up", err)
+        self.fake_host(head=head, merge_state="CLEAN")
+        self.assertIn("with no conflict; run.py record follows the request", self.refused("round", str(task), "rebase"))
+
+    @both_hosts
+    def test_119_conflict_hints_name_round(self):
+        task, wt, head, onto = self.waiting()
+        conflict = self.one(self.events("record"), "conflict")
+        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or tg add "
+                                                    f'"Resolve {self.label()} conflicts with main" --type decision'),
+                        conflict["next"])
+        self.tg("edit", str(task), "--meta", "rounds=3")
+        conflict = self.one(self.events("record"), "conflict")
+        self.assertTrue(conflict["next"].startswith('tg add "Resolve'), conflict["next"])
+        self.assertTrue(conflict["next"].endswith("; or run.py round 1 rebase --attempt 2 to override the cap of 3 rounds"))
+
+    def test_119_a_host_rebase_conflict_names_round(self):
+        task, wt, head, onto = self.waiting()
+        self.fake_host(head=head, merge_state="BEHIND",
+                       extra={"pr update-branch": {"stderr": "X Cannot update PR branch due to conflicts\n", "exit": 1}})
+        conflict = self.one(self.events("close", str(task)), "conflict")
+        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or tg add "
+                                                    '"Rebase worktree-task-1 onto main for PR #1"'), conflict["next"])
+
+    def local_waiting(self):
+        """A task closed in local mode with no MERGE: line, so it waits; then main changes the task's file."""
+        self.commit_file("f.txt", "one\n")
+        task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")))
+        wt = self.task_wt(task)
+        wt, head = self.pass_report(task, wt=wt, head=self.wt_commit(wt, "f.txt", "theirs\n"))
+        self.agents(self.finished(f"task-{task}"))
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assert_awaiting(task)
+        onto = self.commit_file("f.txt", "ours\n")
+        return task, wt, head, onto
+
+    def test_119_record_sees_a_local_conflict_and_a_local_round_merges(self):
+        task, wt, head, onto = self.local_waiting()
+        events = self.events("record")
+        self.assertEqual(self.named(events, "unmerged"), [])
+        conflict = self.one(events, "conflict")
+        self.assertIn(f"branch worktree-task-1 at {head[:7]}: it conflicts with main at {onto[:7]} (git merge-tree)",
+                      conflict["detail"])
+        self.assertTrue(conflict["next"].startswith('run.py round 1 rebase (a new attempt on the same request), or tg add '
+                                                    '"Resolve merge of worktree-task-1 into main"'), conflict["next"])
+        self.assertIn(f"onto {onto[:7]}", self.started(task)["detail"])
+        new = self.resolve(wt, onto)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        self.agents(self.finished("task-1", 2))
+        self.assertEqual(self.one(self.events("record"), "arrived")["next"], "run.py verify 1")
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: artifact-verified\n", kind="verify", attempt=2, by="verify-1-2")
+        self.orders("MERGE: verified branches into main\n")
+        events = self.events("close", str(task))
+        self.one(events, "merged")
+        meta = self.meta(task)
+        self.assertEqual((self.status_of(task), meta["phase"], meta["verdict"], meta["verdict_ref"]),
+                         ("done", "merged", "artifact-verified", new))
+        self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
+        self.assertEqual(meta["rounds"], 1)
+        with open(os.path.join(self.root, "f.txt")) as fh:
+            self.assertEqual(fh.read(), "ours\ntheirs\n")
+
+    @both_hosts
+    def test_119_round_close_pushes_to_the_same_request(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        self.agents(self.finished("task-1", 2))
+        self.assertEqual(self.one(self.events("record"), "arrived")["next"], "run.py verify 1")  # risk is not high
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: artifact-verified\n", kind="verify", attempt=2, by="verify-1-2")
+        self.fake_host(head=head, merge_state="DIRTY")
+        events = self.events("close", str(task))
+        self.assertEqual(self.one(events, "pushed")["detail"], f"{new[:7]} to origin/task-1")
+        self.assertEqual(self.remote_sha(), new)
+        self.assertEqual(len(self.create_calls()), 1)
+        meta = self.meta(task)
+        self.assert_awaiting(task)
+        self.assertEqual((meta["pushed"], meta["verdict"], meta["verdict_ref"], meta["pr"]), (new, "artifact-verified", new, 1))
+        self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
+
+    def test_119_verify_by_risk_gives_a_low_risk_round_the_plain_hint(self):
+        task, wt, head, onto = self.waiting()
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\n[rounds]\nverify = "by-risk"\n')
+        self.started(task)
+        self.pass_report(task, attempt=2, wt=wt, head=self.resolve(wt, onto))
+        self.agents(self.finished("task-1", 2))
+        self.assertTrue(self.one(self.events("record"), "arrived")["next"].startswith("rerun VERIFY in <Worktree:>"))
+
+    def test_119_a_clean_round_carries_the_verdict(self):
+        task, wt, head, onto = self.waiting(conflict=False)  # the host says DIRTY; the rebase is clean
+        self.started(task)
+        self.git("fetch", "-q", "origin", "main")
+        self.git("rebase", "-q", onto, cwd=wt)
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        self.agents(self.finished("task-1", 2))
+        arrived = self.one(self.events("record"), "arrived")
+        self.assertEqual(arrived["next"], f"run.py close 1 (the verdict of {head[:7]} carries over: the same change on {onto[:7]})")
+        events = self.events("close", str(task))
+        self.assertIn("carries over: the same change", self.one(events, "closed")["detail"])
+        self.assertEqual(self.named(events, "verifying"), [])
+        (row,) = [r for r in self.results(task) if r["kind"] == "verify" and r["attempt"] == 2]
+        self.assertEqual(row["author"], "manager")
+        self.assertIn(f"Carried: {head} (rebase round: the same change on {onto[:7]})", row["body"])
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict"], meta["verdict_ref"], meta["pushed"]), ("test-verified", new, new))
+        self.assert_awaiting(task)
+
+    def test_119_round_verifier_brief_uses_the_role(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        text = self.ok("verify", str(task), "--dry-run").stdout
+        self.assertIn(f"Base commit: {onto} (the round's target commit). Head commit: {new}.", text)
+        role = self.section(text, "ROLE")
+        self.assertIn("Task role: rebase", role)
+        old = self.git("merge-base", head, onto)
+        self.assertIn(f"Run `git range-diff {old}..{head} {onto}..<head>`.", role)
+        self.assertIn("blocking: rebase dropped <commit>: <behaviour>", role)
+
+    def test_119_cancel_returns_to_waiting_at_the_verified_head(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        extra = self.wt_commit(wt, "extra.txt", "x\n")
+        self.git("fetch", "-q", "origin", "main")
+        out = subprocess.run(["git", "-C", wt, "rebase", onto], capture_output=True, text=True)
+        self.assertNotEqual(out.returncode, 0)  # a rebase stopped on its conflict
+        self.agents(self.row("task-1", 2))
+        events = self.events("round", str(task), "--cancel")
+        cancelled = self.one(events, "round-cancelled")
+        self.assertEqual(cancelled["next"], "run.py record")
+        self.assertIn(f"worktree-task-1 is back at {head[:7]} with verdict test-verified", cancelled["detail"])
+        self.assertIn(["stop", "sess-task-1-2"], self.calls("stop"))
+        self.assertEqual(self.git("rev-parse", "refs/agentic-team/round/1-2"), extra)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), "worktree-task-1")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict"], meta["verdict_ref"], meta["phase"], meta["pushed"]),
+                         ("test-verified", head, "awaiting_merge", head))
+        self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
+        (row,) = [r for r in self.results(task) if r["kind"] == "verify" and r["attempt"] == 2]
+        self.assertIn(f"Carried: {head} (rebase round cancelled; its head is kept in refs/agentic-team/round/1-2)", row["body"])
+        self.one(self.events("record"), "conflict")  # record follows the request again
+
+    def test_119_cancel_after_a_ci_push_pushes_the_verified_head_back(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.git("push", "-q", "-f", "origin", f"{new}:refs/heads/task-1")  # what a CI verify of the round does
+        self.tg("edit", str(task), "--meta", f"pushed={new}")
+        self.fake_host(head=new, merge_state="CLEAN")
+        events = self.events("round", str(task), "--cancel")
+        self.assertIn(f"{head[:7]} back to origin/task-1 (the round had pushed {new[:7]})", self.one(events, "pushed")["detail"])
+        self.assertEqual(self.remote_sha(), head)
+        self.assertEqual(self.meta(task)["pushed"], head)
+
+    @both_hosts
+    def test_119_request_merged_during_the_round(self):
+        for merged_head, carried in ((None, True), ("e" * 40, False)):
+            if not carried:
+                self.fresh()
+            task, wt, head, onto = self.waiting()
+            self.started(task)
+            self.agents(self.row("task-1", 2))
+            self.fake_host(head=merged_head or head, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
+            events = self.events("record")
+            merged = self.one(events, "merged")
+            self.assertIn(f"{self.label()} merged during the rebase round at {'c' * 40}", merged["detail"])
+            self.assertIn(["stop", "sess-task-1-2"], self.calls("stop"))
+            meta = self.meta(task)
+            self.assertEqual((self.status_of(task), meta["phase"], meta["merged_by"], meta["pushed"]),
+                             ("done", "merged", "operator", merged_head or head))
+            self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto", "gates"})
+            if carried:
+                self.assertEqual((meta["verdict"], meta["verdict_ref"]), ("test-verified", head))
+                self.assertIn("recorded merged_by=operator with that verdict", merged["detail"])
+            else:
+                self.assertNotIn("verdict", meta)
+                self.assertIn(f"its head {'e' * 7} is not the verified {head[:7]}: recorded merged_by=operator, with no verdict",
+                              merged["detail"])
+
+    def test_119_round_not_needed(self):
+        task, wt, head, onto = self.waiting(conflict=False)
+        self.started(task)
+        self.agents(self.row("task-1", 2))
+        self.fake_host(head=head, merge_state="CLEAN")
+        line = self.one(self.events("record"), "round-not-needed")
+        self.assertIn(f"{head[:7]} merges into main at {onto[:7]} with no conflict", line["detail"])
+        self.assertEqual(line["next"], f"run.py round 1 --cancel (the verified head {head[:7]} goes back as it is), "
+                                       "or let the round finish")
+
+    def test_119_a_failed_round_hints_cancel(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        cancel = f"run.py round 1 --cancel (the task waits again at {head[:7]})"
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nHead: {head}\nCheckpoint: {CHECKPOINT}\n", attempt=2)
+        self.agents(self.finished("task-1", 2))
+        self.assertEqual(self.one(self.events("record"), "arrived")["next"], cancel)
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.resolve(wt, onto)}\nCheckpoint: {CHECKPOINT}\n",
+                        attempt=2)
+        self.add_result(task, "ISSUES", "Status: ISSUES\nVerdict: verify-failed\nIssues:\n- blocking: f.txt lost ours\n",
+                        kind="verify", attempt=2, by="verify-1-2")
+        self.assertEqual(self.one(self.events("record"), "verified")["next"], "run run.py close 1")
+        verdict = self.one(self.events("close", str(task)), "verdict")
+        self.assertEqual(verdict["next"], cancel)
+        self.assertEqual(self.one(self.events("record"), "unclosed")["next"], cancel)
+        self.ok("round", str(task), "--cancel")
+        self.assert_awaiting(task)
+
+    def test_119_a_round_that_died_hints_cancel(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        self.agents(self.finished("task-1", 2))
+        died = self.one(self.events("record"), "died")
+        self.assertEqual(died["next"], f"run.py round 1 --cancel (the task waits again at {head[:7]})")
+
+    def test_119_a_round_does_not_use_the_attempt_cap_and_the_round_cap_has_an_override(self):
+        task, wt, head, onto = self.waiting(attempt=3)
+        self.assertEqual(self.started(task)["attempt"], 4)
+        self.ok("round", str(task), "--cancel")
+        self.tg("edit", str(task), "--meta", "rounds=3")
+        self.assertIn("pass --attempt 5 to override", self.refused("round", str(task), "rebase"))
+        self.assertIn("--attempt 4 is not after attempt 4", self.refused("round", str(task), "rebase", "--attempt", "4"))
+        event = self.one(self.events("round", str(task), "rebase", "--attempt", "5"), "round-started")
+        self.assertEqual(event["attempt"], 5)
+        self.assertEqual(self.meta(task)["rounds"], 4)
+
+    def test_119_launch_and_adopt_refuse_a_round_and_launch_after_abandon_drops_it(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        for args in (("launch", str(task)), ("adopt", str(task), "--branch", "worktree-task-1", "--head", head[:7])):
+            self.assertIn("is in a rebase round (attempt 2); run.py round 1 --cancel ends it", self.refused(*args))
+        self.ok("abandon", str(task), "died")
+        self.ok("launch", str(task), "--attempt", "3")
+        meta = self.meta(task)
+        self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
+        self.assertEqual((meta["rounds"], meta["attempt"], meta["phase"]), (1, 3, "running"))
+        with open(os.path.join(self.root, ".agentic-team", "briefs", "task-1-3.md")) as fh:
+            self.assertIn("Read the previous report under UPSTREAM and build on it", fh.read())
+
+    def test_119_role_text_gets_the_variables(self):
+        os.makedirs(os.path.join(self.root, ".claude", "agentic-team", "roles"))
+        with open(os.path.join(self.root, ".claude", "agentic-team", "roles", "vars.md"), "w") as fh:
+            fh.write("---\nfits: anything\n---\n\n## Method\n\nTask {{TASK_ID}} ({{TASK_TITLE}}) of {{PROJECT}}; "
+                     "{{ROUND_FROM}} and {{NOPE}} stay.\n")
+        task = self.add_task(role="vars")
+        role = self.section(self.brief(task), "ROLE")
+        self.assertIn(f"Task {task} (Sweep domains) of demo; {{{{ROUND_FROM}}}} and {{{{NOPE}}}} stay.", role)
+
+    def test_119_a_project_role_replaces_or_extends_rebase(self):
+        task, wt, head, onto = self.waiting()
+        folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
+        os.makedirs(folder)
+        path = os.path.join(folder, "rebase.md")
+        with open(path, "w") as fh:
+            fh.write("---\nfits: our rounds\n---\n\n## Method\n\nMerge {{ROUND_ONTO}} into the branch; no rebase.\n")
+        role = self.section(self.ok("round", str(task), "rebase", "--dry-run").stdout, "ROLE")
+        self.assertIn(f"Role: rebase ({path}).", role)
+        self.assertIn(f"Merge {onto} into the branch; no rebase.", role)
+        self.assertNotIn("git rebase", role)
+        with open(path, "w") as fh:
+            fh.write("---\nextends: rebase\n---\n\n## Method\n\n1. Also run `make lint` at {{ROUND_ONTO}}.\n")
+        role = self.section(self.ok("round", str(task), "rebase", "--dry-run").stdout, "ROLE")
+        self.assertIn(f"Run `git rebase {onto}`.", role)
+        self.assertIn(f"6. Also run `make lint` at {onto}.", role)
+        self.assertEqual(self.meta(task)["phase"], "awaiting_merge")  # a dry run writes nothing
+
+
 class TransitionTest(unittest.TestCase):
     """#99: run.py changes the phase only through TRANSITIONS."""
 
@@ -11556,6 +11950,9 @@ LoggedRoleTest = logged(
     RoleTest, "test_03_adopt_stores_the_role_and_close_still_finds_no_session",
     "test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind",
     "test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify")
+LoggedRoundTest = logged(
+    RoundTest, "test_119_cancel_returns_to_waiting_at_the_verified_head", "test_119_a_failed_round_hints_cancel",
+    "test_119_request_merged_during_the_round", "test_119_record_sees_a_local_conflict_and_a_local_round_merges")
 LoggedDeliveryTest = logged(
     DeliveryTest, "test_b2_a_settled_ask_of_an_earlier_attempt_is_not_pasted_as_open",
     "test_fix10_every_command_that_changes_a_task_waits_for_its_lock")

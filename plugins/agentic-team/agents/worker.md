@@ -18,6 +18,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   reset it or check out another commit. If `git rev-parse HEAD` is not that commit,
   report `BLOCKED` and change nothing. On a retry, build on the commits of the previous
   attempt (CONTEXT pastes its report); never reset, restore or stash them away.
+  SETUP may name one command that moves the branch; run that one and nothing else that moves it.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
   itself, do not guess. Report `BLOCKED` and name what is missing.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
