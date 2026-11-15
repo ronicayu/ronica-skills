@@ -1393,21 +1393,23 @@ class RunTest(Base):
         self.assertNotIn("abandoned", meta)
         self.assertNotIn("verdict", meta)
 
-    def test_17a_stopped_attempt_needs_record_first(self):
+    def test_17a_launch_finishes_an_unfinished_pause_first(self):
         task = self.running_task()
         wt = self.worktree("task-1")
         self.add_result(task, "STOPPED", f"Session: sess-task-1-1\nWorktree: {wt}\nBranch: worktree-task-1\n"
                         "Stopped: now\nFiles: wip.txt\n", by="manager")
-        out = self.run_cmd("launch", str(task))
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("run run.py record first", out.stderr)
         with open(os.path.join(wt, "wip.txt"), "w") as fh:
             fh.write("half done\n")
         self.agents()
-        self.ok("record")
-        head = self.git("rev-parse", "HEAD", cwd=wt)
-        text = self.brief(task)
-        self.assertIn(f"Attempt 2. Your worktree is at `{head}` on branch `worktree-task-1`.", text)
+        dry = self.events("launch", str(task), "--dry-run")
+        self.assertTrue(any("launch commits its WIP" in e["detail"] for e in self.named(dry, "warn")), dry)
+        self.ok("launch", str(task))
+        stopped = [r for r in self.results(task) if r["status"] == "STOPPED"]
+        head = re.search(r"(?m)^Head: (\S+)", stopped[-1]["body"]).group(1)
+        self.assertIn("wip.txt", self.git("show", "--name-only", "--format=", head, cwd=wt))
+        with open(os.path.join(self.root, ".agentic-team", "briefs", f"task-{task}-2.md")) as fh:
+            at = re.search(r"Attempt 2\. Your worktree is at `(\w+)` on branch `worktree-task-1`", fh.read()).group(1)
+        self.git("merge-base", "--is-ancestor", head, at, cwd=wt)  # attempt 2 builds on the committed WIP
         self.assertIn("--worktree task-1 ", self.run_cmd("launch", str(task), "--dry-run").stderr)
 
     def test_17b_verifier_tier_without_a_model(self):
@@ -1708,11 +1710,12 @@ class RunTest(Base):
         self.ok("launch", str(task))
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
         other = self.add_task(attempt=1)
-        self.worktree("task-2")
+        owt = self.worktree("task-2")
+        ohead = self.git("rev-parse", "HEAD", cwd=owt)
         self.add_result(other, "STOPPED", "Session: s\nWorktree: w\nBranch: b\nStopped: now\nFiles: x\n", by="manager")
-        out = self.run_cmd("launch", str(other))
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("run run.py record first", out.stderr)
+        self.ok("launch", str(other))  # the clean folder: launch files the Head and goes on
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=owt), ohead)
+        self.assertIn(f"Head: {ohead}", [r for r in self.results(other) if r["status"] == "STOPPED"][-1]["body"])
 
     def test_23_a_worktree_on_another_branch_or_a_plain_folder_is_refused(self):
         task, wt, head = self.retry_ready()
@@ -2222,6 +2225,21 @@ class RunTest(Base):
         self.ok("record")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), base)
         self.assertIn(f"Head: {base}", self.results(task)[-1]["body"])
+
+    def test_36_an_older_stopped_row_with_no_head_after_a_verdict_lets_launch_go_on(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        base = self.git("rev-parse", "HEAD", cwd=wt)
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {base}\n")
+        self.add_result(task, "ISSUES", "Status: ISSUES\nVerdict: verify-failed\nIssues:\n- blocking: x\n", kind="verify",
+                        by="verify-1-1")
+        self.tg("edit", str(task), "--meta", "verdict=verify-failed", f"verdict_ref={base}")
+        self.add_result(task, "STOPPED", f"Session: s\nWorktree: {wt}\nBranch: worktree-task-1\nStopped: now\nReason: close\n"
+                        "Files: None\n", by="manager")  # as 0.22.3's close wrote it after a failed verdict: no Head line
+        self.agents()
+        self.ok("launch", str(task), "--attempt", "2")
+        self.assertIn(f"Head: {base}", [r for r in self.results(task) if r["status"] == "STOPPED"][-1]["body"])
+        self.assertEqual(self.meta(task)["attempt"], 2)
 
     def test_36_a_pause_after_a_verdict_files_its_head(self):
         task = self.running_task()

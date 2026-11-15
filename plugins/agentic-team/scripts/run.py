@@ -2862,7 +2862,21 @@ def cmd_launch(run, args):
                           + ". If the worker is gone, the resume fails and files DIED, and the launch is free again")
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
-        raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
+        # The pause is not finished: no row has the stopped attempt's Head yet. record finishes it, but not for every
+        # phase an older run.py left (0.22.3's close filed such rows after a verdict). No session of the task is live
+        # here, so launch finishes it the same way record does: commit the WIP, file the Head.
+        if args.dry_run:
+            run.emit("warn", tid, current, None, f"attempt {current} is stopped and has no Head yet; launch commits its WIP "
+                     "and files the Head first (dry run: not done)")
+        else:
+            commit_stopped(run, tid, current, rows, [], task)
+            rows = run.results_for(tid)
+            latest = task_rows(rows, current)
+            wt_head = (run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+                       if wt_there and os.path.isdir(wt) else "")  # the WIP commit moved it
+            if not (latest and HEAD_ANY.search(latest[-1]["body"])):
+                raise Refused(f"#{tid} attempt {current} is stopped and its WIP could not be committed; see the "
+                              "stopped line above, fix it, then rerun")
     refuse_past_cap(tid, nxt, latest, args.attempt)
     # THE WORKTREE. A first attempt creates it at the base: --base, else the fetched target branch (pr) or HEAD
     # (local). A retry continues in it, at its HEAD. `mode` says which, and what a failed start may undo.
