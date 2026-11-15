@@ -98,6 +98,7 @@ the trust prompt before the Manager launches its first worker.
 | [Manager](agents/manager.md) | A short index: startup, playbook routing, principles, escalation, standing orders, and session rules. |
 | [Playbooks](playbooks/) | One file per situation: `plan`, `run`, `report`, and `pause`. The Manager copies the matching playbook's steps into its todo list word for word, and marks any it skips with a reason. |
 | [Worker](agents/worker.md) | Each task session runs as `--agent agentic-team:worker`, in its own worktree. The worker agent holds the fixed rules and the report format (`PASS`, `ISSUES`, or `BLOCKED`), so briefs carry only task content. |
+| [Dependency check](agents/dependency-check.md) | A subagent (`agentic-team:dependency-check`, model `sonnet`), read-only by instruction (its frontmatter cannot limit Bash), that the Manager starts with the Agent tool before it launches a task. It checks whether the code that the task's SCOPE touches or builds on is only in an open request or an unmerged branch, and whether a Taskgraph dependency is missing, and returns `ok` or one `missing:` line per dependency. |
 | [Principles](skills/) | One skill per principle (`principle-<name>`), hidden from automatic invocation. The Manager keeps a one-line index and reads the full rule only when it applies. |
 | [Config script](scripts/config.py) | The only reader of the project config. It merges, fills defaults, validates, and answers `get`, `show`, `check`, and `model`. |
 | [Run script](scripts/run.py) | Launches, adopts, drains, verifies, closes, merges, stops, abandons, and reports. It refuses an unscoped task, a fourth attempt, a launch under `STOP`, and a merge without a `MERGE:` line or (in `local` mode) into a dirty checkout. It matches sessions to tasks by the session id it recorded, never by name. |
@@ -749,7 +750,7 @@ session's message or the end of `wait` wakes it.
 | `abandon <id> <mode>` | Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. `mode` is `died`, `tool-error`, `stuck`, or `unknown`. It also drops a task that waits for its merge: its branch stays unmerged, and in `pr` mode its request stays open on the host for the operator to close. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its merge is listed under "Closed, awaiting merge" (`awaiting_merge` in `--json`), not under "In flight"; it is listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). |
 | `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, or `project, extends plugin:<name>`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
-| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
+| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Without `--verifier`, an `ISSUES` or `BLOCKED` report needs an `Asked:` line: ask ids (`Asked: #12, #15`) or `Asked: none: <one-line reason>`, else the problem is ``<STATUS> needs an `Asked:` line: ...``. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. A verifier's check command has neither: a verifier's report has no `Evidence:` line. `record` never checks the evidence of a report that it recovers from a transcript or a file. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
 | `answer <id>` | Answers a worker's `ask` row with `--file F`, `--default` (the ask's own `Default:` line) or `--decision <id>` (a done decision with `--meta ask=<ask id>`; its notes are the answer). Options: `--ask <row id>` (default: the newest open ask of the current attempt), `--supersede` (answer an ask again), `--by operator`. It refuses an ask of an ended attempt and a second answer without `--supersede`. It files the `answer` row, then delivers the doorbell. |
@@ -1079,6 +1080,22 @@ instructions. The brief and the worker agent say that this line means one thing,
 that the worker acts only on the rows that command prints. In a live check a session refused to run a script
 because a peer message asked it to, so the command comes from the brief, not from the message.
 
+**Ask first (#130).** Before a worker reports `ISSUES` or `BLOCKED` for a question that one Manager answer can
+settle, it asks: a file outside SCOPE is needed, the brief's premise is false, fix it in this task or not, may a
+failure be ignored, ACCEPTANCE has two readings, or the root cause is in another module (work around it now with a
+follow-up, or stop). It reports `ISSUES` or `BLOCKED` only when the answer does not settle it, no ask is left (or
+the brief allows none), the work cannot be finished (time, access), or a rule says `BLOCKED` at once (HEAD is not
+the CONTEXT commit, a missing brief section, a `STOP:` order, a VERIFY that needs a hooks or setup target). Such a report has an `Asked:` line: the ask
+ids it relied on (`Asked: #41, #43`, optionally followed by a note such as `(answered: widen)`) or
+`Asked: none: <one-line reason>`; `check-report` refuses a worker's
+`ISSUES` or `BLOCKED` report without one (a verifier's report needs none). A steer or a finding that conflicts with
+SCOPE or a rule is still `BLOCKED`, but the worker asks about it first when it has an ask left. When the worker needs
+a file outside SCOPE to meet the same ACCEPTANCE, the Manager may widen the task's `scope` meta and put the new
+SCOPE in the answer's `Answer:` line; the worker's `mailbox.py inbox` also prints it (it compares the meta with the
+SCOPE stored in the attempt's context file at launch), and the worker lists it under `Deviations:` as
+`scope: answer #<id>: <paths added>`. An answer never lowers ACCEPTANCE or VERIFY. A new requirement is still a new
+task. The `rebase` role asks with the conflicting hunks before it reports `BLOCKED`.
+
 **Transports**, best first; the first that works is used:
 
 1. **Socket post.** Every Claude Code session binds a Unix socket in `/tmp/cc-socks/`, shared by all profiles;
@@ -1137,7 +1154,7 @@ is refused. A finding is a steer, so the worker acks each one (one ack per findi
 to messages again: a steer filed after it is delivered, not carried, because "ended" means a report of the current
 revision (the rows after the newest `revise` row). One doorbell wakes the kept worker: a resume with
 `--name <name>-r<r>`, whose new session id `run.py` records. The worker does not answer the verifier; a finding that
-conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE is reported `BLOCKED`, as for any steer.
+conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE is reported `BLOCKED`, as for any steer (after an ask, when one is left).
 
 Two socket failures in one `run.py` command turn the socket off for the rest of that command.
 **The worker's doorbell to the Manager** is the existing SendMessage notify step. Its `to` is
@@ -1155,8 +1172,9 @@ exec form with absolute paths. The `checkin` hook, not the worker, writes the ad
 `--settings`: it is read only, asks nothing and takes no steer.
 
 **Limits.** A steer may change focus, order, approach and facts inside SCOPE. It never widens SCOPE and never
-overrides FORBIDDEN or STANDING ORDERS. Once a worker has started, its task's SCOPE and ACCEPTANCE do not change: the
-Manager turns a requirement found later into a new task. A worker reports `BLOCKED` when a steer conflicts with a rule, and lists each applied steer under
+overrides FORBIDDEN or STANDING ORDERS. Once a worker has started, its task's ACCEPTANCE does not change, and its SCOPE
+widens only to answer the worker's ask (Ask first, above): the Manager turns a requirement found later into a new task.
+A worker asks first, and reports `BLOCKED` when a steer conflicts with a rule and the answer does not settle it, and lists each applied steer under
 `Deviations:`. A worker that has a steer with no ack cannot pass `check-report`. `tg` keeps no author check, so a
 worker could file a row `--by manager`; `inbox` ignores every row whose id `run.py` did not list.
 
@@ -1420,7 +1438,7 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 
 | Kind | Status | Written by | Meaning |
 |------|--------|------------|---------|
-| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Evidence, Files, Issues, Deviations, Follow-ups, Checkpoint. Each `Follow-ups:` line is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found` and `split` (`split: timebox: <what remains>`); a `leftover ...` line keeps its own form. A verifier also uses `decision:`. |
+| `task` | `PASS`, `ISSUES`, `BLOCKED` | The worker, at the end of its work | The report: Task, Status, Branch, Head, Worktree, Ran, Evidence, Files, Issues, Asked, Deviations, Follow-ups, Checkpoint. `Asked:` lists the ask ids an `ISSUES` or `BLOCKED` report relied on, or says `none: <one-line reason>` (see [Messaging](#messaging), Ask first). Each `Follow-ups:` line is `<label>: <path or question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found`, `split` (`split: timebox: <what remains>`) and `flake` (`flake: <check>: <the failing run and the passing rerun>`: a check that failed once, not plainly because of the change (a timeout, a network error, a test order problem), and passed on one rerun with no change; the status stays `PASS`. A failing check that runs code the task changed is not a flake unless it also fails on the base. A verifier writes a flake as a `flake:` follow-up, not a `blocking:` finding); a `leftover ...` line keeps its own form. A verifier also uses `decision:` and `nonblocking:`. The Manager triages a `flake:` line like any follow-up: a task to fix the flaky check, or won't-fix with a reason. |
 | `task` | `DIED`, `BLOCKED` | The Manager (`--by manager`) | `DIED`: a session that ended with no result. `BLOCKED`: a session stopped while waiting on a permission prompt; the body has the session, worktree, the item waited for, the model, and the last output. A worker report that `record` recovered keeps the worker's own status. |
 | `task` | `STOPPED` | The Manager | A worker that `stop` stopped (a second row carries the WIP commit `Head:`), or a worker session `close` stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), or `close`. Only `Reason: pause` keeps the attempt from counting toward the cap; a row with no `Reason:` line counts. |
 | `task` | `ABANDONED` | The Manager | A session `abandon` stopped. |
@@ -1570,6 +1588,10 @@ The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
 the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
+
+### Upgrading from 0.24.1
+
+Version 0.25.0 (issue #130) changes three rules; no lifecycle, phase or model change. First, ask first: a worker asks the Manager before it reports `ISSUES` or `BLOCKED` for a question one answer can settle, and its `ISSUES` or `BLOCKED` report has an `Asked:` line (ask ids, or `none: <one-line reason>`); `check-report` without `--verifier` refuses one without it (see [Messaging](#messaging), Ask first). A session started before the upgrade whose check command runs the 0.25.0 `run.py` gets that refusal for an `ISSUES` or `BLOCKED` report; the message names the rule and the line to add, and the report command itself does not check it. Second, a check that fails once and passes on a rerun with no change is a `flake:` follow-up, not `ISSUES`; `flake` is a new Follow-ups label (it shows in `status`). Third, the Manager starts the new read-only subagent `agentic-team:dependency-check` (model `sonnet`) with the Agent tool before the first attempt of each task and before a later attempt on a different base (the run playbook, step 4); it is not skipped for docs-only tasks. `Asked` is a report field: `report_field` stops at it, and a carried report keeps it first after `Status` when it is cut. The software-engineer role asks at once, instead of `BLOCKED` at once, when its census shows that ACCEPTANCE does not fit SCOPE, and the rebase role asks with the conflicting hunks before it reports `BLOCKED`. The dependency check is read-only by instruction: agent frontmatter cannot limit Bash to some commands. The Manager's "Brief frozen" rule now lets SCOPE widen to answer such an ask. No migration.
 
 ### Upgrading from 0.24.0
 
@@ -1757,6 +1779,7 @@ other safe folder.
 |------|---------|
 | `agents/manager.md` | The Manager index |
 | `agents/worker.md` | The worker agent used for every task and verifier session |
+| `agents/dependency-check.md` | The read-only subagent the Manager starts before a launch |
 | `playbooks/` | Step-by-step procedures the Manager follows |
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
 | `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |

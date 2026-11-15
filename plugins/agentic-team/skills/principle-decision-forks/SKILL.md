@@ -43,6 +43,7 @@ Follow the grant only within its stated scope.
   never runs an experiment or an investigation itself: it writes and launches a
   task, or starts a verifier, and reads the result.
 - A worker never asks the operator. It runs an experiment only when its brief
-  allows one, and reports anything else as `BLOCKED` with the question.
+  allows one. It asks anything else of the Manager with its `ask` command, and reports
+  `BLOCKED` with the question only when the answer does not settle it or no ask is left.
 
 When this principle changed a decision, name it and the choice it changed.

@@ -47,6 +47,9 @@ adds what Taskgraph cannot decide.
    finish in one attempt (every slot busy: the run playbook, step 4).
 4. **Relay context through dependencies.** A task that needs an upstream
    result depends on that task. The brief pastes the upstream result.
+   A task that builds on code in an open request or another task's branch
+   depends on that task too. The dependency check before each launch (the run
+   playbook, step 4) finds one that you missed; it does not replace this step.
 5. **Ask through decisions.** A question only the operator can answer is a
    `decision` node, written as Escalation in the Manager index says.
 6. **Size the plan.** Show the operator a short plan before you add more than

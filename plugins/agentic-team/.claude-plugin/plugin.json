@@ -1,7 +1,7 @@
 {
   "name": "agentic-team",
   "description": "A project manager agent that assigns Taskgraph tasks to Claude sessions, monitors progress, and verifies results.",
-  "version": "0.24.1",
+  "version": "0.25.0",
   "author": {
     "name": "Yu Rong",
     "url": "https://github.com/ronicayu"
@@ -20,7 +20,8 @@
   ],
   "agents": [
     "./agents/manager.md",
-    "./agents/worker.md"
+    "./agents/worker.md",
+    "./agents/dependency-check.md"
   ],
   "icon": "./assets/icon.png"
 }

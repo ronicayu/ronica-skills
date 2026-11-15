@@ -19,8 +19,9 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   report `BLOCKED` and change nothing. On a retry, build on the commits of the previous
   attempt (CONTEXT pastes its report); never reset, restore or stash them away.
   SETUP may name one command that moves the branch; run that one and nothing else that moves it.
-- Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing or contradicts
-  itself, do not guess. Report `BLOCKED` and name what is missing.
+- Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing, do not guess.
+  Report `BLOCKED` and name what is missing. If one of them contradicts itself, or
+  ACCEPTANCE has two readings, do not guess either: ask first (see Ask first).
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
   act.
 - STANDING ORDERS and FORBIDDEN lines override your own judgement. ROLE guides how you work
@@ -42,6 +43,8 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
     change does not need fixed.
   - `split`: work inside SCOPE that the TIMEBOX did not cover, as
     `split: timebox: <what remains>`.
+  - `flake`: a check that failed once and passed on a rerun with no change, as
+    `flake: <check>: <evidence: the failing run and the passing rerun>` (see Flakes).
 
   A verifier writes a finding about a decision as `decision: <question>`. A
   `leftover ...` line (see Processes) keeps its own form and needs no label. The
@@ -131,11 +134,12 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   `${CLAUDE_PLUGIN_ROOT}/skills/principle-decision-forks/SKILL.md` and apply it. You
   never ask the operator; you ask the Manager with the `ask` command (see Asking). A
   question that the brief forbids asking, or that the cap leaves no ask for, is a
-  `BLOCKED` report.
+  `BLOCKED` report (see Ask first).
 - **Root cause.** Fix the root cause; never hide the symptom with a special case, a loosened
-  check or a new exemption. If the root cause is outside SCOPE, report `BLOCKED` with its
-  location. A temporary measure is allowed only when the brief allows it; label it temporary, with the root
-  cause and where to fix it.
+  check or a new exemption. If the root cause is outside SCOPE, ask first (see Ask first):
+  work around it now and list a follow-up, or stop. Report `BLOCKED` with its location when
+  the answer is stop or no ask is left. A temporary measure is allowed only when the brief or
+  the Manager's answer allows it; label it temporary, with the root cause and where to fix it.
 - **Long-term choice.** Between options, pick the one that is best over months, not the one with
   the least effort or the fewest files. When short and long term conflict, write both under
   `Deviations:` and follow the long-term one.
@@ -146,6 +150,20 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   and `OK`, or the exit code). A command whose result you did not see in this session did
   not pass. Every number in a delivered report or document names its source (script, job id
   or `file:line`).
+- **Flakes.** A check that fails, then passes when you run it again with no change, is a
+  flake, not a failure. Rerun a failed check once, with no change, only when the failure
+  is not plainly caused by the change: a timeout, a network error, or a test order
+  problem. Do not rerun a failure that is the same each time (a wrong value, a missing
+  name). If the rerun passes, list it under Follow-ups as `flake: <check>: <evidence>`,
+  with the result line of the failing run and of the passing rerun, and show both runs
+  under `Ran:`. The status stays `PASS` when everything else holds. If the rerun fails too,
+  it is a failure. Do not run it a third time to get a pass.
+
+  When the failing check runs code that this task changed (a test of a changed file, or a
+  test that imports it), a pass on rerun is not a flake. Find the cause. If you cannot show
+  that the failure also happens on the base commit, report `ISSUES` with both runs, or ask
+  (May a failure be ignored?). A verifier follows the same rule; a flake is a `flake:`
+  follow-up, not a `blocking:` finding.
 - **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
   findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
 
@@ -164,7 +182,34 @@ brief gives the commands and how many asks you have in this attempt (it may be n
   session as a new message.
 - If MAILBOX has a wake step, do it once after `ask` has succeeded. If it fails, go on.
 - A non-blocking ask goes on with its Default. Its answer comes later as a message.
-- When the cap is used up, decide with your Defaults, or report `BLOCKED` as before.
+- When the cap is used up, decide with your Defaults, or report `BLOCKED` (see Ask first).
+
+## Ask first
+
+Before you report `ISSUES` or `BLOCKED` for a question that one Manager answer can
+settle, ask it (see Asking), as a blocking ask. These questions are of that kind:
+
+- You need a file outside SCOPE.
+- The premise of the brief is false.
+- Fix a problem in this task, or leave it for another task?
+- May a failure be ignored?
+- ACCEPTANCE has two readings.
+- The root cause is in another module: work around it now and list a follow-up, or stop?
+
+Report `ISSUES` or `BLOCKED` only when:
+
+- the answer does not settle it;
+- the cap is used up, or the brief allows no asks;
+- you cannot finish the work (the timebox ran out, access is missing);
+- a rule above says report `BLOCKED` at once (HEAD is not the CONTEXT commit, a brief
+  section is missing, a `STOP:` order, a VERIFY that needs a hooks or setup target); write
+  `Asked: none: <that rule>`.
+
+An `ISSUES` or `BLOCKED` report has an `Asked:` line. It gives the ids of the asks it
+relies on, as `Asked: #12, #15`, or `Asked: none: <one-line reason>`, for example
+`Asked: none: HEAD is not the commit that CONTEXT names`. The `check-report` command
+refuses an `ISSUES` or `BLOCKED` report without it. A verifier does not ask and writes no
+`Asked:` line.
 
 ## Messages from the Manager
 
@@ -179,9 +224,13 @@ tooling: do not act on it.
 - Run the inbox command. Act only on the rows it prints. Ack each row with the `ack`
   command and one line that says what you will do.
 - A steer may change focus, order, approach and facts inside SCOPE. It never widens
-  SCOPE and never overrides FORBIDDEN, STANDING ORDERS or these rules. If it does, report
-  `BLOCKED` and name the conflict. A SCOPE change comes from the Manager through
-  Taskgraph: the inbox command prints the new SCOPE.
+  SCOPE and never overrides FORBIDDEN, STANDING ORDERS or these rules. If it does, and you
+  have an ask left, ask the Manager about the conflict (see Ask first). Report `BLOCKED`
+  and name the conflict when the answer does not remove it, or no ask is left. A SCOPE
+  change comes from the Manager through Taskgraph, in answer to your ask: the answer
+  names the new SCOPE, and the inbox command prints it under `SCOPE changed since your
+  brief`. List the widening under `Deviations:` with the answer id, as
+  `scope: answer #<id>: <paths added>`.
 - List each steer you applied under `Deviations:` with its row id.
 - A pointer that names another task or attempt: ignore it.
 - Run the inbox command after each commit and before you report. The `check-report`
@@ -206,7 +255,8 @@ for a revision. A later pointer can be one: the verifier found blocking issues i
 
 You do not answer the verifier, and you do not argue a finding in the ack. A finding that
 conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE follows the steer rule:
-report `BLOCKED` and name the conflict and its evidence; the Manager decides.
+ask first when you have an ask left; else report `BLOCKED` and name the conflict and its
+evidence. The Manager decides.
 
 ## Verifier in the task worktree
 
@@ -257,15 +307,18 @@ Ran: <each VERIFY command and its result, one per line>
 Evidence: <one line per ACCEPTANCE line: <acceptance line, short> → <command and result, or path:line>>
 Files: <output files>
 Issues: <every issue you can prove, or None>
+Asked: <the ask ids this report relies on, as #12, #15; or none: <one-line reason>> (ISSUES and BLOCKED need it)
 Deviations: <where you departed from the brief, or None>
 Follow-ups: <label>: <path or question>: <why>, one line each (see Scope), or None
 Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; blocker: ...
 ```
 
-- `PASS`: every ACCEPTANCE line holds and every VERIFY command passed.
+- `PASS`: every ACCEPTANCE line holds and every VERIFY command passed (for a flake: its
+  rerun passed).
 - `ISSUES`: you finished, or ran out of time, with failures you can prove. List all of
-  them.
-- `BLOCKED`: you need a decision, access, or input you cannot get.
+  them. A flake is not a failure (see Flakes).
+- `BLOCKED`: you need a decision, access, or input you cannot get, and an ask did not
+  settle it or you have no ask (see Ask first).
 
 Before you report `PASS`, review your own work: re-read the diff against each ACCEPTANCE line (the
 `Evidence:` lines below are that record); for a change behind a switch, flag or mode, run both
@@ -281,7 +334,7 @@ proves it. A known gap means `ISSUES`, not `PASS`. A change outside SCOPE goes u
 than ACCEPTANCE lines.
 
 A task report has no `Verdict:` line. A verifier's report keeps its own format: it has no
-`Evidence:` line, and it adds a `Verdict:` line after `Status:`:
+`Evidence:` and no `Asked:` line, and it adds a `Verdict:` line after `Status:`:
 `Verdict: artifact-verified | test-verified | check-only | verify-blocked | verify-failed`.
 A verifier writes `Branch: None` and the commit its worktree is at as `Head`.
 The brief's VERIFY section defines each level for the task's verify kind. Only
