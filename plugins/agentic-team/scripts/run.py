@@ -2757,6 +2757,7 @@ def cmd_launch(run, args):
     created = mode in ("first", "base", "head")
     if current:
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
+        drop_verifier_folders(run, task)
     path, said, drift, entry, id_note = start_worker(run, task, nxt, session, text, model, effort, profile, base, cap, created)
     if task["status"] == "open":
         run.tg("start", str(tid))
@@ -4894,45 +4895,85 @@ def swept_status(run, path, sweep):
     return why, ignored
 
 
-def folder_check(run, task, folder, path, registered, live, locks, users, sweep=False):
+def recorded_heads(run, rows):
+    """The full commits that the Head: lines of the task's worker and STOPPED rows name, of every attempt."""
+    found = set()
+    for r in rows:
+        if r["kind"] == "task" and (is_worker_result(r) or r["status"] == "STOPPED"):
+            match = HEAD_LINE.search(r.get("body") or "")
+            full = commit_of(run, match.group(1)) if match else None
+            if full:
+                found.add(full)
+    return found
+
+
+def held_by_branch(run, head):
+    """The local branch that holds commit `head` and that cleanup does not delete (a worktree-verify-* branch may go), or
+    None."""
+    out = run.git("for-each-ref", "--contains", head, "--format=%(refname:short)", "refs/heads/", check=False)
+    found = [b for b in out.stdout.split() if not b.startswith("worktree-verify-")]
+    return found[0] if found else None
+
+
+def verifier_at_head(run, folder, head, heads):
+    """True for a verifier folder whose HEAD, and its branch tip when the branch exists, is the Head: of a worker or
+    STOPPED row of the task: a verifier commits nothing, so the folder and its branch hold no work of their own."""
+    if (wt_kind(folder) or (None,))[0] != "verify" or head not in heads:
+        return False
+    tip = commit_of(run, f"refs/heads/worktree-{folder}")
+    return tip is None or tip in heads
+
+
+def folder_check(run, task, folder, path, registered, live, locks, users, sweep=False, heads=frozenset(), merged=True):
     """Why a worktree folder is not safe to remove, else None. The checks, in this order: no live session,
-    process or Docker container uses it; `git status` shows no change; every ignored path is disposable; its
-    HEAD commit is merged. A lock must be Claude Code's own for a session that has ended. Returns (reason,
-    session, head, ignored paths)."""
+    process or Docker container uses it; `git status` shows no change; every ignored path is disposable; then its
+    HEAD commit. For a merged task (`merged`) the HEAD may be merged, a verifier's HEAD may be a recorded worker
+    Head (`heads`), or a branch that stays may hold it (a rebase or squash merge, or a task completed with nothing to
+    merge, leaves it off the target; the folder goes and the branch keeps the commits). Before the merge only a
+    verifier folder at a recorded worker Head goes. A lock must be Claude Code's own for a session that has ended.
+    Returns (reason, session, head, ignored paths, how): how is "merged", "worker-head" or "held"."""
     if path not in registered:
-        return "not a registered git worktree; inspect it and remove it yourself if you do not need it", None, None, []
+        return "not a registered git worktree; inspect it and remove it yourself if you do not need it", None, None, [], None
     for s in live:
         if s.wtname == folder or cwd_in(s.cwd, path):
-            return "still running", s.sid, None, []
+            return "still running", s.sid, None, [], None
     lock = locks.get(path)
     if lock is not None:
         m = re.match(rf"claude session {re.escape(folder)} \(pid (\d+)\b", lock)
         if not m:
-            return f"locked ({lock or 'no reason'})", None, None, []
+            return f"locked ({lock or 'no reason'})", None, None, [], None
         if pid_alive(int(m.group(1))):
-            return f"still running (pid {m.group(1)} holds its lock)", None, None, []
+            return f"still running (pid {m.group(1)} holds its lock)", None, None, [], None
     for pid, command, cwd in users or []:
         if cwd_in(cwd, path):
-            return f"process {pid} ({command}) uses it", None, None, []
+            return f"process {pid} ({command}) uses it", None, None, [], None
     why = container_reason(run, path)
     if why:
-        return why, None, None, []
+        return why, None, None, [], None
     why, ignored = swept_status(run, path, sweep)
     if why:
-        return why, None, None, []
+        return why, None, None, [], None
     head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
     if not head:
-        return "cannot read its HEAD commit", None, None, []
+        return "cannot read its HEAD commit", None, None, [], None
+    if verifier_at_head(run, folder, head, heads):
+        return None, None, head, ignored, "worker-head"
+    if not merged:
+        return f"HEAD {head[:7]} is not the Head: of a worker result of the task", None, head, [], None
     why = not_merged_reason(run, task, head)
-    if why:
-        return why, None, None, []
-    return None, None, head, ignored
+    if not why:
+        return None, None, head, ignored, "merged"
+    if held_by_branch(run, head):
+        return None, None, head, ignored, "held"
+    return f"{why}, and no branch holds it", None, None, [], None
 
 
-def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, note):
+def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, note, how="merged"):
     """Remove one safe folder: unlock (a lock of an ended Claude session, checked by folder_check), a plain
-    `git worktree remove` (never forced), the branch when its tip is merged, then the session rows that name
-    the folder. Says `removed` for the folder, or `kept` with the reason."""
+    `git worktree remove` (never forced), the branch when its tip is merged (a verifier's branch also when its tip is
+    a recorded worker Head, how "worker-head"), then the session rows that name the folder. Says `removed` for the
+    folder, or `kept` with the reason."""
+    holder = held_by_branch(run, head) if how == "held" else None
     reason = locks.get(path)
     if reason is not None:
         undone = run.git("worktree", "unlock", path, check=False)
@@ -4948,7 +4989,7 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     tid = task["id"]
     branch = f"worktree-{folder}"
     tip = run.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}", check=False).stdout.strip()
-    if tip and not_merged_reason(run, task, tip):
+    if tip and not (how == "worker-head" and tip == head) and not_merged_reason(run, task, tip):
         run.emit("kept", tid, None, None, f"{branch}: branch stays, commit {tip[:7]} is not merged")
     elif tip:
         out = run.git("branch", "-D", branch, check=False)
@@ -4964,7 +5005,40 @@ def remove_folder(run, task, folder, path, locks, head, ignored, rows, gone, not
     extra = ""
     if ignored:
         extra = f" (ignored files removed: {len(ignored)}: {', '.join(ignored[:5])}{', ...' if len(ignored) > 5 else ''})"
-    run.emit("removed", tid, None, None, f"worktree {folder} (merged at {head[:7]}){extra}")
+    at = {"merged": f"merged at {head[:7]}", "worker-head": f"at {head[:7]}, the Head of a worker result",
+          "held": f"at {head[:7]}, which branch {holder} holds"}[how]
+    run.emit("removed", tid, None, None, f"worktree {folder} ({at}){extra}")
+
+
+def drop_verifier_folders(run, task, keep=()):
+    """Remove the task's verifier folders once their verdict is recorded (close, the next attempt, a round, its cancel,
+    abandon): each verify-<id>-<m>[-<k>] folder that no live session, process or container uses, with a clean status and
+    only disposable ignored files, whose HEAD and branch tip are the Head: of a worker or STOPPED row of the task. A
+    verifier commits nothing, so no merge check applies; the folder and its worktree-verify-* branch go. Any other
+    folder stays with one `kept` line. `keep` names folders a session will still use. Returns the removed folders."""
+    tid = task["id"]
+    folders = [f for f in task_folders(run, tid)[0] if (wt_kind(f) or (None,))[0] == "verify" and f not in keep
+               and os.path.isdir(os.path.join(run.wt_dir, f))]
+    if not folders or not run.config["merge"]["remove_worktrees"]:
+        return []
+    heads = recorded_heads(run, run.results_for(tid))
+    removed = []
+    for folder in sorted(folders):
+        path = os.path.join(run.wt_dir, folder)
+        run._sessions = run._worktrees = run._users = None
+        registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
+        live = [s for s in run.sessions() if s.live and not s.ghost]
+        reason, sid, head, ignored, how = folder_check(run, task, folder, path, registered, live, locks,
+                                                       cwd_users_once(run), heads=heads, merged=False)
+        if reason:
+            run.emit("kept", tid, None, sid, f"{folder}: {reason}")
+            continue
+        remove_folder(run, task, folder, path, locks, head, ignored, run.sessions(), set(),
+                      lambda f, detail, sid=None: run.emit("kept", tid, None, sid, f"{f}: {detail}"), how)
+        if not os.path.isdir(path):
+            removed.append(folder)
+    run._sessions = run._worktrees = None
+    return removed
 
 
 def no_such_session(out):
@@ -4979,7 +5053,8 @@ def cleanup(run, task, sweep=False):
     session removes only its row; `claude rm` of the first session removes the folder, when the tree is clean
     and pushed. So the sessions go newest first and the task's first session goes last.
     Then every task folder still present goes when it is safe: no live session, process or container uses it,
-    a clean `git status`, only disposable ignored files, a merged HEAD (`folder_check`). The first pass runs no
+    a clean `git status`, only disposable ignored files, and a HEAD that is merged, a verifier's recorded worker Head,
+    or held by a branch that stays (`folder_check`). The first pass runs no
     `claude rm` for a session whose folder fails the container, `git status` or ignored-file check, because
     `claude rm` of the folder's owner deletes the folder with its ignored files.
     `sweep` is `record` coming back to a task that was merged earlier: it prints a folder's `kept` line only when
@@ -5054,20 +5129,23 @@ def cleanup(run, task, sweep=False):
     registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
     live = [s for s in run.sessions() if s.live and not s.ghost]
     users = cwd_users_once(run) if present else None
+    heads = recorded_heads(run, run.results_for(tid)) if present else set()
     swept = set()
     for folder in sorted(present):
         path = os.path.join(run.wt_dir, folder)
         swept.add(folder)
-        reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users, sweep)
+        reason, sid, head, ignored, how = folder_check(run, task, folder, path, registered, live, locks, users, sweep,
+                                                       heads)
         if not reason:  # the lists above may be from earlier in this command: read them all again before a removal
             run._sessions = run._worktrees = run._users = None
             registered, locks = registered_worktrees(run, cached=True), worktree_locks(run, cached=True)
             live, users = [s for s in run.sessions() if s.live and not s.ghost], cwd_users_once(run)
-            reason, sid, head, ignored = folder_check(run, task, folder, path, registered, live, locks, users)
+            reason, sid, head, ignored, how = folder_check(run, task, folder, path, registered, live, locks, users,
+                                                           heads=heads)
         if reason:
             note(folder, reason, sid)
         else:
-            remove_folder(run, task, folder, path, locks, head, ignored, run.sessions(), gone, note)
+            remove_folder(run, task, folder, path, locks, head, ignored, run.sessions(), gone, note, how)
             run._sessions = run._worktrees = None
     for folder, (sid, detail) in held.items():  # a session whose folder the sweep did not see
         if folder not in swept:
@@ -5871,6 +5949,7 @@ def start_round(run, args):
         notes.append(f"moved {branch} from {head[:7]} to the host's head {start[:7]} (the same change)")
     if current:
         carry_thread(run, task, current)
+    drop_verifier_folders(run, task)
     path, said, drift, entry, id_note = start_worker(run, view, nxt, session, text, model, effort, profile, start, asks, False)
     attempt_edit(run, task, nxt, session, model, {**entry, **choice.stored, "round": kind}, "round",
                  [meta_arg(k, v) for k, v in fields.items()], ["verdict", "verdict_ref", "host_rebase", "caught_up_from"])
@@ -5960,6 +6039,7 @@ def cancel_round(run, args):
         request_gate(run, task, int(meta["pr"]))
     else:
         branch_gate(run, task, branch)
+    drop_verifier_folders(run, task)
     run.emit("round-cancelled", tid, attempt, None,
              f"the {kind} round ended; {branch} is back at {start[:7]} with verdict {verdict}"
              + (f"; the round's head {head[:7]} is kept in {kept}" if head else ""), "run.py record")
@@ -6406,10 +6486,12 @@ def cmd_close(run, args):
     if not passing:
         run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind, task))
         post_verdict(run, task, attempt, level, ref, kind)
+        drop_verifier_folders(run, task)
         return
     # The task is done when its change is merged. Until then it stays in progress with phase awaiting_merge, so the
     # tasks that depend on it do not get ready.
     stop_live(run, task, attempt, branch)
+    drop_verifier_folders(run, task)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}"
              + (f"; the verdict of the round's verified head carries over: {carried}" if carried else ""))
     base = no_change(run, task, ref)
@@ -6546,10 +6628,12 @@ def cmd_abandon(run, args):
         clear_merge_gate(run, task)
     run.edit_meta(tid, abandoned=args.mode, phase=phase)
     drop_mailbox(run, task, history=False)
+    removed = set(drop_verifier_folders(run, task))
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
                   ((m := LEGACY_WT.match(e)) and int(m.group(1)) == tid)}
+    names = {n for n in names if n not in removed}
     if run.pr_mode and meta.get("pr") and repointed(task):  # the request is another task's: it is not ours to close
         request = (f"; record no longer follows {run.label(int(meta['pr']))}, which another task merges; the next attempt "
                    "goes back to " + (f"the task's own request {run.label(int(meta['repointed_from']))}"
