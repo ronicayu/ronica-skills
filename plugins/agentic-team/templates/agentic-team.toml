@@ -75,3 +75,7 @@ always_pause = []           # decisions that always need the operator
 [brief]
 # carried_report_bytes = 3000   # most UTF-8 bytes of one carried report (previous attempt, upstream, worker report in a verify brief)
 # carried_total_bytes = 12000   # most UTF-8 bytes of all carried reports of one brief; at least carried_report_bytes
+
+[rounds]
+# cap = 3                   # rounds (run.py round) a task may have without --attempt; a round does not count toward the attempt cap
+# verify = "always"         # "always": a round's PASS goes to a verifier, whatever risk and kind; "by-risk": the rule of a plain attempt

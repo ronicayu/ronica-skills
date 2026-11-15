@@ -3,7 +3,7 @@
 // Labels are for the product reader (statechart SKILL.md, "Pick the chart"): each state names its subject, each arrow
 // starts with its actor, and `glossary` explains every actor and short noun. The actors have the names of view.mjs.
 
-export const title = "Task attempt lifecycle (agentic-team 0.19.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.23.0)";
 
 // Closed: a passing close happened (Lifecycle.tla `Closed`). Since 0.19.0 the task stays in progress until the merge.
 const closed = (v) => v.verdict === "artifact-verified";
@@ -85,6 +85,16 @@ export const step = (action, from, to) => {
     case "SomeoneMerges": return "a reviewer merges the request on the code host";
     case "SomeoneCloses": return "a reviewer closes the request on the code host";
     case "SomeoneReopens": return "a reviewer reopens the request on the code host";
+    case "StartRound": return "the Manager starts a round on the same request";
+    case "RoundCancel": return "the Manager cancels the round; the task waits again at its verified head";
+    case "RoundMerged": return from.roundPushed && !from.roundSame
+      ? "the Manager's record finds the request merged at a head no verdict covers"
+      : "the Manager's record finds the request merged during the round";
+    case "TargetConflicts": return "another merged request makes the request conflict";
+    case "ConflictClears": return "the conflict goes away";
+    case "RoundHeadPushed": return "a CI verify of the round pushes the round's head";
+    case "MainConflicts": return "the target branch moves and conflicts with the branch";
+    case "MainConflictClears": return "the conflict with the target branch goes away";
     default: return action;
   }
 };
@@ -129,4 +139,5 @@ export const glossary = {
   "idle session": "A task or verifier session that has filed its result and waits; the next attempt stops it.",
   "request": "The pull request or merge request for the task's branch on the code host.",
   "merged at once": "The close merges the branch, or records the task as merged because the branch has no commit to merge.",
+  round: "A new attempt of a task that waits for its merge, on the same request: run.py round <id> <kind>; the rebase kind resolves a conflict with the target.",
 };

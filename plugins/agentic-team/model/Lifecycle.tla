@@ -1,5 +1,6 @@
 ---- MODULE Lifecycle ----
-\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.21.0; the lifecycle of 0.19.0, PR-1 of #97): one task, its attempts,
+\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.23.0; the lifecycle of 0.19.0, PR-1 of #97, with the rounds of
+\* #119): one task, its attempts,
 \* one worker session and one verifier session at a time, the result rows of the current attempt, the meta that
 \* decides the next step, and the request in pr mode. Line numbers are of scripts/run.py at that version.
 \*
@@ -33,9 +34,13 @@ CONSTANTS MAX_ATTEMPTS,  \* line 124: MAX_ATTEMPTS = 3; the configs use 2
           REGRESS_65,    \* a ghost row never ends and cleanup skips it (before 0.12.1, #65)
           REGRESS_65B,   \* a row that run.py stopped is not noted: a stopped idle/working row is a young ghost (before part 3 of #65)
           REGRESS_89,    \* record and close read only the Verdict: line: an unlabelled ISSUES report opens a fix round (before 8006a3c)
-          REGRESS_97     \* a passing close runs `tg done` at once, before the merge (before 0.19.0, #97)
+          REGRESS_97,    \* a passing close runs `tg done` at once, before the merge (before 0.19.0, #97)
+          REGRESS_119,   \* a conflict's only way to new work is the redo hint: abandon, then launch (before 0.23.0, #119)
+          ROUND_CAP,     \* [rounds] cap: the rounds without --attempt (the code's default is 3; the configs use 2, the overviews 1)
+          ROUND_VERIFY   \* [rounds] verify: "always" (a round's PASS goes to a verifier) or "by-risk" (the rule of a plain attempt)
 
 ASSUME MERGE_MODE \in {"local", "pr"}
+ASSUME ROUND_VERIFY \in {"always", "by-risk"}
 
 VARIABLES
   status,        \* Taskgraph status: "open", "in_progress", "done"
@@ -59,11 +64,21 @@ VARIABLES
   wtDirty,       \* the task worktree has uncommitted changes
   stopOrder,     \* the standing orders start with a STOP line (Orders.stop, lines 542-549)
   fault,         \* 0.18.0: "none"; "role" (the attempt's role file is missing or broken); "exclude" (info/exclude is read-only)
-  faulted        \* the one fault of this run has happened (FAULTS)
+  faulted,       \* the one fault of this run has happened (FAULTS)
+  \* #119, rounds (run.py round <id> rebase, and round --cancel):
+  inRound,       \* a round is in flight: the round_from meta is set
+  roundSame,     \* the round's PASS head carries the same change as round_from (same_change)
+  rounds,        \* the rounds meta
+  mainConflicts, \* local mode: the verified commit conflicts with the target (git merge-tree, or merge_branch's conflict)
+  roundPushed,   \* the request's head is not round_from any more: a CI verify of the round pushed the round's head (CI
+                 \* verify is out of the model otherwise, so one environment step stands for it)
+  unverifiedMerge \* record recorded the merge of a head that no verdict covers (a round's pushed head; merged_by=operator)
 
 vars == <<status, attempt, abandoned, verdict, merged, pr, mainHas,
           lastTask, stopReason, workerResult, vv, vIssues, vManager, vNewer, vfiled,
-          worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+          worker, verifier, vreport, wtDirty, stopOrder, fault, faulted,
+          inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
+RoundVars == <<inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
 
 \* ---------------------------------------------------------------- values
 
@@ -76,7 +91,7 @@ WorkerStatuses == {"PASS", "ISSUES", "BLOCKED"}
 \* line (cmd_stop, stop_live), STOPPEDhead (commit_stopped), ABANDONED.
 RowKinds == {"none", "BLOCKEDmgr", "DIED", "STOPPED", "STOPPEDhead", "ABANDONED"} \cup WorkerStatuses
 StopReasons == {"none", "pause", "recover", "close"}
-ManagerVerify == {"none", "BLOCKED", "manual"}
+ManagerVerify == {"none", "BLOCKED", "manual", "carried"}   \* carried: a round's round_verdict filed again by the Manager (#119)
 IssueKinds == {"none", "blocking", "unlabelled"}
 Faults == {"none", "role", "exclude"}
 \* One row of `claude agents --json --all`, as the Session class reads it (lines 551-596):
@@ -97,7 +112,8 @@ WorkerStates == {"none", "busy", "idle", "idleBlocked", "prompt", "stopping", "f
 VerifierStates == {"none", "busy", "idle", "idleQuiet", "idleBlocked", "prompt", "finished", "failed", "ghost", "ghostStopped", "ghostGone"}
 OpenPr == {"pending", "clean", "behind", "blocked", "dirty"}
 PrStates == {"none", "merged", "closed"} \cup OpenPr
-Hints == {"launch", "verify", "verifyAgain", "close", "closeManual", "abandon", "stop", "merged", "record", "none"}
+Hints == {"launch", "verify", "verifyAgain", "close", "closeManual", "abandon", "stop", "merged", "record",
+          "round", "roundCancel", "none"}
 
 PrMode == MERGE_MODE = "pr"
 
@@ -165,13 +181,20 @@ Phase ==
 \* rule 13: at the cap it abandons and re-plans; the override is for a bounded fix the operator names), so the
 \* hint is abandon. Before 0.12.0 (REGRESS_56) the stuck, BLOCKED, unclosed and unknown hints said launch at
 \* the cap; only ISSUES and died checked it.
-RetryNext == IF attempt < MAX_ATTEMPTS THEN "launch" ELSE "abandon"
-RetryNextOld == IF REGRESS_56 THEN "launch" ELSE RetryNext
+\* #119: a round that fails is cancelled (round --cancel): the task waits again at its verified head. Launch refuses a
+\* task in a round, so no hint of a round names launch or abandon.
+RetryNext == IF inRound THEN "roundCancel" ELSE IF attempt < MAX_ATTEMPTS THEN "launch" ELSE "abandon"
+RetryNextOld == IF inRound THEN "roundCancel" ELSE IF REGRESS_56 THEN "launch" ELSE RetryNext
 \* stopped_next, lines 748-753: after a pause the launch, at any attempt; after any other stop retry_next.
 \* Before 0.12.0 (REGRESS_59) every STOPPED row read as a pause.
-StoppedNext == IF stopReason = "pause" \/ REGRESS_59 THEN "launch" ELSE RetryNext
+StoppedNext == IF inRound THEN "roundCancel" ELSE IF stopReason = "pause" \/ REGRESS_59 THEN "launch" ELSE RetryNext
+\* record_arrived: a round's PASS with the same change as round_from goes to close, which carries the verdict
+\* (round_carry); any other PASS of a round goes to a verifier under [rounds] verify = "always".
 ArrivedNext(st) ==                                                      \* record_arrived, lines 3535-3547
-  IF st = "PASS" THEN (IF HIGH_RISK THEN "verify" ELSE "closeManual")   \* 3536-3540: ci, risk high, or a kind that is not code
+  IF st = "PASS" THEN
+     IF inRound /\ roundSame THEN "close"
+     ELSE IF HIGH_RISK \/ (inRound /\ ROUND_VERIFY = "always") THEN "verify"   \* ci, risk high, a kind that is not code
+     ELSE "closeManual"
   ELSE IF st = "ISSUES" THEN RetryNext                                  \* line 3542
   ELSE RetryNextOld                                                     \* line 3544: "answer it and ..."
 UnclosedNext(v) ==                                                      \* unclosed_next, lines 923-934
@@ -185,7 +208,7 @@ UnclosedNext(v) ==                                                      \* unclo
 \* which is the stop the old exemption bug needed.
 UnknownNext ==
   IF REGRESS_58 THEN "none"
-  ELSE IF attempt < MAX_ATTEMPTS \/ REGRESS_59 THEN "stop"
+  ELSE IF inRound \/ attempt < MAX_ATTEMPTS \/ REGRESS_59 THEN "stop"
   ELSE "abandon"
 
 \* What one `record` would write and print: the new values plus the event and its hint. A record never changes
@@ -250,13 +273,18 @@ RecInProgress ==
      ELSE IF lost /\ ~vreport THEN [Same EXCEPT !.ev = "no-verdict", !.nx = "verifyAgain"]  \* 3803-3812
      ELSE Verdicts(IF lost THEN salvaged ELSE Same)
 
+\* #119, conflict_next: below [rounds] cap the conflict hint is `run.py round <id> rebase`, at it the decision only.
+\* REGRESS_119 restores the path the vmt Manager took before 0.23.0: the redo hint, abandon (then launch --attempt).
+RoundNext == IF rounds < ROUND_CAP THEN "round" ELSE "none"
+ConflictNext == IF REGRESS_119 THEN "abandon" ELSE RoundNext
+
 \* pr_status, lines 5033-5086. The standing orders hold a MERGE: line, so a clean request is merged here,
 \* except during a pause (5072).
 PrStatus(b) ==
   IF pr = "merged" THEN [b EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]
   ELSE IF pr = "closed" THEN [b EXCEPT !.ev = "pr-closed", !.nx = "none"]      \* reopen it, or a decision
   ELSE IF pr = "pending" THEN [b EXCEPT !.ev = "pr-pending", !.nx = "none"]    \* record later
-  ELSE IF pr = "dirty" THEN [b EXCEPT !.ev = "conflict", !.nx = "none"]        \* a decision
+  ELSE IF pr = "dirty" THEN [b EXCEPT !.ev = "conflict", !.nx = ConflictNext]  \* a round, or at the cap a decision (#119)
   ELSE IF pr = "behind" THEN [b EXCEPT !.ev = "pr-behind", !.nx = "close"]
   ELSE IF pr = "blocked" THEN [b EXCEPT !.ev = "pr-blocked", !.nx = "none"]    \* record later
   ELSE IF stopOrder THEN [b EXCEPT !.ev = "ready-to-merge", !.nx = "none"]
@@ -269,6 +297,7 @@ RecDone ==
      IF pr = "none" THEN [Same EXCEPT !.ev = "unpublished", !.nx = "close"]   \* line 3956
      ELSE PrStatus(Same)                                                 \* line 3959
   ELSE IF mainHas THEN [Same EXCEPT !.merged = TRUE, !.ev = "merged", !.nx = "none"]   \* merged_into, 3967
+  ELSE IF mainConflicts THEN [Same EXCEPT !.ev = "conflict", !.nx = ConflictNext]   \* git merge-tree (#119)
   ELSE [Same EXCEPT !.ev = "unmerged", !.nx = "none"]                   \* line 3975: no next
 
 RecOut ==
@@ -283,11 +312,15 @@ RecordHasEffect ==
   \/ o.vNewer # vNewer \/ o.vfiled # vfiled \/ o.worker # worker \/ o.verifier # verifier
   \/ o.vreport # vreport \/ o.wtDirty # wtDirty \/ o.merged # merged \/ o.pr # pr
 
+\* record_round (#119): the request of a round merged. record_task runs it before record_in_progress.
+RoundMergedPending == inRound /\ PrMode /\ pr = "merged" /\ status = "in_progress" /\ ~abandoned
+
 \* The step that record names. While record still has something to write, the Manager runs record.
-Hint == IF RecordHasEffect THEN "record" ELSE RecOut.nx
+Hint == IF RecordHasEffect \/ RoundMergedPending THEN "record" ELSE RecOut.nx
 Event == RecOut.ev
 
 Record ==
+  /\ ~RoundMergedPending
   /\ RecordHasEffect
   /\ LET o == RecOut IN
        /\ lastTask' = o.lastTask /\ workerResult' = o.workerResult /\ vv' = o.vv /\ vManager' = o.vManager
@@ -296,6 +329,7 @@ Record ==
        /\ vIssues' = IF o.vv = vv THEN vIssues ELSE "none"             \* a salvaged report is a passing one
        /\ status' = IF o.merged # merged THEN "done" ELSE status         \* a merge record runs `tg done` (mark_merged)
   /\ UNCHANGED <<attempt, abandoned, verdict, mainHas, stopReason, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 \* ---------------------------------------------------------------- launch
 
@@ -306,7 +340,7 @@ Record ==
 \* ignore_scratch, 2338-2340, since ff2c8b0: a read-only file refuses before anything is stopped or committed),
 \* a done task (2349), the role (choose, 2353: a role file that is missing or broken refuses, 0.18.0),
 \* abandoned (2359); a task that waits for its merge (refuse_closed, 0.19.0).
-EarlyChecks == ~stopOrder /\ fault = "none" /\ status # "done" /\ ~Awaiting /\ ~abandoned
+EarlyChecks == ~stopOrder /\ fault = "none" /\ status # "done" /\ ~Awaiting /\ ~abandoned /\ ~inRound   \* refuse_round (#119)
 \* The checks after it: a pause not committed (2412); refuse_past_cap (2555-2563): past MAX_ATTEMPTS only a
 \* STOPPED row with Reason: pause is exempt (#59; before 0.12.0, REGRESS_59, any STOPPED row).
 Exempt == lastTask = "STOPPEDhead" /\ (stopReason = "pause" \/ REGRESS_59)
@@ -332,6 +366,7 @@ Launch ==
   /\ worker' = "busy" /\ verifier' = "none" /\ vreport' = FALSE
   /\ wtDirty' = FALSE                                                   \* lines 2489-2499: WIP is committed
   /\ UNCHANGED <<abandoned, merged, pr, mainHas, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 \* The launch stopped the idle sessions (2386-2395) and then refused (2412 or 2413): the rows ended, nothing else.
 LaunchStopsIdleThenRefuses ==
@@ -343,6 +378,7 @@ LaunchStopsIdleThenRefuses ==
   /\ verifier' = IF Live(verifier) THEN AfterStop(verifier) ELSE verifier
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 \* ---------------------------------------------------------------- verify
 
@@ -357,6 +393,7 @@ VerifyAccepted ==
 VerifyUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vManager, vNewer, worker, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 VerifyPlain ==
   /\ Hint = "verify"
@@ -395,14 +432,18 @@ PublishAfter(s) ==
 
 \* A first push creates the request and the host picks its state; or the push fails (push-failed, 4894: exit 1,
 \* the task in progress with phase awaiting_merge), and record says unpublished until a later close pushes again.
+\* A round's close pushes a new head to the open request, and the host computes its state again (#119).
 PublishStep ==
   IF pr = "none" THEN (\E s \in OpenPr : PublishAfter(s)) \/ (pr' = "none" /\ merged' = merged)
+  ELSE IF inRound /\ pr \in OpenPr THEN pr' = "pending" /\ merged' = merged
   ELSE PublishAfter(pr)
 
 \* merge_branch, lines 5624-5654: a merge, or a conflict that becomes a decision, or a pause (5626-5627, 5635-5638).
+\* A conflict stays until the target changes (mainConflicts); a round's head resolved the conflict it had (#119). A
+\* merge that fails for any other cause (a pause, a dirty checkout, no MERGE: line) leaves no conflict.
 LocalMergeStep ==
-  \/ (~stopOrder /\ merged' = TRUE /\ mainHas' = TRUE)
-  \/ (merged' = FALSE /\ mainHas' = mainHas)
+  \/ (~stopOrder /\ (~mainConflicts \/ inRound) /\ merged' = TRUE /\ mainHas' = TRUE /\ mainConflicts' = FALSE)
+  \/ (merged' = FALSE /\ mainHas' = mainHas /\ mainConflicts' \in (IF mainConflicts /\ ~inRound THEN {TRUE} ELSE BOOLEAN))
 
 \* 0.12.3 (#72): a verified head with no commit beyond its base is recorded merged at once, with no merge,
 \* push or request (no_change 5414-5426, close_no_change 5429-5436; at 5608-5613 and 5370-5372). A free
@@ -410,8 +451,9 @@ LocalMergeStep ==
 NoChangeClose == pr = "none" /\ merged' = TRUE /\ UNCHANGED <<pr, mainHas>>
 
 Finish ==
-  \/ NoChangeClose
-  \/ (IF PrMode THEN mainHas' = mainHas /\ PublishStep ELSE pr' = pr /\ LocalMergeStep)
+  \/ (NoChangeClose /\ UNCHANGED mainConflicts)
+  \/ (IF PrMode THEN mainHas' = mainHas /\ mainConflicts' = mainConflicts /\ PublishStep
+      ELSE pr' = pr /\ LocalMergeStep)
 
 \* resume_close, lines 5354-5381: a closed task that waits for its merge (unmerged: phase awaiting_merge).
 ResumeClose ==
@@ -420,7 +462,7 @@ ResumeClose ==
   /\ Finish
   /\ status' = StatusAfter(merged')
   /\ UNCHANGED <<attempt, abandoned, verdict, workerResult, vv, vIssues, vManager, vNewer, vfiled,
-                 vreport, wtDirty, stopOrder, fault, faulted>>
+                 vreport, wtDirty, stopOrder, fault, faulted, inRound, roundSame, rounds, roundPushed, unverifiedMerge>>
 
 \* cmd_close lines 5603-5620: stop the sessions, publish or merge; `tg done` only with the merge (mark_merged).
 CloseAsPassing == StopLive /\ Finish /\ status' = StatusAfter(merged')
@@ -428,24 +470,31 @@ CloseAsPassing == StopLive /\ Finish /\ status' = StatusAfter(merged')
 \* cmd_close lines 5599-5602: the verdict is recorded, the task is not closed.
 CloseNotPassing ==
   /\ status' = status
-  /\ UNCHANGED <<worker, verifier, lastTask, stopReason, merged, pr, mainHas>>
+  /\ UNCHANGED <<worker, verifier, lastTask, stopReason, merged, pr, mainHas, mainConflicts>>
 
 \* cmd_close, lines 5535-5621, with choose_verdict, lines 5384-5411. L is --verdict, or "auto" for none.
 \* close never refuses on a role: verify_kind (2161-2176) reads the kind stored at launch (0.18.0).
+\* The carry (#119, round_carry): a round's PASS with the same change as round_from, no verifier verdict and no
+\* --verdict keeps round_verdict, with a Manager row. A passing close ends the round.
 NormalClose(L) ==
   /\ status = "in_progress" /\ ~abandoned /\ ~Closed                    \* refuse_unless_running; else resume_close
   /\ workerResult = "PASS"                                              \* worker_for
-  /\ (vv = "none") => (L # "auto")                                      \* line 5393: no verdict at all
-  /\ (vv # "none") => (L = "auto" \/ L = vv)                            \* lines 5395-5408: no --override-verifier
-  /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)            \* 5397-5400: refused, `verify --again` (8006a3c)
-  /\ LET level == IF vv = "none" THEN L ELSE vv
-         manual == vv = "none"
-     IN /\ verdict' = level                                             \* line 5579
-        /\ vManager' = IF manual THEN "manual" ELSE vManager            \* lines 5562-5574
-        /\ vNewer' = IF manual THEN FALSE ELSE vNewer
-        /\ vfiled' = vfiled \/ manual
+  /\ LET carry == inRound /\ roundSame /\ vv = "none" /\ L = "auto"
+         level == IF carry THEN "artifact-verified" ELSE IF vv = "none" THEN L ELSE vv
+         manual == vv = "none" /\ ~carry
+     IN /\ (vv = "none" /\ ~carry) => (L # "auto")                      \* line 5393: no verdict at all
+        /\ (vv # "none") => (L = "auto" \/ L = vv)                      \* lines 5395-5408: no --override-verifier
+        /\ ~(vv # "none" /\ vIssues = "unlabelled" /\ ~REGRESS_89)      \* 5397-5400: refused, `verify --again` (8006a3c)
+        /\ verdict' = level                                             \* line 5579
+        /\ vManager' = IF carry THEN "carried" ELSE IF manual THEN "manual" ELSE vManager   \* lines 5562-5574
+        /\ vNewer' = IF manual \/ carry THEN FALSE ELSE vNewer
+        /\ vfiled' = (vfiled \/ manual \/ carry)
+        /\ inRound' = (inRound /\ level \notin Passing)
+        /\ roundSame' = (roundSame /\ level \notin Passing)
+        /\ roundPushed' = (roundPushed /\ level \notin Passing)
         /\ IF level \in Passing THEN CloseAsPassing ELSE CloseNotPassing
-  /\ UNCHANGED <<attempt, abandoned, workerResult, vv, vIssues, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED <<attempt, abandoned, workerResult, vv, vIssues, vreport, wtDirty, stopOrder, fault, faulted,
+                 rounds, unverifiedMerge>>
 
 CloseAuto ==
   /\ Hint = "close"
@@ -471,6 +520,7 @@ Stop ==
   /\ stopReason' = IF stopOrder THEN "pause" ELSE "recover"
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 \* cmd_abandon, lines 5712-5762: stops the task's live worker sessions (5722-5727) and, since 0.12.0 (#57),
 \* its live verifier (5728-5731). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
@@ -484,6 +534,7 @@ Abandon ==
   /\ verifier' = IF Live(verifier) /\ ~REGRESS_57 THEN AfterStop(verifier) ELSE verifier
   /\ UNCHANGED <<status, attempt, verdict, merged, pr, mainHas, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 \* cmd_merged, lines 5657-5671, through mark_merged. No modelled event names it, so it never fires (NOTES.md).
 Merged ==
@@ -492,6 +543,60 @@ Merged ==
   /\ merged' = TRUE /\ status' = "done"
   /\ UNCHANGED <<attempt, abandoned, verdict, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
+
+\* ---------------------------------------------------------------- round (#119)
+
+\* cmd_round, start_round: a round on a task that waits for its merge and whose kind applies (rebase: the request is
+\* DIRTY, or git merge-tree finds a conflict). Its checks: the STOP order (exit 3), the phase, the kind, the cap, no live
+\* session, the role file of the kind (choose), info/exclude. The Manager never passes --attempt, so the cap holds.
+StartRound ==
+  /\ Hint = "round"
+  /\ status = "in_progress" /\ Awaiting /\ ~inRound
+  /\ ~stopOrder /\ fault = "none"
+  /\ IF PrMode THEN pr = "dirty" ELSE mainConflicts
+  /\ rounds < ROUND_CAP
+  /\ ~Live(worker) /\ ~Live(verifier)
+  /\ inRound' = TRUE /\ roundSame' = FALSE /\ roundPushed' = FALSE /\ rounds' = rounds + 1
+  /\ attempt' = attempt + 1 /\ verdict' = "none"                          \* round_verdict keeps the old one
+  /\ lastTask' = "none" /\ stopReason' = "none" /\ workerResult' = "none"
+  /\ vv' = "none" /\ vIssues' = "none" /\ vManager' = "none" /\ vNewer' = FALSE /\ vfiled' = TRUE
+  /\ worker' = "busy" /\ verifier' = "none" /\ vreport' = FALSE /\ wtDirty' = FALSE
+  /\ UNCHANGED <<status, abandoned, merged, pr, mainHas, mainConflicts, stopOrder, fault, faulted, unverifiedMerge>>
+
+\* record_round's round-not-needed line: the verified head would merge as it is.
+ConflictGone == inRound /\ IF PrMode THEN pr \in {"clean", "behind", "blocked"} ELSE ~mainConflicts
+
+\* cmd_round --cancel, on a failed round's hint or on the round-not-needed line: stop the sessions (stop_live), commit
+\* the WIP and keep the round's head in a ref, reset --keep to round_from, push round_from back when the round's head
+\* was pushed, file the carried Manager row, and restore the verdict: the task waits for its merge again.
+RoundCancel ==
+  /\ inRound /\ status = "in_progress" /\ ~abandoned
+  /\ Hint = "roundCancel" \/ (ConflictGone /\ Hint # "record")
+  /\ StopLive
+  /\ verdict' = "artifact-verified" /\ vManager' = "carried" /\ vNewer' = FALSE /\ vfiled' = TRUE
+  /\ wtDirty' = FALSE
+  /\ pr' = IF roundPushed /\ pr \in OpenPr THEN "pending" ELSE pr
+  /\ inRound' = FALSE /\ roundSame' = FALSE /\ roundPushed' = FALSE
+  /\ UNCHANGED <<status, attempt, abandoned, merged, mainHas, workerResult, vv, vIssues, vreport,
+                 stopOrder, fault, faulted, rounds, mainConflicts, unverifiedMerge>>
+
+\* record_round, round_merged (#119): stop the round's sessions and record the merge (`tg done`). The verdict of
+\* round_from carries (a Manager row) only when the merged head is round_from, which no round step pushed over, or the
+\* same change; else it is the operator's merge of a head no verdict covers (merged_by=operator, no verdict). The
+\* round's verifier is moot: stop_live records its session with no row, so nothing waits for its verdict.
+RoundMerged ==
+  /\ RoundMergedPending
+  /\ StopLive
+  /\ LET carry == ~roundPushed \/ roundSame IN
+       /\ verdict' = IF carry THEN "artifact-verified" ELSE verdict
+       /\ vManager' = IF carry THEN "carried" ELSE vManager
+       /\ vNewer' = IF carry THEN FALSE ELSE vNewer
+       /\ unverifiedMerge' = ~carry
+  /\ vfiled' = TRUE /\ merged' = TRUE /\ status' = "done"
+  /\ inRound' = FALSE /\ roundSame' = FALSE /\ roundPushed' = FALSE
+  /\ UNCHANGED <<attempt, abandoned, pr, mainHas, workerResult, vv, vIssues, vreport, wtDirty,
+                 stopOrder, fault, faulted, rounds, mainConflicts>>
 
 Done == End /\ UNCHANGED vars
 
@@ -502,7 +607,8 @@ Done == End /\ UNCHANGED vars
 \* With FULL_ENV = FALSE only the steps of the main flow exist: a worker reports and ends, a verifier files
 \* and ends, a stopped worker exits, the operator merges, the host moves the request.
 NotSessions == <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
-                 vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
+                 vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted,
+                 inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
 
 WorkerEnds == ~End /\ worker = "busy" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
 WorkerExits == ~End /\ worker = "stopping" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
@@ -524,18 +630,25 @@ WorkerGhostStays == ~End /\ FULL_ENV /\ worker \in {"ghost", "ghostStopped"} /\ 
 \* show as live for a while after that.
 WorkerFilesUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, stopReason,
-              vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+              vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted,
+              inRound, rounds, mainConflicts, roundPushed, unverifiedMerge>>
+\* A round's PASS is the same change as round_from, or not (same_change): a free choice. Outside a round it is FALSE.
 WorkerFilesPass ==
-  ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "PASS" /\ workerResult' = "PASS" /\ WorkerFilesUnchanged
+  /\ ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "PASS" /\ workerResult' = "PASS"
+  /\ roundSame' \in (IF inRound THEN BOOLEAN ELSE {FALSE})
+  /\ WorkerFilesUnchanged
 WorkerFilesIssues ==
-  ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "ISSUES" /\ workerResult' = "ISSUES" /\ WorkerFilesUnchanged
+  ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "ISSUES" /\ workerResult' = "ISSUES"
+  /\ UNCHANGED roundSame /\ WorkerFilesUnchanged
 WorkerFilesBlocked ==
-  ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "BLOCKED" /\ workerResult' = "BLOCKED" /\ WorkerFilesUnchanged
+  ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "BLOCKED" /\ workerResult' = "BLOCKED"
+  /\ UNCHANGED roundSame /\ WorkerFilesUnchanged
 
 WorkerDirties ==
   /\ ~End /\ FULL_ENV /\ worker = "busy" /\ ~wtDirty /\ wtDirty' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
 VerifierEnds == ~End /\ verifier = "busy" /\ verifier' = "finished" /\ UNCHANGED worker /\ UNCHANGED NotSessions
 VerifierFails == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "failed" /\ UNCHANGED worker /\ UNCHANGED NotSessions
@@ -555,6 +668,7 @@ VerifierGhostStays == ~End /\ FULL_ENV /\ verifier \in {"ghost", "ghostStopped"}
 VerifierFilesUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vManager, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 VerifierFiles ==
   /\ ~End /\ verifier = "busy"
   /\ vv' \in Levels /\ vNewer' = TRUE /\ vfiled' = TRUE
@@ -574,11 +688,13 @@ VerifierLeavesReport ==
   /\ ~End /\ FULL_ENV /\ verifier = "busy" /\ ~vreport /\ vreport' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
 
-\* The code host, in pr mode.
-HostUnchanged ==
+\* The code host, in pr mode. BaseUnchanged leaves out pr and the round variables.
+BaseUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+HostUnchanged == BaseUnchanged /\ UNCHANGED RoundVars
 HostDecides == ~End /\ PrMode /\ pr = "pending" /\ pr' \in {"clean", "behind", "blocked", "dirty"} /\ HostUnchanged
 TargetMoves == ~End /\ PrMode /\ pr \in {"clean", "blocked"} /\ pr' = "behind" /\ HostUnchanged
 CheckFails == ~End /\ PrMode /\ pr = "clean" /\ pr' = "blocked" /\ HostUnchanged
@@ -586,18 +702,35 @@ CheckPasses == ~End /\ PrMode /\ pr = "blocked" /\ pr' = "clean" /\ HostUnchange
 SomeoneMerges == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "merged" /\ HostUnchanged
 SomeoneCloses == ~End /\ PrMode /\ pr \in OpenPr /\ pr' = "closed" /\ HostUnchanged
 SomeoneReopens == ~End /\ PrMode /\ pr = "closed" /\ pr' = "pending" /\ HostUnchanged
+\* #119: another request merges first and its change conflicts with ours; or a later merge or a revert clears it.
+TargetConflicts == ~End /\ FULL_ENV /\ PrMode /\ pr \in {"clean", "behind", "blocked"} /\ pr' = "dirty" /\ HostUnchanged
+ConflictClears == ~End /\ FULL_ENV /\ PrMode /\ pr = "dirty" /\ pr' \in {"clean", "behind"} /\ HostUnchanged
+\* #119: a CI verify of the round (verify_mode ci:*, otherwise out of the model) pushes the round's head to the request.
+RoundHeadPushed ==
+  /\ ~End /\ FULL_ENV /\ PrMode /\ inRound /\ ~roundPushed /\ pr \in OpenPr /\ workerResult = "PASS"
+  /\ roundPushed' = TRUE /\ pr' = "pending" /\ BaseUnchanged
+  /\ UNCHANGED <<inRound, roundSame, rounds, mainConflicts, unverifiedMerge>>
 
 \* Local mode: the operator merges the branch by hand; record then finds it in HEAD (merged_into, 3967).
 OperatorMerges ==
-  /\ ~End /\ ~PrMode /\ Awaiting /\ ~mainHas /\ mainHas' = TRUE
+  /\ ~End /\ ~PrMode /\ Awaiting /\ ~mainHas /\ mainHas' = TRUE /\ mainConflicts' = FALSE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED <<inRound, roundSame, rounds, roundPushed, unverifiedMerge>>
+\* #119, local mode: the target branch moves and conflicts with the verified commit (git merge-tree); or it clears.
+MainConflicts ==
+  /\ ~End /\ FULL_ENV /\ ~PrMode /\ (Awaiting \/ inRound) /\ ~mainHas /\ ~mainConflicts /\ mainConflicts' = TRUE
+  /\ UNCHANGED pr /\ BaseUnchanged /\ UNCHANGED <<inRound, roundSame, rounds, roundPushed, unverifiedMerge>>
+MainConflictClears ==
+  /\ ~End /\ FULL_ENV /\ ~PrMode /\ mainConflicts /\ mainConflicts' = FALSE
+  /\ UNCHANGED pr /\ BaseUnchanged /\ UNCHANGED <<inRound, roundSame, rounds, roundPushed, unverifiedMerge>>
 
 \* The operator's standing orders: a STOP first line pauses launches and merges (Orders.stop); the operator
 \* lifts it later. A pause is `run.py stop` under that line. Both are behind OPERATOR_PAUSES.
 OrdersUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, fault, faulted>>
+  /\ UNCHANGED RoundVars
 OperatorOrdersStop == ~End /\ OPERATOR_PAUSES /\ ~stopOrder /\ stopOrder' = TRUE /\ OrdersUnchanged
 OperatorLiftsStop == ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE /\ OrdersUnchanged
 
@@ -610,6 +743,7 @@ OperatorLiftsStop == ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE 
 FaultUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder>>
+  /\ UNCHANGED RoundVars
 RoleBreaks == ~End /\ FAULTS /\ ~faulted /\ fault' = "role" /\ faulted' = TRUE /\ FaultUnchanged
 ExcludeBreaks == ~End /\ FAULTS /\ ~faulted /\ fault' = "exclude" /\ faulted' = TRUE /\ FaultUnchanged
 OperatorRepairs == ~End /\ fault # "none" /\ fault' = "none" /\ UNCHANGED faulted /\ FaultUnchanged
@@ -623,6 +757,8 @@ Init ==
   /\ vv = "none" /\ vIssues = "none" /\ vManager = "none" /\ vNewer = FALSE /\ vfiled = TRUE
   /\ worker = "none" /\ verifier = "none" /\ vreport = FALSE /\ wtDirty = FALSE
   /\ stopOrder = FALSE /\ fault = "none" /\ faulted = FALSE
+  /\ inRound = FALSE /\ roundSame = FALSE /\ rounds = 0 /\ mainConflicts = FALSE
+  /\ roundPushed = FALSE /\ unverifiedMerge = FALSE
 
 Next ==
   \/ Launch \/ LaunchStopsIdleThenRefuses \/ VerifyPlain \/ VerifyAgain \/ CloseAuto \/ CloseManual
@@ -636,6 +772,8 @@ Next ==
   \/ HostDecides \/ TargetMoves \/ CheckFails \/ CheckPasses \/ SomeoneMerges \/ SomeoneCloses \/ SomeoneReopens
   \/ OperatorMerges \/ OperatorOrdersStop \/ OperatorLiftsStop
   \/ RoleBreaks \/ ExcludeBreaks \/ OperatorRepairs
+  \/ StartRound \/ RoundCancel \/ RoundMerged
+  \/ TargetConflicts \/ ConflictClears \/ RoundHeadPushed \/ MainConflicts \/ MainConflictClears
 
 Spec == Init /\ [][Next]_vars
 
@@ -657,6 +795,8 @@ TypeOK ==
   /\ worker \in WorkerStates /\ verifier \in VerifierStates
   /\ vreport \in BOOLEAN /\ wtDirty \in BOOLEAN /\ stopOrder \in BOOLEAN
   /\ fault \in Faults /\ faulted \in BOOLEAN
+  /\ inRound \in BOOLEAN /\ roundSame \in BOOLEAN /\ mainConflicts \in BOOLEAN
+  /\ roundPushed \in BOOLEAN /\ unverifiedMerge \in BOOLEAN /\ rounds \in 0..ROUND_CAP
   /\ Hint \in Hints
 
 \* Once the verifier's session ended or its turn ended, the attempt has a verify row that covers it, or
@@ -668,15 +808,21 @@ VerdictNotLost ==
   (verifier # "none" /\ Over(verifier) /\ ~vfiled)
     => (RecordHasEffect \/ Event = "no-verdict" \/ lastTask = "STOPPED")
 
-\* A done or merged task has a passing verdict, and a verify row of the attempt carries it.
+\* A done or merged task has a passing verdict, and a verify row of the attempt carries it: the verifier's, the
+\* Manager's (close --verdict), or the Manager's carried row (#119: round --cancel, a clean round's close, the merge of
+\* round_from during a round). Or record recorded the operator's merge of a head no verdict covers: a round's head that
+\* a CI verify pushed, merged on the host (merged_by=operator, as pr_status records any merge done on the host).
 NoMergeWithoutPassingVerdict ==
-  (status = "done" \/ merged) => (verdict \in Passing /\ (vv = verdict \/ vManager = "manual"))
+  (status = "done" \/ merged) =>
+    ((verdict \in Passing /\ (vv = verdict \/ vManager \in {"manual", "carried"})) \/ unverifiedMerge)
 
 \* The owner's rule (#59): the attempt passes MAX_ATTEMPTS only by a launch after a pause the operator ordered
 \* (the newest row is STOPPED with Reason: pause); a stop that recovers a quiet or broken session, a stop by
-\* close, and DIED all count as an attempt. An action property: it names the step that passes the cap.
+\* close, and DIED all count as an attempt. An action property: it names the step that passes the cap. A round
+\* (#119) does not count toward the cap: [rounds] cap limits the rounds.
 AttemptCap ==
-  [][(attempt' > MAX_ATTEMPTS /\ attempt' # attempt) => (lastTask = "STOPPEDhead" /\ stopReason = "pause")]_vars
+  [][(attempt' > MAX_ATTEMPTS /\ attempt' # attempt)
+       => ((lastTask = "STOPPEDhead" /\ stopReason = "pause") \/ rounds' > rounds)]_vars
 
 \* cmd_launch line 2489: "A dirty worktree never reaches a worker silently: commit what the last attempt left."
 LaunchCommitsLeftovers == [][Launch => wtDirty' = FALSE]_vars
@@ -721,5 +867,13 @@ OneRequestPerTask == [][pr # "none" => pr' # "none"]_vars
 FixRoundNeedsBlocking ==
   (verdict = "verify-failed" /\ vv = verdict /\ vManager # "manual" /\ Hint \in {"launch", "abandon"})
     => vIssues = "blocking"
+
+\* #119: a round has no passing verdict beside it: its phase is in flight, never awaiting_merge, and the task is in
+\* progress.
+RoundIsInFlight == inRound => (~Closed /\ status = "in_progress")
+
+\* #119: following record's hints never abandons a task that waits for its merge: a conflict gets a round on the same
+\* request. REGRESS_119 (the redo hint at a conflict: abandon, then launch --attempt) breaks it.
+NoHintAbandonsWaitingWork == [][(abandoned' /\ ~abandoned) => ~Awaiting]_vars
 
 ====

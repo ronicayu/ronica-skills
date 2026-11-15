@@ -58,10 +58,15 @@ every report, and on every wake (step 6).
      what remains: undecided design → a design task that sets the spec; a tool problem or out-of-scope
      work → a separate task; open-ended acceptance → rewrite it as a closed checklist. Override the cap
      only for a clear, bounded fix, and record why in the task notes.
-   - `conflict`, and `changed` from `close`: add the decision the line names. The task worktree stays
-     as it was. After a host rebase that changed the diff, the request holds the host's new head, and
-     `record` says `pr-changed` until the operator acts. `decision`: carry it into the report with your
-     recommendation.
+   - `conflict`: run the hinted round (`"${CLAUDE_PLUGIN_ROOT}/scripts/run" round <id> rebase`: a new attempt on
+     the same branch and request), or add the decision the line names when the conflict needs the operator or the
+     line names the cap. `changed` from `close`: add the decision. The task worktree stays as it was. After a host
+     rebase that changed the diff, the request holds the host's new head, and `record` says `pr-changed` until the
+     operator acts. `decision`: carry it into the report with your recommendation.
+   - `round-started`: the round's worker runs; treat it as any running attempt. A round's PASS gets its own `next:`
+     (`close` when the change is the same, else `verify`); a round that fails names
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" round <id> --cancel`, which puts the task back to wait at its verified head.
+     `round-not-needed`: the conflict went away; cancel the round, or let it finish. `round-cancelled`: run `record`.
    - `unmerged` and `waits`: say plainly which branch the operator should
      merge and which tasks wait on it. A task that waits for its merge stays in progress (`phase=awaiting_merge`)
      until the merge is recorded, and the tasks that depend on it are not ready until then. Add no title prefix or
@@ -82,7 +87,7 @@ every report, and on every wake (step 6).
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
      A required check that failed on a closed task's request keeps it red: the fix is a new attempt of that task on the
      same branch, as the `pr-blocked` hint says (`run abandon <id> <mode>`, then `run launch <id> --attempt <n>`).
-   - `merged` (a request merged; conflicts ahead of time): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. The rebase round is the `pr-behind` step below; a `conflict` line gets its decision now.
+   - `merged` (a request merged; conflicts ahead of time): In `pr` mode, after each merge, check the open requests of verified tasks for conflicts with the new base, and start a rebase round for each one that conflicts, before it reaches the front of the queue. `record` reads every open request, so drain again once the host has had a moment to recompute them; then act on each `pr-behind` and `conflict` line at once, not when the request reaches the front. A `pr-behind` line is the `close` step below; a `conflict` line gets its round (or its decision) now.
    - `pr-behind`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id>` asks the host to rebase the request
      (`[merge] catch_up = "host"`, the default), or rebases the worktree and pushes (`"local"`). A
      `pr-behind` line from `close` that says the host did not rebase it: follow its `next:`.

@@ -5,7 +5,7 @@
 
 // The labels are run.py's phase and event names, not the product words of view.mjs: phase-edges.json and the test
 // compare them with TRANSITIONS, so do not change them. `glossary` gives each name in product words (#108).
-export const title = "Task phases that run.py records, and the events that move them (agentic-team 0.19.0)";
+export const title = "Task phases that run.py records, and the events that move them (agentic-team 0.23.0)";
 
 export const glossary = {
   // The phases (state labels).
@@ -27,6 +27,8 @@ export const glossary = {
   "close_waits, merged": "Event: the Manager closes the task on a passing verdict and the branch merges in the same step (two writes of run.py).",
   "died": "Event: the Manager's record marks the attempt DIED: the task session ended without a report.",
   "abandon": "Event: the Manager abandons the task.",
+  "round": "Event: the Manager starts a round: a new attempt of a task that waits for its merge, on the same request (#119).",
+  "round_cancel": "Event: the Manager cancels a round; the task waits for its merge again at its verified head.",
   "record": "Event: any other write of the Manager's record; it never moves the phase.",
   "done": "Event: the task has ended; the Manager has nothing more to do.",
   "seen_<phase>": "Event: a session, the code host or the operator changed something, and the Manager's next record sees the new phase, such as seen_reported when the task session files its report.",
@@ -67,6 +69,9 @@ export const step = (action, from, to) => {
     case "Stop": return "stopped";
     case "Abandon": return "abandon";
     case "Merged": return "merged";
+    case "StartRound": return "round";
+    case "RoundCancel": return "round_cancel";
+    case "RoundMerged": return "merged"; // record_round: the request of a round merged (mark_merged)
     case "Record":
       if (to.merged && !from.merged) return "merged"; // mark_merged
       if (to.lastTask === "DIED" && from.lastTask !== "DIED") return "died";

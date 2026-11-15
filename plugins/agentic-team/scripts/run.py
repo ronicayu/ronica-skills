@@ -16,6 +16,11 @@ Usage:
                    branch and open a request (pr); the task is done once its
                    change is merged, and waits as awaiting_merge until then
     merged <id>    record that the operator merged a task branch; marks it done
+    round <id> <kind>
+                   start a new attempt of a task that waits for its merge, on
+                   the same branch and request (kind `rebase`: its change
+                   conflicts with its target); `round <id> --cancel` ends it
+                   and the task waits again at its verified head
     repoint <id> --pr <n>
                    pr mode: a task that waits for its merge follows request
                    <n>, which carries its change (the request of another
@@ -431,6 +436,15 @@ class Run:
     def edit_meta(self, tid, **meta):
         self.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in meta.items()])
 
+    def write_meta(self, task, unset=(), **meta):
+        """Write `meta` and remove the `unset` keys in one tg edit, in Taskgraph and in the task dict this command holds."""
+        self.tg("edit", str(task["id"]), "--meta", *[meta_arg(k, v) for k, v in meta.items()],
+                *(["--unset-meta", *unset] if unset else []))
+        held = task.setdefault("meta", {})
+        held.update(meta)
+        for key in unset:
+            held.pop(key, None)
+
     def unset_meta(self, task, *keys):
         """Remove meta keys in Taskgraph and in the task dict this command is holding. A missing key is fine."""
         self.tg("edit", str(task["id"]), "--unset-meta", *keys)
@@ -813,11 +827,31 @@ def unlabelled_next(tid, problem):
     return f"run.py verify {tid} --again (the verifier's report has no blocking: line: {problem})"
 
 
-def retry_next(tid, attempt, mode="<mode>", lead="", before=""):
+def in_round(task):
+    """True for a task in a round (#119): round_from is set, and the task is not abandoned."""
+    meta = task.get("meta") or {}
+    return bool(meta.get("round_from")) and not meta.get("abandoned")
+
+
+def cancel_next(task, before=""):
+    """The next step after a round that failed: cancel it, and the task waits again at its verified head."""
+    return (f"{before}run.py round {task['id']} --cancel (the task waits again at "
+            f"{str(task['meta']['round_from'])[:7]})")
+
+
+def round_redo(task):
+    """A round's way to try again, as launch is a task's: cancel the round, then start a new one."""
+    return cancel_next(task) + f", then run.py round {task['id']} {task['meta'].get('round')} for a new round"
+
+
+def retry_next(tid, attempt, mode="<mode>", lead="", before="", task=None):
     """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
     run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
     or `before` and the launch with the --attempt override. Every next: hint that retries a task uses it, except
-    the hint after a pause (stopped_next): refuse_past_cap lets a pause pass the cap."""
+    the hint after a pause (stopped_next): refuse_past_cap lets a pause pass the cap. A round (`task` in_round) is never
+    retried by launch: its step is `before`, then round --cancel."""
+    if task is not None and in_round(task):
+        return cancel_next(task, before)
     if attempt < MAX_ATTEMPTS:
         return f"{lead}{before}run.py launch {tid}"
     return (f"run.py abandon {tid} {mode} (the cap is {MAX_ATTEMPTS} attempts), "
@@ -831,11 +865,12 @@ def stop_reason(row):
     return match.group(1) if match else None
 
 
-def stopped_next(tid, attempt, row, before=""):
-    """The next step after the STOPPED row `row`. A pause does not use an attempt; any other stop does."""
-    if stop_reason(row) == "pause":
+def stopped_next(tid, attempt, row, before="", task=None):
+    """The next step after the STOPPED row `row`. A pause does not use an attempt; any other stop does. A round that
+    stopped, for a pause too, is cancelled: launch refuses a task in a round."""
+    if stop_reason(row) == "pause" and not (task is not None and in_round(task)):
         return f"{before}run.py launch {tid} after the pause"
-    return retry_next(tid, attempt, before=before)
+    return retry_next(tid, attempt, before=before, task=task)
 
 
 def work_filed(rows, attempt, s):
@@ -862,6 +897,8 @@ SETTLED = ("verdict_failed", "awaiting_merge", "merged", "abandoned")
 PHASES = FLIGHT + SETTLED
 CLOSED = ("awaiting_merge", "merged")  # a passing close happened; the task waits for its merge, or has it
 OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing close settled; None is a task with no phase
+ROUND = FLIGHT + ("verdict_failed",)  # the phases of a round (#119): an attempt on a closed task that no passing close settled
+ROUND_FIELDS = ("round", "round_from", "round_verdict", "round_onto")  # a round's meta; `rounds` counts them and stays
 
 # The phase changes only through TRANSITIONS: (phase, event) -> phase. None is a task with no phase yet (not launched,
 # or from before 0.19.0); a stored value that is not a phase reads as None, as in task_phase. A command sends the event
@@ -875,8 +912,11 @@ OPEN = (None,) + FLIGHT + ("verdict_failed",)  # an attempt that no passing clos
 #   close_failed     close records a verdict that does not close the task
 #   close_waits      close records a passing verdict on a commit: the task waits for its merge
 #   close_merged     close records a passing verdict on output outside git: nothing to merge
-#   merged           a merge is recorded (mark_merged), or a recorded one is finished (finish_merged)
+#   merged           a merge is recorded (mark_merged), or a recorded one is finished (finish_merged); record also
+#                    records the merge of a round's request from a round phase (record_round)
 #   abandon          abandon drops the task
+#   round            round starts a new attempt of a task that waits for its merge, on the same request (#119)
+#   round_cancel     round --cancel ends a round: the task waits again at its verified head
 # repoint (#111) sends no event: the task stays awaiting_merge and follows another request, so it has no row here.
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
@@ -892,7 +932,7 @@ TRANSITIONS: dict[tuple[str | None, str], str] = {
     **{(p, "close_failed"): "verdict_failed" for p in OPEN},
     **{(p, "close_waits"): "awaiting_merge" for p in OPEN},
     **{(p, "close_merged"): "merged" for p in OPEN},
-    **{(p, "merged"): "merged" for p in (None, "awaiting_merge", "merged")},
+    **{(p, "merged"): "merged" for p in (None, "awaiting_merge", "merged") + ROUND},
     **{(p, "abandon"): "abandoned" for p in OPEN + ("awaiting_merge", "abandoned")},
     **{(None, f"seen_{p}"): p for p in PHASES},
     # The rows move on without a phase write by a session's own row: the worker's report (also one filed after its stop),
@@ -907,6 +947,8 @@ TRANSITIONS: dict[tuple[str | None, str], str] = {
     ("stopped", "seen_verifying"): "verifying",
     ("reported", "seen_verifying"): "verifying",
     ("awaiting_merge", "seen_merged"): "merged",
+    ("awaiting_merge", "round"): "running",
+    **{(p, "round_cancel"): "awaiting_merge" for p in ROUND},
 }
 
 
@@ -932,11 +974,13 @@ def next_phase(task, event):
     return TRANSITIONS[key]
 
 
-def transition(run, task, event, **meta):
-    """Write the phase `event` moves the task to, with `meta` in the same edit, to Taskgraph and the task dict. Nothing
-    is written when the phase stays and there is no meta."""
+def transition(run, task, event, unset=(), **meta):
+    """Write the phase `event` moves the task to, with `meta` and the removal of the `unset` keys in the same edit, to
+    Taskgraph and the task dict. Nothing is written when the phase stays and there is nothing else."""
     phase = next_phase(task, event)
-    if meta or (task.get("meta") or {}).get("phase") != phase:
+    if unset:
+        run.write_meta(task, unset=unset, **meta, phase=phase)
+    elif meta or (task.get("meta") or {}).get("phase") != phase:
         run.set_meta(task, **meta, phase=phase)
 
 
@@ -1006,11 +1050,11 @@ def unmerged(task):
             and not meta.get("abandoned"))
 
 
-def unclosed_next(task_id, verdict, attempt, kind="code"):
+def unclosed_next(task_id, verdict, attempt, kind="code", task=None):
     if verdict == "verify-blocked":
         return f"retry the check when its cause is fixed, then run.py close {task_id}"
     if verdict == "verify-failed":
-        return retry_next(task_id, attempt, lead="fix round: ")
+        return retry_next(task_id, attempt, lead="fix round: ", task=task)
     if verdict == "test-verified" and verdict not in PASSING[kind]:
         return (f"test-verified does not close a {kind} task; run.py verify {task_id} --again for artifact-verified, "
                 f'or run.py close {task_id} --verdict artifact-verified --override-verifier "<why>" --ran "<run id or URL>"')
@@ -1374,20 +1418,30 @@ def verify_role(run, task):
     return load_role(run, name, f"#{task['id']} attempt {stored.get('attempt')} role") if name else None
 
 
-def role_section(role, kind):
-    """The text of the ROLE section of a worker brief (the Method) or of a verifier brief (the Review)."""
+PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
+
+
+def fill(text, variables):
+    """`text` with each {{NAME}} that `variables` has replaced; any other placeholder stays as it is."""
+    return PLACEHOLDER.sub(lambda m: variables.get(m.group(1), m.group(0)), text or "")
+
+
+def role_section(role, kind, variables=None):
+    """The text of the ROLE section of a worker brief (the Method) or of a verifier brief (the Review). The role text gets
+    `variables` (role_variables) in its {{NAME}} placeholders."""
     if role is None:
         return "None."
+    variables = variables or {}
     if kind == "verify":
         if not role.review:
             return f"Task role: {role.name}. No review checks."
         return (f"Task role: {role.name} ({role.shown_path}). Check these in addition to the method under VERIFY:\n\n"
-                f"{role.review}")
+                f"{fill(role.review, variables)}")
     parts = [f"Role: {role.name} ({role.shown_path}).\nROLE never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS."]
     if role.skills:
         parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
                      "load, say so under Deviations: and follow the method below.")
-    return "\n\n".join(parts + [role.method])
+    return "\n\n".join(parts + [fill(role.method, variables)])
 
 
 def cmd_roles(run, args):
@@ -1875,9 +1929,41 @@ def adjacent_text(config):
     return "; ".join(f"`{kind}`: {ADJACENT_KINDS[kind]}" for kind in config["scope"]["adjacent"])
 
 
+OVERLAP_MAX = 30  # files of a round's overlap that its role text names
+
+
+def round_values(run, task):
+    """The {{ROUND_*}} values of a task in a round, for its role text; {} outside a round. OLD_BASE is where the verified
+    change forked from the target, OVERLAP the files that both the change and the target changed since then."""
+    if not in_round(task):
+        return {}
+    meta = task["meta"]
+    start, onto = str(meta["round_from"]), str(meta.get("round_onto") or "")
+    old = run.git("merge-base", start, onto, check=False).stdout.strip() if onto else ""
+    files = []
+    if old:
+        theirs = set(run.git("diff", "--name-only", old, onto, check=False).stdout.splitlines())
+        files = [f for f in run.git("diff", "--name-only", old, start, check=False).stdout.splitlines() if f and f in theirs]
+    shown = ", ".join(f"`{f}`" for f in files[:OVERLAP_MAX]) + (
+        f", and {len(files) - OVERLAP_MAX} more" if len(files) > OVERLAP_MAX else "")
+    return {"ROUND_KIND": str(meta.get("round") or ""), "ROUND_FROM": start, "ROUND_ONTO": onto or "unknown",
+            "ROUND_OLD_BASE": old or "unknown", "ROUND_OVERLAP": shown or "none",
+            "ROUND_VERDICT": str(meta.get("round_verdict") or "unknown")}
+
+
+def verified_report(rows, task):
+    """The worker report of the attempt that passed before the round: the newest one whose Head is round_from, else the
+    newest one of an earlier attempt. None when there is none."""
+    start, attempt = str(task["meta"]["round_from"]), wanted_attempt(task)
+    found = [r for r in rows if is_worker_result(r) and (h := tail_or_none(HEAD_LINE.search(r.get("body") or "")))
+             and start.startswith(h)]
+    return found[-1] if found else latest_worker([r for r in rows if (r.get("attempt") or 0) < (attempt or 0)])
+
+
 def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None):
-    """The brief text. Taskgraph is the only source of task content. `role` is the task's role: its Method goes into a worker
-    brief and its Review into a verifier brief."""
+    """The brief text. Taskgraph is the only source of task content. `role` is the task's role, or the round kind's role
+    in a round: its Method goes into a worker brief and its Review into a verifier brief, with the {{NAME}} variables of
+    the task and the round filled in."""
     tid = task["id"]
     meta = task.get("meta") or {}
     tg_cmd = f"{quote(sys.executable)} {quote(run.tg_path)} --db {quote(run.db)} --project {shlex.quote(run.project)}"
@@ -1915,7 +2001,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         "VERIFY": str(meta["verify"]).strip(),
         "TIMEBOX": timebox,
         "FORBIDDEN": "\n".join(forbidden) or "None beyond the worker rules.",
-        "ROLE": role_section(role, kind),
+        "ROLE": role_section(role, kind, {"TASK_ID": str(tid), "TASK_TITLE": task["title"], "PROJECT": run.project,
+                                          **round_values(run, task)}),
         "STANDING_ORDERS": orders.text,
         "REPORT_FILE": report,
         "CHECK_COMMAND": (f"{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} "
@@ -1998,9 +2085,22 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         })
     else:
         rows = run.results_for(tid)
-        previous = latest_worker(rows)
+        rounding = in_round(task)
+        previous = verified_report(rows, task) if rounding else latest_worker(rows)
         upstream, checkpoint = [], "None"
-        if previous:
+        if previous and rounding:
+            if m := CHECKPOINT_LINE.search(previous["body"]):
+                checkpoint = m.group(1).strip() or "None"
+            upstream.append({"head": f"### The verified attempt ({describe_result(previous)})\n\nThis change passed with verdict "
+                                     f"{meta.get('round_verdict')} at `{meta['round_from']}`. Keep it as it is.",
+                             "row": previous, "task": tid, "rank": 0, "keep": ("Deviations",), "only": None, "always": True,
+                             "label": ""})
+            judged = verifier_rows(rows, previous.get("attempt"))
+            if judged:
+                upstream.append({"head": f"### Verifier report on the verified attempt ({describe_result(judged[-1])})",
+                                 "row": judged[-1], "task": tid, "rank": 0, "keep": ("Status", "Verdict"),
+                                 "only": VERIFIER_FIELDS, "always": True, "label": ""})
+        elif previous:
             if m := CHECKPOINT_LINE.search(previous["body"]):
                 checkpoint = m.group(1).strip() or "None"
             upstream.append({"head": f"### Previous attempt ({describe_result(previous)})\n\nStart from this report. Fix what "
@@ -2032,12 +2132,18 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                              "only": UPSTREAM_FIELDS, "always": True, "label": f"Upstream #{dep['id']}: {dep['title']}"})
         upstream = fit_carried(upstream, config["brief"]["carried_report_bytes"], config["brief"]["carried_total_bytes"], tg_cmd)
         autonomy = config["autonomy"]
+        round_goal = (f"\n\nThis attempt is a `{meta.get('round')}` round: the change passed at `{meta['round_from']}`; ROLE says "
+                      "what this round does to it." if rounding else "")
+        round_setup = (f"Attempt {attempt}, a `{meta.get('round')}` round. Your worktree is at `{base}` on branch "
+                       f"`{task_branch(tid)}`: the head that passed. If `git rev-parse HEAD` is not `{base}`, report BLOCKED and "
+                       "change nothing. ROLE names the one command that moves the branch in this round; run it as ROLE says, "
+                       "and nothing else that moves the branch. Do not push." if rounding else None)
         values.update({
-            "GOAL": f"{task['title']}. {why}",
+            "GOAL": f"{task['title']}. {why}{round_goal}",
             "SCOPE": (str(meta["scope"]).strip() + (
                 f"\n\nAlso allowed outside SCOPE, nothing more: {adjacent_text(config)}. List each such change under "
                 "`Deviations:` as `adjacent: <kind>: <path>`." if adjacent_text(config) else "")),
-            "SETUP": (f"Attempt {attempt}. Your worktree is at `{base}` on branch `{task_branch(tid)}`. It holds the "
+            "SETUP": round_setup or (f"Attempt {attempt}. Your worktree is at `{base}` on branch `{task_branch(tid)}`. It holds the "
                       "commits of the earlier attempts of this task. Read the previous report under UPSTREAM and build "
                       "on it; do not redo what passed. Do not reset the worktree or check out another commit. If "
                       f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."
@@ -2331,8 +2437,12 @@ def verify_kind(run, task, strict=True):
 
 
 def verify_base(run, task, head):
-    """(sha, how) for the verifier brief: the task's base meta when it is an ancestor of head, else the merge
-    base of head with the target; (None, reason) when neither exists."""
+    """(sha, how) for the verifier brief: in a round, its target commit when it is an ancestor of head, so the diff holds
+    only the task's change; else the task's base meta when it is an ancestor of head, else the merge base of head with
+    the target; (None, reason) when none exists."""
+    onto = str((task.get("meta") or {}).get("round_onto") or "") if in_round(task) else ""
+    if onto and run.git("merge-base", "--is-ancestor", onto, head, check=False).returncode == 0:
+        return commit_of(run, onto), "the round's target commit"
     meta_base = str((task.get("meta") or {}).get("base") or "")
     if meta_base and run.git("merge-base", "--is-ancestor", meta_base, head, check=False).returncode == 0:
         return commit_of(run, meta_base), "the task's base meta"
@@ -2501,7 +2611,8 @@ def cmd_launch(run, args):
                       f'tg edit {tid} --notes "<answer>", then tg done {tid}')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
-    refuse_closed(task)
+    refuse_closed(run, task)
+    refuse_round(task)
     refuse_legacy(run, task)
     verify_mode(run, task)
     picked = choose(run, task, args.tier)  # the role, tier and verify kind of this attempt; refused for a bad role
@@ -2614,30 +2725,10 @@ def cmd_launch(run, args):
     cap = asks_cap(run, task, tier)
     text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
     check_cap(run)
-    if args.model:
-        model, effort = args.model, args.effort
-        try:  # --model replaces the tier's model only; the tier still says which profile
-            chosen = resolve_model(run.config, tier)
-        except ConfigError:
-            chosen = None
-    else:
-        try:
-            chosen = resolve_model(run.config, tier)
-        except ConfigError as exc:
-            raise Refused(str(exc))
-        if not chosen["model"]:
-            raise Refused("tier 'verifier' has no model; use mechanical, implementation, judgement "
-                          "or a models.overrides key")
-        model, effort = chosen["model"], args.effort or chosen["effort"]
-    profile = pick_profile(run, tier_profiles(chosen), args.profile)
+    model, effort, profile = worker_model(run, args, tier)
     worktree = f"task-{tid}"
-    settings = worker_settings(run, tid, nxt)
     if args.dry_run:
-        print(claude_line(run, profile, worktree, session, model, effort, settings), file=sys.stderr)
-        if run.json:
-            run.emit("dry-run", tid, nxt, session, text)
-        else:
-            print(text, end="")
+        dry_run(run, tid, nxt, session, profile, model, effort, text)
         return
     if mode == "continue":
         # A dirty worktree never reaches a worker silently: commit what the last attempt left.
@@ -2666,36 +2757,19 @@ def cmd_launch(run, args):
     created = mode in ("first", "base", "head")
     if current:
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
-    try:
-        clear_report(report_path(run, worktree, session))
-        path = write_brief(run, f"task-{tid}-{nxt}.md", text)
-        write_ctx(run, task, nxt, session, cap)
-        said = start_session(run, worktree, session, model, effort, text, profile, settings)
-    except Exception as exc:
-        started_or_cleaned(run, worktree, base, exc, created)
-    drift = drift_warning(run, worktree, base)
-    entry, id_note = session_entry(run, tid, "task", nxt, session, worktree, said, model, profile)
-    if entry is None:  # no session id is known; the attempt still keeps its role, tier and verify kind
-        entry = {"kind": "task", "attempt": nxt, "name": session, "worktree": worktree, "model": model,
-                 **profile_field(profile)}
-    sessions = recorded_sessions(task) + [{**entry, **picked.stored}]
+    path, said, drift, entry, id_note = start_worker(run, task, nxt, session, text, model, effort, profile, base, cap, created)
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts. A repointed task (run.py
     # repoint) gets its own request back: its pr meta is another task's request. `base` is the commit the task branch
-    # forked from: the first launch writes it, a retry keeps it.
+    # forked from: the first launch writes it, a retry keeps it. A round that an abandon ended is over: its meta goes
+    # (#119), and `rounds` stays.
     keep, drop = own_request_meta(task)
     keep += [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
     if not meta.get("base") and mode in ("first", "base", "head"):
         keep.append(meta_arg("base", base))
-    table = mailbox_table(task)  # delivery state of earlier attempts goes; this attempt starts with none
-    left = {k: v for k, v in table.items() if isinstance(v, dict) and (v.get("attempt") or 0) >= nxt}
-    if left != table and left:
-        keep.append(meta_arg("mailbox", left))
-    lower_flag(run, tid)
-    run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
-           meta_arg("attempt", nxt), meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase),
-           *keep, "--unset-meta", "verdict", "verdict_ref", "abandoned", *drop, *(["mailbox"] if table and not left else []))
+    attempt_edit(run, task, nxt, session, model, {**entry, **picked.stored}, "launch", keep,
+                 ["verdict", "verdict_ref", "abandoned", *ROUND_FIELDS, *drop])
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
@@ -2704,6 +2778,72 @@ def cmd_launch(run, args):
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
               + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
     run.emit("launched", tid, nxt, session, detail)
+
+
+def worker_model(run, args, tier):
+    """(model, effort, profile) of a worker session: --model and --effort, else the tier's; --profile, else the tier's
+    profile."""
+    if args.model:
+        model, effort = args.model, args.effort
+        try:  # --model replaces the tier's model only; the tier still says which profile
+            chosen = resolve_model(run.config, tier)
+        except ConfigError:
+            chosen = None
+    else:
+        try:
+            chosen = resolve_model(run.config, tier)
+        except ConfigError as exc:
+            raise Refused(str(exc))
+        if not chosen["model"]:
+            raise Refused("tier 'verifier' has no model; use mechanical, implementation, judgement "
+                          "or a models.overrides key")
+        model, effort = chosen["model"], args.effort or chosen["effort"]
+    return model, effort, pick_profile(run, tier_profiles(chosen), args.profile)
+
+
+def dry_run(run, tid, attempt, session, profile, model, effort, text):
+    """A worker start that writes nothing: the claude command on stderr, the brief on stdout (a dry-run event in --json)."""
+    print(claude_line(run, profile, f"task-{tid}", session, model, effort, worker_settings(run, tid, attempt)), file=sys.stderr)
+    if run.json:
+        run.emit("dry-run", tid, attempt, session, text)
+    else:
+        print(text, end="")
+
+
+def start_worker(run, task, attempt, session, text, model, effort, profile, base, cap, created):
+    """Start the worker of an attempt in the task worktree (launch, round): its brief, its context file, `claude --bg`.
+    A failed start removes the worktree when this command `created` it and that is safe, then raises. Returns (brief
+    path, what claude said, a drift warning or "", the sessions entry, a note on how the session id was found)."""
+    tid, worktree = task["id"], f"task-{task['id']}"
+    try:
+        clear_report(report_path(run, worktree, session))
+        path = write_brief(run, f"task-{tid}-{attempt}.md", text)
+        write_ctx(run, task, attempt, session, cap)
+        said = start_session(run, worktree, session, model, effort, text, profile, worker_settings(run, tid, attempt))
+    except Exception as exc:
+        started_or_cleaned(run, worktree, base, exc, created)
+    drift = drift_warning(run, worktree, base)
+    entry, id_note = session_entry(run, tid, "task", attempt, session, worktree, said, model, profile)
+    if entry is None:  # no session id is known; the attempt still keeps its role, tier and verify kind
+        entry = {"kind": "task", "attempt": attempt, "name": session, "worktree": worktree, "model": model,
+                 **profile_field(profile)}
+    return path, said, drift, entry, id_note
+
+
+def attempt_edit(run, task, attempt, session, model, entry, event, keep, unset):
+    """The one tg edit that records the start of an attempt (launch, round): its session, model, number, start time and
+    sessions entry, the phase that `event` moves the task to, the `keep` arguments, and the `unset` keys. The mailbox state
+    of earlier attempts goes."""
+    tid, phase = task["id"], next_phase(task, event)
+    table = mailbox_table(task)  # delivery state of earlier attempts goes; this attempt starts with none
+    left = {k: v for k, v in table.items() if isinstance(v, dict) and (v.get("attempt") or 0) >= attempt}
+    if left != table and left:
+        keep = keep + [meta_arg("mailbox", left)]
+    lower_flag(run, tid)
+    run.tg("edit", str(tid), "--meta", meta_arg("session", session), meta_arg("model", model),
+           meta_arg("attempt", attempt), meta_arg("started_at", run.now()),
+           meta_arg("sessions", recorded_sessions(task) + [entry]), meta_arg("phase", phase),
+           *keep, "--unset-meta", *unset, *(["mailbox"] if table and not left else []))
 
 
 def refuse_past_cap(tid, nxt, latest, override):
@@ -2727,7 +2867,8 @@ def cmd_adopt(run, args):
         raise Refused(f'#{tid} is a {task["type"]}, not a task')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
-    refuse_closed(task)
+    refuse_closed(run, task)
+    refuse_round(task)
     refuse_legacy(run, task)
     current = wanted_attempt(task) or 0
     if meta.get("abandoned"):
@@ -2787,30 +2928,38 @@ def cmd_adopt(run, args):
 
 # ------------------------------------------------------------------ verify
 
-def refuse_closed(task):
+def refuse_closed(run, task):
     """Refuse a command that would start or change an attempt of a task that was closed and waits for its merge."""
     if not awaiting(task):
         return
     tid = task["id"]
     if task_phase(task) == "merged":
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
+    rounds = round_next(run, task)
     raise Refused(f"#{tid} is closed and waits for the merge of its change; run.py record follows the merge, "
                   f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} <mode> drops it; "
-                  f"{redo_text(task)}")
+                  + (f"on a conflict: {rounds}; " if rounds else "") + redo_text(task))
 
 
-def refuse_unless_running(task):
+def refuse_round(task):
+    """Refuse a command that would start or adopt an attempt of a task in a round: the round is the attempt."""
+    if in_round(task):
+        raise Refused(f"#{task['id']} is in a {task['meta'].get('round')} round (attempt {wanted_attempt(task)}); "
+                      f"run.py round {task['id']} --cancel ends it")
+
+
+def refuse_unless_running(run, task):
     tid = task["id"]
     meta = task.get("meta") or {}
     if task["status"] != "in_progress" or wanted_attempt(task) is None:
         raise Refused(f"#{tid} is not in progress with an attempt")
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']})")
-    refuse_closed(task)
+    refuse_closed(run, task)
     return wanted_attempt(task)
 
 
-def worker_for(run, tid, attempt, result_id=None):
+def worker_for(run, tid, attempt, result_id=None, task=None):
     rows = run.results_for(tid)
     if result_id is not None:
         found = [r for r in rows if r["id"] == result_id and r["kind"] == "task"]
@@ -2821,7 +2970,7 @@ def worker_for(run, tid, attempt, result_id=None):
         raise Refused(f"#{tid} has no worker result for attempt {attempt}; run run.py record")
     if worker["status"] != "PASS":
         raise Refused(f"#{tid} attempt {attempt} reported {worker['status']}, not PASS; "
-                      f"a fix round is run.py launch {tid}")
+                      + (round_redo(task) if task is not None and in_round(task) else f"a fix round is run.py launch {tid}"))
     return rows, worker
 
 
@@ -2833,12 +2982,12 @@ def cmd_verify(run, args):
     if mode != "session":
         verify_kind(run, task)
         return verify_ci(run, args, task, mode[3:])
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     phase = next_phase(task, "verify")  # before the verifier starts
     role = verify_role(run, task)  # refused when the role of this attempt has no file or a broken one
     role_size_warning(run, task, role, attempt)
     kind = verify_kind(run, task)
-    rows, worker = worker_for(run, tid, attempt, args.result)
+    rows, worker = worker_for(run, tid, attempt, args.result, task)
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
     if not ref:
         raise Refused(f"result #{worker['id']} has no Head: line; pass --ref")
@@ -2921,8 +3070,8 @@ def verify_ci(run, args, task, name):
     tid = task["id"]
     if args.ref or args.model or args.effort or args.dry_run:
         raise Refused("verify_mode=ci runs on the branch head and starts no session; drop --ref/--model/--effort/--dry-run")
-    attempt = refuse_unless_running(task)
-    rows, worker = worker_for(run, tid, attempt, args.result)
+    attempt = refuse_unless_running(run, task)
+    rows, worker = worker_for(run, tid, attempt, args.result, task)
     head = tail_or_none(HEAD_ANY.search(worker["body"]))
     if not is_sha(head):
         raise Refused(f"ci verification needs a commit on the branch; result #{worker['id']} has no Head:")
@@ -2941,7 +3090,7 @@ def verify_ci(run, args, task, name):
         rows = ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs)
         if rows is not None:
             emit_verified(run, tid, attempt, [r for r in task_rows(rows, attempt, "verify") if r.get("author") == "ci"][-1],
-                          verify_kind(run, task, strict=False))
+                          verify_kind(run, task, strict=False), task)
         return
     where = f"{name} on {pr_branch} at {head[:7]}"
     ok, why = run.host().dispatch(pr_branch, name)
@@ -2974,14 +3123,14 @@ def ci_evaluate(run, task, rows, attempt, name, head, pr_branch, runs):
     return run.results_for(tid)
 
 
-def emit_verified(run, tid, attempt, row, kind):
+def emit_verified(run, tid, attempt, row, kind, task=None):
     level = verdict_of(row)
     nxt = f"run run.py close {tid}"
     problem = unlabelled_failure(row)
     if problem:
         nxt = unlabelled_next(tid, problem)
     elif row["author"] == "ci" and level == "verify-failed":
-        nxt += " (records verify-failed), then " + retry_next(tid, attempt, lead="fix round: ")
+        nxt += " (records verify-failed), then " + retry_next(tid, attempt, lead="fix round: ", task=task)
     elif row["author"] == "ci" and level == "verify-blocked":
         nxt = f"run.py verify {tid} --again"
     if level == "test-verified" and kind != "code":
@@ -3210,7 +3359,7 @@ def file_died(run, task, attempt, s, why):
     tid = task["id"]
     run.add_result(tid, "task", attempt, "manager", "DIED", f"session {s.sid} {s.status}/{s.state}, no result; {why}")
     carry_thread(run, task, attempt)
-    run.emit("died", tid, attempt, s.sid, f"filed DIED ({why})", retry_next(tid, attempt, "died"))
+    run.emit("died", tid, attempt, s.sid, f"filed DIED ({why})", retry_next(tid, attempt, "died", task=task))
 
 
 def deliver(run, task, row, interrupt=False):
@@ -3513,7 +3662,7 @@ def cmd_answer(run, args):
     tid = args.id
     task = run.show(tid)
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     rows = run.results_for(tid)
     th = Thread(rows, task, attempt)
     if args.ask is not None:
@@ -3558,7 +3707,7 @@ def cmd_steer(run, args):
     tid = args.id
     task = run.show(tid)
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     rows = run.results_for(tid)
     s = worker_session(run, tid, attempt, task)
     th = Thread(rows, task, attempt)
@@ -3677,28 +3826,43 @@ def record_arrived(run, snap, task, attempt, result):
         model = tail_or_none(MODEL_LINE.search(body))
         model = None if model == "unknown" else model or (session_model(task, found) if found else None)
         run.emit("stuck", tid, attempt, None, "filed earlier",
-                 PROMPT_HINT.format(sid=found or "<sid>", cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
+                 PROMPT_HINT.format(sid=found or "<sid>", cmd=retry_next(tid, attempt, "stuck", task=task)) + pinned_hint(model))
         return
     answered = [d for d in task.get("depends_on") or []
                 if d in snap.by_id and snap.by_id[d]["type"] == "decision" and snap.by_id[d]["status"] == "done"]
     meta = task.get("meta") or {}
     if status == "BLOCKED" and answered:
         run.emit("arrived", tid, attempt, None, f"BLOCKED by {result.get('author') or 'unknown'} (result #{result['id']})",
-                 f"decision #{answered[0]} answered; " + retry_next(tid, attempt))
+                 f"decision #{answered[0]} answered; " + retry_next(tid, attempt, task=task))
         return
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
-        nxt = (f"run.py verify {tid}" if str(meta.get("verify_mode") or "").startswith("ci:") or meta.get("risk") == "high"
-               or verify_kind(run, task, strict=False) != "code"
+        carried = round_carry(run, task, tail_or_none(HEAD_ANY.search(result.get("body") or "")))
+        always = in_round(task) and run.config["rounds"]["verify"] == "always"  # a round's change goes to a verifier
+        nxt = (f"run.py close {tid} (the verdict of {str(meta.get('round_from'))[:7]} carries over: {carried})" if carried
+               else f"run.py verify {tid}" if always or str(meta.get("verify_mode") or "").startswith("ci:")
+               or meta.get("risk") == "high" or verify_kind(run, task, strict=False) != "code"
                else f"rerun VERIFY in <Worktree:>, then run.py close {tid} --verdict L --ran \"...\"")
         adopted = WORKTREE_LINE.search(result.get("body") or "")
         detail += "; adopted" if adopted and adopted.group(1).strip() == "None" else ""
     elif status == "ISSUES":
-        nxt = retry_next(tid, attempt, lead="fix round: ")
+        nxt = retry_next(tid, attempt, lead="fix round: ", task=task)
     else:
-        nxt = (retry_next(tid, attempt, before="answer it and ") + ', or tg add "<question>" --type decision '
+        nxt = (retry_next(tid, attempt, before="answer it and ", task=task) + ', or tg add "<question>" --type decision '
                f"--meta decider=operator --blocks {tid}")
     run.emit("arrived", tid, attempt, None, detail, nxt)
+
+
+def round_carry(run, task, head):
+    """In a round, why the PASS head `head` keeps the verdict of round_from with no verifier: it carries the same change
+    as round_from (same_change against round_onto); None when it does not, or outside a round."""
+    meta = task.get("meta") or {}
+    if not in_round(task) or not is_sha(head) or not commit_of(run, head) or not meta.get("round_onto"):
+        return None
+    start, onto = str(meta["round_from"]), str(meta["round_onto"])
+    if commit_of(run, head) == commit_of(run, start):
+        return f"the head is {start[:7]} itself"
+    return f"the same change on {onto[:7]}" if same_change(run, task, start, head, ref=onto)[0] else None
 
 
 def parse_report(text, tid, verifier=False):
@@ -3824,7 +3988,7 @@ def salvage_verifier(run, task, attempt, session):
     return added
 
 
-def commit_stopped(run, tid, attempt, rows, sessions):
+def commit_stopped(run, tid, attempt, rows, sessions, task=None):
     """Phase 2 of a pause: commit the WIP of a stopped worker that has exited. The row it files copies the
     Reason: line of the row that run.py stop filed."""
     stopped = [r for r in task_rows(rows, attempt) if r["status"] == "STOPPED"]
@@ -3845,7 +4009,7 @@ def commit_stopped(run, tid, attempt, rows, sessions):
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
                        f"Session: {sid}\nWorktree: {wt}\nBranch: None\nHead: None\n{reason}Files: None")
         run.emit("stopped", tid, attempt, sid, f"folder {rel} is a plain folder, not a git worktree; move or delete "
-                 "it yourself; nothing committed", stopped_next(tid, attempt, stopped[-1]))
+                 "it yourself; nothing committed", stopped_next(tid, attempt, stopped[-1], task=task))
         return
     on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
     if on != task_branch(tid):  # a commit here would not be on the task branch
@@ -3853,9 +4017,10 @@ def commit_stopped(run, tid, attempt, rows, sessions):
         where = f"on {on}" if on else f"on a detached HEAD at {at[:7]}"
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
                        f"Session: {sid}\nWorktree: {wt}\nBranch: {on or 'None'}\nHead: None\n{reason}Files: None")
+        fix = (f"fix the branch ({detached_or_wrong(run, wt, rel, on, task_branch(tid))}), then "
+               if task is not None and in_round(task) else "fix the branch (launch says how), then ")
         run.emit("stopped", tid, attempt, sid, f"{rel} is {where}, not {task_branch(tid)}; nothing committed; "
-                 "its uncommitted work stays there",
-                 stopped_next(tid, attempt, stopped[-1], before="fix the branch (launch says how), then "))
+                 "its uncommitted work stays there", stopped_next(tid, attempt, stopped[-1], before=fix, task=task))
         return
     porcelain = run.git("status", "--porcelain", cwd=wt).stdout.rstrip("\n")
     if porcelain:
@@ -3867,7 +4032,7 @@ def commit_stopped(run, tid, attempt, rows, sessions):
                    f"Session: {sid}\nWorktree: {wt}\nBranch: {branch}\nHead: {head}\n{reason}Files: {porcelain or 'None'}")
     run.emit("stopped", tid, attempt, sid,
              (f"WIP committed {head} on {branch}" if porcelain else f"worktree clean at {head} on {branch}"),
-             stopped_next(tid, attempt, stopped[-1]))
+             stopped_next(tid, attempt, stopped[-1], task=task))
 
 
 def ci_target(run, task, rows):
@@ -3902,7 +4067,7 @@ def record_in_progress(run, snap, task, unmanaged):
     mine = own_sessions(run, tid, "task", attempt)
     paused = task_rows(rows, attempt)
     if paused and paused[-1]["status"] == "STOPPED" and not HEAD_ANY.search(paused[-1]["body"]):
-        commit_stopped(run, tid, attempt, rows, mine)  # finish the pause first: launch needs its Head line
+        commit_stopped(run, tid, attempt, rows, mine, task)  # finish the pause first: launch needs its Head line
         return
     holds = False  # a worker that waits for an answer, or has a message it has not acked, is not dead and not stuck
     failed = False
@@ -3988,14 +4153,14 @@ def record_in_progress(run, snap, task, unmanaged):
                           if r.get("author") == "manager" and verdict_of(r)), default=0)
     with_verdict = [r for r in verdicts if verdict_of(r) and r["id"] > newest_manager]
     if with_verdict and (not meta.get("verdict") or verdict_of(with_verdict[-1]) != meta.get("verdict")):
-        emit_verified(run, tid, attempt, with_verdict[-1], verify_kind(run, task, strict=False))
+        emit_verified(run, tid, attempt, with_verdict[-1], verify_kind(run, task, strict=False), task)
         return
     if verdicts and not any(verdict_of(r) for r in verdicts) and not meta.get("verdict"):
         run.emit("verified", tid, attempt, None, f"no Verdict line (result #{verdicts[-1]['id']} by {verdicts[-1]['author']})",
                  f"run run.py close {tid} --verdict L")
         return
     if meta.get("verdict"):
-        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], attempt, verify_kind(run, task, strict=False)))
+        run.emit("unclosed", tid, attempt, None, f"verdict {meta['verdict']}", unclosed_next(tid, meta["verdict"], attempt, verify_kind(run, task, strict=False), task))
         return
     results = task_rows(rows, attempt)
     if not results:
@@ -4012,14 +4177,14 @@ def record_in_progress(run, snap, task, unmanaged):
             carry_thread(run, task, attempt)
             transition(run, task, "stopped")
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}{on_profile(s)}; filed BLOCKED ({reason})",
-                     PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck")) + pinned_hint(model))
+                     PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck", task=task)) + pinned_hint(model))
         elif busy:
             run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name}{on_profile(busy[0])})")
         elif unknown:
             s = unknown[0]
             run.emit("unknown", tid, attempt, s.sid, f"session {s.sid}{on_profile(s)} status={s.status} state={s.state}; not filed as DIED",
                      f"claude logs {s.sid}; if it has stopped working, "
-                     + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and "))
+                     + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and ", task=task))
         else:
             s = mine[-1] if mine else None
             report = report_path(run, f"task-{tid}", str(meta.get("session") or f"task-{tid}-{attempt}"))
@@ -4044,19 +4209,20 @@ def record_in_progress(run, snap, task, unmanaged):
                 carry_thread(run, task, attempt)
                 transition(run, task, "died")
                 way_out = (f"; a failed session may be an account problem: the open thread goes into the next brief, so relaunch "
-                           f"(run.py launch {tid} --profile <name> for another account) or abandon" if failed else "")
+                           f"(run.py launch {tid} --profile <name> for another account) or abandon"
+                           if failed and not in_round(task) else "")
                 run.emit("died", tid, attempt, s.sid if s else None, "filed DIED" + (f" ({s.state})" if failed else ""),
-                         retry_next(tid, attempt, "died") + way_out)
+                         retry_next(tid, attempt, "died", task=task) + way_out)
         return
     latest = results[-1]
     if latest["status"] == "STOPPED":
         if HEAD_ANY.search(latest["body"]):
             run.emit("stopped", tid, attempt, None, f"head {tail_or_none(HEAD_ANY.search(latest['body'])) or 'None'}",
-                     stopped_next(tid, attempt, latest))
+                     stopped_next(tid, attempt, latest, task=task))
         else:
-            commit_stopped(run, tid, attempt, rows, mine)
+            commit_stopped(run, tid, attempt, rows, mine, task)
     elif latest["status"] == "DIED":
-        run.emit("died", tid, attempt, None, "filed earlier", retry_next(tid, attempt, "died"))
+        run.emit("died", tid, attempt, None, "filed earlier", retry_next(tid, attempt, "died", task=task))
     else:
         record_arrived(run, snap, task, attempt, latest)
 
@@ -4130,6 +4296,12 @@ def record_closed(run, snap, task):
         else:
             if not merge_gate(task):
                 branch_gate(run, task, closed_branch(snap, task))
+            clash, _, why = conflicts_with_target(run, task, sha)
+            if clash:
+                run.emit("conflict", tid, None, None, f"branch {task_branch(tid)} at {sha[:7]}: {why}",
+                         conflict_next(run, task, decision_text(
+                             f"Resolve merge of {task_branch(tid)} into {target_name(run, task)}", task, snap)))
+                return
             waits = [b for b in task.get("blocks") or [] if b in snap.by_id and snap.by_id[b]["status"] != "done"]
             run.emit("unmerged", tid, None, None,
                      f"branch {task_branch(tid)} at {sha} is ready to merge; blocks {ids_text(waits)}")
@@ -4163,8 +4335,10 @@ def host_guard(run, task, fn, *args):
 
 
 def record_task(run, snap, task, unmanaged):
-    """record's part for one task in progress: settle the phase, then follow the rows."""
+    """record's part for one task in progress: settle the phase, then the request of a round, then follow the rows."""
     if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
+        if in_round(task) and record_round(run, snap, task):
+            return
         record_in_progress(run, snap, task, unmanaged)
 
 
@@ -4231,9 +4405,9 @@ def wait_host(run, snap, watched):
     """The code host part of what `wait` compares: the request of each closed task that is not merged, and the
     newest CI run of each watched task that `record` reads runs for. A host failure is the value "error"."""
     found = {}
-    for task in snap.closed:
+    for task in snap.closed + [t for t in snap.in_progress if in_round(t)]:  # a round pushes to its request again
         meta = task.get("meta") or {}
-        if not unmerged(task) or not meta.get("pr"):
+        if not (unmerged(task) or in_round(task)) or not meta.get("pr"):
             continue
         try:
             host = run.host()
@@ -5024,7 +5198,7 @@ def verdict_comment(run, task, attempt, level, ref, kind, source):
     the comment by. `source` is the verify result the verdict comes from, or None."""
     tid = task["id"]
     closes = level in PASSING[kind]
-    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, attempt, kind)}."
+    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, attempt, kind, task)}."
     by = f"by {source['author']} (verify result #{source['id']})" if source else "with no verify result on file"
     evidence = ""
     if source:
@@ -5168,7 +5342,7 @@ def host_catch_up(run, task, branch, head, p):
     if kind == "conflict":
         run.unset_meta(task, "host_rebase")
         run.emit("conflict", tid, attempt, None, f"the host could not rebase {label} onto {target}: {why}",
-                 decision_text(f"Rebase {branch} onto {target} for {label}", task))
+                 conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
         return
     if kind == "current":
         run.unset_meta(task, "host_rebase")
@@ -5191,7 +5365,7 @@ def host_catch_up(run, task, branch, head, p):
         if error:
             run.unset_meta(task, "host_rebase")
             run.emit("conflict", tid, attempt, None, f"the host could not rebase {label} onto {target}: {error}",
-                     decision_text(f"Rebase {branch} onto {target} for {label}", task))
+                     conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
             return
     run.emit("pr-pending", tid, attempt, None,
              f"{label}: the host has not finished the rebase after {(CATCH_UP_POLLS - 1) * CATCH_UP_WAIT} seconds",
@@ -5249,7 +5423,7 @@ def rebase_branch(run, task, branch, head, p):
     if run.git("rebase", run.target_ref(task), cwd=wt, check=False).returncode != 0:
         run.git("rebase", "--abort", cwd=wt, check=False)
         run.emit("conflict", tid, attempt, None, f"rebasing {branch} onto {remote}/{target} conflicted; rebase aborted",
-                 decision_text(f"Rebase {branch} onto {target} for {label}", task))
+                 conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
         return
     new = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
     same, reason = same_change(run, task, head, new)
@@ -5311,7 +5485,7 @@ def pr_status(run, snap, task, p):
         run.emit("pr-draft", tid, None, None, f"{label} is a draft", "mark it ready on the host")
     elif p.merge_state == "DIRTY":
         run.emit("conflict", tid, None, None, f"{label} conflicts with {target}",
-                 decision_text(f"Resolve {label} conflicts with {target}", task, snap))
+                 conflict_next(run, task, decision_text(f"Resolve {label} conflicts with {target}", task, snap)))
     elif p.merge_state == "BEHIND":
         how = ("asks the host to rebase it" if run.config["merge"]["catch_up"] == "host"
                else f"rebases onto {run.config['merge']['remote']}/{target} and pushes again")
@@ -5488,6 +5662,367 @@ def cmd_repoint(run, args):
         run.emit("superseded", tid, None, None, f"{old_label} closed with a comment that names {label}")
 
 
+# ------------------------------------------------------------------- round
+#
+# A round (#119) is a new attempt of a task that waits for its merge, on the same branch and request: the phase goes from
+# awaiting_merge to running, and the attempt then follows the usual flow (record, verify, close). The kind names what the
+# round is for, and the role (the file named like the kind) whose Method and Review the worker and the verifier get.
+# ROUND_KINDS says whether a kind applies now and gives its target commit (round_onto); nothing else here knows a kind.
+# round_from is the verified head and round_verdict its verdict: a cancel, a carry at close, and a merge of that head
+# during the round restore them.
+
+def round_count(task):
+    try:
+        return int((task.get("meta") or {}).get("rounds") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def target_name(run, task):
+    """The name of the branch the task merges into: run.target in pr mode; in local mode the target meta, merge.base, else
+    the branch of the main checkout (as merge_refs)."""
+    if run.pr_mode:
+        return run.target(task)
+    return (str((task.get("meta") or {}).get("target") or "") or run.config["merge"]["base"]
+            or run.git("branch", "--show-current", check=False).stdout.strip() or "HEAD")
+
+
+def conflicts_with_target(run, task, head, p=None):
+    """The `rebase` round kind: (True, onto, why) when the change at `head` conflicts with the task's target, as the host
+    says (request `p` is DIRTY) or as `git merge-tree --write-tree <target> <head>` finds; else (False, onto, why). `onto`
+    is the target commit: the fetched remote branch in pr mode, the local target branch in local mode."""
+    name = target_name(run, task)
+    onto = commit_of(run, run.target_ref(task) if run.pr_mode else f"refs/heads/{name}")
+    if not onto:
+        return False, None, f"the target branch {name} is not in this clone"
+    if p is not None and p.merge_state == "DIRTY":
+        return True, onto, f"{run.host().label(p.number)} conflicts with {name} (the host says so)"
+    if not commit_of(run, head):
+        return False, onto, f"{head[:7]} is not a commit in this clone"
+    out = run.git("merge-tree", "--write-tree", onto, head, check=False)
+    if out.returncode == 1 and COMMIT_SHA.fullmatch(out.stdout.split("\n", 1)[0].strip()):  # exit 1 with a tree: a conflict
+        return True, onto, f"it conflicts with {name} at {onto[:7]} (git merge-tree)"
+    if out.returncode != 0:
+        return False, onto, f"git merge-tree failed: {first_line(out.stderr) or 'no output'}"
+    return False, onto, f"{head[:7]} merges into {name} at {onto[:7]} with no conflict"
+
+
+ROUND_KINDS = {"rebase": conflicts_with_target}
+
+
+def round_next(run, task):
+    """The rebase round that start_round lets through for a conflict, or None: a repointed task's request is another
+    task's, and from [rounds] cap on a round needs the --attempt override."""
+    tid, cap = task["id"], run.config["rounds"]["cap"]
+    if repointed(task):
+        return None
+    if round_count(task) < cap:
+        return f"run.py round {tid} rebase"
+    return f"run.py round {tid} rebase --attempt {(wanted_attempt(task) or 1) + 1} to override the cap of {cap} rounds"
+
+
+def conflict_next(run, task, decision):
+    """The next step of a conflict line: a rebase round on the same request below [rounds] cap, else the decision with
+    the override. A repointed task's request is another task's, so it gets the decision only."""
+    rounds = round_next(run, task)
+    if rounds is None:
+        return decision
+    if round_count(task) < run.config["rounds"]["cap"]:
+        return f"{rounds} (a new attempt on the same request), or {decision}"
+    return f"{decision}; or {rounds}"
+
+
+def cmd_round(run, args):
+    if args.cancel:
+        if args.kind:
+            raise Refused(f"--cancel ends the round of #{args.id} whatever its kind; drop {args.kind}")
+        return cancel_round(run, args)
+    if not args.kind:
+        raise Refused(f"name the kind: run.py round {args.id} <{'|'.join(sorted(ROUND_KINDS))}>, or --cancel")
+    return start_round(run, args)
+
+
+def start_round(run, args):
+    """Start a round of kind args.kind on a task that waits for its merge. Every check comes before the first write."""
+    tid, kind = args.id, args.kind
+    orders = run.orders()
+    if orders.stop:
+        raise Refused(f"standing orders say {orders.stop_line!r}; start no round", 3)
+    if args.keyword and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", args.keyword):
+        raise Refused(f"keyword {args.keyword!r} may hold letters, digits, and hyphens only")
+    task = run.show(tid)
+    meta = task.setdefault("meta", {})
+    if task["type"] != "task":
+        raise Refused(f'#{tid} is a {task["type"]}, not a task')
+    if task["status"] == "done":
+        raise Refused(f"#{tid} is done")
+    if meta.get("abandoned"):
+        raise Refused(f"#{tid} is abandoned ({meta['abandoned']}); run.py launch {tid} --attempt "
+                      f"{(wanted_attempt(task) or 0) + 1} to try again")
+    if in_round(task):
+        raise Refused(f"#{tid} is already in a {meta.get('round')} round (attempt {wanted_attempt(task)}); "
+                      f"run.py round {tid} --cancel ends it")
+    refuse_legacy(run, task)
+    if (task["status"] == "in_progress" and stored_phase(task) is None
+            and derive_phase(task, kind=verify_kind(run, task, strict=False)) == "awaiting_merge"):
+        raise Refused(f"#{tid} waits for its merge but has no stored phase (closed by an older run.py); run.py record "
+                      "stores it, then rerun")
+    if task["status"] != "in_progress" or stored_phase(task) != "awaiting_merge" or not unmerged(task):
+        raise Refused(f"#{tid} does not wait for its merge (status {task['status']}, phase {task_phase(task) or 'none'}); "
+                      "a round starts from phase awaiting_merge")
+    if repointed(task):
+        raise Refused(f"#{tid} follows {run.label(int(meta['pr']))} (run.py repoint), which another task owns; the round "
+                      "of that task updates it")
+    current = wanted_attempt(task) or 0
+    if args.attempt is not None and args.attempt <= current:
+        raise Refused(f"--attempt {args.attempt} is not after attempt {current}")
+    done, cap = round_count(task), run.config["rounds"]["cap"]
+    if done >= cap and args.attempt is None:
+        raise Refused(f"#{tid} has had {done} round{'s' * (done != 1)}, the cap ([rounds] cap = {cap}); add the decision "
+                      f"of the conflict line, or pass --attempt {current + 1} to override")
+    start = commit_of(run, str(meta["verdict_ref"]))
+    if not start:
+        raise Refused(f"the verified commit {meta['verdict_ref']} of #{tid} is not in this clone; fetch it")
+    p = None
+    if run.pr_mode:
+        if not meta.get("pr"):
+            raise Refused(f"#{tid} has no request yet; run.py close {tid} publishes it")
+        if not meta.get("pushed") or commit_of(run, str(meta["pushed"])) != start:
+            raise Refused(f"#{tid}: the pushed head {str(meta.get('pushed') or 'none')[:7]} is not the verified head "
+                          f"{start[:7]}; run.py close {tid} publishes it")
+        p = run.host().pr(int(meta["pr"]))
+        label = run.host().label(p.number)
+        if p.state == "MERGED":
+            raise Refused(f"{label} is merged; run.py record records it")
+        if p.state == "CLOSED":
+            raise Refused(f"{label} is closed without a merge; reopen it on the host, then run.py record")
+        if p.head != str(meta["pushed"]):
+            raise Refused(f"{label} head is {p.head[:7]}, not the pushed {str(meta['pushed'])[:7]}: someone else pushed; "
+                          f"the operator decides (reset the branch and push, or merge by hand and run.py merged {tid})")
+    needed, onto, why = ROUND_KINDS[kind](run, task, start, p)
+    if not needed:
+        then = (f"run.py close {tid} catches it up" if p is not None and p.merge_state == "BEHIND"
+                else "run.py record follows " + ("the request" if run.pr_mode else "the branch"))
+        raise Refused(f"#{tid}: no {kind} round is needed: {why}; {then}")
+    live = [s for s in run.sessions() if s.task_id == tid and s.live]
+    if live:
+        raise Refused(f"#{tid} has a live session {live[0].describe()}; run.py close {tid} stops it")
+    wt, branch, rel = task_worktree(run, tid), task_branch(tid), f".claude/worktrees/task-{tid}"
+    held = commit_of(run, str(meta["caught_up_from"])) if meta.get("caught_up_from") else None
+    if os.path.lexists(wt):
+        if os.path.realpath(wt) not in registered_worktrees(run):
+            raise Refused(f"folder {rel} is a plain folder, not a git worktree; move or delete it yourself")
+        on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+        if on != branch:
+            raise Refused(detached_or_wrong(run, wt, rel, on, branch))
+        head, reattach = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip(), False
+        dirty = run.git("status", "--porcelain", cwd=wt).stdout.splitlines()
+        if dirty:
+            raise Refused(f"{rel} has uncommitted changes ({files_text([line[3:] for line in dirty], 5)}); a round starts "
+                          "at the verified head: commit them on another branch or remove them, then rerun")
+    else:
+        head, reattach = commit_of(run, f"refs/heads/{branch}"), True
+    if not head:
+        raise Refused(f"branch {branch} is missing, not at the verified head {start[:7]}; run git branch {branch} "
+                      f"{start[:7]}, then rerun")
+    if head not in (start, held):
+        raise Refused(f"{rel if not reattach else 'branch ' + branch} is at {head[:7]}, not the verified "
+                      f"head {start[:7]}; put {branch} back at {start[:7]} (git -C {rel} log shows what is on it), then rerun")
+    if not args.dry_run:
+        ignore_reports(run)
+        ignore_scratch(run)
+    verify_mode(run, task)
+    role = load_role(run, kind, f"round kind {kind}")
+    stored, picked = stored_choice(task) or {}, choose(run, task, strict=False)
+    if args.tier:
+        tier, tier_from = args.tier, "--tier"
+    elif role.tier:
+        tier, tier_from = role.tier, f"role {kind}"
+    elif stored.get("tier"):
+        tier, tier_from = str(stored["tier"]), f"attempt {current}"
+    else:
+        tier, tier_from = picked.tier, picked.tier_from
+    choice = Choice(role, tier, tier_from, verify_kind(run, task), "task")
+    nxt = args.attempt or current + 1
+    session = f"task-{tid}-{nxt}" + (f"-{args.keyword}" if args.keyword else "")
+    role_size_warning(run, task, role, nxt)
+    asks = asks_cap(run, task, tier)
+    fields = {"round": kind, "round_from": start, "round_verdict": meta["verdict"], "round_onto": onto, "rounds": done + 1}
+    view = {**task, "meta": {**meta, **fields, "attempt": nxt}}
+    text = render(run, view, "task", nxt, session, base=start, retry=True, cap=asks, role=role)
+    check_cap(run)
+    model, effort, profile = worker_model(run, args, tier)
+    next_phase(task, "round")  # an event the table refuses stops the command before anything starts
+    if args.dry_run:
+        dry_run(run, tid, nxt, session, profile, model, effort, text)
+        return
+    notes = []
+    if reattach:
+        if os.path.realpath(wt) in worktree_locks(run):
+            raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
+                          "then git worktree prune, then rerun")
+        run.git("worktree", "prune")
+        out = run.git("worktree", "add", "-q", wt, branch, check=False)
+        if out.returncode != 0:
+            raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
+        notes.append(f"reattached {branch}")
+    if head != start:  # the branch stayed at the head the host rebased; the verified head is the same change
+        run.git("reset", "--keep", start, cwd=wt)
+        notes.append(f"moved {branch} from {head[:7]} to the host's head {start[:7]} (the same change)")
+    if current:
+        carry_thread(run, task, current)
+    path, said, drift, entry, id_note = start_worker(run, view, nxt, session, text, model, effort, profile, start, asks, False)
+    attempt_edit(run, task, nxt, session, model, {**entry, **choice.stored, "round": kind}, "round",
+                 [meta_arg(k, v) for k, v in fields.items()], ["verdict", "verdict_ref", "host_rebase", "caught_up_from"])
+    request = f" of {run.label(int(meta['pr']))}" if run.pr_mode else ""
+    run.emit("round-started", tid, nxt, session,
+             f"{kind} round {done + 1} of {cap}{request}: {model}{'/' + effort if effort else ''}"
+             f"{' ' + profile_label(profile) if profile_label(profile) else ''} session {session} worktree {rel} at "
+             f"{start[:7]}, onto {onto[:7]}; brief {path}; {choice.tier_text}" + "".join(f"; {n}" for n in notes)
+             + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
+             + (f"; {drift}" if drift else ""))
+
+
+def git_operation(run, wt):
+    """The git operation in progress in worktree `wt` that `git <op> --abort` undoes: rebase, merge, cherry-pick, or None."""
+    for op, names in (("rebase", ("rebase-merge", "rebase-apply")), ("merge", ("MERGE_HEAD",)),
+                      ("cherry-pick", ("CHERRY_PICK_HEAD",))):
+        for name in names:
+            if os.path.exists(os.path.join(wt, run.git("rev-parse", "--git-path", name, cwd=wt).stdout.strip())):
+                return op
+    return None
+
+
+def cancel_round(run, args):
+    """End the round of a task: its sessions stop, its head is kept in a ref, the branch goes back to round_from, the
+    request (pr mode) is at round_from again, and the task waits for its merge with the verdict it had."""
+    tid = args.id
+    task = run.show(tid)
+    meta = task.setdefault("meta", {})
+    if task["status"] != "in_progress" or not in_round(task):
+        raise Refused(f"#{tid} is not in a round" + (f" (abandoned: {meta['abandoned']})" if meta.get("abandoned") else ""))
+    refuse_legacy(run, task)
+    phase = next_phase(task, "round_cancel")
+    attempt, kind, verdict = wanted_attempt(task), meta.get("round"), meta.get("round_verdict")
+    start = commit_of(run, str(meta["round_from"]))
+    if not start:
+        raise Refused(f"the verified commit {meta['round_from']} of #{tid} is not in this clone; fetch it")
+    if run.pr_mode and meta.get("pr"):  # a merged request is record's: the merge decides the verdict (round_merged)
+        p = run.host().pr(int(meta["pr"]))
+        if p.state == "MERGED":
+            raise Refused(f"{run.host().label(p.number)} is merged; run.py record records it")
+    wt, branch, rel = task_worktree(run, tid), task_branch(tid), f".claude/worktrees/task-{tid}"
+    there = os.path.isdir(wt) and os.path.realpath(wt) in registered_worktrees(run)
+    if there:
+        on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+        if on != branch and git_operation(run, wt) != "rebase":  # a rebase in progress detaches HEAD
+            raise Refused(detached_or_wrong(run, wt, rel, on, branch))
+    workers = [s for s in own_sessions(run, tid, "task") if s.live]
+    stop_live(run, task, attempt, branch)
+    if not all(wait_for_exit(run, s) for s in workers):  # a commit under a running worker could take half its edit
+        run.emit("stopping", tid, attempt, None, "the round's worker was stopped and has not exited yet",
+                 f"run.py round {tid} --cancel again")
+        return
+    kept = f"refs/agentic-team/round/{tid}-{attempt}"
+    if there:
+        op = git_operation(run, wt)
+        if op:
+            run.git(op, "--abort", cwd=wt, check=False)
+            on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+            if on != branch:
+                raise Refused(f"after git {op} --abort, " + detached_or_wrong(run, wt, rel, on, branch)
+                              + f"; then run.py round {tid} --cancel again")
+        if run.git("status", "--porcelain", cwd=wt).stdout.strip():
+            run.git("add", "-A", cwd=wt)
+            run.git("commit", "-q", "-m", f"WIP task {tid} attempt {attempt}: {kind} round cancelled", cwd=wt)
+        head = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        run.git("update-ref", kept, head)
+        run.git("reset", "--keep", start, cwd=wt)
+    else:
+        head = commit_of(run, f"refs/heads/{branch}")
+        if head:
+            run.git("update-ref", kept, head)
+        run.git("update-ref", f"refs/heads/{branch}", start)
+    fields = {"verdict": verdict, "verdict_ref": start}
+    pushed = str(meta.get("pushed") or "")
+    if run.pr_mode and pushed and pushed != start:  # a CI verify of the round pushed its head: the request gets start back
+        ok, why = run.host().push(f"refs/heads/{branch}", meta.get("pr_branch") or f"task-{tid}", pushed)
+        if ok:
+            run.emit("pushed", tid, attempt, None, f"{start[:7]} back to {run.config['merge']['remote']}/"
+                     f"{meta.get('pr_branch') or f'task-{tid}'} (the round had pushed {pushed[:7]})")
+        else:
+            push_refused(run, task, pushed, why)
+        fields["pushed"] = start  # a lease that failed leaves the request at another head: record says pr-changed
+    run.add_result(tid, "verify", attempt, "manager", "PASS",
+                   f"Verdict: {verdict}\nCarried: {start} ({kind} round cancelled; its head is kept in {kept})\nHead: {start}\n")
+    run.write_meta(task, unset=ROUND_FIELDS, **fields, phase=phase)
+    if run.pr_mode and meta.get("pr"):
+        request_gate(run, task, int(meta["pr"]))
+    else:
+        branch_gate(run, task, branch)
+    run.emit("round-cancelled", tid, attempt, None,
+             f"the {kind} round ended; {branch} is back at {start[:7]} with verdict {verdict}"
+             + (f"; the round's head {head[:7]} is kept in {kept}" if head else ""), "run.py record")
+
+
+def record_round(run, snap, task):
+    """record's part for a task in a round, before its rows: the request the round will push to (pr mode), and whether
+    the round's kind still applies. True when the request merged and the merge is recorded."""
+    tid, meta = task["id"], task["meta"]
+    attempt, kind, start = wanted_attempt(task), meta.get("round"), str(meta["round_from"])
+    p = None
+    if run.pr_mode and meta.get("pr"):
+        p = run.host().pr(int(meta["pr"]))
+        label = run.host().label(p.number)
+        if p.state == "MERGED":
+            round_merged(run, task, p)
+            return True
+        if p.state == "CLOSED":
+            run.emit("pr-closed", tid, attempt, None, f"{label} closed without a merge during the {kind} round",
+                     f"the round goes on, and its close pushes to the closed request: reopen it on the host, or "
+                     f"{cancel_next(task)}")
+            return False
+        if p.head != meta.get("pushed"):
+            run.emit("pr-changed", tid, attempt, None, f"{label} head is {p.head[:7]}, not the pushed "
+                     f"{str(meta.get('pushed'))[:7]}; the round's close will be refused",
+                     f"the operator decides: reset the branch to {str(meta.get('pushed'))[:7]} and push, or "
+                     f"{cancel_next(task)}")
+            return False
+    check = ROUND_KINDS.get(str(kind))
+    if check and commit_of(run, start):
+        needed, _, why = check(run, task, start, p)
+        if not needed:
+            run.emit("round-not-needed", tid, attempt, None, f"the {kind} round is no longer needed: {why}",
+                     f"run.py round {tid} --cancel (the verified head {start[:7]} goes back as it is), or let the round finish")
+    return False
+
+
+def round_merged(run, task, p):
+    """The request of a round merged. The verdict of round_from carries only when the merged head is round_from (the
+    head pushed when the round started) or carries the same change; any other head is the operator's merge of a head no
+    verdict covers, as pr_status records one. The round's sessions stop, and the task is merged and done."""
+    tid, meta = task["id"], task["meta"]
+    attempt, kind, start = wanted_attempt(task), meta.get("round"), str(meta["round_from"])
+    label = run.host().label(p.number)
+    stop_live(run, task, attempt, task_branch(tid))
+    if p.head != start and not commit_of(run, p.head):
+        run.git("fetch", run.config["merge"]["remote"], f"refs/heads/{meta.get('pr_branch') or f'task-{tid}'}", check=False)
+    carry = p.head == start or bool(commit_of(run, p.head) and meta.get("round_onto")
+                                   and same_change(run, task, start, p.head, ref=str(meta["round_onto"]))[0])
+    fields = {}
+    if carry:
+        run.add_result(tid, "verify", attempt, "manager", "PASS",
+                       f"Verdict: {meta.get('round_verdict')}\nCarried: {start} (the request merged during the {kind} round "
+                       f"at {p.head})\nHead: {start}\n")
+        fields = {"verdict": meta.get("round_verdict"), "verdict_ref": start}
+    mark_merged(run, task, "operator", unset=ROUND_FIELDS, pushed=p.head, **fields)
+    run.emit("merged", tid, attempt, None,
+             f"{label} merged during the {kind} round at {p.merge_commit or 'unknown commit'}; "
+             + (f"its head carries the verified change of {start[:7]}: recorded merged_by=operator with that verdict" if carry
+                else f"its head {p.head[:7]} is not the verified {start[:7]}: recorded merged_by=operator, with no verdict"))
+    cleanup(run, task)
+
+
 # ------------------------------------------------------------------- close
 
 def transcript_usage(path):
@@ -5658,7 +6193,8 @@ def choose_verdict(run, args, task, rows, attempt):
     wanted = args.verdict
     if wanted not in ("verify-failed", "verify-blocked"):
         if level == "verify-failed":
-            raise Refused(f"a verify-failed verdict needs a fix round (run.py launch {tid}), not an override")
+            raise Refused("a verify-failed verdict needs " + (f"a new round ({round_redo(task)})" if in_round(task)
+                                                              else f"a fix round (run.py launch {tid})") + ", not an override")
         if OVERRIDE_RANK[wanted] > OVERRIDE_RANK.get(level, -1) and not EVIDENCE.search(args.ran or ""):
             raise Refused(f"an upgrade from {level} to {wanted} needs evidence in --ran: a CI run id or URL, or an artifact link")
     return wanted, True, (level, last)
@@ -5756,16 +6292,17 @@ def clear_merge_gate(run, task):
     tg_gate(run, task, "--clear")
 
 
-def mark_merged(run, task, by, **extra):
-    """Record that the task's change is in its target: merged_at, merged_by and phase merged in one write, then `tg done`.
-    Every merge record goes through here. A merge recorded earlier keeps its merged_at and merged_by."""
+def mark_merged(run, task, by, unset=(), **extra):
+    """Record that the task's change is in its target: merged_at, merged_by and phase merged in one write (with the
+    `unset` keys removed), then `tg done`. Every merge record goes through here. A merge recorded earlier keeps its
+    merged_at and merged_by."""
     meta = task.setdefault("meta", {})
     if not meta.get("merged_at"):
         fields = {"merged_at": run.now(), "merged_by": by, **extra}
         if meta.get("abandoned"):
-            run.set_meta(task, **fields)  # an abandoned task keeps its phase
+            run.write_meta(task, unset=unset, **fields)  # an abandoned task keeps its phase
         else:
-            transition(run, task, "merged", **fields)
+            transition(run, task, "merged", unset=unset, **fields)
     elif extra:
         run.set_meta(task, **extra)
     finish_merged(run, task)
@@ -5801,20 +6338,32 @@ def cmd_close(run, args):
         cleanup(run, task)
         return
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
-    rows, worker = worker_for(run, tid, attempt)
+    attempt = refuse_unless_running(run, task)
+    rows, worker = worker_for(run, tid, attempt, task=task)
     kind = verify_kind(run, task)
     branch_line = tail_or_none(BRANCH_LINE.search(worker["body"]))
-    level, manual, override = choose_verdict(run, args, task, rows, attempt)
-    ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
+    # A round's PASS with the same change as round_from, and no verifier verdict or --verdict, keeps round_verdict.
+    head = tail_or_none(HEAD_ANY.search(worker["body"]))
+    carried = (round_carry(run, task, head) if not args.verdict and not [r for r in verifier_rows(rows, attempt)
+                                                                        if verdict_of(r)] else None)
+    if not carried:
+        level, manual, override = choose_verdict(run, args, task, rows, attempt)
+    ref = args.ref or head
     if not ref:
         raise Refused(f"no Head: in result #{worker['id']}; pass --ref")
-    branch = branch_line or task_branch(tid)
+    branch, moved = branch_line or task_branch(tid), None
     if is_sha(ref):
         branch, new = branch_at(run, tid, attempt, worker, ref, task)
         if new != ref:
-            run.emit("rebased", tid, attempt, None, f"same change at {new[:7]} (verified at {ref[:7]}); verdict_ref moves")
-            ref = new
+            moved, ref = ref, new
+    if carried and ((args.ref and commit_of(run, args.ref) != commit_of(run, str(head)))
+                    or not round_carry(run, task, ref)):
+        carried = None  # the carry covers the worker's Head only; another ref needs a verdict
+        level, manual, override = choose_verdict(run, args, task, rows, attempt)
+    elif carried:
+        level, manual, override = str(meta["round_verdict"]), False, None
+    if moved:
+        run.emit("rebased", tid, attempt, None, f"same change at {ref[:7]} (verified at {moved[:7]}); verdict_ref moves")
     passing = level in PASSING[kind]
     phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")
     if manual:
@@ -5829,7 +6378,12 @@ def cmd_close(run, args):
         if override:
             run.emit("override", tid, attempt, None,
                      f"{override[0]} by {override[1]['author']} -> {level}; {args.override_verifier}")
-    run.edit_meta(tid, verdict=level, verdict_ref=ref, phase=phase)
+    if carried:
+        body = f"Verdict: {level}\nCarried: {meta['round_from']} ({meta.get('round')} round: {carried})\nHead: {ref}\n"
+        earlier = [r for r in task_rows(rows, attempt, "verify") if r.get("author") == "manager"]
+        if not (earlier and earlier[-1]["body"] == body):
+            run.add_result(tid, "verify", attempt, "manager", "PASS", body)
+    run.write_meta(task, unset=ROUND_FIELDS if passing and in_round(task) else (), verdict=level, verdict_ref=ref, phase=phase)
     entry = next((e for e in reversed(recorded_sessions(task)) if e.get("kind") == "task" and e.get("attempt") == attempt
                   and e.get("id")), None)  # an adopted attempt has an entry with no id
     if entry:  # the session run.py recorded for this attempt, and its row if claude still lists it
@@ -5850,14 +6404,14 @@ def cmd_close(run, args):
             run.emit("tokens", tid, None, sid or None,
                      f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
     if not passing:
-        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind))
+        run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind, task))
         post_verdict(run, task, attempt, level, ref, kind)
         return
     # The task is done when its change is merged. Until then it stays in progress with phase awaiting_merge, so the
     # tasks that depend on it do not get ready.
     stop_live(run, task, attempt, branch)
-    run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}")
-    meta.update(verdict=level, verdict_ref=ref, phase=phase)
+    run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}"
+             + (f"; the verdict of the round's verified head carries over: {carried}" if carried else ""))
     base = no_change(run, task, ref)
     if not is_sha(ref):
         finish_merged(run, task)
@@ -5899,10 +6453,8 @@ def merge_branch(run, task, branch):
         return
     run.git("merge", "--abort", check=False)
     branch_gate(run, task, branch)
-    blocks = [str(b["id"]) for b in task.get("blocks") or [] if b["derived_status"] != "done"]
     run.emit("conflict", tid, None, None, f"merging {branch} into {target} conflicted; merge aborted",
-             f'tg add "Resolve merge of {branch} into {target}" --type decision --meta decider=operator'
-             + (f" --blocks {' '.join(blocks)}" if blocks else ""))
+             conflict_next(run, task, decision_text(f"Resolve merge of {branch} into {target}", task)))
 
 
 # ------------------------------------------------- merged, stop, abandon
@@ -6193,7 +6745,8 @@ def cmd_status(run, args):
         elif arrived(task, rows):
             waiting.append((tid, task["title"], last, meta.get("session"), checkpoint))
         else:
-            in_flight.append((tid, task["title"], meta.get("session") or ("not managed" if attempt is None else None),
+            session = meta.get("session") or ("not managed" if attempt is None else None)
+            in_flight.append((tid, task["title"], f"{session} ({meta.get('round')} round)" if in_round(task) else session,
                               meta.get("model"), attempt,
                               meta.get("started_at"), last, checkpoint))
             named = [e for e in recorded_sessions(task) if e.get("name") == meta.get("session")]
@@ -6274,7 +6827,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -6312,6 +6865,19 @@ def build_parser():
     p.add_argument("--ref")
     p.add_argument("--ran", help="what you ran and saw (stored in your verify result)")
     p.add_argument("--override-verifier", metavar="REASON", help="change the verifier's verdict; an upgrade needs a run id or link in --ran")
+
+    p = sub.add_parser("round", help="start a new attempt of a task that waits for its merge, on the same branch and request; "
+                                     "--cancel ends it")
+    p.add_argument("id", type=int)
+    p.add_argument("kind", nargs="?", choices=sorted(ROUND_KINDS), help="what the round is for; its role file has this name")
+    p.add_argument("--cancel", action="store_true", help="end the round: the task waits again at its verified head")
+    p.add_argument("--keyword", help="one or two hyphenated words added to the session name")
+    p.add_argument("--tier", help="a tier or a models.overrides key (overrides the role's and the last attempt's)")
+    p.add_argument("--model", help="model alias (overrides the tier)")
+    p.add_argument("--effort", help="effort level (with --model, or to override the tier's)")
+    p.add_argument("--profile", help="Claude profile of the session: a name from [profiles], or default (overrides the tier)")
+    p.add_argument("--attempt", type=int, help="the attempt number; it also lifts the [rounds] cap")
+    p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
 
     p = sub.add_parser("merged", help="record that a task branch is merged")
     p.add_argument("id", type=int)
@@ -6389,13 +6955,14 @@ def build_parser():
 
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
+            "round": cmd_round,
             "merged": cmd_merged, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
             "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
-ADDR_COMMANDS = ("record", "launch", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
+ADDR_COMMANDS = ("record", "launch", "round", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
 # `status`, `inbox`, `steer --by operator` and the like may run in another Claude session, whose socket must not replace it
-LOCKED = ("launch", "adopt", "verify", "close", "merged", "repoint", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
+LOCKED = ("launch", "adopt", "verify", "close", "round", "merged", "repoint", "stop", "abandon", "answer", "steer")  # the commands that take a task id and change it
 
 
 def main(argv=None):
