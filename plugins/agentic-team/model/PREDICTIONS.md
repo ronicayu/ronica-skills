@@ -251,3 +251,50 @@ If a rule breaks: `NoMergeWithoutPassingVerdict` points at a merge path that wri
 `AttemptCap` at a round whose `rounds` did not grow; a dead end in a round state means a round hint whose action is
 refused (check `RoundCancel`'s guard first). A missing `round_cancel` or `merged` edge for one of the five phases means
 my reading of the reachable round states was wrong: find out why before adding an exclusion.
+
+# agentic-team 0.24.0 (#127, revisions)
+
+Written from the model before any run; this session could not run TLC or SANY. New in the model: the constants
+`REVISION_CAP`, `SEAT`, `REGRESS_127C`, `REGRESS_127H`, `REGRESS_127W`, `REGRESS_127A`; the variables `revision`,
+`workerKept`, `verifierKept`, `findingsOpen`, `verifierAt`, `vvRev`; the actions `Revise`, `WorkerAcksFindings`,
+`VerifyResume`, `WorkerKeepEnds`, `VerifierKeepEnds`; the rules `RevisionCap`, `ClosingVerdictOnFinalHead`,
+`NoConcurrentWriters`, `FindingsAckedBeforeReport`; and changed `UnclosedNext`, `ArrivedNext`, `VerifyAccepted`,
+`VerifyPlain`, `VerifyAgain`, `Record`, `Launch`, `LaunchStopsIdleThenRefuses`, `StopLive`, `Stop`, `Abandon`, `Merged`,
+`StartRound`, `WorkerFiles*`, `VerifierFiles*`, `FixRoundNeedsBlocking` and `NoSessionLeftAtEnd`. Every config of 0.23.0
+sets `REVISION_CAP = 0`, `SEAT = "own"` and the four `REGRESS_127*` FALSE, adds `RevisionBound` to CONSTRAINT and the
+four new rules.
+
+Why the 0.23.0 configs cannot change: with `REVISION_CAP = 0` every new action is disabled (`Revise` needs `RevisionOK`,
+which needs `REVISION_CAP > 0`; `VerifyResume` needs `revision > 0`; `WorkerAcksFindings` needs `findingsOpen`, set only by
+`Revise`; the keep-time steps need a `*Kept` flag, set TRUE only as `REVISION_CAP > 0`). Every changed action writes the new
+variables to their `Init` values there (`workerKept' = (REVISION_CAP > 0)` is FALSE, `verifierAt' = revision` is 0,
+`vvRev' = verifierAt` is 0), and the new guards are TRUE (`ReportAllowed`, the seat rule with `SEAT = "own"`,
+`~(revision > 0 /\ verifierKept)`), and `RevisionOK` is FALSE, so `UnclosedNext` is `RetryNextOld` as before and
+`ArrivedNext` reads `revision > 0` as FALSE. So each state of 0.23.0 maps to exactly one state with the new variables at
+`Init`, with the same successors: the same distinct and generated counts, and for a regress config the same first break.
+The 0.23.0 counts are from the main session's TLC run of `bf3cab5` (scratchpad `tlc119`).
+
+| Config | Expect |
+|---|---|
+| check.cfg | Every rule holds, no dead end; 294,921 states generated, 63,272 distinct (as 0.23.0). |
+| check-pr.cfg | Every rule holds, no dead end; 2,459,470 generated, 333,260 distinct (as 0.23.0). |
+| pause.cfg, pause-pr.cfg, peel-1.cfg, faults.cfg, faults-pr.cfg | Every rule holds; distinct states as 0.23.0: 185,356, 894,808, 44,552, 178,208, 922,640. |
+| overview.cfg, overview-pr.cfg | Every rule holds; 286 and 1,054 distinct (as 0.23.0). |
+| each regress config of 0.23.0 | The same first break with the same state count: regress-42 VerdictNotLost (57 distinct), regress-54 PauseFinishedFirst (813), regress-56 deadlock (571), regress-57 NoSessionLeftAtEnd (540), regress-58 deadlock (14), regress-59 AttemptCap (1,149), regress-61 deadlock (72), regress-62 deadlock (1,311), regress-65 deadlock (208), regress-65b StoppedIdleNeverRefuses (76), regress-89 FixRoundNeedsBlocking (640), regress-97 DoneOnlyWhenMerged (604), regress-119 NoHintAbandonsWaitingWork (1,345). |
+| check-revise.cfg (local, cap 2, seat task) | Every rule holds, the four of #127 included; no dead end. More states than check.cfg: each attempt can now take up to two revisions, each a worker turn and a verifier turn, and the keep flags double some states; I guess 3 to 8 times 63,272. |
+| check-revise-pr.cfg | As check-revise.cfg; more states than check-pr.cfg by a similar factor. |
+| check-revise-own.cfg (seat own) | As check-revise.cfg; somewhat more states than it, because without the seat rule the verifier may start while the worker's turn still runs. |
+| overview-revise.cfg (FULL_ENV = FALSE, cap 1) | Every rule holds; more than 286 states. With `phase-view.mjs` the chart shows `verdict_failed -> running` labelled revise. If it passes the 516-state budget, the statechart command draws no chart; then note it, the edge is still in the check-revise dump. |
+| regress-127c.cfg | Breaks `RevisionCap` in 24 steps (two full revisions, then a third `revise` at revision 2). Nothing else breaks first. |
+| regress-127h.cfg (seat own) | Breaks `ClosingVerdictOnFinalHead` in 14 steps: the resumed verifier files artifact-verified about revision 0, and close passes at revision 1. |
+| regress-127w.cfg | Breaks `NoConcurrentWriters` in 3 steps: launch, PASS (the worker's turn still runs), verify. |
+| regress-127a.cfg | Breaks `FindingsAckedBeforeReport` in 9 steps: the first revision's worker files PASS before its acks. |
+| regress-89-revise.cfg | Breaks `FixRoundNeedsBlocking` in 7 steps (not 6 as regress-89: with seat task the worker's turn must end before verify). The last hint is `revise` (the worker ended: both sessions kept) or `launch` (it went idle: not finished, so no revision); both are 7 steps, and TLC shows the one it reaches first. |
+| check.cfg, check-pr.cfg and check-revise.cfg through `phase-edges.mjs` | The 32 edges of `phase-edges.json`: the 31 of 0.23.0 from check and check-pr, and `verdict_failed, revise, running` from check-revise (written by hand into the fixture). check-revise alone should give all 32: it has every path of check.cfg (a revision is only an extra choice where `RevisionOK` holds, and when the keep time ends first the old path follows). `VerifyResume` gives `reported, verify, verifying`, an edge already there. No other new edge: `WorkerAcksFindings` and the keep-time steps keep the phase. |
+
+If a rule breaks in a revise config: `NoConcurrentWriters` points at a path where the worker becomes busy while a
+verifier runs (check `Revise`'s `verifier = "finished"` and the `VerifyAccepted` seat rule); `ClosingVerdictOnFinalHead`
+at a verifier row that no `verifierAt` update covers (a salvaged row: `Record` sets `vvRev` from `verifierAt`);
+`NoSessionLeftAtEnd` at an end step that leaves a `*Kept` flag; a dead end with hint `revise` means `Revise`'s guard
+differs from `RevisionOK`. A count change in a 0.23.0 config means a new variable moved from `Init` there: find the action
+that writes it without `REVISION_CAP > 0`.

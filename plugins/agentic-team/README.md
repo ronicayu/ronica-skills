@@ -123,9 +123,11 @@ Three rules carry the rest:
 
 ### Task lifecycle
 
-Nothing is patched in place. A refused launch is fixed in Taskgraph, a retry
-or fix round renders a fresh brief, and a merged task unblocks the next. Only
-calls that need the operator leave the loop, as Taskgraph `decision` nodes.
+A refused launch is fixed in Taskgraph, a retry or fix round renders a fresh
+brief, and a merged task unblocks the next. One thing is fixed in place: a
+verifier's blocking findings go back to the same worker session, in the same
+worktree and attempt (a revision, see [Revisions](#revisions-fix-in-place)).
+Only calls that need the operator leave the loop, as Taskgraph `decision` nodes.
 
 `run.py launch <id>` renders the brief and starts the worker in the task's one
 worktree (`.claude/worktrees/task-<id>`), on the task's one branch
@@ -168,9 +170,19 @@ round); else it asks for `--base`. A failed `claude --bg` on a retry removes
 nothing. `base` in the task's metadata is the commit the branch forked from; it
 is written once and a retry does not change it.
 
-`run.py verify` creates a verifier's worktree of its own
-(`verify-<id>-<attempt>`, then `-2`, `-3` for a second verifier), fresh at the
-commit under review, and `cleanup` removes it after the merge. `claude --bg`
+`run.py verify` starts the verifier in the task worktree, read only, once the
+worker's turn is over (`[verify] seat = "task"`, the default): no new folder.
+It falls back to a worktree of its own (`verify-<id>-<attempt>`, then `-2`,
+`-3` for a second verifier), fresh at the commit under review, with a
+`seat-fallback` line, when the task folder is dirty, is not at the worker's
+`Head`, or the worker is still busy `[verify] seat_wait_minutes` after its
+report (before that, `verify` refuses and names the busy session), and always
+with `seat = "own"`. A verifier folder goes when its verdict is recorded:
+`close`, the next `launch`, `round`, `round --cancel` and `abandon` remove each
+clean `verify-*` folder that no session uses and whose `HEAD` and branch tip are
+the `Head` of a worker or `STOPPED` row, with its branch; else one `kept` line
+names the cause. `verify --again` reuses a clean verifier folder at the same
+commit instead of creating `-<k>`. `claude --bg`
 writes session data under `~/.claude`, so run
 `launch` and `verify` outside the Bash sandbox or allow writes to `~/.claude`;
 either needs the operator's agreement. Before it files its report, whatever the
@@ -294,14 +306,23 @@ works in two steps.
      database folder that a container uses, an `.env` file or logs, and keeps
      the folder. The `removed` line counts the ignored paths that went with the
      folder and names the first five.
-   - Its `HEAD` commit is merged. `local` mode: it is in the local branch the
-     task merges into (the `target` meta, else `merge.base`, else the branch the
-     main checkout is on; a detached checkout counts as nothing merged). After a
-     squash or rebase merge that was recorded, the task's verified commit
-     (`verdict_ref`), or a commit with the same change, counts as well. `pr`
-     mode: it is in `pushed`, the head the request merged, or in the fetched
-     target branch, or it is the head that the host rebased (`caught_up_from`).
-     The main checkout's `HEAD` is never the test in `pr` mode.
+   - Its `HEAD` commit is safe to leave: merged, a verifier's recorded worker
+     `Head`, or held by a branch that stays. Merged, in `local` mode: it is in
+     the local branch the task merges into (the `target` meta, else
+     `merge.base`, else the branch the main checkout is on; a detached checkout
+     counts as nothing merged). After a squash or rebase merge that was
+     recorded, the task's verified commit (`verdict_ref`), or a commit with the
+     same change, counts as well. In `pr` mode: it is in `pushed`, the head the
+     request merged, or in the fetched target branch, or it is the head that the
+     host rebased (`caught_up_from`). The main checkout's `HEAD` is never the
+     test in `pr` mode. A verifier folder whose `HEAD` and branch tip are the
+     `Head` of a worker or `STOPPED` row also goes, with its branch: a verifier
+     commits nothing. Any other folder whose `HEAD` is not merged goes when a
+     local branch that stays (not a `worktree-verify-*` branch) holds that
+     commit: a rebase or squash merge, or a task completed with nothing to
+     merge, leaves it off the target, and the branch keeps the commits (with a
+     `branch stays` line). A detached `HEAD` that no branch holds keeps the
+     folder.
 
    Then `run.py` runs `git worktree unlock` when the folder is locked (it
    unlocks Claude Code's lock only for a clean, merged folder),
@@ -309,15 +330,17 @@ works in two steps.
    when the branch tip is merged too. A branch checked out elsewhere, or with an
    unmerged tip, stays. It last runs `claude rm` for every session row that
    still names the folder, so `claude agents` does not list sessions of a
-   folder that is gone. It prints `removed ... worktree <folder> (merged at <short>)`.
+   folder that is gone. It prints `removed ... worktree <folder> (merged at <short>)`,
+   `(at <short>, the Head of a worker result)` or `(at <short>, which branch <branch> holds)`.
 
 A folder that fails a check stays, with one `kept` line that names the check:
 `still running`, `process <pid> (<command>) uses it`, `locked (<reason>)`,
 `used by docker: container <name> (<state>) mounts <path>` (or `... was started
 by docker compose from <path>`), `docker did not answer (<why>); start Docker
 and run run.py record again`, `uncommitted changes (<files>)`, `ignored files
-that may be data: <paths>`, `commit <short> is not merged`, or `pushed head
-<short> is not in this clone; fetch <remote>/<branch>`. If git refuses the removal (for example for a worktree with a
+that may be data: <paths>`, `commit <short> is not merged, and no branch holds
+it`, or `pushed head <short> is not in this clone; fetch <remote>/<branch>, and no
+branch holds it`. If git refuses the removal (for example for a worktree with a
 submodule), the folder and its lock stay and the `kept` line quotes git's first
 line; `run.py` does not retry with force. `run.py` never deletes a file and
 never forces a worktree removal. A closed task that waits for its merge keeps
@@ -349,6 +372,85 @@ What the operator does with a `kept` line about data:
   stack again from the main checkout, which recreates its containers there.
   Then run `run.py record`.
 - `docker did not answer`: start Docker, then run `run.py record`.
+
+### Revisions (fix in place)
+
+A verifier session's `verify-failed` verdict with `blocking:` lines no longer
+starts a new attempt while both sessions of the attempt can still work. The
+sequence:
+
+1. The worker files `PASS`, ends its turn and stays idle (kept).
+2. The verifier works in the task worktree, read only, once the worker's turn
+   is over (see `[verify] seat`).
+3. `run.py close` records `verify-failed` and hints `revise: run.py revise <id>`.
+4. `run.py revise <id>` files a `revise` row, moves the phase
+   `verdict_failed -> running` with `revision=<r>` and no verdict, files one
+   steer of kind `finding` per `blocking:` line, and wakes the same worker
+   session (`claude --bg --resume <sessionId> --name <name>-r<r>`).
+5. The worker acks each finding (one ack per finding: `mailbox.py report`
+   refuses while one has no ack), fixes it in the same worktree, runs VERIFY
+   again and files a new, complete report in the same attempt.
+6. `record` hints `run.py verify <id>`, which resumes the same verifier session
+   with a short revision brief: the old and the new head, the diff, the worker's
+   new report and the verifier's own findings. The verifier checks each
+   finding, runs the full method again on the new head, and files a new verify
+   row. With `seat = "own"` its folder first moves to the new head.
+7. `close` records the new verdict: a pass closes the task and stops both
+   sessions; another `verify-failed` can take the next revision.
+
+A revision is a step inside an attempt. It does not count toward the attempt
+cap or `[rounds] cap`; `[verify] revisions_per_attempt` (default 2) caps it, and
+the task's plan key `revisions` overrides that for one task. The old path, a
+new attempt (`fix round: run.py launch <id>`, or `abandon` at the cap), applies
+when the attempt is over the cap, when the worker or the verifier session is
+gone (stopped, failed, no transcript, no folder, or its newest row is older
+than `[verify] keep_sessions_minutes`), and when the verdict is not a verifier
+session's (a CI run's, or the Manager's `close --verdict`). `record` stops a
+kept session once its keep time ends, or once a failed verdict can have no
+revision (`kept-session-stopped`); `launch`, a passing `close` and `abandon`
+stop them too. An idle kept session holds no slot. The two sessions take turns
+in the task worktree, because the CLI locks no worktree: `revise` refuses while
+the verifier still works, and `verify` refuses while the worker still works,
+naming the busy session. Before `revise` and `close`, a change that the
+verifier left in the task worktree is stashed as
+`agentic-team: verifier leftovers #<id> attempt <n> revision <r>`
+(`verifier-leftovers`); no file is deleted. Each resume makes a new session id
+(Claude Code 2.1.325), which `run.py` records as the next `sessions` entry
+(`resumed_from` the old id, the same name); rows are matched by recorded id
+only, and `cleanup` removes every row of the chain. Inside a round, `revise`
+comes before `round --cancel` and keeps the round's meta.
+
+The phases: `verdict_failed --revise--> running`, a new row of `TRANSITIONS`;
+the rest of a revision uses the rows that exist (`seen_reported`, `verify`,
+`close_*`). The rows of an attempt are read per revision: the rows after its
+newest `revise` row. `revisions_per_attempt = 0` gives the lifecycle of 0.23.0.
+
+```mermaid
+stateDiagram-v2
+  [*] --> none
+  none --> running: launch
+  running --> reported: worker_reported / seen_reported
+  running --> stopped: stopped / died
+  stopped --> running: launch
+  reported --> running: launch
+  reported --> verifying: verify
+  verifying --> verdict_failed: close_failed
+  verifying --> awaiting_merge: close_waits
+  verifying --> merged: close_merged
+  verdict_failed --> running: launch (new attempt)
+  verdict_failed --> running: revise (same attempt, same sessions)
+  verdict_failed --> awaiting_merge: close_waits
+  awaiting_merge --> merged: merged
+  awaiting_merge --> running: round
+  running --> abandoned: abandon
+  verdict_failed --> abandoned: abandon
+  awaiting_merge --> abandoned: abandon
+  merged --> [*]
+  abandoned --> [*]
+```
+
+The chart leaves out the `seen_*` edges, the `round_cancel` edges and the
+abandon edges from every in-flight phase; the checked chart below has them.
 
 A question only the operator can answer is a Taskgraph `decision` node that
 `--blocks` the tasks it holds back. Blocked tasks leave `ready` by themselves,
@@ -636,7 +738,8 @@ session's message or the end of `wait` wakes it.
 |---------|--------------|
 | `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. It refuses a task in a round (`round <id> --cancel` ends it). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
-| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
+| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`, in the task worktree (read only) or a folder of its own (`[verify] seat`; `seat-fallback` says why it took its own folder). In a revision it resumes the attempt's kept verifier with a revision brief, or starts a new one in the same seat when that verifier is gone. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
+| `revise <id>` | After a verifier session's `verify-failed` verdict with `blocking:` lines, files a `revise` row, sets `revision`, moves the phase to `running` with no verdict, files one `finding` steer per blocking line and wakes the attempt's own worker session: a revision (see [Revisions](#revisions-fix-in-place)). Refused when no revision is possible (the message names the old path, `launch` or `abandon`), under a STOP order (exit 3), while the verifier still works, and on a full session cap. Prints `revised`, and `verifier-leftovers` when it stashed the verifier's changes. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
 | `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. In a round, a PASS with the same change as the verified head and no verifier verdict keeps the round's old verdict (a `Carried:` row). |
 | `round <id> <kind>` | Starts a new attempt of a task that waits for its merge, on the same branch and request: kind `rebase`, for a change that conflicts with its target. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt <n>` (also lifts `[rounds] cap`), `--dry-run`. `round <id> --cancel` ends a round: the task waits again at its verified head. Prints `round-started` or `round-cancelled`. See "Round" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests). |
@@ -650,7 +753,7 @@ session's message or the end of `wait` wakes it.
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
 | `answer <id>` | Answers a worker's `ask` row with `--file F`, `--default` (the ask's own `Default:` line) or `--decision <id>` (a done decision with `--meta ask=<ask id>`; its notes are the answer). Options: `--ask <row id>` (default: the newest open ask of the current attempt), `--supersede` (answer an ask again), `--by operator`. It refuses an ask of an ended attempt and a second answer without `--supersede`. It files the `answer` row, then delivers the doorbell. |
-| `steer <id>` | Sends a running worker a steer: `--file F`, `--kind info\|redirect\|wrap-up`, `--by operator`, `--interrupt` (stop and resume a busy worker). It refuses a verifier, and a task with no live worker in its current attempt (the message says to write the text in the task notes). |
+| `steer <id>` | Sends a running worker a steer: `--file F`, `--kind info\|redirect\|wrap-up` (`finding` is refused: only `revise` files it), `--by operator`, `--interrupt` (stop and resume a busy worker). It refuses a verifier, and a task with no live worker in its current attempt (the message says to write the text in the task notes). |
 | `inbox <id>` | Shows the task's messages: asks, answers, steers and acks, with the delivery state of each. Read only. |
 
 Each event is one line: `<event> #<id> attempt <n>: <detail>`, followed by
@@ -810,6 +913,10 @@ pattern.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `kind` | `"code"`, `"schema"`, `"design-doc"` | `"code"` | The verify kind of a task without a `verify_kind` meta. See Task metadata. |
+| `revisions_per_attempt` | integer, 0 or more | `2` | The revisions (`run.py revise`) one attempt may have. `0` turns revisions off: the lifecycle of 0.23.0. The task's plan key `revisions` overrides it. See [Revisions](#revisions-fix-in-place). |
+| `keep_sessions_minutes` | positive integer | `60` | How long the worker and the verifier stay idle after their newest row of the revision, waiting for a revision; then `record` stops them. |
+| `seat` | `"task"`, `"own"` | `"task"` | Where the verifier runs: `"task"`, the task worktree, read only, after the worker's turn; `"own"`, a `verify-<id>-<n>` folder, as before 0.24.0. |
+| `seat_wait_minutes` | positive integer | `5` | How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) before the verifier gets a folder of its own. |
 
 ### `[scope]`
 
@@ -1023,6 +1130,15 @@ answered and has not acked is never filed `DIED` or `stuck`, and `launch` refuse
 is acked, the older answers to it are settled. `steer` refuses an attempt that has a filed report, whatever the process
 shows, and takes a waiting or parked worker. The worker's `inbox` prints every unacked row of its attempt.
 
+**Finding steers (#127).** `run.py revise` files one steer of kind `finding` per `blocking:` line of the
+verifier's row (`Steer: blocking: ...`, `Kind: finding`, `Revision: <r> (verify #<row>)`); `run.py steer --kind finding`
+is refused. A finding is a steer, so the worker acks each one (one ack per finding) and `mailbox.py report`,
+`check-report --mailbox` and `record`'s salvage refuse a report while one has no ack. A `revise` row opens the attempt
+to messages again: a steer filed after it is delivered, not carried, because "ended" means a report of the current
+revision (the rows after the newest `revise` row). One doorbell wakes the kept worker: a resume with
+`--name <name>-r<r>`, whose new session id `run.py` records. The worker does not answer the verifier; a finding that
+conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE is reported `BLOCKED`, as for any steer.
+
 Two socket failures in one `run.py` command turn the socket off for the rest of that command.
 **The worker's doorbell to the Manager** is the existing SendMessage notify step. Its `to` is
 `uds:<the Manager's inbox socket>` when `.agentic-team/manager.addr` holds it, else the Manager's session name. Only
@@ -1081,7 +1197,18 @@ base commit first runs every check of the head commit (the head's test suites
 and the VERIFY commands), then exports the base with `git archive` into
 `.agentic-team-scratch/base` in its own worktree and runs only the base-side
 checks there. It leaves the export in place; `run.py` removes it with the
-worktree.
+worktree. A verifier in the task worktree (`[verify] seat = "task"`) is read
+only there and exports the base to `<run dir>/scratch/<session>/base`, outside
+the repository, so the task's test runner never collects it; it runs git with
+`--no-optional-locks`. A worker brief, while revisions are on, has a
+`Revision.` paragraph in MAILBOX: after its report the worker stays idle; a
+later pointer can be a revision, whose `finding` steers it acks one by one,
+fixes in SCOPE with new commits, and answers with a new, complete report
+(`Revision: <n>` after `Status:`, each finding under `Deviations:` as
+`finding #<id>: <what changed>`). A resumed verifier gets a short revision brief
+(`briefs/task-<id>-<n>-verify-r<r>.md`): the old and new heads, the diff, the
+worker's new report, its own earlier findings, and the order to run the full
+method again on the new head.
 
 Carried reports are short. Every carried report (the previous attempt, each
 upstream dependency, the worker report in a verify brief) drops its `Ran:`
@@ -1301,7 +1428,8 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt before it filed a verdict. A `BLOCKED` row has no `Verdict:` line, so it does not hide a verdict filed before it. |
 | `ask` | `OPEN` | The worker (`--by` its session name) | A question for the Manager: `Question:`, `Options:`, `Default:`, `Blocking: yes\|no`, `Why:`. |
 | `answer` | `ANSWERED` | `run.py` (`--by manager` or `operator`) | `Re: #<ask id>`, `Answer:`, `Source: manager\|operator\|default\|decision #<id>`. |
-| `steer` | `SENT` | `run.py` (`--by manager` or `operator`) | `Steer:`, `Kind: info\|redirect\|wrap-up`. |
+| `steer` | `SENT` | `run.py` (`--by manager` or `operator`) | `Steer:`, `Kind: info\|redirect\|wrap-up`, or `Kind: finding` with `Revision: <r> (verify #<row>)` for a verifier's blocking line that `revise` relays. |
+| `revise` | `OPEN` | `run.py revise` (`--by manager`) | The start of a revision: `Revision:`, `From: verify #<row>`, `Head:` (the head the verifier judged), `Verifier:`, `Worker:`. The rows of the attempt after it are the revision's: a revision adds a second task row and a second verify row to the attempt. |
 | `ack` | `SEEN` | The worker | `Re: #<message id>`, `Action:` (one line). The only proof that a message was delivered. |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
@@ -1329,7 +1457,7 @@ skill. Metadata holds everything else, 41 keys:
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` (see [Roles](#roles)); an adopted attempt has an entry with these and no `"id"`. A task in progress with an attempt and no `sessions` key was started under 0.6.0, unless the GitHub backend keeps `sessions` local: then this machine's cache lost it (see [When the local cache is lost](#when-the-local-cache-is-lost)). |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}` (a verifier in the task worktree has `"worktree": "task-<id>"` and its own name `verify-<id>-<n>`; its identity is that name, not the folder), `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` (see [Roles](#roles)); an adopted attempt has an entry with these and no `"id"`. A revision's resume adds an entry with the new id, the same name, `"resumed_from"` (the old id) and `"revision"`. A task in progress with an attempt and no `sessions` key was started under 0.6.0, unless the GitHub backend keeps `sessions` local: then this machine's cache lost it (see [When the local cache is lost](#when-the-local-cache-is-lost)). |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
@@ -1348,6 +1476,8 @@ skill. Metadata holds everything else, 41 keys:
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
 | `round`, `round_from`, `round_verdict`, `round_onto` | `round` | A round in flight: its kind (`rebase`), the verified head it started from, that head's verdict, and the target commit of the kind. A passing `close`, `round --cancel`, and the merge of the request during the round remove them; `launch` after an `abandon` removes them too. |
 | `rounds` | `round` | How many rounds the task has had; `[rounds] cap` limits them without `--attempt`. Never removed. |
+| `revision` | `revise` | How many revisions the current attempt has had (see [Revisions](#revisions-fix-in-place)). `launch` and `round` remove it. |
+| `revisions` | plan | The revisions one attempt of this task may have; overrides `[verify] revisions_per_attempt` (`0` turns them off for the task). |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts. The one exception is a repointed task: its `pr` is
@@ -1388,6 +1518,7 @@ the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
 | `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | on the issue | Written once per repoint; the next `launch` reads them back. |
 | `merged_at`, `merged_by`, `merged_via` | on the issue | The merge record; written once. |
 | `round`, `round_from`, `round_verdict`, `round_onto`, `rounds` | on the issue | `close`, `record` and `round --cancel` read them back, and another machine must see that a round runs. |
+| `revision`, `revisions` | on the issue | `record`, `verify` and `close` read `revision` back, and another machine must see that a revision runs; `revisions` is a plan key, like `risk`. |
 | `abandoned` | on the issue | The only marker of an abandoned task. |
 | `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
 
@@ -1439,6 +1570,13 @@ The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
 the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
+
+### Upgrading from 0.23.0
+
+Version 0.24.0 (issue #127) fixes a verifier's blocking findings in place: `run.py revise <id>` sends them to the same worker session, in the same worktree and attempt, and `run.py verify` then resumes the same verifier session (see [Revisions](#revisions-fix-in-place)). Revisions are on by default: `[verify] revisions_per_attempt = 2`, `keep_sessions_minutes = 60`, and the verifier runs in the task worktree (`seat = "task"`). `revisions_per_attempt = 0` gives the behaviour of 0.23.0; `seat = "own"` keeps the verifier's own folder. The `close` after a verifier's `verify-failed` now hints `revise: run.py revise <id>` when a revision is possible; act on it before a fix round. New: the command `revise`, the result row kind `revise`, the steer kind `finding` (only `revise` files it), the meta keys `revision` and `revisions` (on the issue on the Taskgraph GitHub backend), the `[verify]` keys above, and the events `revised`, `verifier-leftovers`, `seat-fallback` and `kept-session-stopped`. Two folder fixes apply with any setting: a verifier folder goes once its verdict is recorded, and a completed task's clean folder goes while the branch that holds its `HEAD` stays. The folders of done tasks that earlier versions kept go at the next `record` sweep, with a `branch stays` line for each branch that keeps commits. During a revision, run every command of that task with 0.24.0: an older `record` reads no `revise` row and can settle the phase back to `verifying` (0.24.0's `record` tolerates that and lets the revision's rows move it on). No migration.
+
+
+A `--dry-run` of `launch`, `verify` or `round` starts nothing, so a full session cap no longer refuses it: it prints `warn: cap full: <n>/<cap> sessions live ... (dry run: shown anyway)` and shows the brief and the command.
 
 ### Upgrading from 0.22.3
 

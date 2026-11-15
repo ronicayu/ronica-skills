@@ -5,6 +5,10 @@ when the non-blocking test in your brief holds.
 
 ### Method: design-doc
 
+A change to a tracked file, or a new file that git does not ignore, in the worktree under review is
+a verifier error: your checks write only ignored build output and the scratch folder your brief names.
+In the task worktree, run.py stashes such a change before the task session resumes.
+
 1. Sources: each factual claim (a requirement, the current state, a number)
    points to a source. Open each source and confirm the claim. An unsourced
    or wrong claim is a miss.

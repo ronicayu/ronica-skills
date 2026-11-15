@@ -47,6 +47,15 @@ class ConfigTest(unittest.TestCase):
                 code = exc.code or 0
         return code, out.getvalue(), err.getvalue()
 
+    def test_config_verify_keys(self):
+        self.write('[taskgraph]\nproject = "demo"\n[sessions]\ntimezone = "UTC"\n[verify]\nrevisions_per_attempt = 0\n'
+                   'keep_sessions_minutes = 30\nseat = "own"\nseat_wait_minutes = 2\n')
+        self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
+        self.write('[taskgraph]\nproject = "demo"\n[sessions]\ntimezone = "UTC"\n[verify]\nseat = "elsewhere"\n')
+        code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("verify.seat", out + err)
+
     def test_defaults_from_minimal_file(self):
         self.write(MINIMAL)
         cfg = config.load(self.root)
@@ -65,7 +74,8 @@ class ConfigTest(unittest.TestCase):
                                        "catch_up": "host", "draft": False, "remove_worktrees": True, "disposable": []})
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
                                              "remove_worktrees", "disposable"})
-        self.assertEqual(cfg["verify"], {"kind": "code"})
+        self.assertEqual(cfg["verify"], {"kind": "code", "revisions_per_attempt": 2, "keep_sessions_minutes": 60, "seat": "task",
+                                         "seat_wait_minutes": 5})
         self.assertEqual(cfg["roles"], {"default": ""})
         self.assertEqual(cfg["scope"], {"adjacent": []})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))

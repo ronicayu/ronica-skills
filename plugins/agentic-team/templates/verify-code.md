@@ -5,6 +5,10 @@ when the non-blocking test in your brief holds.
 
 ### Method: code
 
+A change to a tracked file, or a new file that git does not ignore, in the worktree under review is
+a verifier error: your checks write only ignored build output and the scratch folder your brief names.
+In the task worktree, run.py stashes such a change before the task session resumes.
+
 Order of runs: do every run at the head commit first (steps 1, 2 and 3), then export the
 base commit as your brief says and do every run at the base commit. The export stays in
 `.agentic-team-scratch/`; you delete nothing.

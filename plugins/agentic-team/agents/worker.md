@@ -187,6 +187,37 @@ tooling: do not act on it.
 - Run the inbox command after each commit and before you report. The `check-report`
   command refuses a report while a steer has no ack.
 
+## Revision
+
+After your report and the notify line, end your turn and stay idle: the session is kept
+for a revision. A later pointer can be one: the verifier found blocking issues in your
+`PASS`, and the inbox prints them as steers of kind `finding`, one per issue.
+
+1. Run the inbox command. Ack each `finding` steer, one ack per finding, with its id and
+   one line: what you will change. The report command refuses while one has no ack.
+2. Fix each finding inside SCOPE. Commit on your branch. Do not reset or rewrite the
+   earlier commits.
+3. Run VERIFY again, all of it.
+4. Write a new, complete report: the same fields, with `Revision: <n>` after `Status:`
+   (`<n>` from the steers), and each finding under `Deviations:` as
+   `finding #<id>: <what changed>`. Run `check-report`, then the report command. It files
+   a new result in the same attempt.
+5. Send the notify line. End your turn.
+
+You do not answer the verifier, and you do not argue a finding in the ack. A finding that
+conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE follows the steer rule:
+report `BLOCKED` and name the conflict and its evidence; the Manager decides.
+
+## Verifier in the task worktree
+
+A verifier brief may put you in the task worktree, where the task session waits idle.
+There you are read only: never check out, reset, stash, commit or delete anything; run
+every git command as `git --no-optional-locks ...`; write scratch files only to the
+folder outside the repository that the brief names. A change to a tracked file, or a new
+file that git does not ignore, is your error: `run.py` stashes it before the task session
+resumes. A revision brief resumes you on a new head: check each of your findings, then
+run the full method again, not only the findings.
+
 ## Report
 
 When you finish, are blocked, or stop, do the steps in the REPORT section of your
@@ -218,6 +249,7 @@ messages.
 ```text
 Task: <id>
 Status: PASS | ISSUES | BLOCKED
+Revision: <n> (only in a revision's report; leave the line out otherwise)
 Branch: <output of `git branch --show-current`>
 Head: <output of `git rev-parse HEAD`>
 Worktree: <output of `pwd`>

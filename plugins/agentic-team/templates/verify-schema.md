@@ -5,6 +5,10 @@ when the non-blocking test in your brief holds.
 
 ### Method: schema
 
+A change to a tracked file, or a new file that git does not ignore, in the worktree under review is
+a verifier error: your checks write only ignored build output and the scratch folder your brief names.
+In the task worktree, run.py stashes such a change before the task session resumes.
+
 1. Recompute every number the artifact states (columns, fields added, merged
    or dropped, row counts) from the source tables or inventories. Do not copy
    a number from the document. Write each recomputed number next to the

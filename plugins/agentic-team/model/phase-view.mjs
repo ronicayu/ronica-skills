@@ -5,7 +5,7 @@
 
 // The labels are run.py's phase and event names, not the product words of view.mjs: phase-edges.json and the test
 // compare them with TRANSITIONS, so do not change them. `glossary` gives each name in product words (#108).
-export const title = "Task phases that run.py records, and the events that move them (agentic-team 0.23.0)";
+export const title = "Task phases that run.py records, and the events that move them (agentic-team 0.24.0)";
 
 export const glossary = {
   // The phases (state labels).
@@ -29,6 +29,7 @@ export const glossary = {
   "abandon": "Event: the Manager abandons the task.",
   "round": "Event: the Manager starts a round: a new attempt of a task that waits for its merge, on the same request (#119).",
   "round_cancel": "Event: the Manager cancels a round; the task waits for its merge again at its verified head.",
+  "revise": "Event: the Manager sends the verifier's blocking findings to the same task session, which fixes them in the same attempt (a revision, #127).",
   "record": "Event: any other write of the Manager's record; it never moves the phase.",
   "done": "Event: the task has ended; the Manager has nothing more to do.",
   "seen_<phase>": "Event: a session, the code host or the operator changed something, and the Manager's next record sees the new phase, such as seen_reported when the task session files its report.",
@@ -61,7 +62,8 @@ export const step = (action, from, to) => {
   const after = state(to);
   switch (action) {
     case "Launch": case "LaunchStopsIdleThenRefuses": return "launch";
-    case "VerifyPlain": case "VerifyAgain": return "verify";
+    case "VerifyPlain": case "VerifyAgain": case "VerifyResume": return "verify";
+    case "Revise": return "revise";
     case "CloseAuto": case "CloseManual":
       if (after === "verdict_failed") return "close_failed";
       if (before === "awaiting_merge") return "merged"; // resume_close: the merge is recorded (mark_merged)
