@@ -12677,6 +12677,57 @@ class RevisionTest(Base):
         self.assertIn("cap full", self.refused("verify", str(task)))
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("verify-1-1")), head)
 
+    # --- the vmt trials
+
+    def test_two_revisions_end_to_end_record_never_errs(self):
+        task, wt, head, _ = self.failed()
+        for number in (1, 2):
+            self.one(self.events("revise", str(task)), "revised")
+            self.assertEqual(self.named(self.events("record"), "transition-error"), [])
+            new = self.second_pass(task, wt, text=f"fix {number}\n")
+            events = self.events("record")
+            self.assertEqual(self.named(events, "transition-error"), [])
+            self.assertEqual(self.one(events, "arrived")["next"], "run.py verify 1")
+            self.ok("verify", str(task))
+            for entry in self.meta(task)["sessions"]:  # a resumed session writes the transcript of its new id
+                if entry.get("sessionId"):
+                    self.transcript("task-1", entry["sessionId"])
+            rows = json.load(open(self.agents_file))
+            for row in rows:
+                row.update(status="idle", state="done")
+            self.agents(*rows)
+            self.add_result(task, "ISSUES", self.issues((f"src/a.py:{number}: still wrong",)), kind="verify", by="verify-1-1")
+            self.assertEqual(self.named(self.events("record"), "transition-error"), [])
+            verdict = self.one(self.events("close", str(task)), "verdict")
+            self.assertEqual(verdict["next"], "revise: run.py revise 1" if number == 1 else "fix round: run.py launch 1")
+            self.assertIn(new, self.meta(task)["verdict_ref"])
+        self.assertEqual(self.named(self.events("record"), "transition-error"), [])
+
+    def test_a_phase_an_older_record_settled_in_a_revision_heals(self):
+        task, wt, head, _ = self.revised()
+        self.tg("edit", str(task), "--meta", "phase=verifying")  # what 0.23.0's record derives from the attempt's verify rows
+        events = self.events("record")
+        self.assertEqual(self.named(events, "transition-error"), [])
+        self.assertEqual(self.named(events, "phase-mismatch"), [])
+        self.second_pass(task, wt)
+        events = self.events("record")
+        self.assertEqual(self.one(events, "arrived")["next"], "run.py verify 1")
+        self.ok("verify", str(task))
+
+    def test_a_worker_that_files_issues_is_not_kept(self):
+        task = self.add_task()
+        self.write_config('[verify]\nseat = "task"\n')
+        self.ok("launch", str(task))
+        wt = self.task_wt(task)
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nHead: {self.wt_commit(wt)}\nCheckpoint: {CHECKPOINT}\n",
+                        by="task-1-1")
+        self.agents({"id": "sess-task-1-1", "name": "task-1-1", "cwd": wt, "status": "idle", "state": "done", "pid": 4242})
+        events = self.events("record")
+        stopped = self.one(events, "kept-session-stopped")
+        self.assertEqual(stopped["session"], "sess-task-1-1")
+        self.assertIn("no revision follows a worker ISSUES", stopped["detail"])
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")

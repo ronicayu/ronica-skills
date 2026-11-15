@@ -4813,6 +4813,10 @@ def settle_phase(run, snap, task):
         return True  # a verify that recorded no session, or a CI run not filed yet: the rows cannot show it
     if stored in ("verifying", "stopped") and derived == "verdict_failed":
         return True  # verify --again or stop after a failed verdict: the verdict stays until the next one replaces it
+    if stored == "verifying" and derived == "running" and revision_of(task) > 0:
+        # a record of 0.23.0 or older, which reads no revise row, settled a revision to verifying from the attempt's verify
+        # rows; the revision's own rows move the phase on (its PASS reads reported, which verifying accepts, then verify)
+        return True
     if stored is None or (stored in FLIGHT and derived in FLIGHT) or (
             stored == "awaiting_merge" and derived == "merged" and meta.get("merged_at")):
         transition(run, task, f"seen_{derived}")
@@ -4934,13 +4938,17 @@ def stop_kept(run, task, attempt, why, only=None):
 
 
 def release_kept(run, task):
-    """record: stop a kept worker or verifier once keep_sessions_minutes passed since its newest row of the revision, and
-    both once the verdict failed and no revision is possible."""
+    """record: stop a kept worker or verifier once keep_sessions_minutes passed since its newest row of the revision, a
+    worker at once when its newest report is ISSUES or BLOCKED, and both once the verdict failed and no revision is
+    possible."""
     tid, attempt, meta = task["id"], wanted_attempt(task), task.get("meta") or {}
     found = kept_rows(run, task, attempt)
     if not found:
         return
     rows = run.results_for(tid)
+    newest = latest_worker(rows, attempt)
+    if newest and newest["status"] != "PASS":  # a revision follows a verifier's verdict on a PASS, never this report
+        stop_kept(run, task, attempt, f"no revision follows a worker {newest['status']}", only=("task",))
     if meta.get("verdict") == "verify-failed" and not run.orders().stop:  # a STOP order pauses; it releases nothing
         ok, why = revision_possible(run, task, rows)
         if not ok:
