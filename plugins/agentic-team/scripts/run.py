@@ -1142,7 +1142,8 @@ def kept_reason(run, task, kind, rows):
     if not entry.get("sessionId"):
         return f"the {word} session {entry['id']} has no full session id on file"
     row = next((s for s in run.sessions() if s.sid == entry["id"]), None)
-    if row is not None and (row.live or row.state in ("failed", "stopped")):
+    # a verifier still in its turn after its row is kept: revise waits for it (busy_rows)
+    if row is not None and (row.state in ("failed", "stopped") or (row.live and (kind == "task" or row.stuck))):
         return f"the {word} session {row.describe()} is {'still running' if row.live else row.state}"
     if entry["id"] in stopped_ids(run):
         return f"the {word} session {entry['id']} was stopped"
@@ -1199,6 +1200,7 @@ def revision_possible(run, task, rows=None):
     if str(meta.get("verify_mode") or "session") != "session":
         return False, "verify_mode is not session: a CI verdict takes the old path"
     rows = run.results_for(task["id"]) if rows is None else rows
+    fill_session_ids(run, task)
     row, why = revise_findings(task, rows)
     if row is None:
         return False, why
@@ -2710,7 +2712,7 @@ def decision_text(text, task, snap=None, extra=""):
 
 # ------------------------------------------------------------------ launch
 
-def session_entry(run, tid, kind, attempt, name, worktree, said, model=None, profile=None):
+def session_entry(run, tid, kind, attempt, name, worktree, said, model=None, profile=None, since=None):
     """(entry, note) for the session `claude --bg` just started. The entry is what goes into the task's
     `sessions` meta, or None when no id is known. It never fails the launch: the session runs.
 
@@ -2734,6 +2736,8 @@ def session_entry(run, tid, kind, attempt, name, worktree, said, model=None, pro
                 f"no session id printed; recorded the row {sid} found in the worktree")
     elif printed:
         sid, note = printed, f"claude agents does not list {printed} yet"
+    elif since is not None and (found := new_row(run, profile or DEFAULT_PROFILE, os.path.join(run.wt_dir, worktree), since)):
+        sid, note = found, f"no session id printed; recorded the new row {found} in the worktree"
     else:
         return None, "no session id printed; the row is matched by its folder"
     full = next((s.row.get("sessionId") for s in rows if s.sid == sid), None)  # the id that --resume needs
@@ -3189,6 +3193,7 @@ def cmd_verify(run, args):
     revision = revision_of(task)
     resume, replaced = None, ""
     if revision > 0 and not args.again:
+        fill_session_ids(run, task)
         entry = newest_entry(task, "verify", attempt)
         why = resume_reason(run, task, entry, rows) if entry else "no verifier is recorded"
         if why is None and (entry.get("revision") or 0) < revision:
@@ -3198,6 +3203,8 @@ def cmd_verify(run, args):
     if resume is not None:
         return verify_resume(run, args, task, attempt, rows, worker, ref, resume, role)
     seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, replaced)  # may refuse: before any stop
+    if replaced and not args.dry_run:
+        stop_kept(run, task, attempt, "a new verifier replaces it", only=("verify",))
     if not args.dry_run:
         for s in [s for s in verifiers if s.live]:  # its turn is over and it filed nothing; it only holds a slot
             record_row(run, task, s, attempt)
@@ -3249,13 +3256,14 @@ def cmd_verify(run, args):
     try:
         clear_report(report_path(run, folder, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
+        called = time.time()
         said = start_session(run, folder, name, model, effort, text, profile)
     except Exception as exc:
         if created:
             started_or_cleaned(run, name, ref, exc)
         raise
     drift = drift_warning(run, folder, ref, branch=False) if is_sha(ref) else ""
-    entry, id_note = session_entry(run, tid, "verify", attempt, name, folder, said, model, profile)
+    entry, id_note = session_entry(run, tid, "verify", attempt, name, folder, said, model, profile, since=called)
     if entry and revision:
         entry["revision"] = revision
     run.edit_meta(tid, phase=phase, **({"sessions": recorded_sessions(task) + [entry]} if entry else {}))
@@ -3282,12 +3290,14 @@ def verifier_seat_choice(run, task, attempt, worker, ref, replaced=""):
     """("task" or "own", why it fell back to "own" or None). The task worktree serves when [verify] seat is "task", the
     output is a commit, the folder is clean and at the worker's Head, and the worker's turn is over; a worker that is
     still busy is waited for ([verify] seat_wait_minutes after its report: refused, the command is run again), then the
-    verifier gets its own folder. A verifier of a revision that replaces one keeps the seat of the one it replaces."""
+    verifier gets its own folder. A verifier of a revision that replaces one keeps the seat of the one it replaces, after
+    the same checks."""
     tid = task["id"]
     entry = newest_entry(task, "verify", attempt)
-    if replaced and entry and entry.get("worktree"):
-        return ("task" if entry["worktree"] == f"task-{tid}" else "own"), None
-    if run.config["verify"]["seat"] != "task" or not is_sha(ref):
+    inherited = (entry["worktree"] == f"task-{tid}") if replaced and entry and entry.get("worktree") else None
+    if inherited is False:
+        return "own", None
+    if (inherited is None and run.config["verify"]["seat"] != "task") or not is_sha(ref):
         return "own", None
     wt, rel = task_worktree(run, tid), f".claude/worktrees/task-{tid}"
     if not os.path.isdir(wt):
@@ -3360,18 +3370,28 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         if busy:
             raise Refused(f"the worker's turn is not over: {busy[0].describe()} still works in {rel}; run run.py verify "
                           f"{tid} again once it is idle")
+        dirty = run.git("status", "--porcelain", cwd=path, check=False).stdout.splitlines()
+        if dirty:  # the worker's own files: never judged, and never stashed as a verifier's leftovers
+            raise Refused(f"{rel} has uncommitted changes ({files_text([d[3:] for d in dirty], 5)}); the worker commits "
+                          f"them before it reports, so resume it with run.py steer {tid}, or commit them, then run.py "
+                          f"verify {tid} again")
         head = run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip()
         if is_sha(ref) and head != commit_of(run, ref):
             raise Refused(f"{rel} is at {head[:7]}, not the worker's Head {ref[:7]}; the verifier judges the Head the "
                           "worker reported")
+        check_cap(run)
     elif is_sha(ref) and not args.dry_run:
         why = status_reason(run, path)[0]
         if why:
             raise Refused(f"the verifier's folder {rel} is not clean ({why}); it cannot move to {ref[:7]}")
+        check_cap(run)  # before the folder moves
         moved = run.git("checkout", "-q", "--detach", ref, cwd=path, check=False)
         if moved.returncode != 0:
             raise Refused(f"git checkout of {ref[:7]} in {rel} failed: {first_line(moved.stderr or moved.stdout)}", 1)
-    check_cap(run)
+        # the branch moves with the folder, so the folder and its branch go once this verdict is recorded
+        run.git("branch", "-f", f"worktree-{folder}", ref, check=False)
+    else:
+        check_cap(run)
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
@@ -3389,14 +3409,16 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         if not wait_for_exit(run, s):
             raise Refused(f"the verifier {s.describe()} did not exit after claude stop; run run.py verify {tid} again", 1)
     pointer = f"agentic-team: task {tid} attempt {attempt} revision {revision}: read {brief_path} and follow it."
+    called = time.time()
     out = run.claude("--bg", "--resume", entry["sessionId"], "--name", f"{name}-r{revision}", pointer, check=False,
                      profile=s.profile, cwd=path)
     if out.returncode != 0:
         raise Refused(f"claude --resume of the verifier failed: {first_line(out.stderr.strip() or out.stdout.strip())}; "
                       f"run.py verify {tid} --again starts a new verifier", 1)
     match = BACKGROUNDED.search(out.stdout)
+    new = match.group(1) if match else new_row(run, s.profile, path, called, {s.sid})
     forget_stopped(run, s.sid)
-    added = record_resumed(run, task, "verify", attempt, s, match.group(1)) if match and match.group(1) != s.sid else None
+    added = record_resumed(run, task, "verify", attempt, s, new) if new and new != s.sid else None
     run.edit_meta(tid, phase=phase)
     run.emit("verifying", tid, attempt, name,
              f"resumed verifier {s.sid}" + (f" as {added['id']}" if added else "") + f" for revision {revision}, ref {ref}"
@@ -3859,6 +3881,7 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))  # its socket is the old process's: the wake's SessionStart writes a new one
     flags = rowless_flags(run, task, s) if getattr(s, "rowless", False) else []
+    called = time.time()
     if name:  # a revision: CLI 2.1.325 renames a resumed session and gives it a new id, so name it and record the id
         flags = [f for i, f in enumerate(flags) if f != "--name" and not (i and flags[i - 1] == "--name")] + ["--name", name]
     out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile, cwd=wt)
@@ -3871,8 +3894,9 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: claude --resume failed ({said}); record tries again")
         return settle("pending", "pending")  # one try is counted; the cap ends it
     match = BACKGROUNDED.search(out.stdout)
-    if name and match and match.group(1) != s.sid:
-        record_resumed(run, task, "task", attempt, s, match.group(1))
+    new = match.group(1) if match else (new_row(run, s.profile, wt, called, {s.sid}) if name else None)
+    if name and new and new != s.sid:
+        record_resumed(run, task, "task", attempt, s, new)
         run.resumed.add((tid, attempt))
         lower_flag(run, tid, attempt)
         return settle("resume", "resume")
@@ -3895,6 +3919,31 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
     run.resumed.add((tid, attempt))
     lower_flag(run, tid, attempt)
     return settle("resume", "resume")
+
+
+def new_row(run, profile, folder, since, exclude=()):
+    """The id of the one unrecorded `claude agents` row of `profile` whose working directory is `folder` and that started
+    at or after `since` (seconds), else None: how a start or a resume that printed no id is still recorded. The CLI
+    renames rows, so the name is never the match."""
+    run._sessions = None
+    real = os.path.realpath(folder)
+    found = [s.sid for s in run.sessions() if not s.recorded and s.sid and s.sid not in exclude and s.profile == profile
+             and s.cwd and os.path.realpath(s.cwd) == real and isinstance(s.row.get("startedAt"), (int, float))
+             and s.row["startedAt"] / 1000 >= since - 1]
+    return found[0] if len(found) == 1 else None
+
+
+def fill_session_ids(run, task):
+    """Write the full session id of each `sessions` entry that has none, once `claude agents` lists it (a resume's new
+    row can appear after the command that recorded it)."""
+    entries, changed = recorded_sessions(task), False
+    rows = {s.sid: s for s in run.sessions()}
+    for e in entries:
+        row = rows.get(str(e.get("id") or ""))
+        if e.get("id") and not e.get("sessionId") and row is not None and row.row.get("sessionId"):
+            e["sessionId"], changed = row.row["sessionId"], True
+    if changed:
+        run.set_meta(task, sessions=entries)
 
 
 def record_resumed(run, task, kind, attempt, s, new):
@@ -4126,6 +4175,9 @@ def cmd_revise(run, args):
     worker = newest_entry(task, "task", attempt) or {}
     verifier = newest_entry(task, "verify", attempt) or {}
     stash_leftovers(run, task, attempt)
+    old_report = report_path(run, f"task-{tid}", str((task.get("meta") or {}).get("session") or worker.get("name")))
+    if os.path.lexists(old_report):  # the revision's report must be new: record never salvages the old one as it
+        os.replace(old_report, old_report[:-len(".md")] + f".r{number - 1}.md")
     head = tail_or_none(HEAD_ANY.search((latest_worker(rows, attempt) or {}).get("body") or "")) or "None"
     mark = run.add_result(tid, REVISE, attempt, "manager", "OPEN",
                           f"Revision: {number}\nFrom: verify #{row['id']}\nHead: {head}\n"
@@ -4134,6 +4186,12 @@ def cmd_revise(run, args):
     filed = [file_message(run, task, attempt, mbx.STEER, "manager", "SENT",
                           f"Steer: {line}\nKind: finding\nRevision: {number} (verify #{row['id']})\n") for line in lines]
     word = deliver(run, task, filed[-1], name=f"{worker.get('name') or f'task-{tid}-{attempt}'}-r{number}")
+    table = mailbox_table(task)
+    rung = table.get(str(filed[-1]["id"])) or {}
+    if len(filed) > 1 and rung.get("via") in ("socket", "resume"):  # one doorbell: the inbox prints every open finding
+        for f in filed[:-1]:
+            table.setdefault(str(f["id"]), {}).update({k: rung[k] for k in ("via", "at") if k in rung})
+        save_mailbox(run, task, table)
     run.emit("revised", tid, attempt, None,
              f"revision {number} (row #{mark['id']}): {len(filed)} finding{'s' * (len(filed) != 1)} "
              f"({', '.join('#' + str(f['id']) for f in filed)}) sent to {worker.get('name') or worker.get('id')}; "
@@ -4370,11 +4428,20 @@ def parse_report(text, tid, verifier=False):
     return status.group(1), report
 
 
-def salvage(run, tid, session, report, verifier=False):
+def revise_start(rows, attempt):
+    """When the attempt's newest `revise` row was filed (an aware datetime), or None: a report from before it is of an
+    earlier revision."""
+    marks = [r for r in rows if r.get("attempt") == attempt and r["kind"] == REVISE and r.get("author") == "manager"]
+    return stamp_of(marks[-1].get("at")) if marks else None
+
+
+def salvage(run, tid, session, report, verifier=False, since=None):
     """A report that a session wrote but did not file: (status, report, where it came from), else None. The sources,
     in this order: its report file, the assistant messages of its transcript, `claude logs`. The last works only
     while the session's process is alive, and it shows a terminal screen, not the text."""
     try:
+        if since is not None and os.path.getmtime(report) <= since.timestamp():
+            raise OSError("written before the revision")
         with open(report, encoding="utf-8") as fh:
             found = parse_report(fh.read(), tid, verifier)
     except (OSError, UnicodeDecodeError):
@@ -4384,10 +4451,12 @@ def salvage(run, tid, session, report, verifier=False):
     if session is None:
         return None
     path = find_transcript(run, session.worktree(run.root), session.sid, session.row, session.profile)[0]
-    for text in reversed(transcript_texts(path) if path else []):
+    for text in reversed(transcript_texts(path, since) if path else []):
         found = parse_report(text, tid, verifier)
         if found:
             return (*found, f"transcript of {session.sid}")
+    if since is not None:
+        return None  # claude logs shows a screen with no times: it cannot tell this revision's report from an older one
     out = run.claude("logs", session.sid, check=False, profile=session.profile)
     found = parse_report(out.stdout if out.returncode == 0 else "", tid, verifier)
     return (*found, f"claude logs {session.sid}") if found else None
@@ -4465,7 +4534,8 @@ def salvage_verifier(run, task, attempt, session):
     """File the report of a verifier that ended without one. Returns the new row, else None. The row is filed by
     the verifier's name: verifier_rows does not count a row by "manager"."""
     tid = task["id"]
-    found = salvage(run, tid, session, report_path(run, session.wtname, session.label), verifier=True)
+    found = salvage(run, tid, session, report_path(run, session.wtname, session.label), verifier=True,
+                    since=revise_start(run.results_for(tid), attempt))
     if found is None:
         return None
     record_row(run, task, session, attempt)
@@ -4675,9 +4745,10 @@ def record_in_progress(run, snap, task, unmanaged):
                      f"claude logs {s.sid}; if it has stopped working, "
                      + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and ", task=task))
         else:
-            s = mine[-1] if mine else None
+            order = [e.get("id") for e in recorded_sessions(task)]
+            s = sorted(mine, key=lambda x: order.index(x.sid) if x.sid in order else -1)[-1] if mine else None
             report = report_path(run, f"task-{tid}", str(meta.get("session") or f"task-{tid}-{attempt}"))
-            found = salvage(run, tid, s, report)
+            found = salvage(run, tid, s, report, since=revise_start(rows, attempt))
             if s is not None:  # filed for this attempt, either way
                 record_row(run, task, s, attempt)
             if found and open_steers:  # the same rule as `mailbox.py report`: no report while a steer has no ack
@@ -4863,7 +4934,7 @@ def release_kept(run, task):
     if not found:
         return
     rows = run.results_for(tid)
-    if meta.get("verdict") == "verify-failed":
+    if meta.get("verdict") == "verify-failed" and not run.orders().stop:  # a STOP order pauses; it releases nothing
         ok, why = revision_possible(run, task, rows)
         if not ok:
             stop_kept(run, task, attempt, f"no revision ({why})")
@@ -4871,8 +4942,9 @@ def release_kept(run, task):
     keep = run.config["verify"]["keep_sessions_minutes"]
     for kind in ("task", "verify"):
         entry = newest_entry(task, kind, attempt)
-        own = [r for r in task_rows(rows, attempt, kind) if (is_worker_result(r) if kind == "task" else
-                                                             r.get("author") == ((entry or {}).get("name") or ""))]
+        # the verifier's newest row may be of an earlier revision: it waits for its resume, and its keep time runs
+        own = [r for r in task_rows(rows, attempt, kind, history=kind == "verify")
+               if (is_worker_result(r) if kind == "task" else r.get("author") == ((entry or {}).get("name") or ""))]
         if own and minutes_since(own[-1].get("at")) >= keep:
             stop_kept(run, task, attempt, f"its row #{own[-1]['id']} is older than {keep} minutes", only=(kind,))
 
@@ -6657,8 +6729,19 @@ def transcript_usage(path):
                  ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
-def transcript_texts(path):
-    """The text of each assistant message in a transcript, oldest first. A message spans several records."""
+def stamp_of(text):
+    """An ISO time (with Z or an offset) as an aware datetime, or None."""
+    try:
+        moment = datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
+
+
+def transcript_texts(path, since=None):
+    """The text of each assistant message in a transcript, oldest first. A message spans several records. With `since`
+    (an aware datetime), only the messages of records stamped after it: a resumed session's transcript holds the turns
+    of the revisions before."""
     texts = {}
     with open(path, errors="replace") as fh:
         for line in fh:
@@ -6669,6 +6752,8 @@ def transcript_texts(path):
             if not isinstance(record, dict):
                 continue
             message = record.get("message")
+            if since is not None and not ((when := stamp_of(record.get("timestamp"))) and when > since):
+                continue
             if record.get("type") == "assistant" and isinstance(message, dict) and isinstance(message.get("content"), list):
                 for block in message["content"]:
                     if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
@@ -6957,8 +7042,6 @@ def cmd_close(run, args):
     attempt = refuse_unless_running(run, task)
     rows, worker = worker_for(run, tid, attempt, task=task)
     kind = verify_kind(run, task)
-    if not busy_rows(run, tid, "verify", attempt):
-        stash_leftovers(run, task, attempt)  # a verifier in the task worktree left changes: close and cleanup see a clean tree
     branch_line = tail_or_none(BRANCH_LINE.search(worker["body"]))
     # A round's PASS with the same change as round_from, and no verifier verdict or --verdict, keeps round_verdict.
     head = tail_or_none(HEAD_ANY.search(worker["body"]))
@@ -6982,6 +7065,8 @@ def cmd_close(run, args):
         level, manual, override = str(meta["round_verdict"]), False, None
     if moved:
         run.emit("rebased", tid, attempt, None, f"same change at {ref[:7]} (verified at {moved[:7]}); verdict_ref moves")
+    if not busy_rows(run, tid, "verify", attempt):  # after every refusal: a verifier in the task worktree left changes
+        stash_leftovers(run, task, attempt)
     passing = level in PASSING[kind]
     phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")
     if manual:

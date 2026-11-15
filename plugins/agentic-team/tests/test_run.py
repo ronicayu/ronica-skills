@@ -12221,10 +12221,13 @@ class RevisionTest(Base):
             shutil.rmtree(os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", self.wt_path("task-1"))))
             self.transcript("task-1", self.V)  # the verifier's stays
 
-        def no_session_id():
+        def no_session_id():  # neither recorded nor listed by claude agents
             entries = self.meta(1)["sessions"]
             entries[0].pop("sessionId")
             self.record_sessions(1, *entries)
+            rows = json.load(open(self.agents_file))
+            rows[0].pop("sessionId")
+            self.agents(*rows)
 
         cases = [(gone_transcript, "has no transcript"), (no_session_id, "no full session id"),
                  (lambda: self.kept(worker={"state": "failed"}), "is failed"),
@@ -12266,11 +12269,6 @@ class RevisionTest(Base):
         self.assertIn("cap full", self.refused("revise", str(task)))
         self.assertEqual(self.meta(task)["phase"], "verdict_failed")
         self.assertEqual(self.meta(task)["verdict"], "verify-failed")
-
-    def test_revise_waits_for_verifier_turn(self):
-        task, wt, head, _ = self.failed()
-        self.kept(verifier={"status": "busy", "state": "working"})
-        self.assertIn("sess-verify-1-1", self.refused("revise", str(task)))
 
     # --- messages in a revision
 
@@ -12534,6 +12532,134 @@ class RevisionTest(Base):
         self.one(self.events("close", str(task)), "merged")
         removed = {c[1] for c in self.calls("rm")}
         self.assertEqual(removed, {"sess-task-1-1", "sess-verify-1-1", "sess-copy", "sess-copy-2"})
+
+    # --- the review of 0.24.0
+
+    def test_replacement_verifier_waits_for_worker_turn(self):
+        task, wt, head, _ = self.revised()
+        head2 = self.commit_file("fix.txt", "fixed\n", cwd=wt)
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {head2}\nCheckpoint: {CHECKPOINT}\n", by="task-1-1")
+        rows = json.load(open(self.agents_file))  # the woken worker still works; the old verifier failed
+        for row in rows:
+            if row["id"] == "sess-verify-1-1":
+                row.update(state="failed")
+        self.agents(*rows)
+        out = self.refused("verify", str(task))
+        self.assertIn("the worker's turn is not over", out)
+        self.assertEqual([c for c in self.calls("--bg") if "--resume" not in c and "verify-1-1-2" in c], [])
+
+    def test_revise_moves_old_report_aside_and_record_salvages_no_stale_pass(self):
+        task, wt, head, _ = self.failed()
+        report = os.path.join(wt, ".agentic-team", "report-task-1-1.md")
+        os.makedirs(os.path.dirname(report), exist_ok=True)
+        old = f"Task: 1\nStatus: PASS\nHead: {head}\nCheckpoint: {CHECKPOINT}\n"
+        with open(report, "w") as fh:
+            fh.write(old)
+        time.sleep(1.1)  # the revise row is filed after the report was written
+        self.ok("revise", str(task))
+        self.assertFalse(os.path.exists(report))
+        self.assertEqual(open(report[:-3] + ".r0.md").read(), old)
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        with open(os.path.join(folder, f"copy-{self.W}.jsonl"), "w") as fh:  # the resumed conversation holds the old report
+            fh.write(json.dumps({"type": "assistant", "timestamp": "2020-01-01T00:00:00Z",
+                                 "message": {"id": "m0", "content": [{"type": "text", "text": old}]}}) + "\n")
+        rows = json.load(open(self.agents_file))
+        for row in rows:
+            if row["id"] == "sess-copy":
+                row.update(status="idle", state="done")
+                row.pop("pid")
+        self.agents(*rows)
+        events = self.events("record")
+        self.assertEqual(self.named(events, "salvaged"), [])
+        self.one(events, "died")
+
+    def test_verify_resume_refuses_dirty_task_folder(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.touch(wt, "half.txt")
+        out = self.refused("verify", str(task))
+        self.assertIn("has uncommitted changes (half.txt)", out)
+        self.assertEqual([c for c in self.calls("--bg") if c[:3] == ["--bg", "--resume", self.V]], [])
+
+    def test_close_that_refuses_stashes_nothing(self):
+        task, wt, head, _ = self.failed(close=False)
+        self.touch(wt, "gen.txt")
+        self.refused("close", str(task), "--verdict", "artifact-verified")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "?? gen.txt")
+        self.assertEqual(self.git("stash", "list", cwd=wt), "")
+
+    def test_revise_waits_for_verifier_turn(self):
+        task, wt, head, _ = self.failed(close=False)
+        self.kept(verifier={"status": "busy", "state": "working"})
+        self.assertEqual(self.one(self.events("close", str(task)), "verdict")["next"], "revise: run.py revise 1")
+        out = self.refused("revise", str(task))
+        self.assertIn("run.py: the verifier session sess-verify-1-1 (verify-1-1, busy/working) is still working in the "
+                      "attempt; run run.py record, and revise once its turn is over", out)
+        self.assertEqual(self.named(self.events("record"), "kept-session-stopped"), [])
+
+    def test_stop_order_releases_no_kept_session(self):
+        task, wt, head, _ = self.failed()
+        self.orders("STOP: a pause\n")
+        self.assertEqual(self.named(self.events("record"), "kept-session-stopped"), [])
+        self.assertEqual(self.calls("stop"), [])
+
+    def test_revise_one_doorbell_settles_every_finding(self):
+        task, wt, head, _ = self.revised(lines=("src/a.py:1: one", "src/b.py:2: two"))
+        table = self.meta(task)["mailbox"]
+        self.assertEqual({e["via"] for e in table.values()}, {"resume"})
+        self.events("record")
+        self.assertEqual(len([c for c in self.calls("--bg") if "--resume" in c]), 1)
+
+    def test_seat_own_resume_moves_verifier_branch(self):
+        task, wt, head, _ = self.revised(seat="own")
+        new = self.second_pass(task, wt)
+        self.ok("verify", str(task))
+        self.assertEqual(self.git("rev-parse", "worktree-verify-1-1"), new)
+
+    def test_kept_verifier_times_out_during_revision(self):
+        task, wt, head, _ = self.revised()
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE id=?", (RevisionTest.old(61), self.verify_row))
+        events = self.events("record")
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-verify-1-1"])
+
+    def test_replacement_stops_the_old_kept_verifier(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        entries = self.meta(task)["sessions"]
+        entries[1]["sessionId"] = "sid-gone"  # its transcript is gone: it cannot be resumed
+        self.record_sessions(task, *entries)
+        events = self.events("verify", str(task))
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-verify-1-1"])
+        self.assertIn("cannot be resumed", self.one(events, "verifying")["detail"])
+
+    def test_resumed_session_id_filled_later(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        entries = self.meta(task)["sessions"]
+        entries[-1].pop("sessionId")  # claude agents did not list the resumed row yet
+        self.record_sessions(task, *entries)
+        self.ok("verify", str(task))
+        chain = [e for e in self.meta(task)["sessions"] if e["id"] == "sess-copy"]
+        self.assertEqual(chain[0].get("sessionId"), "copy-" + self.W)
+
+    def test_verify_start_without_printed_id_records_the_new_row(self):
+        task, wt, head = self.ready()
+        row = {"id": "sess-v-new", "name": "a name the CLI chose", "cwd": wt, "status": "busy", "state": "working",
+               "pid": 4600, "startedAt": int(time.time() * 1000) + 5000}
+        env = dict(self.env, FAKE_CLAUDE_BG_SAID="", FAKE_CLAUDE_BG_ROW=json.dumps(row))
+        self.ok("verify", str(task), env=env)
+        entry = self.meta(task)["sessions"][-1]
+        self.assertEqual((entry["id"], entry["kind"], entry["worktree"]), ("sess-v-new", "verify", "task-1"))
+
+    def test_seat_own_resume_checks_cap_before_moving(self):
+        task, wt, head, _ = self.revised(seat="own")
+        self.second_pass(task, wt)
+        self.write_config('[verify]\nseat = "own"\n', sessions="max_parallel = 1\n")
+        other = self.add_task(start=True, attempt=1, sessions=json.dumps([self.entry(2)]))
+        self.agents(*json.load(open(self.agents_file)), self.row(f"task-{other}"))
+        self.assertIn("cap full", self.refused("verify", str(task)))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("verify-1-1")), head)
 
     @staticmethod
     def old(minutes):
