@@ -350,6 +350,9 @@ def both_hosts(test):
     return wrapper
 
 
+POLL_SCALE = 0.02  # the share of each pause between polls that the tests keep
+
+
 class Base(unittest.TestCase):
     host = "github"
 
@@ -391,6 +394,7 @@ class Base(unittest.TestCase):
             "FAKE_DOCKER": os.path.join(self.dir, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(self.dir, "docker.log"),
             "FAKE_GH": os.path.join(self.dir, "gh.json"), "FAKE_GH_LOG": os.path.join(self.dir, "gh.log"),
             "FAKE_GLAB": os.path.join(self.dir, "glab.json"), "FAKE_GLAB_LOG": os.path.join(self.dir, "glab.log"),
+            "AGENTIC_TEAM_TEST_POLL_SCALE": str(POLL_SCALE),  # the pauses between polls of a stop and of a host rebase
         })
         self.project = urlquote(codehost.parse_remote(self.origin)[1], safe="")  # the GitLab project path
         self.transitions = os.path.join(self.dir, "logged", "transitions.jsonl")
@@ -679,7 +683,7 @@ class Base(unittest.TestCase):
             sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
         return sections
 
-    def hold_lock(self, name, seconds=2.5):
+    def hold_lock(self, name, seconds=1.0):
         """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
         lock = os.path.join(self.root, ".agentic-team", "locks", name)
         holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
@@ -7759,7 +7763,7 @@ class PrTest(Base):
                               **self.rebase_polls(busy, busy, {"rebase_in_progress": False, "merge_error": None, "sha": new})})
         started = time.time()
         events = self.events("close", str(task))
-        self.assertGreaterEqual(time.time() - started, 6)  # two waits of 3 seconds between three reads
+        self.assertGreaterEqual(time.time() - started, 6 * POLL_SCALE)  # two waits of 3 seconds between three reads
         self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
         polls = [c for c in self.host_log() if c == ["api", f"projects/{self.project}/merge_requests/1?include_rebase_in_progress=true"]]
         self.assertEqual(len(polls), 3)
@@ -7780,7 +7784,7 @@ class PrTest(Base):
             json.dump(table, fh)
         reads, started = len(self.host_calls("pr view")), time.time()
         events = self.events("close", str(task))
-        self.assertGreaterEqual(time.time() - started, 3)
+        self.assertGreaterEqual(time.time() - started, 3 * POLL_SCALE)
         self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
         self.assertEqual(len(self.host_calls("pr view")) - reads, 3)  # publish, then two reads for the new head
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
@@ -9092,7 +9096,7 @@ class DeliveryTest(Base):
                 try:
                     start = time.monotonic()
                     self.run_cmd(command, str(task), *args)  # whatever it decides, it first waits for the lock
-                    self.assertGreater(time.monotonic() - start, 1.5, command)
+                    self.assertGreater(time.monotonic() - start, 0.6, command)
                 finally:
                     self.release(holder)
         self.assertEqual(len([r for r in self.results(task) if r["kind"] == "steer"]), 0)  # none of them filed a steer: answer and steer refused or came after
@@ -9105,7 +9109,7 @@ class DeliveryTest(Base):
         try:
             start = time.monotonic()
             self.ok("record")  # deliver inside record runs inside record's lock
-            self.assertGreater(time.monotonic() - start, 1.5)
+            self.assertGreater(time.monotonic() - start, 0.6)
         finally:
             self.release(holder)
         self.assertTrue(os.path.isfile(os.path.join(self.root, ".agentic-team", "locks", "task-1.lock")))
@@ -9161,11 +9165,11 @@ class DeliveryTest(Base):
 
     def test_r4_8_the_stopped_sessions_file_has_its_own_lock(self):
         task = self.worker(status="busy", state="working", pid=4242)
-        holder = self.hold_lock("stopped-sessions.lock", 2.5)  # another task's command is rewriting the file
+        holder = self.hold_lock("stopped-sessions.lock")  # another task's command is rewriting the file
         try:
             start = time.monotonic()
             self.ok("stop", str(task))  # appends the stopped id once the file is free
-            self.assertGreater(time.monotonic() - start, 1.5)
+            self.assertGreater(time.monotonic() - start, 0.6)
         finally:
             self.release(holder)
         self.assertEqual(self.stopped_ids(), ["sess-task-1-1"])
