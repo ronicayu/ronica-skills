@@ -1573,7 +1573,7 @@ Taskgraph either: they stay on the old machine. Copy the standing orders and run
 
 ### Upgrading from 0.24.0
 
-Version 0.24.1 fixes a launch that refused for good on a task carried over from 0.22.3: 0.22.3's `close` wrote a STOPPED row with no `Head:` line, and `launch` read it as a stop whose WIP was not committed yet. `launch` now refuses only when the task folder holds uncommitted changes; with a clean folder it prints a `warn` line and the retry continues at the folder's HEAD. Reported by the vmt Manager (task 760).
+Version 0.24.1 fixes a launch that refused for good on a task carried over from 0.22.3: 0.22.3's `close` wrote a STOPPED row with no `Head:` line, and `launch` read it as a stop whose WIP was not committed yet. `record` did not finish such a pause in every phase, so the refusal never cleared. `launch` now finishes an unfinished pause itself, as `record` does: it commits the WIP (nothing when the folder is clean), files the stopped row with its `Head:`, and goes on from there; `--dry-run` says so in a `warn` line. Reported by the vmt Manager (task 760).
 
 ### Upgrading from 0.23.0
 
