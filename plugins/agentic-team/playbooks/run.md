@@ -75,6 +75,9 @@ every report, and on every wake (step 6).
      goes on with the other tasks and exits 1). Check the task's `phase` as for `phase-mismatch`; if it is right,
      tell the operator: it is a bug in `run.py`.
    - `legacy`: a task that agentic-team 0.6.0 started. Do not launch it; follow the `next:` line.
+   - `sessions-restored`: this machine's Taskgraph cache had lost the task's `sessions` meta and `run.py` rebuilt it;
+     nothing to do. `sessions-lost`: it could not, and the worker may run on another machine. Do not relaunch it;
+     tell the operator and follow the `next:` line only when they say the worker is gone.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
      A required check that failed on a closed task's request keeps it red: the fix is a new attempt of that task on the

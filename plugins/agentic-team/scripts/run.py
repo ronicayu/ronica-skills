@@ -121,7 +121,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
-                    profile_path, resolve_model, tier_profiles)
+                    profile_path, resolve_model, taskgraph_store, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -136,6 +136,7 @@ ABANDON_MODES = ("died", "tool-error", "stuck", "unknown")
 TASK_WT = re.compile(r"^task-(\d+)$")
 VERIFY_WT = re.compile(r"^verify-(\d+)-(\d+)(?:-(\d+))?$")
 LEGACY_WT = re.compile(r"^task-(\d+)-(\d+)$")  # a worktree of agentic-team 0.6.0
+TASK_NAME = re.compile(r"^task-(\d+)-(\d+)(?:-[A-Za-z0-9][A-Za-z0-9-]*)?$")  # a worker session: task-<id>-<attempt>[-<keyword>]
 BACKGROUNDED = re.compile(r"backgrounded\s*\u00b7\s*([0-9A-Za-z-]+)")
 COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}")
 FIELD_LINE = re.compile(r"^(exit tests?|acceptance):\s*(.*)$", re.I)  # only these labels are fields
@@ -315,6 +316,8 @@ class Run:
         if found:
             raise Refused("fix the config before you continue (or run /agentic-team:setup):\n  " + "\n  ".join(found))
         self.project = self.config["taskgraph"]["project"]
+        store = taskgraph_store(self.root, self.project)
+        self.local_meta = set(store["local"]) if store else set()  # the meta keys that tg keeps in this machine's cache only
         self.db = os.path.abspath(os.path.expanduser(os.environ.get("TASKGRAPH_DB") or "~/.taskgraph/tasks.db"))
         self.run_dir = os.path.abspath(args.run_dir or os.path.join(self.root, ".agentic-team"))
         self.wt_dir = os.path.realpath(os.path.join(self.root, ".claude", "worktrees"))
@@ -462,14 +465,20 @@ class Run:
             found = [(DEFAULT_PROFILE, r) for r in self.agents(DEFAULT_PROFILE)]
             index = {}  # session id -> (task id, kind, attempt, worktree name), from the `sessions` meta run.py wrote
             recorded = {}  # session id -> the profile its entry names
+            lost, running_lost = set(), False  # tasks whose `sessions` meta went with this machine's Taskgraph cache
             for task in self.tg("ls", "--status", "open", "in_progress", "done") or []:
                 entries = (task.get("meta") or {}).get("sessions")
+                if self.cache_lost(task):
+                    lost.add(task["id"])
+                    running_lost = running_lost or task["status"] == "in_progress"
                 for entry in entries if isinstance(entries, list) else []:
                     if isinstance(entry, dict) and entry.get("id"):
                         index[str(entry["id"])] = (task["id"], entry.get("kind"), entry.get("attempt"),
                                                    entry.get("worktree") or f"task-{task['id']}")
                         recorded[str(entry["id"])] = str(entry.get("profile") or DEFAULT_PROFILE)
-            others = sorted((set(recorded.values()) | self.extra_profiles) - {DEFAULT_PROFILE})
+            # With no entry to name its profile, a session of a task in progress may be under any profile.
+            every = set(self.config.get("profiles") or {}) if running_lost else set()
+            others = sorted((set(recorded.values()) | self.extra_profiles | every) - {DEFAULT_PROFILE})
             for name in others:
                 if name not in (self.config.get("profiles") or {}):
                     raise Refused(f"a `sessions` entry names profile {name}, which [profiles] does not define; "
@@ -486,7 +495,12 @@ class Run:
                     continue
                 at[sid] = len(chosen)
                 chosen.append((name, row))
-            self._sessions = [Session(r, self.wt_dir, index, p) for p, r in chosen]
+            named = {sid: tied for _, r in chosen if (sid := str(r.get("id") or "")) and sid not in index
+                     and (tied := self.tie_by_name(r, lost))}
+            self._sessions = [Session(r, self.wt_dir, {**index, **named}, p) for p, r in chosen]
+            for s in self._sessions:
+                if s.sid in named:
+                    s.recorded = False  # tied by its name, not by a `sessions` entry: record_row may record it
             stopped = set()
             try:
                 with open(os.path.join(self.run_dir, STOPPED_FILE), encoding="utf-8") as fh:
@@ -499,6 +513,27 @@ class Run:
                 if s.live and not s.status and (s.sid in stopped or (s.ghost and quiet_for(self, s, VERIFIER_QUIET_MINUTES))):
                     s.finished, s.live, s.stuck, s.unknown, s.turn_over = True, False, False, False, True
         return self._sessions
+
+    def cache_lost(self, task):
+        """True for a task with an attempt and no `sessions` meta on a Taskgraph GitHub backend that keeps `sessions`
+        local: this machine's cache does not have it (a new machine, a cleared ~/.taskgraph). Not a 0.6.0 task."""
+        return ("sessions" in self.local_meta and "sessions" not in (task.get("meta") or {})
+                and (wanted_attempt(task) or 0) >= 1)
+
+    def tie_by_name(self, row, lost):
+        """(task id, kind, attempt, worktree name) for a row of a task in `lost` (see cache_lost), from its session name
+        task-<id>-<attempt>[-<keyword>] or verify-<id>-<attempt>[-<k>], else None. The name counts only with the row's
+        folder in this repository: its root (where `claude stop` leaves a row) or the worktree that the name gives."""
+        name, cwd = str(row.get("name") or ""), os.path.realpath(row["cwd"]) if row.get("cwd") else ""
+        if m := TASK_NAME.match(name):
+            tid, kind, attempt, folder = int(m.group(1)), "task", int(m.group(2)), f"task-{m.group(1)}"
+        elif m := VERIFY_WT.match(name):
+            tid, kind, attempt, folder = int(m.group(1)), "verify", int(m.group(2)), name
+        else:
+            return None
+        if tid not in lost or cwd not in (os.path.realpath(self.root), os.path.join(self.wt_dir, folder)):
+            return None
+        return tid, kind, attempt, folder
 
     def orders(self):
         path = os.path.join(self.run_dir, "standing-orders.md")
@@ -678,10 +713,49 @@ def legacy_detail(task):
             "run.py does not manage it")
 
 
-def refuse_legacy(task):
-    if is_legacy(task):
-        raise Refused(f"#{task['id']} attempt {wanted_attempt(task)}: {legacy_detail(task)}; "
-                      + LEGACY_NEXT.format(tid=task["id"]))
+def refuse_legacy(run, task):
+    """Refuse a 0.6.0 task. A task whose `sessions` meta went with the local cache gets it rebuilt first
+    (restore_sessions); one that cannot be rebuilt safely is refused with the reason."""
+    if not is_legacy(task):
+        return
+    if run.cache_lost(task):
+        why = restore_sessions(run, task)
+        if why:
+            raise Refused(f"#{task['id']} attempt {wanted_attempt(task)}: {why[0]}; {why[1]}")
+        return
+    raise Refused(f"#{task['id']} attempt {wanted_attempt(task)}: {legacy_detail(task)}; "
+                  + LEGACY_NEXT.format(tid=task["id"]))
+
+
+def restore_sessions(run, task):
+    """Rebuild the `sessions` meta of a task in progress that lost it with this machine's Taskgraph cache (cache_lost)
+    from the `claude agents` rows tied to the task: by folder, or by session name (Run.tie_by_name). `session` gets the
+    newest worker row's name of the current attempt. Written when a row is found or when the attempt has a worker
+    result (nothing then rests on a session); None after the write. Else nothing is written, so that no command reads
+    a worker that may run on another machine as dead: (detail, next) for the refusal or the record event."""
+    tid, attempt = task["id"], wanted_attempt(task)
+    found = [s for s in run.sessions() if s.task_id == tid and s.kind and s.sid]
+    if not found and not task_rows(run.results_for(tid), attempt):
+        return (f"no `sessions` meta (it stays in the local Taskgraph cache, and this cache does not have it) and no "
+                f"`claude agents` row for the task; its worker may run on another machine",
+                f"run run.py there; or, if the worker is gone, tg edit {tid} --meta sessions='[]' and run.py record "
+                f"(salvages its report or files DIED)")
+    entries = []
+    for s in found:
+        m = TASK_NAME.match(s.name) if s.kind == "task" else None
+        number = s.attempt or (int(m.group(2)) if m else attempt)
+        entries.append({"id": s.sid, "kind": s.kind, "attempt": number, "name": s.name or s.wtname, "worktree": s.wtname,
+                        **profile_field(s.profile), **({"sessionId": s.row["sessionId"]} if s.row.get("sessionId") else {})})
+    entries.sort(key=lambda e: (e["attempt"], e["kind"] != "task"))
+    workers = [e for e in entries if e["kind"] == "task" and e["attempt"] == attempt]
+    fields = {"session": workers[-1]["name"]} if workers and not (task.get("meta") or {}).get("session") else {}
+    run.set_meta(task, sessions=entries, **fields)
+    run._sessions = None
+    run.emit("sessions-restored", tid, attempt, None,
+             f"the local Taskgraph cache had no `sessions` meta; rebuilt it from {len(entries)} `claude agents` row(s)"
+             + (f" ({', '.join(e['id'] for e in entries)})" if entries else "")
+             + "; the role, tier and verify kind stored at launch are not in it, so the task's role now counts")
+    return None
 
 
 # ------------------------------------------------- shared result predicates
@@ -2428,7 +2502,7 @@ def cmd_launch(run, args):
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
     refuse_closed(task)
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     verify_mode(run, task)
     picked = choose(run, task, args.tier)  # the role, tier and verify kind of this attempt; refused for a bad role
     blockers = waiting_for(run, task)
@@ -2654,7 +2728,7 @@ def cmd_adopt(run, args):
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
     refuse_closed(task)
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     current = wanted_attempt(task) or 0
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']}); run.py launch {tid} --attempt {current + 1} to try again")
@@ -2754,7 +2828,7 @@ def worker_for(run, tid, attempt, result_id=None):
 def cmd_verify(run, args):
     tid = args.id
     task = run.show(tid)
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     mode = verify_mode(run, task)
     if mode != "session":
         verify_kind(run, task)
@@ -3438,7 +3512,7 @@ DELIVERED = {"carried": "its attempt has ended; the next brief carries it",
 def cmd_answer(run, args):
     tid = args.id
     task = run.show(tid)
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     attempt = refuse_unless_running(task)
     rows = run.results_for(tid)
     th = Thread(rows, task, attempt)
@@ -3483,7 +3557,7 @@ def cmd_answer(run, args):
 def cmd_steer(run, args):
     tid = args.id
     task = run.show(tid)
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     attempt = refuse_unless_running(task)
     rows = run.results_for(tid)
     s = worker_session(run, tid, attempt, task)
@@ -3816,7 +3890,12 @@ def record_in_progress(run, snap, task, unmanaged):
     if attempt is None:
         unmanaged.append(tid)
         return
-    if is_legacy(task):
+    if is_legacy(task) and run.cache_lost(task):
+        why = restore_sessions(run, task)
+        if why:
+            run.emit("sessions-lost", tid, attempt, None, *why)
+            return
+    elif is_legacy(task):
         run.emit("legacy", tid, attempt, None, legacy_detail(task), LEGACY_NEXT.format(tid=tid))
         return
     rows = snap.rows(tid)
@@ -5219,8 +5298,13 @@ def pr_status(run, snap, task, p):
         run.emit("pr-rebased", tid, None, None, f"{label} head is {p.head[:7]}: the host rebased {pushed[:7]}; not checked yet",
                  f"run.py close {tid} (checks that the change is the same and records the new head)")
     elif p.head != pushed:
+        lost = ("host_rebase" in run.local_meta and run.config["merge"]["catch_up"] == "host"
+                and "host_rebase" not in meta)
         run.emit("pr-changed", tid, None, None, f"{label} head is {p.head[:7]}, not the pushed {pushed[:7]}; not merged by run.py",
-                 f"the operator decides: reset the branch to {pushed[:7]} and push, or merge by hand and run.py merged {tid} --by operator")
+                 f"the operator decides: reset the branch to {pushed[:7]} and push, or merge by hand and run.py merged {tid} --by operator"
+                 + (f"; if run.py asked the host to rebase it and this machine's Taskgraph cache lost the local "
+                    f"`host_rebase` meta: tg edit {tid} --meta host_rebase={pushed}, then run.py close {tid} checks the "
+                    "host's head" if lost else ""))
     elif p.merge_state == "UNKNOWN":
         run.emit("pr-pending", tid, None, None, f"{label} state {p.raw_state}", "run.py record later")
     elif p.merge_state == "DRAFT":
@@ -5716,7 +5800,7 @@ def cmd_close(run, args):
         run.emit("closed", tid, wanted_attempt(task), None, "closed earlier; marked it done")
         cleanup(run, task)
         return
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     attempt = refuse_unless_running(task)
     rows, worker = worker_for(run, tid, attempt)
     kind = verify_kind(run, task)
@@ -5845,7 +5929,7 @@ def cmd_stop(run, args):
     task = run.show(tid)
     if awaiting(task):
         raise Refused(f"#{tid} is closed; run.py close {tid} stops its sessions again")
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     attempt = wanted_attempt(task)
     found = own_sessions(run, tid, "task", attempt) if attempt is not None else []
     if attempt is not None and not found and rowless_session(run, task, attempt):
@@ -5885,7 +5969,7 @@ def cmd_abandon(run, args):
         raise Refused(f"#{tid} is not in progress")
     if task_phase(task) == "merged":
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
-    refuse_legacy(task)
+    refuse_legacy(run, task)
     phase = next_phase(task, "abandon")  # before any session stops
     meta = task.get("meta") or {}
     attempt = wanted_attempt(task)

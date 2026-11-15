@@ -1253,7 +1253,7 @@ skill. Metadata holds everything else, 36 keys:
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started. `adopt` writes `session=adopted` and no `model`. |
-| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` (see [Roles](#roles)); an adopted attempt has an entry with these and no `"id"`. A task in progress with an attempt and no `sessions` key was started under 0.6.0. |
+| `sessions` | `launch`, `verify`, `adopt` | A JSON list with one entry per session `run.py` started: `{"id", "kind" (task or verify), "attempt", "name", "worktree"}`, `"profile"` for a session that runs under a profile other than the Manager's own, and `"sessionId"` (the full id that `--resume` needs) when the `claude agents` row had one. `id` is the short id that `claude --bg` printed, checked against `claude agents`. `launch` and `adopt` add `"role"`, `"tier"` and `"verify_kind"` (see [Roles](#roles)); an adopted attempt has an entry with these and no `"id"`. A task in progress with an attempt and no `sessions` key was started under 0.6.0, unless the GitHub backend keeps `sessions` local: then this machine's cache lost it (see [When the local cache is lost](#when-the-local-cache-is-lost)). |
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
@@ -1275,14 +1275,95 @@ skill. Metadata holds everything else, 36 keys:
 request across attempts. The one exception is a repointed task: its `pr` is
 another task's request, so `launch` puts the task's own request back.
 
-On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state that
-`run.py` writes often on this machine, so that a delivery retry never edits the issue:
-`[projects."<name>".meta]` with `local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]`.
+On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state of this
+machine in its cache and send the keys that change often and that nobody needs live with the next write: the
+`local` and `deferred` lists of [Meta keys on the Taskgraph GitHub backend](#meta-keys-on-the-taskgraph-github-backend).
 
 A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Meta keys on the Taskgraph GitHub backend
+
+On the GitHub backend every meta write is an issue edit, unless `.taskgraph.toml`
+lists the key under `[projects."<name>".meta]`: a `local` key stays in this
+machine's Taskgraph cache and is never sent; a `deferred` key waits in the cache
+and goes to the issue with the next write to that issue, or with `tg sync` (see
+the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
+
+| Key | Class | Why |
+|-----|-------|-----|
+| `sessions` | local | The ids, profiles and `--resume` ids of this machine's `claude agents` rows; rewritten at each launch, verify and recorded row. Another machine cannot use them. |
+| `session` | local | The newest worker session's name: this machine's report file name and the `status` line. |
+| `cleanup_kept` | local | Why this machine kept a worktree folder; it only stops `record` from repeating a `kept` line. |
+| `host_rebase` | local | A host rebase that this machine's `close` asked for and has not seen end; most `close` runs set and remove it. |
+| `mailbox` | local | The delivery state of each answer and steer (socket, resume, pending, tries); it changes at each delivery try. |
+| `mailbox_ids` | local | Which answer and steer rows this machine's `run.py` filed. Only this machine's `run.py` and its workers, which read the same cache, check it. |
+| `tokens` | deferred | Shown by `status` and the report; nothing acts on it. |
+| `model` | deferred | The current attempt's model, for `status` and for the verifier's model; read on this machine, where the cache already holds it. |
+| `started_at` | deferred | Shown by `status`; written at each launch. |
+| `attempt`, `phase` | on the issue | Every command reads them; another machine or a person must see where the task is. |
+| `base`, `target` | on the issue | The verified change is `base..Head`, and `target` is where it merges; written once. |
+| `verdict`, `verdict_ref` | on the issue | `close`, `record` and the merge read them back. |
+| `pr`, `pr_branch`, `pushed`, `caught_up_from` | on the issue | The request, the lease for each push and the guard for each merge; `close` and `record` read the full SHAs back. |
+| `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | on the issue | Written once per repoint; the next `launch` reads them back. |
+| `merged_at`, `merged_by`, `merged_via` | on the issue | The merge record; written once. |
+| `abandoned` | on the issue | The only marker of an abandoned task. |
+| `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
+
+The plan keys (`scope`, `verify`, `verify_kind`, `verify_mode`, `tier`, `role`,
+`risk`, `estimate`) and a decision's `decider` and `ask` are written by the
+Manager or you with `tg`, not by `run.py`; they stay on the issue. The block to
+add to `.taskgraph.toml`:
+
+```toml
+[projects."<name>".meta]
+local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]
+deferred = ["tokens", "model", "started_at"]
+```
+
+`config.py check` prints a warning (and still exits 0) for each key of the
+`local` and `deferred` rows that the project's entry lists in neither. Put the
+block in place before `run.py` first writes on the GitHub backend: a value that
+an issue already holds stays in its meta block when the key becomes `local`, and
+tg shows that old value whenever the cache has none. To drop it, delete the key
+from the issue's meta block on GitHub.
+
+#### When the local cache is lost
+
+The `local` keys exist only in this machine's cache (by default
+`~/.taskgraph/cache/github/<owner>/<repo>.db`). On a new machine, or after the
+cache is deleted, tg reads each task from GitHub without them, and a `deferred`
+value that was not sent yet is gone too. What `run.py` does then:
+
+| Key | After the loss |
+|-----|----------------|
+| `sessions` | Rebuilt. The first command that acts on a task in progress with an attempt and no `sessions` (`record`, `launch`, `adopt`, `verify`, `close`, `stop`, `abandon`, `answer`, `steer`) rebuilds it from this machine's `claude agents` rows, under every `[profiles]` profile, and prints `sessions-restored`. A row counts when it is in the task's worktree folder, or when its session name is `task-<id>-<attempt>[-<keyword>]` or `verify-<id>-<attempt>[-<k>]` and its folder is this repository's root (where `claude stop` leaves a row) or that worktree. When no row is found, an attempt that has a worker result gets an empty list: nothing then depends on a session. An attempt with no result and no row is left as it is: `record` prints `sessions-lost` and the other commands refuse, because its worker may run on another machine and must not be filed DIED. The rebuilt entries do not have the role, tier and verify kind stored at launch, so `verify` uses the role the task names now. A session whose row was removed (`claude rm`) cannot be resumed. A merged task's rows are matched by name for its cleanup, with no write. |
+| `session` | Rebuilt with `sessions`: the name of the current attempt's newest worker row. |
+| `mailbox`, `mailbox_ids` | Lost. `run.py` cannot tell its own answer and steer rows from rows a worker filed `--by manager`, so it does not rebuild the lists, and no earlier answer or steer counts. An ask they answered reads as open again and `record` prints it as `asked`: answer it again. A steer the worker had not acked no longer shows in its inbox: steer again (`run.py inbox <id>` lists the rows). A later brief carries no answer or steer of an earlier attempt. |
+| `cleanup_kept` | Lost; `record` prints each kept folder's `kept` line once more. |
+| `host_rebase` | Lost. A request whose head the host rebased after a `close` reads as `pr-changed`, not `pr-rebased`; its next step names the `tg edit <id> --meta host_rebase=<pushed>` that lets `close` check and take the host's head. |
+
+What you do:
+
+1. Before you move to another machine or delete the cache: let the workers
+   finish or `run.py stop` them, and run `tg sync` to send the deferred values.
+2. After the loss, run `run.py record`. For each `sessions-lost` line: if the
+   worker runs on another machine, finish it there; if it is gone,
+   `tg edit <id> --meta sessions='[]'` and `run.py record`, which salvages its
+   report from the worktree or files DIED.
+3. Answer again the asks that `record` prints, and steer again what a worker
+   had not acked.
+
+The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
+the inbox files, the list of stopped sessions) and the worktrees are not in
+Taskgraph either: they stay on the old machine. Copy the standing orders and run
+`run.py notify-to` again on the new one.
+
+### Upgrading from 0.22.2
+
+Version 0.22.3 (issue #123) is for projects on the Taskgraph GitHub backend; on the local SQLite store nothing changes. The README now owns the list of meta keys that `run.py` writes and their class on that backend ([Meta keys on the Taskgraph GitHub backend](#meta-keys-on-the-taskgraph-github-backend)); add the `deferred` list (`tokens`, `model`, `started_at`) next to the `local` one. `config.py check` warns for each such key that `.taskgraph.toml` lists in neither. When this machine's cache has lost `sessions` (a new machine, a cleared `~/.taskgraph`), a task in progress is no longer read as a 0.6.0 task: `run.py` rebuilds `sessions` and `session` from `claude agents`, and a task with no row and no result gets a `sessions-lost` line and is left alone, never filed DIED for want of a row (see [When the local cache is lost](#when-the-local-cache-is-lost)). A `pr-changed` line whose `host_rebase` meta was lost says how to let `close` take the host's head. No migration.
 
 ### Upgrading from 0.22.1
 

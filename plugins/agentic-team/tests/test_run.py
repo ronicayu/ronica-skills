@@ -484,6 +484,20 @@ class Base(unittest.TestCase):
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
 
+    def github_store(self, local=config.RUNTIME_META["local"]):
+        """(env, tg) for run_cmd so that run.py reads a .taskgraph.toml that maps the project to the GitHub backend with
+        `local` keys, while tg (a wrapper that drops TASKGRAPH_CONFIG) keeps the test's SQLite store. A task with no
+        `sessions` meta then looks like one whose local keys went with the cache."""
+        path = os.path.join(self.dir, "taskgraph.toml")
+        with open(path, "w") as fh:
+            fh.write(f'version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n'
+                     f'[projects."demo".meta]\nlocal = {json.dumps(list(local))}\n')
+        wrapper = os.path.join(self.dir, "tg-sqlite.py")
+        with open(wrapper, "w") as fh:
+            fh.write(f"import os, runpy, sys\nos.environ.pop('TASKGRAPH_CONFIG', None)\nsys.path.insert(0, {os.path.dirname(TG)!r})\n"
+                     f"sys.argv[0] = {TG!r}\nrunpy.run_path({TG!r}, run_name='__main__')\n")
+        return dict(self.env, TASKGRAPH_CONFIG=path), wrapper
+
     def agents(self, *rows):
         with open(self.agents_file, "w") as fh:
             json.dump(list(rows), fh)
@@ -7719,6 +7733,22 @@ class PrTest(Base):
         self.assertNotIn("host_rebase", meta)
         self.assertEqual(len(self.update_calls()), 1)
 
+    def test_a_host_rebase_whose_local_host_rebase_meta_was_lost_says_how_to_take_it(self):
+        env, tg = self.github_store()
+        task, wt, head = self.published()
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND", extra=self.update_answer("failed"))
+        self.one(self.events("close", str(task)), "pr-behind")
+        self.tg("edit", str(task), "--unset-meta", "host_rebase")  # the cache that held it is gone
+        new = self.host_rebases()
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        self.assertNotIn("host_rebase", self.one(self.events("record"), "pr-changed")["next"])  # SQLite: never lost
+        line = self.one(self.events("record", env=env, tg=tg), "pr-changed")
+        self.assertIn(f"tg edit 1 --meta host_rebase={head}, then run.py close 1 checks the host's head", line["next"])
+        self.tg("edit", str(task), "--meta", f"host_rebase={head}")
+        self.one(self.events("close", str(task), env=env, tg=tg), "rebased")
+        self.assertEqual(self.meta(task)["pushed"], new)
+
     @both_hosts
     def test_103_a_push_that_a_pre_push_hook_refuses_is_push_failed_with_the_hook_line(self):
         task, wt, head = self.published()
@@ -9716,6 +9746,90 @@ class DeliveryTest(Base):
 def transcript_text(tokens):
     return transcript(tokens)
 
+
+
+class LostCacheTest(Base):
+    """#123: on the Taskgraph GitHub backend `sessions` and `session` stay in this machine's cache. A task in progress
+    whose cache lost them (a new machine, a cleared ~/.taskgraph) is rebuilt from `claude agents`, never read as a
+    0.6.0 task, and never read as dead without a row or a result."""
+
+    def setUp(self):
+        super().setUp()
+        self.gh_env, self.gh_tg = self.github_store()
+
+    def gh(self, *args):
+        return self.events(*args, env=self.gh_env, tg=self.gh_tg)
+
+    def gh_run(self, *args):
+        return self.run_cmd(*args, env=self.gh_env, tg=self.gh_tg)
+
+    def lost_task(self):
+        """A task in progress at attempt 1 whose `sessions` and `session` meta are gone, with its worktree."""
+        task = self.add_task(start=True, attempt=1)
+        self.task_wt(task)
+        return task
+
+    def test_a_live_row_in_the_task_folder_rebuilds_sessions_and_the_worker_runs_on(self):
+        task = self.lost_task()
+        self.agents(self.row("task-1", name="task-1-1", sessionId=UUID1))
+        self.one(self.events("record"), "legacy")  # the SQLite store keeps every key: no sessions is a 0.6.0 task
+        events = self.gh("record")
+        self.assertEqual(self.named(events, "legacy"), [])
+        self.assertIn("rebuilt it from 1 `claude agents` row(s) (sess-task-1-1)", self.one(events, "sessions-restored")["detail"])
+        self.assertEqual(self.one(events, "running")["session"], "sess-task-1-1")
+        meta = self.meta(task)
+        self.assertEqual(meta["sessions"], [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
+                                             "worktree": "task-1", "sessionId": UUID1}])
+        self.assertEqual(meta["session"], "task-1-1")
+        again = self.gh("record")
+        self.assertEqual(self.named(again, "sessions-restored"), [])
+        self.one(again, "running")
+
+    def test_a_parked_worker_stopped_at_the_root_is_tied_by_its_name_on_any_profile_and_not_filed_died(self):
+        c2 = os.path.join(self.dir, "claude-2")
+        os.makedirs(c2)
+        self.write_config(f'[profiles]\nc2 = "{c2}"\n')
+        task = self.lost_task()
+        other = os.path.join(self.dir, "other-repo")  # the same session name in another repository counts for nothing
+        with open(os.path.join(c2, "agents.json"), "w") as fh:
+            json.dump([{"id": "sess-a", "name": "task-1-1", "cwd": self.root, "state": "stopped", "sessionId": UUID1},
+                       {"id": "sess-b", "name": "task-1-1", "cwd": other, "state": "stopped"}], fh)
+        ask = self.add_result(task, "OPEN", "Question: Which endpoint?\nDefault: v2\nBlocking: yes\nWhy: both\n",
+                              kind="ask", by="task-1-1")["id"]
+        events = self.gh("record")
+        self.one(events, "sessions-restored")
+        self.assertIn(f"#{ask} by task-1-1", self.one(events, "asked")["detail"])
+        self.assertEqual(self.named(events, "died"), [])
+        self.assertEqual([r["status"] for r in self.results(task)], ["OPEN"])
+        self.assertEqual(self.meta(task)["sessions"], [{"id": "sess-a", "kind": "task", "attempt": 1, "name": "task-1-1",
+                                                        "worktree": "task-1", "profile": "c2", "sessionId": UUID1}])
+
+    def test_no_row_and_no_result_is_not_read_as_dead_and_launch_is_refused_with_the_way_out(self):
+        task = self.lost_task()
+        self.agents()
+        events = self.gh("record")
+        lost = self.one(events, "sessions-lost")
+        self.assertIn("its worker may run on another machine", lost["detail"])
+        self.assertIn("tg edit 1 --meta sessions='[]' and run.py record", lost["next"])
+        for name in ("died", "legacy", "sessions-restored"):
+            self.assertEqual(self.named(events, name), [])
+        self.assertEqual(self.results(task), [])
+        self.assertNotIn("sessions", self.meta(task))
+        out = self.gh_run("launch", str(task))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("its worker may run on another machine", out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+        self.tg("edit", str(task), "--meta", "sessions=[]")  # the operator's call: the worker is gone
+        self.one(self.gh("record"), "died")
+
+    def test_an_attempt_with_a_result_gets_an_empty_list_and_its_commands_work(self):
+        task = self.lost_task()
+        self.pass_report(task)
+        self.agents()
+        out = self.gh_run("verify", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.meta(task)["sessions"], [])
+        self.assertNotIn("session", self.meta(task))
 
 
 class PhaseTest(Base):
