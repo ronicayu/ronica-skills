@@ -20,6 +20,9 @@ repo = "acme/plan"
 local = ["sessions", "session"]
 deferred = ["tokens"]
 
+[projects."demo".results]
+local = ["ack", "steer", "anything-new"]
+
 [projects."other"]
 backend = "github"
 repo = "acme/other"
@@ -47,6 +50,7 @@ def test_load_config_reads_every_key(tmp_path):
     demo, other = project_entry(config, "demo"), project_entry(config, "other")
     assert (demo.backend, demo.repo, demo.label, demo.cache_ttl, demo.full_every) == ("github", "acme/plan", "taskgraph", 30, 600)
     assert demo.local == ("sessions", "session") and demo.deferred == ("tokens",)
+    assert demo.local_results == ("ack", "steer", "anything-new") and other.local_results == ()
     assert (other.label, other.cache_ttl, other.full_every, other.cache, other.claimant) == ("tasks", 5, 60, "~/c/other.db", "me")
     assert project_entry(config, "unmapped") is None
 
@@ -117,12 +121,16 @@ CASES = {
     "version must be 1": GOOD.replace("version = 1", "version = 2"),
     "unknown key colour": GOOD.replace('label = "tasks"', 'colour = "red"'),
     "meta takes only local and deferred": GOOD.replace('deferred = ["tokens"]', 'shared = ["tokens"]'),
+    "results takes only local": GOOD.replace('local = ["ack"', 'deferred = ["ack"'),
+    r"results.local must be a list of result kinds": GOOD.replace('local = ["ack", "steer", "anything-new"]', 'local = "ack"'),
+    r"results.local must be a list of result kinds ": GOOD.replace('local = ["ack", "steer", "anything-new"]', 'local = ["ack", 3]'),
+    "results takes only local ": GOOD.replace('[projects."demo".results]\nlocal = ["ack", "steer", "anything-new"]', '').replace('repo = "acme/plan"', 'repo = "acme/plan"\nresults = ["ack"]'),
 }
 
 
 @pytest.mark.parametrize("message", CASES)
 def test_validation_errors(tmp_path, message):
-    with pytest.raises(StoreError, match=message):
+    with pytest.raises(StoreError, match=message.strip()):
         load_config(write(tmp_path, CASES[message]))
 
 

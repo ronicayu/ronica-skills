@@ -11,7 +11,7 @@ from tgstore.base import StoreError
 
 NAME = ".taskgraph.toml"
 BACKENDS = ("github",)
-KEYS = {"backend", "repo", "label", "cache_ttl", "full_every", "cache", "claimant", "meta"}
+KEYS = {"backend", "repo", "label", "cache_ttl", "full_every", "cache", "claimant", "meta", "results"}
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class Entry:
     claimant: str | None = None
     local: tuple = ()
     deferred: tuple = ()
+    local_results: tuple = ()  # result kinds kept in the cache only
 
 
 @dataclass(frozen=True)
@@ -82,10 +83,10 @@ def number(name, table, key, default, minimum):
     return value
 
 
-def words(name, meta, key):
-    value = meta.get(key, [])
+def words(name, table, key, section="meta", what="keys"):
+    value = table.get(key, [])
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        bad(name, f"meta.{key} must be a list of keys")
+        bad(name, f"{section}.{key} must be a list of {what}")
     return tuple(value)
 
 
@@ -111,9 +112,12 @@ def entry_from(name, table):
     both = sorted(set(local) & set(deferred))
     if both:
         bad(name, f"meta key {both[0]} is in both local and deferred")
+    results = table.get("results", {})
+    if not isinstance(results, dict) or set(results) - {"local"}:
+        bad(name, "results takes only local")
     return Entry(
         name, backend, repo, table.get("label", "taskgraph"), number(name, table, "cache_ttl", 30, 0), number(name, table, "full_every", 600, 60),
-        table.get("cache"), table.get("claimant"), local, deferred,
+        table.get("cache"), table.get("claimant"), local, deferred, words(name, results, "local", "results", "result kinds"),
     )
 
 

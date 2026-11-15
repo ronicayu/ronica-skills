@@ -19,6 +19,9 @@ cache = "{cache}"
 [projects.demo.meta]
 local = ["sessions", "session", "cleanup_kept", "host_rebase"]
 deferred = ["tokens", "model", "started_at"]
+
+[projects.demo.results]
+local = ["ack", "steer"]
 """
 
 
