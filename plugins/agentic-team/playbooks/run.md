@@ -14,7 +14,9 @@ every report, and on every wake (step 6).
      carries the previous report, and the cap is enforced.
    - `arrived ISSUES` because the timebox or context ran out: split the work
      in Taskgraph and launch the smaller task.
-   - `arrived BLOCKED` or `gated`: read its `Asked:` line first: the asks it relied on, or why it asked none. Apply the decision-forks principle. When
+   - `arrived ISSUES` or `arrived BLOCKED`: read its `Asked:` line first: the asks it relied on, or why it asked none. When an
+     `Asked: none:` reason is wrong (an ask was possible and left), say so in the task notes for the retry.
+   - `arrived BLOCKED` or `gated`: apply the decision-forks principle. When
      evidence can answer it, answer in the task notes or the standing orders
      and relaunch. Otherwise add a decision with `--blocks <id>`. A done
      decision's notes are pasted into the next brief.
@@ -39,8 +41,10 @@ every report, and on every wake (step 6).
      `--meta ask=<n>` (the worker's `Default:` in its notes), and after it is done run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --decision <decision id>`. The worker waits idle at no cost; it is not stuck and not dead.
      Workers ask before they report `ISSUES` or `BLOCKED` (Ask first in `agents/worker.md`), so answer what one answer can settle:
-     when the worker needs a file outside SCOPE to meet the same ACCEPTANCE, widen the task's `scope` meta with `tg edit` and
-     answer (its inbox prints the new SCOPE); a new requirement is still a new task (Brief frozen at start).
+     when the worker needs a file outside SCOPE to meet the same ACCEPTANCE, widen the task's `scope` meta with `tg edit`, and
+     put the new SCOPE in the answer's `Answer:` line (the worker's inbox also prints it under `SCOPE changed since your
+     brief`); a new requirement is still a new task (Brief frozen at start). An answer never lowers ACCEPTANCE or VERIFY.
+     Allow ignoring a failure only when the evidence shows it fails on the base too, and file it as a follow-up.
      `asking`: the same ask still has no answer; nothing new to do. `ask-due`: the ask passed `[messaging] ask_due_minutes`;
      apply its default yourself with `"${CLAUDE_PLUGIN_ROOT}/scripts/run" answer <id> --ask <n> --default` (or a better answer): `run` never decides or answers for you.
    - `answer-seen`, `steer-seen`: the worker acked the message (the line names the transport and its one-line action). Nothing to do.
@@ -178,13 +182,16 @@ every report, and on every wake (step 6).
      its verdict. Give it in the prompt: the task id and title, its SCOPE and notes
      (`tg show <id>`), the base (the target branch, or the `--base` you will pass), the
      target branch, its current dependencies, and the Taskgraph command with the real
-     plugin path and project. For several tasks, start one subagent per task in one
+     plugin path and project. Pass the base as a ref fetched just before (for example
+     `origin/main` after `git fetch`): the subagent does not fetch. For several tasks, start one subagent per task in one
      message. A retry on the same base needs no check. Do the check for docs-only
      tasks too: a document often describes code that is not merged yet.
    - Act on the verdict. `ok`: launch. A `missing:` line: add the dependency
      (`"${CLAUDE_PLUGIN_ROOT}/scripts/tg" --project <project> dep add <id> <n>`; the task leaves
      `ready`), wait for the request it names, or launch with `--base <branch>` on
-     purpose. A `not checked:` or `ask:` line: decide from the evidence you have, as
+     purpose. To wait, record it so the task leaves `ready` (a Taskgraph dependency on the
+     request's task, an outside-dependency node, or a gate), and run the check again only
+     when that request merged. A `not checked:` or `ask:` line: decide from the evidence you have, as
      the decision-forks principle says; never launch the check a second time for it.
    - Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
    - Exit 2: fix what the message names (the task, the config, or the state),

@@ -16,7 +16,8 @@ at most 10 lines.
 The Manager's prompt gives you:
 
 - the task id, its title, its SCOPE and its notes (the acceptance criteria);
-- the base: the commit or branch that the task will start from;
+- the base: the commit or branch that the task will start from, as a ref that the
+  Manager fetched just before (you do not fetch, so other remote refs may be stale);
 - the target branch (for example `main`);
 - the Taskgraph command: `<plugin root>/scripts/tg --project <project>`;
 - the task's current dependencies.
@@ -26,7 +27,8 @@ one line.
 
 ## Rules
 
-- Read only. Use Bash only for these commands: `git log`, `git show`, `git branch -r`,
+- Read only, by instruction: nothing in this file's frontmatter limits the Bash tool, so
+  you keep these rules yourself. Use Bash only for these commands: `git log`, `git show`, `git branch -r`,
   `git branch --contains`, `git ls-tree`, `git cat-file`, `git grep`, `git merge-base`,
   `git rev-parse`; `gh pr list`, `gh pr view`, `gh pr diff`; `glab mr list`, `glab mr view`,
   `glab mr diff`; and the Taskgraph command with `show`, `ls` or `result ls`.
@@ -45,16 +47,18 @@ one line.
 2. For each one, check that it exists on the base: `git ls-tree -r --name-only <base> --
    <path>` for a path, `git grep -n <name> <base> -- <folder>` for a name.
 3. For each one that is missing, find where it is:
-   - `git branch -r --contains` or `git log --all --oneline -S <name> -- <path>` for a commit
-     on an unmerged branch;
+   - `git log --oneline -S <name> --branches --remotes --not <base> -- <path>` for a commit
+     that is not on the base, then `git branch -r --contains <commit>` for its branch.
+     Remote refs other than the base may be stale: say so when a verdict depends on one;
    - `gh pr list --state open --search "<name or path>"` (or `glab mr list --search`) for an
      open request, and `gh pr diff <n> --name-only` to confirm the path.
    - A branch named `worktree-task-<n>` or `task-<n>` is the work of Taskgraph task `<n>`.
      Read it with `tg show <n>`.
 4. Check Taskgraph: is the task that makes the missing code a dependency of this task
-   (`tg show <id>`)? If not, the dependency is missing. Also look at the open tasks
-   (`tg ls`) whose SCOPE writes the same paths as this task: a task that must land first
-   and is not a dependency is missing too.
+   (`tg show <id>`)? If not, the dependency is missing. Also run
+   `tg ls --status ready in_progress --search <path>` for each path this task writes (it
+   searches titles and notes): a task that must land first and is not a dependency is
+   missing too.
 
 ## Answer
 
