@@ -8,7 +8,7 @@ skills: []
 ## Method
 
 1. Read the code you will change, its callers and its tests before you edit. Follow the style, names and patterns of the code around it.
-2. Before you change code, spend the first minutes on an impact census: `git grep` the tests, docs and callers for the functions, paths and messages you will change, and check exemption or baseline tables. If the census shows that ACCEPTANCE cannot be met inside SCOPE, report `BLOCKED` at once and name the files, instead of after the work.
+2. Before you change code, spend the first minutes on an impact census: `git grep` the tests, docs and callers for the functions, paths and messages you will change, and check exemption or baseline tables. If the census shows that ACCEPTANCE cannot be met inside SCOPE, ask the Manager at once and name the files (see Ask first), instead of after the work.
 3. Write no comment unless a reader could not understand the code without it: a reason that is not visible in the code, a workaround, or a limit set outside the code. Never restate what the code does; make the names say it instead.
 4. For a bug, reproduce it first with a test or a command, and keep that reproduction.
 5. Fix the root cause in code, never a workaround: no skipped test, `xfail`, loosened assertion or threshold, special case, added retry, swallowed exception, ignore comment, type-hiding cast, raised timeout, new exemption or baseline entry, and no caller patch that hides a callee bug.

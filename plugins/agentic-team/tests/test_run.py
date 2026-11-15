@@ -5697,7 +5697,7 @@ class RunTest(Base):
     def test_107_check_report_refuses_an_unlabelled_line(self):
         out = self.check_report("\ncaller: src/b.py: calls the old name\n- fix the README too\nBug: src/c.py: wrong")
         self.assertEqual((out.returncode, out.stdout), (2, ""))
-        hint = ("start it with one of caller, doc, test, other, found, split, decision, nonblocking, "
+        hint = ("start it with one of caller, doc, test, other, found, split, flake, decision, nonblocking, "
                 "as `<label>: <path or question>: <why>`")
         self.assertEqual(out.stderr.splitlines(), [
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
@@ -5720,7 +5720,7 @@ class RunTest(Base):
         empty = os.path.join(self.dir, "empty")  # not a repository, no .agentic-team.toml
         os.makedirs(empty)
         with open(os.path.join(empty, "report.md"), "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: ISSUES\nAsked: #4\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         out = self.run_cmd("check-report", os.path.join("empty", "report.md"), root=empty, tg=None)
         self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
         self.assertEqual(self.run_cmd("status", root=empty, tg=None).returncode, 2)  # a command that builds Run refuses
@@ -5766,8 +5766,8 @@ class RunTest(Base):
             "one line": ("PASS", "Evidence: first -> make test: ok\n", (2, "", problem.format(1))),
             "none": ("PASS", "Evidence: None\n", (2, "", problem.format(0))),
             "no field": ("PASS", "", (2, "", problem.format(0))),
-            "issues": ("ISSUES", "", (0, "ok\n", "")),
-            "blocked": ("BLOCKED", "Evidence: None\n", (0, "ok\n", "")),
+            "issues": ("ISSUES", "Asked: #4\n", (0, "ok\n", "")),
+            "blocked": ("BLOCKED", "Evidence: None\nAsked: none: no ask is left\n", (0, "ok\n", "")),
         }
         for name, (status, evidence, expected) in cases.items():
             with self.subTest(name):
@@ -6315,8 +6315,8 @@ class Issue89Test(Base):
         self.assertIn("a PASS report has no blocking finding", err)
 
     def test_a_worker_report_keeps_free_issue_lines(self):
-        self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails")), (0, "ok\n", ""))
-        self.assertEqual(self.check(self.report("ISSUES", Issues="None")), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails", Asked="#4")), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Issues="None", Asked="none: the timebox ran out")), (0, "ok\n", ""))
 
     def test_the_brief_passes_verifier_only_to_a_verifier(self):
         task = self.running_task()
@@ -6359,7 +6359,7 @@ class Issue89Test(Base):
     def test_the_path_check_exempts_a_deleted_line_and_a_blocked_report(self):
         report = self.report(Files="`old/gone.py` (deleted)\n`old/other.py` removed in this task")
         self.assertEqual(self.check(report), (0, "ok\n", ""))
-        self.assertEqual(self.check(self.report("BLOCKED", Files="`no/such.py`")), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("BLOCKED", Files="`no/such.py`", Asked="#4")), (0, "ok\n", ""))
 
     def test_the_path_check_looks_up_an_absolute_path_inside_the_worktree(self):
         inside = os.path.join(self.dir, "missing", "x.py")
@@ -12749,6 +12749,90 @@ class RevisionTest(Base):
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Issue130Test(Base):
+    """agentic-team 0.25.0 (issue #130): ask before ISSUES or BLOCKED, flakes are follow-ups, and the dependency-check
+    agent."""
+
+    def report(self, status, **fields):
+        path = os.path.join(self.dir, "report.md")
+        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+                "Issues": "the test fails" if status != "PASS" else "None", "Deviations": "None", "Follow-ups": "None",
+                "Checkpoint": CHECKPOINT, **fields}
+        with open(path, "w") as fh:
+            fh.write("".join(f"{k}: {v}\n" for k, v in text.items() if v is not None))
+        return path
+
+    def check(self, path, *flags):
+        out = self.run_cmd("check-report", path, *flags)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_130_check_report_refuses_issues_or_blocked_with_no_valid_asked_line(self):
+        for status in ("ISSUES", "BLOCKED"):
+            for name, asked in (("missing", None), ("bare none", "None"), ("no reason", "none:"), ("no hash", "12, 15"),
+                                ("prose", "I asked about it")):
+                with self.subTest(status=status, case=name):
+                    code, out, err = self.check(self.report(status, Asked=asked))
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn(f"run.py: {status} needs an `Asked:` line", err)
+                    self.assertIn("`Asked: #12, #15`", err)
+                    self.assertIn("`Asked: none: <one-line reason>`", err)
+                    self.assertIn("ask first", err)
+                    self.assertEqual(len(err.splitlines()), 1, err)
+
+    def test_130_check_report_accepts_ask_ids_and_a_reason_for_none(self):
+        for status in ("ISSUES", "BLOCKED"):
+            for asked in ("#123, #125", "#7", "#3 #4", "none: the brief allows no asks",
+                          "None: HEAD is not the commit that CONTEXT names"):
+                with self.subTest(status=status, asked=asked):
+                    self.assertEqual(self.check(self.report(status, Asked=asked)), (0, "ok\n", ""))
+            self.assertEqual(self.check(self.report(status, Asked="#123, see the notes"))[0], 2)
+
+    def test_130_an_asked_line_after_follow_ups_is_not_a_follow_up(self):
+        path = self.report("ISSUES", Checkpoint=None)
+        with open(path, "a") as fh:
+            fh.write(f"Asked: #9\nCheckpoint: {CHECKPOINT}\n")
+        self.assertEqual(self.check(path), (0, "ok\n", ""))
+
+    def test_130_pass_and_verifier_reports_need_no_asked_line(self):
+        self.assertEqual(self.check(self.report("PASS")), (0, "ok\n", ""))
+        issues = self.report("ISSUES", Issues="blocking: a red test", Verdict="verify-failed")
+        self.assertEqual(self.check(issues, "--verifier"), (0, "ok\n", ""))
+        self.assertEqual(self.check(issues)[0], 2)  # the same report from a worker
+        blocked = self.report("BLOCKED", Issues="None", Verdict="verify-blocked")
+        self.assertEqual(self.check(blocked, "--verifier"), (0, "ok\n", ""))
+        self.assertEqual(self.check(blocked)[0], 2)
+
+    def test_130_the_worker_brief_names_the_asked_rule_and_the_verifier_brief_does_not(self):
+        task = self.add_task()
+        self.assertIn("`Asked:`", self.section(self.brief(task), "REPORT"))
+        worker = self.running_task()
+        self.add_result(worker, "PASS", f"Task: {worker}\nStatus: PASS\nHead: {SHA_A}\n")
+        self.assertNotIn("`Asked:`", self.section(self.ok("verify", str(worker), "--dry-run").stdout, "REPORT"))
+
+    def test_130_a_flake_follow_up_is_labelled(self):
+        import run as runner
+        self.assertIn("flake", runner.FOLLOW_UP_LABELS)
+        follow = "flake: make test: run 1 failed test_upload (timeout); the rerun with no change printed OK"
+        self.assertEqual(self.check(self.report("PASS", **{"Follow-ups": follow})), (0, "ok\n", ""))
+        self.assertEqual(runner.follow_ups(f"Follow-ups:\n- {follow}\n"), [("flake", f"- {follow}")])
+
+    def test_130_a_carried_report_keeps_its_asked_line_when_it_is_cut(self):
+        import run as runner
+        body = ("Status: BLOCKED\nWorktree: /w\n" + "\n".join(f"  WT{i} " + "w" * 24 for i in range(10))
+                + "\nAsked: #41, #42\nFiles: a.py\nIssues: src/b.py is outside SCOPE\nDeviations: None\n")
+        out = runner.carried_body(body, ("[cut]", "[full]"), 120)
+        self.assertIn("Asked: #41, #42", out)
+        self.assertNotIn("WT9", out)
+        self.assertTrue(out.endswith("[cut]"))
+
+    def test_130_the_worker_instructions_have_the_asked_field_and_the_flake_label(self):
+        with open(os.path.join(os.path.dirname(HERE), "agents", "worker.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        block = re.search(r"```text\n(.*?)```", text, re.S).group(1)
+        self.assertRegex(block, r"(?m)^Issues: .*\nAsked: ")
+        self.assertIn("`flake`", text)
 
 
 class TransitionTest(unittest.TestCase):
