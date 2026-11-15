@@ -150,7 +150,10 @@ number: it caps retries at 3 and labels result rows, session names, and brief
 files. The retry starts at the worktree's `HEAD`, and its brief says so and pastes
 the previous report. `launch --base` on a retry is refused while the worktree
 exists, and the message gives the by-hand reset; `run.py` never resets,
-rebases, or checks out another commit in place. Before a retry the worktree
+rebases, or checks out another commit in place, except the `close` catch-up with
+`catch_up = "local"` (it rebases the idle worktree, and puts the old head back
+when the change differs) and `round --cancel` (it keeps the round's head in a
+ref, then resets to the verified head). Before a retry the worktree
 must be clean. `launch` refuses a `STOPPED` attempt whose WIP commit is not made
 yet (run `record` first). When a dead or stuck attempt left uncommitted files,
 `launch` commits them as `WIP task <id> attempt <n>: <status>` and says so in
@@ -241,7 +244,9 @@ request instead (next section). A task that depends on one that waits for its
 merge is not ready; `launch --base <its branch>` builds on it anyway (`adopt`
 takes only a branch that holds its commit), and the Manager says so plainly in its replies and reports. A task that waits for its
 merge refuses `launch`, `adopt`, `verify` and `stop`; `close` again resumes at
-the merge or the push, and `abandon` drops it. After the merge, `run.py` removes
+the merge or the push, `round` starts a new attempt on the same branch and
+request (see "Round" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests)),
+and `abandon` drops it. After the merge, `run.py` removes
 the worktrees of the task by default (`merge.remove_worktrees = true`). It
 works in two steps.
 
@@ -360,7 +365,7 @@ or broke (`Reason: recover`), and the attempt counts toward the cap, as a
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](assets/diagrams/lifecycle.svg)
 
-The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict, a task is done exactly when its change is merged, and the attempt cap holds. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. The model also names each state's `phase`, and a test checks that `run.py`'s table `TRANSITIONS` has the same phase changes as the model, apart from a short list of known differences, each with its reason. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
+The chart below is checked, not drawn by hand. [model/](model/) holds a TLA+ model of one task's attempts in `run.py`. The [statechart](../statechart/) skill, adapted from poteto's pstack, checks it with TLC and draws the chart. TLC checks every reachable state against the model's rules: following `record`'s hints never reaches a dead end, a verdict is never lost, nothing merges without a passing verdict (except a merge on the host of a head no verdict covers, which `record` records as the operator's), a task is done exactly when its change is merged, the attempt cap holds, and a conflict on a task that waits for its merge gets a round, never an abandon. The chart leaves out the operator's pause, which `pause.cfg` checks, and it leaves out decisions, splits, CI verify and the request states that the diagram above shows. The model also names each state's `phase`, and a test checks that `run.py`'s table `TRANSITIONS` has the same phase changes as the model, apart from a short list of known differences, each with its reason. [model/NOTES.md](model/NOTES.md) says how to run the model and keep it current.
 
 ![The checked lifecycle of one task's attempts: launch, report, verify, verdict, close, merge, retry and abandon](assets/diagrams/attempt-statechart.svg)
 
@@ -389,7 +394,9 @@ the operator's standing permission for `run.py` to push task branches to
    GitHub lists the issue on the pull request. A GitLab URL is a plain link.
 2. `run.py record` reads the request at each drain. It prints `pr-pending`,
    `pr-blocked` (with the required checks), `pr-draft`, `conflict`,
-   `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. When the host reports the
+   `pr-behind`, `pr-rebased`, `pr-changed`, `pr-unpinned`, or `ready-to-merge`. A
+   `conflict` line names `run.py round <id> rebase` first and the decision
+   second (item 5). When the host reports the
    request clean, a `MERGE:` line exists, and `STOP` is absent, `record` merges
    it with `merge.method`. The merge is guarded by the pushed head
    (`--match-head-commit` on GitHub, `sha` on GitLab). A request whose head is
@@ -423,13 +430,13 @@ the operator's standing permission for `run.py` to push task branches to
    from this machine, so a local pre-push hook does not run, and the task
    worktree is not touched. A changed diff is a decision, and `pushed` stays at
    the old head, so `record` prints `pr-changed` and never merges the request.
-   A conflict on the host is a decision. A host that cannot rebase (an old `gh`,
+   A conflict on the host is a `conflict` line: a round (item 5), or a decision. A host that cannot rebase (an old `gh`,
    no endpoint) or that refuses this user falls back to the local rebase
    (`catch-up-local`). A rebase that the host finishes late is found by the next
    `record` (`pr-rebased`) and checked by the next `close`. With
    `catch_up = "local"`, `close` rebases the branch in its idle worktree, checks
    that the change is the same, and pushes it again. A conflict is aborted and
-   written as a decision. A worktree that is missing, dirty, or in use is not
+   gets the same `conflict` line. A worktree that is missing, dirty, or in use is not
    touched. `run.py` never approves, force-resolves, or unprotects. A push is
    made only when our head moved. A push that fails while the remote branch is
    still at `pushed` did not reach the remote, for example because of a pre-push
@@ -437,7 +444,52 @@ the operator's standing permission for `run.py` to push task branches to
    someone else moved the remote branch while our head stayed, `record` prints
    `pr-changed`; `push-refused` appears when our head moved too, with where the
    remote branch is and git's line.
-5. **Repoint.** When the changes of several tasks go into one request (the
+5. **Round.** `run.py round <id> rebase` (#119) starts a new attempt of a task
+   that waits for its merge and whose change conflicts with its target, on the
+   same branch and the same request. It takes a task with
+   `phase=awaiting_merge` whose request (in `pr` mode) is open at the pushed
+   head, which is the verified head; it refuses a task that is repointed,
+   already in a round, or at `[rounds] cap` without `--attempt <n>`, and a task
+   with no conflict that `run.py` can see (the host says the request is
+   `DIRTY`, or `git merge-tree --write-tree <target> <head>` finds a conflict;
+   in `local` mode the second check only, which `record` also runs and prints
+   as `conflict` instead of `unmerged`). The worktree must be clean and at the
+   verified head; after a host rebase it may be at `caught_up_from`, and
+   `round` first moves the branch to the host's head (the same change). The
+   round is attempt `n+1` with the phase `running`: its brief's ROLE is the
+   role named like the kind (`rebase`, shipped in `templates/roles/rebase.md`;
+   a project replaces it or `extends` it, see [Roles](#roles)), with the
+   round's values filled in, and its SETUP says that ROLE names the one command
+   that moves the branch. The worker rebases onto the target commit that
+   `round` names, resolves each conflict keeping both behaviours, runs VERIFY,
+   commits, and does not push. A round does not count toward the attempt cap.
+   It writes `round`, `round_from` (the verified head), `round_verdict`,
+   `round_onto` (the target commit) and `rounds`, and unsets `verdict` and
+   `verdict_ref`; `pr`, `pr_branch`, `pushed` and the `merge` gate stay. Then
+   the usual flow: a PASS whose head carries the same change as `round_from`
+   needs no verifier, and `close` carries `round_verdict` with a Manager
+   `verify` row (`Carried: ...`); any other PASS goes to `run.py verify` under
+   `[rounds] verify = "always"` (the default), whatever the risk and the kind,
+   and the verifier's base is the target commit, so its diff holds only the
+   task's change. A passing `close` pushes the new head to the same request
+   with the lease, and the task waits for its merge again. A round that fails
+   (ISSUES, BLOCKED, DIED, stuck, stopped, a failing verdict) gets the hint
+   `run.py round <id> --cancel`, never `launch` or `abandon`. `--cancel` stops
+   the round's sessions, aborts a rebase in progress, commits the WIP, keeps the
+   round's head in `refs/agentic-team/round/<id>-<attempt>`, resets the branch
+   to `round_from`, pushes `round_from` back to the request when a CI verify
+   of the round had pushed the round's head, files the carried row, and puts
+   the verdict back: the task waits again. While a round runs, `record` reads
+   its request: `round-not-needed` when the conflict went away (cancel, or let
+   the round finish), `pr-closed` and `pr-changed` as usual. When the request
+   merges during a round, `record` stops the round's sessions and records the
+   merge (`merged_by=operator`); it puts back the verdict of `round_from` only
+   when the merged head is `round_from` or carries the same change, and else
+   records the merge with no verdict. The round's worktree then holds an
+   unmerged head, so cleanup keeps it with a `kept` line. `launch` and `adopt`
+   refuse a task in a round; `abandon` drops it, and a later `launch` starts a
+   plain fix round.
+6. **Repoint.** When the changes of several tasks go into one request (the
    operator combined their requests to resolve a conflict), each task follows
    that request: `run.py repoint <id> --pr <n>`. It takes only a task with
    `phase=awaiting_merge` in `pr` mode, and refuses a request that is closed,
@@ -489,7 +541,7 @@ the operator's standing permission for `run.py` to push task branches to
    keys); if repoint closed that request, the next `close` reports it as
    `pr-closed` until you reopen it on the host. `status` shows the request as
    `#<n> (repointed from #<own>)`.
-6. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
+7. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
 **Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
 and the push accept a branch at a new head when the change is the same. The
@@ -505,7 +557,9 @@ not. Two trade-offs: with no context lines, the same `-` and `+` lines at
 another place in the same file count as the same change; and a target that
 renamed a file the task edited is refused (the `diff --git` line differs), which
 is the safe side. The move is printed
-(`rebased`) and written (`verdict_ref`); any other difference is refused.
+(`rebased`) and written (`verdict_ref`); any other difference is refused. A
+round whose head carries the same change as the verified head keeps its verdict
+by the same rule (item 5 above).
 
 **CI as the verifier.** With `--meta verify_mode=ci:<name>` on the task,
 `run.py verify <id>` pushes the branch, opens the request, and finds the CI run
@@ -576,11 +630,12 @@ session's message or the end of `wait` wakes it.
 
 | Command | What it does |
 |---------|--------------|
-| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. |
+| `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. It refuses a task in a round (`round <id> --cancel` ends it). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
-| `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. |
+| `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. In a round, a PASS with the same change as the verified head and no verifier verdict keeps the round's old verdict (a `Carried:` row). |
+| `round <id> <kind>` | Starts a new attempt of a task that waits for its merge, on the same branch and request: kind `rebase`, for a change that conflicts with its target. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt <n>` (also lifts `[rounds] cap`), `--dry-run`. `round <id> --cancel` ends a round: the task waits again at its verified head. Prints `round-started` or `round-cancelled`. See "Round" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests). |
 | `merged <id>` | Records that the operator merged a task branch (`--by operator`, the default), marks the task done, then removes its sessions and worktrees. |
 | `repoint <id> --pr <n>` | `pr` mode: a task that waits for its merge follows request `<n>`, which carries its change (another task's request). Writes `pr`, `pr_branch` and the `repointed_*` keys, unsets `pushed`, sets the merge gate to `<n>`, and closes the task's own request with a comment that names `<n>` (`--keep-old` leaves it open). The phase stays `awaiting_merge`. `record` then only reports `<n>`, and marks the task merged (`merged_by=repoint`, `merged_via=<n>`) once `<n>` is merged; a `target-check` line says, for information, whether the task's commit is in the target. See "Repoint" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests). |
 | `stop <id>` | Stops a worker and files a `STOPPED` result. The row says `Reason: pause` when the standing orders' first line is `STOP`: a pause, which does not use an attempt. Else it says `Reason: recover`: a stop that recovers a quiet or broken session, which counts as an attempt. |
@@ -645,8 +700,8 @@ in either file.
 Model values are either a model id (`"opus"`) or a table
 (`{ model = "sonnet", effort = "high" }`). A table may add `profile`, a Claude
 profile for the sessions of that tier (see [Workers on more than one Claude
-profile](#workers-on-more-than-one-claude-profile)). The config has 11 sections
-and 32 keys, and one optional table, `[profiles]`, whose names are your own.
+profile](#workers-on-more-than-one-claude-profile)). The config has 12 sections
+and 34 keys, and one optional table, `[profiles]`, whose names are your own.
 
 ### `[taskgraph]`
 
@@ -770,6 +825,13 @@ pattern.
 |-----|------|---------|---------|
 | `carried_report_bytes` | positive integer | `3000` | The most UTF-8 bytes of one carried report (the previous attempt, an upstream dependency, the worker report in a verify brief) in a brief. A report over it is cut at a line boundary and ends with a line that names its result id and the command that prints it. |
 | `carried_total_bytes` | positive integer | `12000` | The most UTF-8 bytes of all carried reports of one brief together. It must be at least `carried_report_bytes`. |
+
+### `[rounds]`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `cap` | positive integer | `3` | The rounds (`run.py round`) a task may have without `--attempt`. A round does not count toward the attempt cap. At the cap a `conflict` line names the decision and the override. |
+| `verify` | `"always"`, `"by-risk"` | `"always"` | `"always"`: a round's PASS goes to a verifier session, whatever the task's risk and verify kind, unless its head carries the same change as the verified head. `"by-risk"`: the rule of a plain attempt (a verifier for `risk=high`, CI verify, or a kind that is not `code`). |
 
 ### `[notifications]`
 
@@ -1064,12 +1126,15 @@ A role is a method for one kind of task. A task names its role in the `role` met
 
 Every worker is still the one worker agent with the one report format. ROLE guides how the worker works. It never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS, and the brief says so. A task that needs two roles is two tasks. A task with no role and no `roles.default` is unchanged, except that its brief has a ROLE section that reads `None.`.
 
-Two roles ship with the plugin, in [templates/roles/](templates/roles/):
+Three roles ship with the plugin, in [templates/roles/](templates/roles/):
 
 | Role | Fits | Tier | Verify kind | Skills |
 |------|------|------|-------------|--------|
 | `architect` | design documents, ADRs, specs, interface contracts, data models, migration plans | `judgement` | `design-doc` | `architecture-design:architecture-design`, `writing-editor:writing-editor` |
 | `software-engineer` | code changes: features, bug fixes, refactors, tests, scripts, build and CI changes | `implementation` | `code` | none |
+| `rebase` | rounds only: the role of `run.py round <id> rebase`, not of a task | none (the last attempt's) | none (the task's) | none |
+
+A round's kind names its role: `run.py round <id> rebase` gives the worker the Method, and the verifier the Review, of the role `rebase`, instead of the task's role. A project changes what a round does by replacing that file or extending it (below): for example a project that resolves conflicts with `git merge` instead of a rebase.
 
 `run.py roles` lists the roles a project has. The Manager runs it once while planning and sets `--meta role=<name>` on the task whose work matches a role's `fits`.
 
@@ -1128,11 +1193,15 @@ extends: software-engineer   # the parent role
 - **What shows.** `run.py roles` shows the source as `project, extends plugin:software-engineer` (or `project:<name>`). The ROLE line of a brief names both files. The 600-word warning counts the merged text.
 - **Broken.** An `extends` that names no role, and a parent that is broken or extends another role, make the role broken, with the same refusals as any broken role.
 
+### Variables in role text
+
+`launch`, `round` and `verify` fill `{{NAME}}` placeholders in a role's Method and Review: `{{TASK_ID}}`, `{{TASK_TITLE}}` and `{{PROJECT}}` in every brief, and in a round `{{ROUND_KIND}}`, `{{ROUND_FROM}}` (the verified head), `{{ROUND_ONTO}}` (the target commit), `{{ROUND_OLD_BASE}}` (`git merge-base` of the two), `{{ROUND_OVERLAP}}` (the files that both the change and the target changed since then, in backticks, at most 30, else `none`) and `{{ROUND_VERDICT}}`. A placeholder with no value stays as it is.
+
 ### Tier and verify kind
 
 | | Order, first match wins |
 |---|---|
-| Tier | `launch --tier`, the task's `tier` meta, the role's `tier`, then `implementation` |
+| Tier | `launch --tier`, the task's `tier` meta, the role's `tier`, then `implementation`. A round: `round --tier`, the kind role's `tier`, the tier stored for the last attempt, then the order above |
 | Verify kind | the task's `verify_kind` meta, the role's `verify_kind`, then `verify.kind` from the config |
 
 The `launched` line says where the tier came from, for example `tier judgement (role architect)`, `tier implementation (meta)` or `tier implementation (default)`. Set `tier` or `verify_kind` on a task only to depart from its role.
@@ -1233,7 +1302,10 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
-`Overrides:` and `Reason:`. Every row filed when
+`Overrides:` and `Reason:`. A round's carried verdict (a clean round's `close`,
+`round --cancel`, the request merged during a round at the verified head) is a
+`PASS` row by `manager` with `Verdict:`, `Carried: <verified head> (<why>)` and
+`Head:`. Every row filed when
 `run.py` stops a session carries `Session: <id>` and `Worktree: <path>` lines;
 they are a record, not how sessions are matched.
 
@@ -1243,7 +1315,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 36 keys:
+skill. Metadata holds everything else, 41 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1270,6 +1342,8 @@ skill. Metadata holds everything else, 36 keys:
 | `phase` | `launch`, `adopt`, `verify`, `record`, `close`, `stop`, `merged`, `abandon` | Where the task is: `running` (a worker runs), `stopped` (the attempt ended with no report: `STOPPED`, `DIED`, or the Manager's `BLOCKED`), `reported` (the worker filed its result), `verifying` (a verifier or a CI run checks it), `verdict_failed` (a verdict that did not close it), `awaiting_merge` (closed, in progress until its change is merged), `merged` (merged, or closed with nothing to merge; done), `abandoned`. `record` writes it for a task that has none, from `abandoned`, `merged_at`, the status, `verdict`, `verdict_ref` and the result rows, and keeps the first four in step with the result rows. A done task that is merged (or closed with nothing to merge) and has no phase gets none written: `run.py` derives `merged` when it reads it. A done task whose stored phase is one of the first four (an older `run.py` closed it after a newer `record` wrote the phase) is derived again from those fields, as if it had none. When the stored phase and those fields disagree on anything else, `record` prints `phase-mismatch` and leaves the task alone until you fix the meta. Every change goes through the table `TRANSITIONS` in `run.py`; an event with no row for the task's phase stops the command with an internal error, except in `record`, which prints `transition-error` for that task, goes on with the others, and exits 1. |
 | `gates` (key `merge`) | `close`, `record`, `merged`, `abandon` | Taskgraph's completion gates (`tg gate`, Taskgraph 1.19.0). `run.py` owns the gate `merge` and sets it while the task waits for its merge: label `merge of <branch>` with no ref (local mode, or pr mode before the request opens), else `PR #<n>` or `MR !<n>` with the request URL as ref. `run.py` clears it, with `tg gate <id> merge --clear`, in the merge record before `tg done`, and in `abandon`. A task that is done in Taskgraph (closed by 0.18.0) gets no gate. Other gates on the task are not `run.py`'s. |
 | `abandoned` | `abandon` | One word: `died`, `tool-error`, `stuck`, or `unknown`. Set when attempt 3 has failed. Only this marker lists a task as abandoned. |
+| `round`, `round_from`, `round_verdict`, `round_onto` | `round` | A round in flight: its kind (`rebase`), the verified head it started from, that head's verdict, and the target commit of the kind. A passing `close`, `round --cancel`, and the merge of the request during the round remove them; `launch` after an `abandon` removes them too. |
+| `rounds` | `round` | How many rounds the task has had; `[rounds] cap` limits them without `--attempt`. Never removed. |
 
 `launch` never unsets `pr`, `pr_branch`, `pushed`, or `target`: a task has one
 request across attempts. The one exception is a repointed task: its `pr` is
@@ -1309,6 +1383,7 @@ the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
 | `pr`, `pr_branch`, `pushed`, `caught_up_from` | on the issue | The request, the lease for each push and the guard for each merge; `close` and `record` read the full SHAs back. |
 | `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | on the issue | Written once per repoint; the next `launch` reads them back. |
 | `merged_at`, `merged_by`, `merged_via` | on the issue | The merge record; written once. |
+| `round`, `round_from`, `round_verdict`, `round_onto`, `rounds` | on the issue | `close`, `record` and `round --cancel` read them back, and another machine must see that a round runs. |
 | `abandoned` | on the issue | The only marker of an abandoned task. |
 | `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
 
@@ -1360,6 +1435,10 @@ The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
 the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
+
+### Upgrading from 0.22.3
+
+Version 0.23.0 (issue #119) adds `run.py round <id> rebase`: a new attempt of a task that waits for its merge and whose change conflicts with its target, on the same branch and request, instead of `abandon` and `launch --attempt`. Each `conflict` line now names the round first and the decision second; in `local` mode `record` prints `conflict` (not `unmerged`) for a branch that `git merge-tree` finds in conflict with its target. A round that fails names `run.py round <id> --cancel`. New: the `[rounds]` config section (`cap = 3`, `verify = "always"`), the shipped role `rebase` (a project file of that name replaces it; `run.py roles` lists it, and the Manager does not give it to a task), the meta keys `round`, `round_from`, `round_verdict`, `round_onto` and `rounds` (on the issue on the Taskgraph GitHub backend), the events `round-started`, `round-cancelled` and `round-not-needed`, and `{{NAME}}` variables in role text. A role file that holds `{{` text of its own keeps it, unless it is one of the names in [Variables in role text](#variables-in-role-text). No migration.
 
 ### Upgrading from 0.22.2
 
