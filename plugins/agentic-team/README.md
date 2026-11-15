@@ -1589,6 +1589,32 @@ the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
 
+### Result kinds on the Taskgraph GitHub backend
+
+On the GitHub backend every result row is an issue comment, and GitHub's secondary rate limits on creating comments
+(per minute and per hour) are shared by every session on one `gh` login: the Manager, each worker and each verifier.
+The mailbox handshake adds rows fast (a steer and its ack for each message), so keep those kinds in this machine's
+Taskgraph cache with Taskgraph 1.21.0 or later (#133). Add this block next to the meta block:
+
+```toml
+[projects."<name>".results]
+local = ["ack", "steer"]
+```
+
+A row of a `local` kind is never posted; `tg result add` and `tg result ls` work as before, and the worker's
+`mailbox.py`, which runs `tg` on the same machine, reads the same cache. `config.py check` prints a warning (and still
+exits 0) for each of these kinds that the project's entry does not list. `ask` and `answer` stay on the issue by
+default: they hold the worker's question and the Manager's decision, which a person or another machine may want to
+read. A project may add them to `local` too; then a lost cache also loses the questions and the answers, and an answer
+that came from a `decision` task stays in that task's notes.
+
+When the cache is lost (see [When the local cache is lost](#when-the-local-cache-is-lost)), the local rows go with it:
+the handshake history, which `run.py inbox` showed, and the evidence behind the `steer-seen` and `answer-seen` lines.
+`record` still works, because every place that reads a steer or an ack starts from the ids in the `mailbox` and
+`mailbox_ids` meta, which are local keys and are lost at the same time: with no listed steer, no steer waits for an
+ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is what the meta table above already
+says: answer again the asks that `record` prints, and steer again what a worker had not acked.
+
 ### Upgrading from 0.24.1
 
 Version 0.25.0 (issue #130) changes three rules; no lifecycle, phase or model change. First, ask first: a worker asks the Manager before it reports `ISSUES` or `BLOCKED` for a question one answer can settle, and its `ISSUES` or `BLOCKED` report has an `Asked:` line (ask ids, or `none: <one-line reason>`); `check-report` without `--verifier` refuses one without it (see [Messaging](#messaging), Ask first). A session started before the upgrade whose check command runs the 0.25.0 `run.py` gets that refusal for an `ISSUES` or `BLOCKED` report; the message names the rule and the line to add, and the report command itself does not check it. Second, a check that fails once and passes on a rerun with no change is a `flake:` follow-up, not `ISSUES`; `flake` is a new Follow-ups label (it shows in `status`). Third, the Manager starts the new read-only subagent `agentic-team:dependency-check` (model `sonnet`) with the Agent tool before the first attempt of each task and before a later attempt on a different base (the run playbook, step 4); it is not skipped for docs-only tasks. `Asked` is a report field: `report_field` stops at it, and a carried report keeps it first after `Status` when it is cut. The software-engineer role asks at once, instead of `BLOCKED` at once, when its census shows that ACCEPTANCE does not fit SCOPE, and the rebase role asks with the conflicting hunks before it reports `BLOCKED`. The dependency check is read-only by instruction: agent frontmatter cannot limit Bash to some commands. The Manager's "Brief frozen" rule now lets SCOPE widen to answer such an ask. No migration.

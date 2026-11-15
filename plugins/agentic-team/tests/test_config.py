@@ -427,11 +427,40 @@ class ConfigTest(unittest.TestCase):
             [projects."demo".meta]
             local = {local}
             deferred = {deferred}
+            [projects."demo".results]
+            local = {json.dumps(list(config.LOCAL_RESULT_KINDS))}
         """)
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
         self.write_taskgraph('version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n')  # no meta table
         self.assertEqual(sum("run-time meta key" in line for line in self.run_cli("check")[2].splitlines()),
                          len(config.RUNTIME_META["local"]) + len(config.RUNTIME_META["deferred"]))
+
+    def test_check_warns_for_each_recommended_local_result_kind_the_github_backend_would_post(self):
+        self.write(MINIMAL)
+        os.environ.pop("TASKGRAPH_CONFIG", None)
+        meta = (f'[projects."demo".meta]\nlocal = {json.dumps(list(config.RUNTIME_META["local"]))}\n'
+                f'deferred = {json.dumps(list(config.RUNTIME_META["deferred"]))}\n')
+        head = 'version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n' + meta
+        path = self.write_taskgraph(head)
+        code, out, err = self.run_cli("check")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertEqual(err.splitlines(), [
+            f"config.py: warning: taskgraph: the GitHub backend posts each {kind!r} result row as an issue comment, and "
+            f"comments share GitHub's rate limit on creating content; add {kind!r} to local under "
+            f'[projects."demo".results] in {os.path.realpath(path)}' for kind in config.LOCAL_RESULT_KINDS] or err)
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["steer", "ask"]\n')
+        err = self.run_cli("check")[2]
+        self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack"])
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "ask", "answer"]\n')
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
+        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "ask", "answer"))
+
+    def test_the_readme_gives_the_recommended_local_result_kinds_of_the_code(self):
+        with open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        section = text.split("### Result kinds on the Taskgraph GitHub backend", 1)[1].split("\n### ", 1)[0]
+        self.assertIn(f'[projects."<name>".results]\nlocal = {json.dumps(list(config.LOCAL_RESULT_KINDS))}\n', section)
+        self.assertEqual(re.findall(r'(?m)^local = (\[.*\])$', section), [json.dumps(list(config.LOCAL_RESULT_KINDS))])
 
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)

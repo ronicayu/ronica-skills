@@ -799,10 +799,12 @@ REVISE = "revise"  # the row kind that run.py revise files: the rows of the atte
 
 
 def current_rows(rows, attempt):
-    """The rows of `attempt` after its newest `revise` row (a revision, #127), or all its rows when it has none."""
+    """The rows of `attempt` after its newest `revise` row (a revision, #127), or all its rows when it has none. "After"
+    is the order of `tg result ls`, not the id: a result kind that the Taskgraph GitHub backend keeps local has ids of
+    its own range."""
     mine = [r for r in rows if r.get("attempt") == attempt]
-    start = max((r["id"] for r in mine if r["kind"] == REVISE and r.get("author") == "manager"), default=0)
-    return [r for r in mine if r["id"] > start]
+    marks = [i for i, r in enumerate(mine) if r["kind"] == REVISE and r.get("author") == "manager"]
+    return mine[marks[-1] + 1:] if marks else mine
 
 
 def task_rows(rows, attempt=None, kind="task", history=False):
@@ -3614,6 +3616,7 @@ class Thread:
         self.asks = [r for r in mine if r["kind"] == mbx.ASK]
         self.answers = [r for r in mine if r["kind"] == mbx.ANSWER and r.get("author") in mbx.SENDERS and r["id"] in listed]
         self.steers = [r for r in mine if r["kind"] == mbx.STEER and r.get("author") in mbx.SENDERS and r["id"] in listed]
+        self.sent = [r for r in mine if r in self.answers or r in self.steers]  # in the order of `tg result ls`
         self.acks = [r for r in mine if r["kind"] == mbx.ACK]
         self.acked = {mbx.ref_of(r.get("body")) for r in self.acks} - {None}
         self.open = mbx.open_messages(rows, task.get("meta"), attempt, listed)  # what the worker's inbox prints
@@ -4056,7 +4059,7 @@ def mailbox_events(run, task, attempt, th, deliver_ok=True):
             run.emit("ask-due", tid, attempt, None, f"#{ask['id']} has had no answer for {messaging['ask_due_minutes']} minutes",
                      f"run.py answer {tid} --ask {ask['id']} --default (the worker's Default: "
                      f"{mbx.field_line(ask['body'], 'Default')})")
-    for row in sorted(th.answers + th.steers, key=lambda r: r["id"]):
+    for row in th.sent:
         entry = table.get(str(row["id"]))
         if entry is None or entry.get("carried"):
             continue
