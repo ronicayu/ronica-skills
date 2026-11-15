@@ -1469,27 +1469,34 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("cap full: 1/1 sessions live", out.stderr)
         self.agents(self.finished("task-9"))
-        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("cap full", out.stdout)
         self.agents(self.row("verify-9-1"))
-        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 2)
+        out = self.run_cmd("launch", str(task), "--dry-run")  # a dry run starts nothing: it warns and shows the brief
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("cap full: 1/1 sessions live", out.stdout)
+        self.assertIn("(dry run: shown anyway)", out.stdout)
 
     def test_21_a_ghost_row_does_not_fill_the_cap(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
         self.agents(self.row("task-9", status=None, state="working"))
-        self.assertEqual(self.run_cmd("launch", str(task), "--dry-run").returncode, 0)
+        out = self.run_cmd("launch", str(task), "--dry-run")
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("cap full", out.stdout)
         self.agents(self.row("task-9", status="busy", state="working", pid=1234))
         out = self.run_cmd("launch", str(task), "--dry-run")
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("cap full: 1/1", out.stderr)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("cap full: 1/1", out.stdout)
 
     def test_21_a_working_row_with_a_pid_and_no_status_counts(self):
         self.write_config(sessions="max_parallel = 1\n")
         task = self.add_task()
         self.agents(self.row("task-9", status=None, state="working", pid=1234))
         out = self.run_cmd("launch", str(task), "--dry-run")
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("cap full", out.stderr)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("cap full", out.stdout)
 
     def test_22_untrusted_workspace(self):
         task = self.add_task()

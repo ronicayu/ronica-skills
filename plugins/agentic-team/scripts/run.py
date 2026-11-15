@@ -2549,10 +2549,15 @@ def resolve_base(run, ref):
     return out.stdout.strip(), None
 
 
-def check_cap(run):
+def check_cap(run, dry=False):
+    """Refuse a new session when the cap is full. A dry run starts nothing, so it only warns and goes on."""
     live, cap = live_count(run), run.config["sessions"]["max_parallel"]
     if live >= cap:
-        raise Refused(f"cap full: {live}/{cap} sessions live; run run.py record and refill after it")
+        message = f"cap full: {live}/{cap} sessions live; run run.py record and refill after it"
+        if dry:
+            run.emit("warn", None, None, None, message + " (dry run: shown anyway)")
+            return
+        raise Refused(message)
 
 
 def refuse_unmerged_deps(run, task, holds, way):
@@ -2905,7 +2910,7 @@ def cmd_launch(run, args):
     role_size_warning(run, task, picked.role, nxt)
     cap = asks_cap(run, task, tier)
     text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
-    check_cap(run)
+    check_cap(run, getattr(args, "dry_run", False))
     model, effort, profile = worker_model(run, args, tier)
     worktree = f"task-{tid}"
     if args.dry_run:
@@ -3237,7 +3242,7 @@ def cmd_verify(run, args):
     else:
         model = "sonnet" if str((task.get("meta") or {}).get("model") or "").startswith("opus") else "opus"
         effort = args.effort
-    check_cap(run)
+    check_cap(run, getattr(args, "dry_run", False))
     where = verify_skill(run, ref)[0] or "none"
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role, seat=folder)
     if args.dry_run:
@@ -3379,19 +3384,19 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         if is_sha(ref) and head != commit_of(run, ref):
             raise Refused(f"{rel} is at {head[:7]}, not the worker's Head {ref[:7]}; the verifier judges the Head the "
                           "worker reported")
-        check_cap(run)
+        check_cap(run, getattr(args, "dry_run", False))
     elif is_sha(ref) and not args.dry_run:
         why = status_reason(run, path)[0]
         if why:
             raise Refused(f"the verifier's folder {rel} is not clean ({why}); it cannot move to {ref[:7]}")
-        check_cap(run)  # before the folder moves
+        check_cap(run, getattr(args, "dry_run", False))  # before the folder moves
         moved = run.git("checkout", "-q", "--detach", ref, cwd=path, check=False)
         if moved.returncode != 0:
             raise Refused(f"git checkout of {ref[:7]} in {rel} failed: {first_line(moved.stderr or moved.stdout)}", 1)
         # the branch moves with the folder, so the folder and its branch go once this verdict is recorded
         run.git("branch", "-f", f"worktree-{folder}", ref, check=False)
     else:
-        check_cap(run)
+        check_cap(run, getattr(args, "dry_run", False))
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
@@ -4169,7 +4174,7 @@ def cmd_revise(run, args):
     if busy:
         raise Refused(f"the verifier session {busy[0].describe()} is still working in the attempt; run run.py record, and "
                       "revise once its turn is over")
-    check_cap(run)
+    check_cap(run, getattr(args, "dry_run", False))
     row, lines = revise_findings(task, rows)
     number = revision_of(task) + 1
     worker = newest_entry(task, "task", attempt) or {}
@@ -6534,7 +6539,7 @@ def start_round(run, args):
     fields = {"round": kind, "round_from": start, "round_verdict": meta["verdict"], "round_onto": onto, "rounds": done + 1}
     view = {**task, "meta": {**meta, **fields, "attempt": nxt}}
     text = render(run, view, "task", nxt, session, base=start, retry=True, cap=asks, role=role)
-    check_cap(run)
+    check_cap(run, getattr(args, "dry_run", False))
     model, effort, profile = worker_model(run, args, tier)
     next_phase(task, "round")  # an event the table refuses stops the command before anything starts
     if args.dry_run:
