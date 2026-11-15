@@ -205,8 +205,9 @@ report whose `Issues:` lines do not all start with `blocking:`."""
 FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "flake", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
 FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
 FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
-ASKED_IDS = re.compile(r"#\d+(?:\s*,?\s*#\d+)*")
+ASKED_IDS = re.compile(r"#\d+(?:\s*,?\s*#\d+)*(?:\s*[(:\u2014-].*)?", re.S)  # ids, then an optional note
 ASKED_NONE = re.compile(r"none:\s*\S", re.I)
+ASKED_LOOSE = re.compile(r"(?m)^[ \t]*(?:[-*][ \t]*)?\**Asked\**:.*$")  # an Asked line that is not at column 0
 PATH_FIELDS = ("Files", "Evidence", "Ran")  # the fields whose backticked paths check-report looks up in a worker report
 BACKTICKED = re.compile(r"`([^`\n]+)`")
 PATH_LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
@@ -7366,12 +7367,19 @@ def asked_problems(body, status):
     """The ask-first rule of a worker report: ISSUES and BLOCKED name the asks they relied on, or why none applied."""
     if status not in ("ISSUES", "BLOCKED"):
         return []
-    asked = report_field(strip_comments(body or ""), "Asked")
+    text = strip_comments(body or "")
+    asked = report_field(text, "Asked")
     if ASKED_IDS.fullmatch(asked) or ASKED_NONE.match(asked):
         return []
-    return [f"{status} needs an `Asked:` line: the ids of the asks it relied on, as `Asked: #12, #15`, or "
-            "`Asked: none: <one-line reason>`; ask first (agents/worker.md, Asking): report ISSUES or BLOCKED only "
-            "when one Manager answer cannot settle it, no ask is left, or the work cannot be finished"]
+    fix = ("add the line `Asked: #12, #15` (the ids of the asks it relied on) or `Asked: none: <one-line reason>` at "
+           "the start of a line; ask first (agents/worker.md, Ask first): report ISSUES or BLOCKED only when one "
+           "Manager answer cannot settle it, no ask is left, or the work cannot be finished")
+    loose = ASKED_LOOSE.search(text)
+    if asked:
+        return [f"{status}: `Asked: {asked.splitlines()[0]}` is not `#12, #15` or `none: <reason>`; {fix}"]
+    if loose and not text[loose.start():].startswith("Asked:"):
+        return [f"{status} needs an `Asked:` line at the start of a line, not `{loose.group(0).strip()}`; {fix}"]
+    return [f"{status} needs an `Asked:` line; {fix}"]
 
 
 def verifier_problems(body, status):

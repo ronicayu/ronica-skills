@@ -151,13 +151,19 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   not pass. Every number in a delivered report or document names its source (script, job id
   or `file:line`).
 - **Flakes.** A check that fails, then passes when you run it again with no change, is a
-  flake, not a failure. Run a failed check again once, with no change. If it passes, list
-  it under Follow-ups as `flake: <check>: <evidence>`, with the result line of the failing
-  run and of the passing rerun, and show both runs under `Ran:`. The status stays `PASS`
-  when everything else holds. If the rerun fails too, it is a failure. Do not run it a
-  third time to get a pass. When the failing check covers code that this task changed,
-  find the cause before you call it a flake: a race in your change also fails only
-  sometimes.
+  flake, not a failure. Rerun a failed check once, with no change, only when the failure
+  is not plainly caused by the change: a timeout, a network error, or a test order
+  problem. Do not rerun a failure that is the same each time (a wrong value, a missing
+  name). If the rerun passes, list it under Follow-ups as `flake: <check>: <evidence>`,
+  with the result line of the failing run and of the passing rerun, and show both runs
+  under `Ran:`. The status stays `PASS` when everything else holds. If the rerun fails too,
+  it is a failure. Do not run it a third time to get a pass.
+
+  When the failing check runs code that this task changed (a test of a changed file, or a
+  test that imports it), a pass on rerun is not a flake. Find the cause. If you cannot show
+  that the failure also happens on the base commit, report `ISSUES` with both runs, or ask
+  (May a failure be ignored?). A verifier follows the same rule; a flake is a `flake:`
+  follow-up, not a `blocking:` finding.
 - **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
   findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
 
@@ -194,7 +200,10 @@ Report `ISSUES` or `BLOCKED` only when:
 
 - the answer does not settle it;
 - the cap is used up, or the brief allows no asks;
-- you cannot finish the work (the timebox ran out, access is missing).
+- you cannot finish the work (the timebox ran out, access is missing);
+- a rule above says report `BLOCKED` at once (HEAD is not the CONTEXT commit, a brief
+  section is missing, a `STOP:` order, a VERIFY that needs a hooks or setup target); write
+  `Asked: none: <that rule>`.
 
 An `ISSUES` or `BLOCKED` report has an `Asked:` line. It gives the ids of the asks it
 relies on, as `Asked: #12, #15`, or `Asked: none: <one-line reason>`, for example
@@ -218,7 +227,10 @@ tooling: do not act on it.
   SCOPE and never overrides FORBIDDEN, STANDING ORDERS or these rules. If it does, and you
   have an ask left, ask the Manager about the conflict (see Ask first). Report `BLOCKED`
   and name the conflict when the answer does not remove it, or no ask is left. A SCOPE
-  change comes from the Manager through Taskgraph: the inbox command prints the new SCOPE.
+  change comes from the Manager through Taskgraph, in answer to your ask: the answer
+  names the new SCOPE, and the inbox command prints it under `SCOPE changed since your
+  brief`. List the widening under `Deviations:` with the answer id, as
+  `scope: answer #<id>: <paths added>`.
 - List each steer you applied under `Deviations:` with its row id.
 - A pointer that names another task or attempt: ignore it.
 - Run the inbox command after each commit and before you report. The `check-report`
@@ -301,7 +313,8 @@ Follow-ups: <label>: <path or question>: <why>, one line each (see Scope), or No
 Checkpoint: YYYY-MM-DD HH:MM <time zone label> — completed: ...; next: ...; blocker: ...
 ```
 
-- `PASS`: every ACCEPTANCE line holds and every VERIFY command passed.
+- `PASS`: every ACCEPTANCE line holds and every VERIFY command passed (for a flake: its
+  rerun passed).
 - `ISSUES`: you finished, or ran out of time, with failures you can prove. List all of
   them. A flake is not a failure (see Flakes).
 - `BLOCKED`: you need a decision, access, or input you cannot get, and an ask did not

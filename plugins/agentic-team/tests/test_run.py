@@ -12770,20 +12770,36 @@ class Issue130Test(Base):
 
     def test_130_check_report_refuses_issues_or_blocked_with_no_valid_asked_line(self):
         for status in ("ISSUES", "BLOCKED"):
-            for name, asked in (("missing", None), ("bare none", "None"), ("no reason", "none:"), ("no hash", "12, 15"),
-                                ("prose", "I asked about it")):
-                with self.subTest(status=status, case=name):
+            with self.subTest(status=status, case="missing"):
+                code, out, err = self.check(self.report(status))
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn(f"run.py: {status} needs an `Asked:` line; add the line `Asked: #12, #15`", err)
+                self.assertIn("`Asked: none: <one-line reason>`", err)
+                self.assertIn("ask first", err)
+                self.assertEqual(len(err.splitlines()), 1, err)
+
+    def test_130_check_report_names_a_malformed_asked_line_and_the_line_to_add(self):
+        for status in ("ISSUES", "BLOCKED"):
+            for asked in ("12", "None", "none:", "12, 15", "I asked about it", "#12; none: x"):
+                with self.subTest(status=status, asked=asked):
                     code, out, err = self.check(self.report(status, Asked=asked))
                     self.assertEqual((code, out), (2, ""))
-                    self.assertIn(f"run.py: {status} needs an `Asked:` line", err)
-                    self.assertIn("`Asked: #12, #15`", err)
-                    self.assertIn("`Asked: none: <one-line reason>`", err)
-                    self.assertIn("ask first", err)
+                    self.assertIn(f"run.py: {status}: `Asked: {asked}` is not `#12, #15` or `none: <reason>`; "
+                                  "add the line `Asked: #12, #15`", err)
                     self.assertEqual(len(err.splitlines()), 1, err)
+            with self.subTest(status=status, asked="listed"):
+                path = self.report(status, Checkpoint=None)
+                with open(path, "a") as fh:
+                    fh.write(f"- Asked: #12\nCheckpoint: {CHECKPOINT}\n")
+                code, _, err = self.check(path)
+                self.assertEqual(code, 2)
+                self.assertIn(f"run.py: {status} needs an `Asked:` line at the start of a line, not `- Asked: #12`; "
+                              "add the line `Asked: #12, #15`", err)
 
     def test_130_check_report_accepts_ask_ids_and_a_reason_for_none(self):
         for status in ("ISSUES", "BLOCKED"):
-            for asked in ("#123, #125", "#7", "#3 #4", "none: the brief allows no asks",
+            for asked in ("#123, #125", "#7", "#3 #4", "#12 (answered: widen)", "#12, #15: both answered",
+                          "none: the brief allows no asks",
                           "None: HEAD is not the commit that CONTEXT names"):
                 with self.subTest(status=status, asked=asked):
                     self.assertEqual(self.check(self.report(status, Asked=asked)), (0, "ok\n", ""))
@@ -12811,6 +12827,18 @@ class Issue130Test(Base):
         self.add_result(worker, "PASS", f"Task: {worker}\nStatus: PASS\nHead: {SHA_A}\n")
         self.assertNotIn("`Asked:`", self.section(self.ok("verify", str(worker), "--dry-run").stdout, "REPORT"))
 
+    def test_130_the_worker_inbox_prints_a_scope_widened_after_launch(self):
+        task = self.add_task()
+        self.ok("launch", str(task))
+        ctx = self.inbox_file(f"{task}-1.ctx.json")
+        inbox = [sys.executable, os.path.join(os.path.dirname(HERE), "scripts", "mailbox.py"), "--ctx", ctx, "inbox"]
+        before = subprocess.run(inbox, capture_output=True, text=True, env=self.env)
+        self.assertNotIn("SCOPE changed", before.stdout, before.stderr)
+        self.tg("edit", str(task), "--meta", 'scope="src/ and docs/api.md"')
+        after = subprocess.run(inbox, capture_output=True, text=True, env=self.env)
+        self.assertIn("SCOPE changed since your brief. The current SCOPE is:\nsrc/ and docs/api.md", after.stdout,
+                      after.stderr)
+
     def test_130_a_flake_follow_up_is_labelled(self):
         import run as runner
         self.assertIn("flake", runner.FOLLOW_UP_LABELS)
@@ -12833,6 +12861,14 @@ class Issue130Test(Base):
         block = re.search(r"```text\n(.*?)```", text, re.S).group(1)
         self.assertRegex(block, r"(?m)^Issues: .*\nAsked: ")
         self.assertIn("`flake`", text)
+        flat = re.sub(r"\s+", " ", text)
+        self.assertIn("a pass on rerun is not a flake. Find the cause. If you cannot show that the failure also happens "
+                      "on the base commit, report `ISSUES` with both runs, or ask", flat)
+        self.assertIn("every VERIFY command passed (for a flake: its rerun passed)", flat)
+        self.assertIn("a flake is a `flake:` follow-up, not a `blocking:` finding", flat)
+        self.assertIn("write `Asked: none: <that rule>`", flat)
+        with open(os.path.join(os.path.dirname(HERE), "templates", "roles", "rebase.md"), encoding="utf-8") as fh:
+            self.assertIn("then ask the Manager with the conflicting hunks", fh.read())
 
     def test_130_the_dependency_check_agent_ships_read_only(self):
         base = os.path.dirname(HERE)
