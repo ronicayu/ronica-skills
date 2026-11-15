@@ -178,12 +178,12 @@ cd plugins/agentic-team/model
 OUT=<a new folder outside the repository>
 "$JAVA" -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -config check.cfg -dump dot,actionlabels "$OUT/check" -metadir "$OUT/states-check" Lifecycle.tla
 "$JAVA" -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -config check-pr.cfg -dump dot,actionlabels "$OUT/check-pr" -metadir "$OUT/states-check-pr" Lifecycle.tla
-"$JAVA" -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -config check-revise.cfg -dump dot,actionlabels "$OUT/check-revise" -metadir "$OUT/states-check-revise" Lifecycle.tla
-node phase-edges.mjs "$OUT/check.dot" "$OUT/check-pr.dot" "$OUT/check-revise.dot" > phase-edges.json
+"$JAVA" -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -config overview-revise.cfg -dump dot,actionlabels "$OUT/overview-revise" -metadir "$OUT/states-overview-revise" Lifecycle.tla
+node phase-edges.mjs "$OUT/check.dot" "$OUT/check-pr.dot" "$OUT/overview-revise.dot" > phase-edges.json
 git diff --exit-code phase-edges.json
 ```
 
-`phase-edges.mjs` needs a Node that runs TypeScript, the same one the statechart command needs. The diff must be empty, or explained in PREDICTIONS.md and in the exclusions. To see the phases of the main flow as a chart, run the statechart command with `--config overview.cfg --view phase-view.mjs`, which stays under the budget.
+`phase-edges.mjs` needs a Node that runs TypeScript, the same one the statechart command needs. The revision steps come from `overview-revise.cfg`: the dump of `check-revise.cfg` is about 730 MB, more than Node reads into one string. The diff must be empty, or explained in PREDICTIONS.md and in the exclusions. To see the phases of the main flow as a chart, run the statechart command with `--config overview.cfg --view phase-view.mjs`, which stays under the budget.
 
 What the test covers: which phase changes exist, from which phase, and by which event, in both the code and the model. What it does not cover: how a command decides (its refusals, its hints, and the rows and meta it writes beside the phase), and what the model's actions read. Those keep their line numbers in the action table, in `Lifecycle.tla` and in this file, and still need updating by hand when run.py moves (see "Keeping the model current"). The line numbers that only pointed at a phase write are gone (from "0.19.0" and "What the model leaves out"). `Lifecycle.tla` had no such line number: each of its line numbers points at a hint, a guard or a field that the model reads.
 

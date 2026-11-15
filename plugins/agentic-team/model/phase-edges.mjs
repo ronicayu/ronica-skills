@@ -30,7 +30,7 @@ for (const file of files) {
     if (was !== is) edges.add(JSON.stringify([was, view.step(action, before, after), is]));
   }
 }
-const about = "The steps between phases of Lifecycle.tla in check.cfg, check-pr.cfg and check-revise.cfg, as [from, event, to] of " +
+const about = "The steps between phases of Lifecycle.tla in check.cfg, check-pr.cfg and overview-revise.cfg, as [from, event, to] of " +
   "phase-view.mjs (\"none\" is run.py's None). Written by phase-edges.mjs; tests/test_run.py checks them against TRANSITIONS.";
 process.stdout.write(`{\n  "about": ${JSON.stringify(about)},\n  "edges": [\n${
   [...edges].sort().map((e) => `    ${e}`).join(",\n")}\n  ]\n}\n`);
