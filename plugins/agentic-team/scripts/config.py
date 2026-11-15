@@ -24,6 +24,10 @@ state and makes no network call; run.py detects the code host from [merge].
 `check` also runs `claude plugin list --json` under each profile and fails
 when agentic-team is not installed there. Without [profiles] nothing changes.
 
+When the .taskgraph.toml that tg finds maps taskgraph.project to the GitHub
+backend, `check` warns (exit 0) for each run-time meta key of RUNTIME_META that
+is in neither meta.local nor meta.deferred of that project.
+
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
 
@@ -94,6 +98,17 @@ DISPOSABLE_DEFAULT = (
     # the session report files of agentic-team (each report is in Taskgraph), and the scratch folder of a session
     ".agentic-team/", ".agentic-team-scratch/",
 )
+
+
+TASKGRAPH_TOML = ".taskgraph.toml"
+# The meta keys that run.py writes as run-time state, by their class on the Taskgraph GitHub backend: "local" stays in
+# this machine's cache and is never sent, "deferred" is sent with the next write to the issue. Every other key that
+# run.py writes stays on the issue. The README's table "Meta keys on the Taskgraph GitHub backend" lists the same keys
+# (a test compares them).
+RUNTIME_META = {
+    "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
+    "deferred": ("tokens", "model", "started_at"),
+}
 
 
 def system_timezone():
@@ -523,6 +538,70 @@ def messaging_warnings(config):
     return []
 
 
+def taskgraph_file(root, env=None):
+    """The .taskgraph.toml that tg finds when it runs in `root`, or None. The same search as Taskgraph's
+    tgstore/config.py find_config (which lives in the other plugin): $TASKGRAPH_CONFIG (an empty value turns it off),
+    else the first .taskgraph.toml in root or a parent, else the one in the main checkout of a git worktree."""
+    env = os.environ if env is None else env
+    given = env.get("TASKGRAPH_CONFIG")
+    if given is not None:
+        path = os.path.expanduser(given)
+        return path if given and os.path.isfile(path) else None
+    here = os.path.realpath(root)
+    while True:
+        if os.path.isfile(os.path.join(here, TASKGRAPH_TOML)):
+            return os.path.join(here, TASKGRAPH_TOML)
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    try:
+        out = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"], capture_output=True, text=True)
+    except OSError:
+        return None
+    common = out.stdout.strip() if out.returncode == 0 else ""
+    if not common:
+        return None
+    common = os.path.realpath(os.path.join(root, common))
+    main = os.path.dirname(common) if os.path.basename(common) == ".git" else common
+    path = os.path.join(main, TASKGRAPH_TOML)
+    return path if os.path.isfile(path) else None
+
+
+def taskgraph_store(root, project, env=None):
+    """{"path", "local", "deferred"} when tg's .taskgraph.toml maps `project` to the GitHub backend, else None (no
+    file, the project is not in it, or the local SQLite store). A file that does not parse is None too: tg reports
+    it itself on its first call."""
+    path = taskgraph_file(root, env)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    table = (data.get("projects") or {}).get(project) if isinstance(data.get("projects"), dict) else None
+    if not isinstance(table, dict) or table.get("backend") != "github":
+        return None
+    meta = table.get("meta") if isinstance(table.get("meta"), dict) else {}
+    keys = {name: tuple(v for v in meta.get(name) or () if isinstance(v, str)) if isinstance(meta.get(name), list) else ()
+            for name in ("local", "deferred")}
+    return {"path": path, **keys}
+
+
+def taskgraph_warnings(config):
+    """One warning per run-time key (RUNTIME_META) that the project's GitHub-backend entry in .taskgraph.toml has in
+    neither meta.local nor meta.deferred: each such write edits the issue. None for the SQLite store."""
+    project = config["taskgraph"]["project"]
+    store = taskgraph_store(config.root, project) if isinstance(project, str) and project.strip() else None
+    if store is None:
+        return []
+    block = f'[projects."{project}".meta] in {store["path"]}'
+    return [f"taskgraph: the GitHub backend sends run-time meta key {key!r} to the issue on each write; add it to "
+            f"{kind} under {block}"
+            for kind, keys in RUNTIME_META.items() for key in keys if key not in store["local"] + store["deferred"]]
+
+
 def plugin_problems(config):
     """(problems, warnings) from `claude plugin list --json` under each profile in [profiles]. A profile needs the
     agentic-team plugin for `--agent agentic-team:worker`; the brief holds absolute paths to the Manager's run.py
@@ -675,7 +754,7 @@ def main(argv=None):
     try:
         if args.command == "check":
             found = problems(config)
-            warnings = messaging_warnings(config)
+            warnings = messaging_warnings(config) + taskgraph_warnings(config)
             if config.get(PROFILES) and not getattr(config, "missing", False):
                 more, extra = plugin_problems(config)
                 found += more

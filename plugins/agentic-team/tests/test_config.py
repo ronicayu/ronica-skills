@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import textwrap
@@ -370,6 +371,83 @@ class ConfigTest(unittest.TestCase):
             json.dump({"permissions": {"defaultMode": "bypassPermissions"}}, fh)
         self.write(MINIMAL)
         self.assertIn("bypassPermissions", self.run_cli("check")[2])
+
+    def write_taskgraph(self, text, folder=None):
+        path = os.path.join(folder or self.root, config.TASKGRAPH_TOML)
+        with open(path, "w") as fh:
+            fh.write(textwrap.dedent(text))
+        return path
+
+    def test_check_warns_for_each_run_time_key_the_github_backend_would_send_to_the_issue(self):
+        self.write(MINIMAL)
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_CONFIG": ""}):  # turned off: the SQLite store
+            self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
+        os.environ.pop("TASKGRAPH_CONFIG", None)
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))  # no .taskgraph.toml at all
+        path = self.write_taskgraph("""\
+            version = 1
+            [projects."other"]
+            backend = "github"
+            repo = "o/r"
+        """)
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))  # the file does not name this project
+        self.write_taskgraph("""\
+            version = 1
+            [projects."demo"]
+            backend = "github"
+            repo = "o/r"
+            [projects."demo".meta]
+            local = ["sessions", "session", "cleanup_kept", "host_rebase"]
+            deferred = ["tokens", "model"]
+        """)
+        code, out, err = self.run_cli("check")
+        self.assertEqual((code, out), (0, "ok\n"))
+        warned = [line for line in err.splitlines() if "run-time meta key" in line]
+        self.assertEqual(len(warned), 3, err)
+        for key, kind in (("mailbox", "local"), ("mailbox_ids", "local"), ("started_at", "deferred")):
+            self.assertTrue(any(f"key '{key}'" in line and
+                                f'add it to {kind} under [projects."demo".meta] in {os.path.realpath(path)}' in line
+                                for line in warned), (key, err))
+        local, deferred = (json.dumps(list(config.RUNTIME_META[k])) for k in ("local", "deferred"))
+        self.write_taskgraph(f"""\
+            version = 1
+            [projects."demo"]
+            backend = "github"
+            repo = "o/r"
+            [projects."demo".meta]
+            local = {local}
+            deferred = {deferred}
+        """)
+        self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
+        self.write_taskgraph('version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n')  # no meta table
+        self.assertEqual(sum("run-time meta key" in line for line in self.run_cli("check")[2].splitlines()),
+                         len(config.RUNTIME_META["local"]) + len(config.RUNTIME_META["deferred"]))
+
+    def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
+        os.environ.pop("TASKGRAPH_CONFIG", None)
+        inner = os.path.join(self.root, "a", "b")
+        os.makedirs(inner)
+        path = self.write_taskgraph('version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n')
+        self.assertEqual(config.taskgraph_file(inner), os.path.realpath(path))  # a parent folder
+        other = self.write_taskgraph('version = 1\n', folder=inner)
+        self.assertEqual(config.taskgraph_file(inner, env={"TASKGRAPH_CONFIG": other}), other)
+        self.assertIsNone(config.taskgraph_file(inner, env={"TASKGRAPH_CONFIG": ""}))
+        self.assertIsNone(config.taskgraph_store(inner, "demo"))  # the nearer file does not name the project
+        self.assertEqual(config.taskgraph_store(self.root, "demo")["local"], ())
+
+    def test_the_readme_table_lists_the_run_time_keys_of_the_code(self):
+        with open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        section = text.split("### Meta keys on the Taskgraph GitHub backend", 1)[1].split("\n#", 1)[0]
+        found = {"local": [], "deferred": [], "on the issue": []}
+        for line in section.splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.startswith("| `") else []
+            if cells:
+                found[cells[1]] += re.findall(r"`([a-z_]+)`", cells[0])
+        for kind in ("local", "deferred"):
+            self.assertEqual(sorted(found[kind]), sorted(config.RUNTIME_META[kind]), kind)
+            self.assertIn(f"{kind} = {json.dumps(list(config.RUNTIME_META[kind]))}", section)  # the recommended block
+        self.assertFalse(set(found["on the issue"]) & set(sum(config.RUNTIME_META.values(), ())))
 
 
 if __name__ == "__main__":

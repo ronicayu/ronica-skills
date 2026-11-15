@@ -1275,14 +1275,60 @@ skill. Metadata holds everything else, 36 keys:
 request across attempts. The one exception is a repointed task: its `pr` is
 another task's request, so `launch` puts the task's own request back.
 
-On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state that
-`run.py` writes often on this machine, so that a delivery retry never edits the issue:
-`[projects."<name>".meta]` with `local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]`.
+On the Taskgraph GitHub backend (a `.taskgraph.toml` with `backend = "github"`), keep the run state of this
+machine in its cache and send the keys that change often and that nobody needs live with the next write: the
+`local` and `deferred` lists of [Meta keys on the Taskgraph GitHub backend](#meta-keys-on-the-taskgraph-github-backend).
 
 A task's priority (`P0` to `P3`, none by default) is a Taskgraph field that
 `tg add --priority` and `tg edit --priority` set; it is not one of these keys.
 `record` lists the ready tasks in `tg ready` order, which is priority first and
 then id, and the Manager launches them in that order.
+
+### Meta keys on the Taskgraph GitHub backend
+
+On the GitHub backend every meta write is an issue edit, unless `.taskgraph.toml`
+lists the key under `[projects."<name>".meta]`: a `local` key stays in this
+machine's Taskgraph cache and is never sent; a `deferred` key waits in the cache
+and goes to the issue with the next write to that issue, or with `tg sync` (see
+the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
+
+| Key | Class | Why |
+|-----|-------|-----|
+| `sessions` | local | The ids, profiles and `--resume` ids of this machine's `claude agents` rows; rewritten at each launch, verify and recorded row. Another machine cannot use them. |
+| `session` | local | The newest worker session's name: this machine's report file name and the `status` line. |
+| `cleanup_kept` | local | Why this machine kept a worktree folder; it only stops `record` from repeating a `kept` line. |
+| `host_rebase` | local | A host rebase that this machine's `close` asked for and has not seen end; most `close` runs set and remove it. |
+| `mailbox` | local | The delivery state of each answer and steer (socket, resume, pending, tries); it changes at each delivery try. |
+| `mailbox_ids` | local | Which answer and steer rows this machine's `run.py` filed. Only this machine's `run.py` and its workers, which read the same cache, check it. |
+| `tokens` | deferred | Shown by `status` and the report; nothing acts on it. |
+| `model` | deferred | The current attempt's model, for `status` and for the verifier's model; read on this machine, where the cache already holds it. |
+| `started_at` | deferred | Shown by `status`; written at each launch. |
+| `attempt`, `phase` | on the issue | Every command reads them; another machine or a person must see where the task is. |
+| `base`, `target` | on the issue | The verified change is `base..Head`, and `target` is where it merges; written once. |
+| `verdict`, `verdict_ref` | on the issue | `close`, `record` and the merge read them back. |
+| `pr`, `pr_branch`, `pushed`, `caught_up_from` | on the issue | The request, the lease for each push and the guard for each merge; `close` and `record` read the full SHAs back. |
+| `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | on the issue | Written once per repoint; the next `launch` reads them back. |
+| `merged_at`, `merged_by`, `merged_via` | on the issue | The merge record; written once. |
+| `abandoned` | on the issue | The only marker of an abandoned task. |
+| `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
+
+The plan keys (`scope`, `verify`, `verify_kind`, `verify_mode`, `tier`, `role`,
+`risk`, `estimate`) and a decision's `decider` and `ask` are written by the
+Manager or you with `tg`, not by `run.py`; they stay on the issue. The block to
+add to `.taskgraph.toml`:
+
+```toml
+[projects."<name>".meta]
+local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]
+deferred = ["tokens", "model", "started_at"]
+```
+
+`config.py check` prints a warning (and still exits 0) for each key of the
+`local` and `deferred` rows that the project's entry lists in neither. Put the
+block in place before `run.py` first writes on the GitHub backend: a value that
+an issue already holds stays in its meta block when the key becomes `local`, and
+tg shows that old value whenever the cache has none. To drop it, delete the key
+from the issue's meta block on GitHub.
 
 ### Upgrading from 0.22.1
 
