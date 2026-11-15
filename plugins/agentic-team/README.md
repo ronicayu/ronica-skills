@@ -469,14 +469,17 @@ the operator's standing permission for `run.py` to push task branches to
    `verdict_ref`; `pr`, `pr_branch`, `pushed` and the `merge` gate stay. Then
    the usual flow: a PASS whose head carries the same change as `round_from`
    needs no verifier, and `close` carries `round_verdict` with a Manager
-   `verify` row (`Carried: ...`); any other PASS goes to `run.py verify` under
+   `verify` row (`Carried: ...`), on that head only (`close --ref` with
+   another commit needs a verdict); any other PASS goes to `run.py verify` under
    `[rounds] verify = "always"` (the default), whatever the risk and the kind,
    and the verifier's base is the target commit, so its diff holds only the
    task's change. A passing `close` pushes the new head to the same request
    with the lease, and the task waits for its merge again. A round that fails
    (ISSUES, BLOCKED, DIED, stuck, stopped, a failing verdict) gets the hint
-   `run.py round <id> --cancel`, never `launch` or `abandon`. `--cancel` stops
-   the round's sessions, aborts a rebase in progress, commits the WIP, keeps the
+   `run.py round <id> --cancel`, never `launch` or `abandon`. `--cancel`
+   refuses a request that merged (`record` records it) before it writes
+   anything, and a worktree on another branch; else it stops the round's
+   sessions, aborts a rebase in progress, commits the WIP, keeps the
    round's head in `refs/agentic-team/round/<id>-<attempt>`, resets the branch
    to `round_from`, pushes `round_from` back to the request when a CI verify
    of the round had pushed the round's head, files the carried row, and puts

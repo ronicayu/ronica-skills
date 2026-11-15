@@ -839,6 +839,11 @@ def cancel_next(task, before=""):
             f"{str(task['meta']['round_from'])[:7]})")
 
 
+def round_redo(task):
+    """A round's way to try again, as launch is a task's: cancel the round, then start a new one."""
+    return cancel_next(task) + f", then run.py round {task['id']} {task['meta'].get('round')} for a new round"
+
+
 def retry_next(tid, attempt, mode="<mode>", lead="", before="", task=None):
     """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
     run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
@@ -2606,7 +2611,7 @@ def cmd_launch(run, args):
                       f'tg edit {tid} --notes "<answer>", then tg done {tid}')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
-    refuse_closed(task)
+    refuse_closed(run, task)
     refuse_round(task)
     refuse_legacy(run, task)
     verify_mode(run, task)
@@ -2862,7 +2867,7 @@ def cmd_adopt(run, args):
         raise Refused(f'#{tid} is a {task["type"]}, not a task')
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
-    refuse_closed(task)
+    refuse_closed(run, task)
     refuse_round(task)
     refuse_legacy(run, task)
     current = wanted_attempt(task) or 0
@@ -2923,16 +2928,17 @@ def cmd_adopt(run, args):
 
 # ------------------------------------------------------------------ verify
 
-def refuse_closed(task):
+def refuse_closed(run, task):
     """Refuse a command that would start or change an attempt of a task that was closed and waits for its merge."""
     if not awaiting(task):
         return
     tid = task["id"]
     if task_phase(task) == "merged":
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
+    rounds = round_next(run, task)
     raise Refused(f"#{tid} is closed and waits for the merge of its change; run.py record follows the merge, "
                   f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} <mode> drops it; "
-                  f"on a conflict: run.py round {tid} rebase; {redo_text(task)}")
+                  + (f"on a conflict: {rounds}; " if rounds else "") + redo_text(task))
 
 
 def refuse_round(task):
@@ -2942,18 +2948,18 @@ def refuse_round(task):
                       f"run.py round {task['id']} --cancel ends it")
 
 
-def refuse_unless_running(task):
+def refuse_unless_running(run, task):
     tid = task["id"]
     meta = task.get("meta") or {}
     if task["status"] != "in_progress" or wanted_attempt(task) is None:
         raise Refused(f"#{tid} is not in progress with an attempt")
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']})")
-    refuse_closed(task)
+    refuse_closed(run, task)
     return wanted_attempt(task)
 
 
-def worker_for(run, tid, attempt, result_id=None):
+def worker_for(run, tid, attempt, result_id=None, task=None):
     rows = run.results_for(tid)
     if result_id is not None:
         found = [r for r in rows if r["id"] == result_id and r["kind"] == "task"]
@@ -2964,7 +2970,7 @@ def worker_for(run, tid, attempt, result_id=None):
         raise Refused(f"#{tid} has no worker result for attempt {attempt}; run run.py record")
     if worker["status"] != "PASS":
         raise Refused(f"#{tid} attempt {attempt} reported {worker['status']}, not PASS; "
-                      f"a fix round is run.py launch {tid}")
+                      + (round_redo(task) if task is not None and in_round(task) else f"a fix round is run.py launch {tid}"))
     return rows, worker
 
 
@@ -2976,12 +2982,12 @@ def cmd_verify(run, args):
     if mode != "session":
         verify_kind(run, task)
         return verify_ci(run, args, task, mode[3:])
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     phase = next_phase(task, "verify")  # before the verifier starts
     role = verify_role(run, task)  # refused when the role of this attempt has no file or a broken one
     role_size_warning(run, task, role, attempt)
     kind = verify_kind(run, task)
-    rows, worker = worker_for(run, tid, attempt, args.result)
+    rows, worker = worker_for(run, tid, attempt, args.result, task)
     ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
     if not ref:
         raise Refused(f"result #{worker['id']} has no Head: line; pass --ref")
@@ -3064,8 +3070,8 @@ def verify_ci(run, args, task, name):
     tid = task["id"]
     if args.ref or args.model or args.effort or args.dry_run:
         raise Refused("verify_mode=ci runs on the branch head and starts no session; drop --ref/--model/--effort/--dry-run")
-    attempt = refuse_unless_running(task)
-    rows, worker = worker_for(run, tid, attempt, args.result)
+    attempt = refuse_unless_running(run, task)
+    rows, worker = worker_for(run, tid, attempt, args.result, task)
     head = tail_or_none(HEAD_ANY.search(worker["body"]))
     if not is_sha(head):
         raise Refused(f"ci verification needs a commit on the branch; result #{worker['id']} has no Head:")
@@ -3656,7 +3662,7 @@ def cmd_answer(run, args):
     tid = args.id
     task = run.show(tid)
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     rows = run.results_for(tid)
     th = Thread(rows, task, attempt)
     if args.ask is not None:
@@ -3701,7 +3707,7 @@ def cmd_steer(run, args):
     tid = args.id
     task = run.show(tid)
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
+    attempt = refuse_unless_running(run, task)
     rows = run.results_for(tid)
     s = worker_session(run, tid, attempt, task)
     th = Thread(rows, task, attempt)
@@ -3831,7 +3837,7 @@ def record_arrived(run, snap, task, attempt, result):
         return
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
-        carried = round_carry(run, task, result)
+        carried = round_carry(run, task, tail_or_none(HEAD_ANY.search(result.get("body") or "")))
         always = in_round(task) and run.config["rounds"]["verify"] == "always"  # a round's change goes to a verifier
         nxt = (f"run.py close {tid} (the verdict of {str(meta.get('round_from'))[:7]} carries over: {carried})" if carried
                else f"run.py verify {tid}" if always or str(meta.get("verify_mode") or "").startswith("ci:")
@@ -3847,11 +3853,10 @@ def record_arrived(run, snap, task, attempt, result):
     run.emit("arrived", tid, attempt, None, detail, nxt)
 
 
-def round_carry(run, task, worker):
-    """In a round, why the PASS report `worker` keeps the verdict of round_from with no verifier: its Head carries the same
-    change as round_from (same_change against round_onto); None when it does not, or outside a round."""
+def round_carry(run, task, head):
+    """In a round, why the PASS head `head` keeps the verdict of round_from with no verifier: it carries the same change
+    as round_from (same_change against round_onto); None when it does not, or outside a round."""
     meta = task.get("meta") or {}
-    head = tail_or_none(HEAD_ANY.search(worker.get("body") or ""))
     if not in_round(task) or not is_sha(head) or not commit_of(run, head) or not meta.get("round_onto"):
         return None
     start, onto = str(meta["round_from"]), str(meta["round_onto"])
@@ -4012,9 +4017,10 @@ def commit_stopped(run, tid, attempt, rows, sessions, task=None):
         where = f"on {on}" if on else f"on a detached HEAD at {at[:7]}"
         run.add_result(tid, "task", attempt, "manager", "STOPPED",
                        f"Session: {sid}\nWorktree: {wt}\nBranch: {on or 'None'}\nHead: None\n{reason}Files: None")
+        fix = (f"fix the branch ({detached_or_wrong(run, wt, rel, on, task_branch(tid))}), then "
+               if task is not None and in_round(task) else "fix the branch (launch says how), then ")
         run.emit("stopped", tid, attempt, sid, f"{rel} is {where}, not {task_branch(tid)}; nothing committed; "
-                 "its uncommitted work stays there",
-                 stopped_next(tid, attempt, stopped[-1], before="fix the branch (launch says how), then ", task=task))
+                 "its uncommitted work stays there", stopped_next(tid, attempt, stopped[-1], before=fix, task=task))
         return
     porcelain = run.git("status", "--porcelain", cwd=wt).stdout.rstrip("\n")
     if porcelain:
@@ -5704,16 +5710,26 @@ def conflicts_with_target(run, task, head, p=None):
 ROUND_KINDS = {"rebase": conflicts_with_target}
 
 
+def round_next(run, task):
+    """The rebase round that start_round lets through for a conflict, or None: a repointed task's request is another
+    task's, and from [rounds] cap on a round needs the --attempt override."""
+    tid, cap = task["id"], run.config["rounds"]["cap"]
+    if repointed(task):
+        return None
+    if round_count(task) < cap:
+        return f"run.py round {tid} rebase"
+    return f"run.py round {tid} rebase --attempt {(wanted_attempt(task) or 1) + 1} to override the cap of {cap} rounds"
+
+
 def conflict_next(run, task, decision):
     """The next step of a conflict line: a rebase round on the same request below [rounds] cap, else the decision with
     the override. A repointed task's request is another task's, so it gets the decision only."""
-    tid, cap = task["id"], run.config["rounds"]["cap"]
-    if repointed(task):
+    rounds = round_next(run, task)
+    if rounds is None:
         return decision
-    if round_count(task) < cap:
-        return f"run.py round {tid} rebase (a new attempt on the same request), or {decision}"
-    return (f"{decision}; or run.py round {tid} rebase --attempt {(wanted_attempt(task) or 1) + 1} to override the cap of "
-            f"{cap} rounds")
+    if round_count(task) < run.config["rounds"]["cap"]:
+        return f"{rounds} (a new attempt on the same request), or {decision}"
+    return f"{decision}; or {rounds}"
 
 
 def cmd_round(run, args):
@@ -5747,6 +5763,10 @@ def start_round(run, args):
         raise Refused(f"#{tid} is already in a {meta.get('round')} round (attempt {wanted_attempt(task)}); "
                       f"run.py round {tid} --cancel ends it")
     refuse_legacy(run, task)
+    if (task["status"] == "in_progress" and stored_phase(task) is None
+            and derive_phase(task, kind=verify_kind(run, task, strict=False)) == "awaiting_merge"):
+        raise Refused(f"#{tid} waits for its merge but has no stored phase (closed by an older run.py); run.py record "
+                      "stores it, then rerun")
     if task["status"] != "in_progress" or stored_phase(task) != "awaiting_merge" or not unmerged(task):
         raise Refused(f"#{tid} does not wait for its merge (status {task['status']}, phase {task_phase(task) or 'none'}); "
                       "a round starts from phase awaiting_merge")
@@ -5802,8 +5822,11 @@ def start_round(run, args):
                           "at the verified head: commit them on another branch or remove them, then rerun")
     else:
         head, reattach = commit_of(run, f"refs/heads/{branch}"), True
+    if not head:
+        raise Refused(f"branch {branch} is missing, not at the verified head {start[:7]}; run git branch {branch} "
+                      f"{start[:7]}, then rerun")
     if head not in (start, held):
-        raise Refused(f"{rel if not reattach else 'branch ' + branch} is at {(head or 'nothing')[:7]}, not the verified "
+        raise Refused(f"{rel if not reattach else 'branch ' + branch} is at {head[:7]}, not the verified "
                       f"head {start[:7]}; put {branch} back at {start[:7]} (git -C {rel} log shows what is on it), then rerun")
     if not args.dry_run:
         ignore_reports(run)
@@ -5884,11 +5907,15 @@ def cancel_round(run, args):
     start = commit_of(run, str(meta["round_from"]))
     if not start:
         raise Refused(f"the verified commit {meta['round_from']} of #{tid} is not in this clone; fetch it")
+    if run.pr_mode and meta.get("pr"):  # a merged request is record's: the merge decides the verdict (round_merged)
+        p = run.host().pr(int(meta["pr"]))
+        if p.state == "MERGED":
+            raise Refused(f"{run.host().label(p.number)} is merged; run.py record records it")
     wt, branch, rel = task_worktree(run, tid), task_branch(tid), f".claude/worktrees/task-{tid}"
     there = os.path.isdir(wt) and os.path.realpath(wt) in registered_worktrees(run)
     if there:
         on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
-        if on != branch and not git_operation(run, wt):
+        if on != branch and git_operation(run, wt) != "rebase":  # a rebase in progress detaches HEAD
             raise Refused(detached_or_wrong(run, wt, rel, on, branch))
     workers = [s for s in own_sessions(run, tid, "task") if s.live]
     stop_live(run, task, attempt, branch)
@@ -5901,6 +5928,10 @@ def cancel_round(run, args):
         op = git_operation(run, wt)
         if op:
             run.git(op, "--abort", cwd=wt, check=False)
+            on = run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip()
+            if on != branch:
+                raise Refused(f"after git {op} --abort, " + detached_or_wrong(run, wt, rel, on, branch)
+                              + f"; then run.py round {tid} --cancel again")
         if run.git("status", "--porcelain", cwd=wt).stdout.strip():
             run.git("add", "-A", cwd=wt)
             run.git("commit", "-q", "-m", f"WIP task {tid} attempt {attempt}: {kind} round cancelled", cwd=wt)
@@ -6162,7 +6193,8 @@ def choose_verdict(run, args, task, rows, attempt):
     wanted = args.verdict
     if wanted not in ("verify-failed", "verify-blocked"):
         if level == "verify-failed":
-            raise Refused(f"a verify-failed verdict needs a fix round (run.py launch {tid}), not an override")
+            raise Refused("a verify-failed verdict needs " + (f"a new round ({round_redo(task)})" if in_round(task)
+                                                              else f"a fix round (run.py launch {tid})") + ", not an override")
         if OVERRIDE_RANK[wanted] > OVERRIDE_RANK.get(level, -1) and not EVIDENCE.search(args.ran or ""):
             raise Refused(f"an upgrade from {level} to {wanted} needs evidence in --ran: a CI run id or URL, or an artifact link")
     return wanted, True, (level, last)
@@ -6306,24 +6338,32 @@ def cmd_close(run, args):
         cleanup(run, task)
         return
     refuse_legacy(run, task)
-    attempt = refuse_unless_running(task)
-    rows, worker = worker_for(run, tid, attempt)
+    attempt = refuse_unless_running(run, task)
+    rows, worker = worker_for(run, tid, attempt, task=task)
     kind = verify_kind(run, task)
     branch_line = tail_or_none(BRANCH_LINE.search(worker["body"]))
     # A round's PASS with the same change as round_from, and no verifier verdict or --verdict, keeps round_verdict.
-    carried = (round_carry(run, task, worker) if not args.verdict and not [r for r in verifier_rows(rows, attempt)
-                                                                          if verdict_of(r)] else None)
-    level, manual, override = ((str(meta["round_verdict"]), False, None) if carried
-                               else choose_verdict(run, args, task, rows, attempt))
-    ref = args.ref or tail_or_none(HEAD_ANY.search(worker["body"]))
+    head = tail_or_none(HEAD_ANY.search(worker["body"]))
+    carried = (round_carry(run, task, head) if not args.verdict and not [r for r in verifier_rows(rows, attempt)
+                                                                        if verdict_of(r)] else None)
+    if not carried:
+        level, manual, override = choose_verdict(run, args, task, rows, attempt)
+    ref = args.ref or head
     if not ref:
         raise Refused(f"no Head: in result #{worker['id']}; pass --ref")
-    branch = branch_line or task_branch(tid)
+    branch, moved = branch_line or task_branch(tid), None
     if is_sha(ref):
         branch, new = branch_at(run, tid, attempt, worker, ref, task)
         if new != ref:
-            run.emit("rebased", tid, attempt, None, f"same change at {new[:7]} (verified at {ref[:7]}); verdict_ref moves")
-            ref = new
+            moved, ref = ref, new
+    if carried and ((args.ref and commit_of(run, args.ref) != commit_of(run, str(head)))
+                    or not round_carry(run, task, ref)):
+        carried = None  # the carry covers the worker's Head only; another ref needs a verdict
+        level, manual, override = choose_verdict(run, args, task, rows, attempt)
+    elif carried:
+        level, manual, override = str(meta["round_verdict"]), False, None
+    if moved:
+        run.emit("rebased", tid, attempt, None, f"same change at {ref[:7]} (verified at {moved[:7]}); verdict_ref moves")
     passing = level in PASSING[kind]
     phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")
     if manual:

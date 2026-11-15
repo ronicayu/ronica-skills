@@ -11759,6 +11759,122 @@ class RoundTest(Base):
         self.assertIn(f"6. Also run `make lint` at {onto}.", role)
         self.assertEqual(self.meta(task)["phase"], "awaiting_merge")  # a dry run writes nothing
 
+    def test_119_cancel_refuses_a_request_merged_after_a_ci_push(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.git("push", "-q", "-f", "origin", f"{new}:refs/heads/task-1")  # what a CI verify of the round does
+        self.tg("edit", str(task), "--meta", f"pushed={new}")
+        self.agents(self.row("task-1", 2))
+        self.fake_host(head=new, state="MERGED", merge_state="UNKNOWN", merge_commit="c" * 40)
+        before = self.meta(task)
+        self.assertIn(f"{self.label()} is merged; run.py record records it", self.refused("round", str(task), "--cancel"))
+        self.assertEqual(self.meta(task), before)
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(self.remote_sha(), new)
+        merged = self.one(self.events("record"), "merged")
+        self.assertIn(f"its head {new[:7]} is not the verified {head[:7]}: recorded merged_by=operator, with no verdict",
+                      merged["detail"])
+        meta = self.meta(task)
+        self.assertEqual((meta["merged_by"], meta["pushed"]), ("operator", new))
+        self.assertNotIn("verdict", meta)
+
+    def test_119_close_with_another_ref_does_not_carry_the_verdict(self):
+        task, wt, head, onto = self.waiting(conflict=False)
+        self.started(task)
+        self.git("fetch", "-q", "origin", "main")
+        self.git("rebase", "-q", onto, cwd=wt)
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        self.agents(self.finished("task-1", 2))
+        extra = self.wt_commit(wt, "unverified.txt", "x\n")
+        self.assertIn("has no verifier verdict", self.refused("close", str(task), "--ref", extra))
+        meta = self.meta(task)
+        self.assertNotIn("verdict", meta)
+        self.assertEqual(meta["round_from"], head)
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "verify" and r["attempt"] == 2], [])
+        self.ok("close", str(task), "--ref", extra, "--verdict", "test-verified", "--ran", "make test")
+        (row,) = [r for r in self.results(task) if r["kind"] == "verify" and r["attempt"] == 2]
+        self.assertNotIn("Carried:", row["body"])
+        self.assertEqual(self.meta(task)["verdict_ref"], extra)
+
+    def test_119_cancel_refuses_a_worktree_left_on_another_branch(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        self.git("fetch", "-q", "origin", "main")
+        self.git("switch", "-q", "-c", "tmp", cwd=wt)
+        self.assertNotEqual(subprocess.run(["git", "-C", wt, "merge", onto], capture_output=True).returncode, 0)
+        self.agents(self.row("task-1", 2))
+        before = self.meta(task)
+        self.assertIn("is on tmp, not worktree-task-1", self.refused("round", str(task), "--cancel"))
+        self.assertEqual((self.meta(task), self.calls("stop")), (before, []))
+        self.git("merge", "--abort", cwd=wt)
+        self.git("switch", "-q", "-c", "tmp2", cwd=wt)
+        self.assertNotEqual(subprocess.run(["git", "-C", wt, "rebase", onto], capture_output=True).returncode, 0)
+        self.assertIn("after git rebase --abort, .claude/worktrees/task-1 is on tmp2, not worktree-task-1",
+                      self.refused("round", str(task), "--cancel"))
+        meta = self.meta(task)
+        self.assertEqual((meta["round_from"], meta["phase"]), (head, before["phase"]))
+        self.assertNotIn("verdict", meta)
+        self.assertFalse(self.git("for-each-ref", "refs/agentic-team/round/"))
+
+    def test_119_round_refuses_a_missing_branch(self):
+        task, wt, head, onto = self.waiting()
+        self.git("worktree", "remove", "--force", wt)
+        self.git("branch", "-q", "-D", "worktree-task-1")
+        for extra in (("--dry-run",), ()):
+            self.assertIn(f"branch worktree-task-1 is missing, not at the verified head {head[:7]}",
+                          self.refused("round", str(task), "rebase", *extra))
+        self.assertEqual(self.meta(task)["phase"], "awaiting_merge")
+        self.assertEqual(self.calls("--bg"), [])
+
+    def test_119_the_closed_refusal_names_a_round_only_when_round_takes_it(self):
+        task, wt, head, onto = self.waiting()
+        self.assertIn("on a conflict: run.py round 1 rebase; to redo it", self.refused("launch", str(task)))
+        self.tg("edit", str(task), "--meta", "rounds=3")
+        self.assertIn("on a conflict: run.py round 1 rebase --attempt 2 to override the cap of 3 rounds; to redo it",
+                      self.refused("launch", str(task)))
+        self.tg("edit", str(task), "--meta", "repointed_at=now")
+        self.assertNotIn("run.py round", self.refused("launch", str(task)))
+
+    def test_119_a_round_needs_a_stored_phase_and_record_stores_it(self):
+        task, wt, head, onto = self.waiting()
+        self.tg("edit", str(task), "--unset-meta", "phase")
+        err = self.refused("round", str(task), "rebase")
+        self.assertIn("#1 waits for its merge but has no stored phase (closed by an older run.py); run.py record stores it",
+                      err)
+        self.assertNotIn("does not wait for its merge", err)
+        self.events("record")
+        self.assertEqual(self.meta(task)["phase"], "awaiting_merge")
+        self.started(task)
+
+    def test_119_hints_inside_a_round_name_the_round_not_launch(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        redo = (f"run.py round 1 --cancel (the task waits again at {head[:7]}), then run.py round 1 rebase for a new "
+                "round")
+        self.add_result(task, "ISSUES", f"Task: 1\nStatus: ISSUES\nHead: {head}\nCheckpoint: {CHECKPOINT}\n", attempt=2)
+        self.agents(self.finished("task-1", 2))
+        err = self.refused("verify", str(task))
+        self.assertIn(f"reported ISSUES, not PASS; {redo}", err)
+        self.assertNotIn("launch", err)
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.resolve(wt, onto)}\nCheckpoint: {CHECKPOINT}\n",
+                        attempt=2)
+        self.add_result(task, "ISSUES", "Status: ISSUES\nVerdict: verify-failed\nIssues:\n- blocking: f.txt lost ours\n",
+                        kind="verify", attempt=2, by="verify-1-2")
+        err = self.refused("close", str(task), "--verdict", "test-verified", "--override-verifier", "flaky",
+                           "--ran", "https://ci.example/run/1")
+        self.assertIn(f"a verify-failed verdict needs a new round ({redo}), not an override", err)
+        self.agents()
+        self.add_result(task, "STOPPED", "Session: s\nWorktree: w\nBranch: b\nStopped: now\nReason: pause\nFiles: x\n",
+                        attempt=2, by="manager")
+        self.git("switch", "-q", "-c", "elsewhere", cwd=wt)
+        stopped = self.one(self.events("record"), "stopped")
+        self.assertIn("nothing committed", stopped["detail"])
+        self.assertEqual(stopped["next"], "fix the branch (.claude/worktrees/task-1 is on elsewhere, not worktree-task-1; "
+                                          "run git -C .claude/worktrees/task-1 switch worktree-task-1), then run.py round 1 "
+                                          f"--cancel (the task waits again at {head[:7]})")
+
 
 class TransitionTest(unittest.TestCase):
     """#99: run.py changes the phase only through TRANSITIONS."""
