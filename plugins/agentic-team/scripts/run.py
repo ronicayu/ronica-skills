@@ -713,7 +713,17 @@ def own_sessions(run, tid, kind=None, attempt=None):
 
 
 def live_count(run):
-    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost)
+    """The live session rows that hold a slot. A kept idle/working row (idle_kept) holds none, as a kept idle row
+    with state done holds none."""
+    found = {}
+
+    def rows_of(tid):
+        if tid not in found:
+            found[tid] = run.results_for(tid)
+        return found[tid]
+
+    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost
+               and not (s.status == "idle" and idle_kept(s, rows_of(s.task_id), s.attempt)))
 
 
 def wanted_attempt(task):
@@ -831,6 +841,12 @@ def turn_ended(s, rows, attempt):
     if s.kind == "task":
         return any(is_worker_result(r) for r in mine or [])
     return any(r["kind"] == "verify" and r.get("author") == s.label for r in mine or [])
+
+
+def idle_kept(s, rows, attempt):
+    """A live row whose turn ended only by its filed work (turn_ended, not Session.turn_over), with a process: kept idle
+    for a revision like a row with state done and a pid (kept_rows)."""
+    return s.live and not s.turn_over and bool(s.row.get("pid")) and turn_ended(s, rows, attempt)
 
 
 def task_rows(rows, attempt=None, kind="task", history=False):
@@ -2586,11 +2602,9 @@ def resolve_base(run, ref):
     return out.stdout.strip(), None
 
 
-def check_cap(run, dry=False, replaces=None):
-    """Refuse a new session when the cap is full. A dry run starts nothing, so it only warns and goes on. `replaces` is
-    the id of a session that the new one replaces (a revision's resume): its live row does not count."""
+def check_cap(run, dry=False):
+    """Refuse a new session when the cap is full. A dry run starts nothing, so it only warns and goes on."""
     live, cap = live_count(run), run.config["sessions"]["max_parallel"]
-    live -= sum(1 for s in run.sessions() if replaces and s.sid == replaces and s.kind and s.live and not s.ghost)
     if live >= cap:
         message = f"cap full: {live}/{cap} sessions live; run run.py record and refill after it"
         if dry:
@@ -3452,19 +3466,19 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         if is_sha(ref) and head != commit_of(run, ref):
             raise Refused(f"{rel} is at {head[:7]}, not the worker's Head {ref[:7]}; the verifier judges the Head the "
                           "worker reported")
-        check_cap(run, getattr(args, "dry_run", False), replaces=entry["id"])
+        check_cap(run, getattr(args, "dry_run", False))
     elif is_sha(ref) and not args.dry_run:
         why = status_reason(run, path)[0]
         if why:
             raise Refused(f"the verifier's folder {rel} is not clean ({why}); it cannot move to {ref[:7]}")
-        check_cap(run, getattr(args, "dry_run", False), replaces=entry["id"])  # before the folder moves
+        check_cap(run, getattr(args, "dry_run", False))  # before the folder moves
         moved = run.git("checkout", "-q", "--detach", ref, cwd=path, check=False)
         if moved.returncode != 0:
             raise Refused(f"git checkout of {ref[:7]} in {rel} failed: {first_line(moved.stderr or moved.stdout)}", 1)
         # the branch moves with the folder, so the folder and its branch go once this verdict is recorded
         run.git("branch", "-f", f"worktree-{folder}", ref, check=False)
     else:
-        check_cap(run, getattr(args, "dry_run", False), replaces=entry["id"])
+        check_cap(run, getattr(args, "dry_run", False))
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
@@ -4243,7 +4257,7 @@ def cmd_revise(run, args):
     if busy:
         raise Refused(f"the verifier session {busy[0].describe()} is still working in the attempt; run run.py record, and "
                       "revise once its turn is over")
-    check_cap(run, getattr(args, "dry_run", False), replaces=(newest_entry(task, "task", attempt) or {}).get("id"))
+    check_cap(run, getattr(args, "dry_run", False))
     row, lines = revise_findings(task, rows)
     number = revision_of(task) + 1
     worker = newest_entry(task, "task", attempt) or {}
@@ -4984,13 +4998,13 @@ def record_task(run, snap, task, unmanaged):
 
 def kept_rows(run, task, attempt=None):
     """The task's worker and verifier rows that ended their turn but whose process still runs (a pid): sessions kept
-    idle for a revision. None of them when revisions are off for the task, so a project with revisions_per_attempt = 0
-    sees no such stop."""
+    idle for a revision, an idle/working row whose work is filed too (idle_kept). None of them when revisions are off
+    for the task, so a project with revisions_per_attempt = 0 sees no such stop."""
     if revision_cap(run, task) <= 0:
         return []
-    gone = stopped_ids(run)
-    return [s for s in own_sessions(run, task["id"], attempt=attempt) if s.kind in ("task", "verify") and not s.live
-            and s.row.get("pid") and s.state != "stopped" and s.sid not in gone]
+    gone, rows, current = stopped_ids(run), run.results_for(task["id"]), wanted_attempt(task)
+    return [s for s in own_sessions(run, task["id"], attempt=attempt) if s.kind in ("task", "verify") and s.sid not in gone
+            and (idle_kept(s, rows, current) or not s.live and s.row.get("pid") and s.state != "stopped")]
 
 
 def stop_kept(run, task, attempt, why, only=None):

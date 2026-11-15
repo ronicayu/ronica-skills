@@ -12813,6 +12813,32 @@ class RevisionTest(Base):
         resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
         self.assertEqual(resume[:5], ["--bg", "--resume", "copy-" + self.V, "--name", "verify-1-1-r2"])
 
+    def test_137_idle_working_worker_with_report_is_kept_then_stopped(self):
+        task, wt, head, _ = self.failed(close=False)
+        self.set_row("sess-task-1-1", state="working")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "kept-session-stopped"), [])
+        self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
+        self.assertEqual(self.calls("stop"), [])
+        worker = [r for r in self.results(task) if r["kind"] == "task"][-1]["id"]
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE id=?", (RevisionTest.old(90), worker))
+        events = self.events("record")
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-task-1-1"])
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+        with open(os.path.join(self.root, ".agentic-team", "stopped-sessions")) as fh:
+            self.assertIn("sess-task-1-1", fh.read().split())
+
+    def test_137_mid_turn_idle_worker_is_not_stopped_as_kept(self):
+        task, wt, head, _ = self.revised()
+        self.set_row("sess-copy", status="idle", state="working")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE task_id=? AND kind='task'", (RevisionTest.old(90), task))
+        events = self.events("record")
+        self.assertNotIn("sess-copy", [e["session"] for e in self.named(events, "kept-session-stopped")])
+        self.assertNotIn(["stop", "sess-copy"], self.calls("stop"))
+        self.assertEqual(self.one(events, "slots")["detail"], "1/2 live")
+
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
