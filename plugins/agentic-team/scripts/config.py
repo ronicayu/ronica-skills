@@ -44,6 +44,12 @@ all of them in one brief.
 [rounds] sets the policy of `run.py round`: the rounds a task may have without
 --attempt, and whether a round's PASS always goes to a verifier.
 
+[verify] sets, besides the default verify kind, the revisions of #127 (`run.py
+revise`): how many revisions one attempt may have (0 turns them off), how long
+the worker and the verifier stay idle for one, where the verifier runs ("task":
+the task worktree, read only; "own": a folder of its own), and how long `verify`
+waits for the worker's turn to end before it uses a folder of its own.
+
 Python callers (run.py) may import load(root), problems(config),
 resolve_model(config, name) and profile_path(config, name).
 """
@@ -162,7 +168,13 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "remove_worktrees": ("bool", True),
         "disposable": ("patterns", []),
     },
-    "verify": {"kind": ("choice:code,schema,design-doc", "code")},
+    "verify": {
+        "kind": ("choice:code,schema,design-doc", "code"),
+        "revisions_per_attempt": ("nonneg", 2),
+        "keep_sessions_minutes": ("posint", 60),
+        "seat": ("choice:task,own", "task"),
+        "seat_wait_minutes": ("posint", 5),
+    },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
     "messaging": {
