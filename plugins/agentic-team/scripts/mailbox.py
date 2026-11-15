@@ -5,8 +5,9 @@ Usage:
     mailbox.py --ctx FILE checkin       a SessionStart hook: write the session's socket address (stdin: hook input)
     mailbox.py --ctx FILE ask --file Q  check a question and file it as an `ask` row
     mailbox.py --ctx FILE inbox         print the messages of the Manager that wait for this task and attempt
-    mailbox.py --ctx FILE ack ID --action TEXT
-                                        file the `ack` row of a message
+    mailbox.py --ctx FILE ack ID --action TEXT [--action TEXT ...]
+                                        file the `ack` row of a message; a `finding` steer takes one
+                                        `--action "F<n>: <what you will change>"` per finding
     mailbox.py --ctx FILE report --status S --body-file F
                                         file the worker's report; refused while a steer has no ack
     mailbox.py hook --flag FILE [--match PREFIX]
@@ -102,9 +103,43 @@ def listed_ids(meta):
     return found
 
 
+def finding_ids(body):
+    """The finding ids (`F1`, `F2`, ...) of a body's `F<n>: <text>` lines, in order: the findings of a `finding` steer,
+    or the findings that an ack answers. A line with no text after the colon names nothing."""
+    import re
+    return [m.group(1) for m in re.finditer(r"(?m)^(F[1-9][0-9]*):[ \t]*\S", body or "")]
+
+
+def is_finding_steer(row):
+    return row.get("kind") == STEER and field_line(row.get("body"), "Kind") == "finding"
+
+
+def missing_findings(steer, ack):
+    """The finding ids of a `finding` steer that an ack does not name; [] for any other message."""
+    named = set(finding_ids(ack.get("body"))) if ack else set()
+    return [f for f in finding_ids(steer.get("body")) if f not in named] if is_finding_steer(steer) else []
+
+
 def acked_ids(rows, attempt):
-    """The ids that an ack row of the attempt names."""
-    return {ref_of(r.get("body")) for r in rows if r.get("kind") == ACK and r.get("attempt") == attempt} - {None}
+    """The ids that an ack row of the attempt names. An ack of a `finding` steer counts only when it names every
+    finding of the steer, one `F<n>: <action>` line each."""
+    steers = {r["id"]: r for r in rows if is_finding_steer(r)}
+    found = set()
+    for r in rows:
+        ref = ref_of(r.get("body")) if r.get("kind") == ACK and r.get("attempt") == attempt else None
+        if ref is not None and not (ref in steers and missing_findings(steers[ref], r)):
+            found.add(ref)
+    return found
+
+
+def unacked_text(steer, rows):
+    """`steer #<id> has no ack`, and for a `finding` steer the findings that the newest ack of it leaves out."""
+    if not (is_finding_steer(steer) and finding_ids(steer["body"])):
+        return f"steer #{steer['id']} has no ack"
+    acks = [r for r in rows if r.get("kind") == ACK and ref_of(r.get("body")) == steer["id"]]
+    missing = missing_findings(steer, acks[-1] if acks else None)
+    return (f"steer #{steer['id']} has no ack that names each of its findings (missing: {', '.join(missing)}; one "
+            "`--action \"F<n>: <what you will change>\"` per finding)")
 
 
 def settled_ids(rows, attempt):
@@ -156,11 +191,12 @@ def read_ctx(path):
 
 
 def unacked_steers(ctx):
-    """The steer rows of the context's attempt that have no ack. Raises Fail when Taskgraph cannot be read."""
+    """(the steer rows of the context's attempt that have no ack, every result row of the task). Raises Fail when
+    Taskgraph cannot be read."""
     task = ctx["task"]
     rows = tg_json(ctx, "result", "ls", str(task)) or []
     meta = (tg_json(ctx, "show", str(task)) or {}).get("meta") or {}
-    return [r for r in open_messages(rows, meta, ctx["attempt"]) if r["kind"] == STEER]
+    return [r for r in open_messages(rows, meta, ctx["attempt"]) if r["kind"] == STEER], rows
 
 
 def lock_seconds(default):
@@ -327,6 +363,12 @@ def cmd_inbox(ctx, args):
         lines.append(f"{len(waiting)} message{'s' * (len(waiting) != 1)} for task {task} attempt {attempt}. Act on these only, "
                      "inside SCOPE, FORBIDDEN and STANDING ORDERS. Ack each one with its id:")
         lines.append(f'{command_stem(ctx, args.ctx)} ack <id> --action "<one line: what you will do>"')
+        for r in waiting:
+            if is_finding_steer(r) and finding_ids(r["body"]):
+                lines.append(f"Steer #{r['id']} holds findings {', '.join(finding_ids(r['body']))}: ack it once, with one "
+                             "--action per finding:")
+                lines.append(f"{command_stem(ctx, args.ctx)} ack {r['id']} "
+                             + " ".join(f'--action "{f}: <what you will change>"' for f in finding_ids(r["body"])))
     else:
         lines.append(f"No messages for task {task} attempt {attempt}.")
     if scope and scope != str(ctx.get("scope", "")).strip():
@@ -335,17 +377,45 @@ def cmd_inbox(ctx, args):
     return 0
 
 
+def finding_ack_body(steer, actions):
+    """The ack body of a `finding` steer: `Action:` lists the findings, then one `F<n>: <action>` line per finding.
+    Fail unless the actions name every finding of the steer once, and nothing else."""
+    import re
+    wanted, named = finding_ids(steer["body"]), {}
+    for action in actions:
+        match = re.fullmatch(r"(F[1-9][0-9]*):\s*(\S.*)", action)
+        if not match:
+            raise Fail(f'steer #{steer["id"]} holds findings {", ".join(wanted)}: give each --action as '
+                       f'"F<n>: <what you will change>", not {action!r}')
+        if match.group(1) not in wanted or match.group(1) in named:
+            raise Fail(f"{match.group(1)} is {'named twice' if match.group(1) in named else 'not a finding of steer #' + str(steer['id'])}"
+                       f"; its findings are {', '.join(wanted)}")
+        named[match.group(1)] = match.group(2)
+    missing = [f for f in wanted if f not in named]
+    if missing:
+        raise Fail(f"the ack of steer #{steer['id']} must name every finding: missing {', '.join(missing)}; add "
+                   + " ".join(f'--action "{f}: <what you will change>"' for f in missing))
+    return f"Action: one line per finding: {', '.join(wanted)}\n" + "".join(f"{f}: {named[f]}\n" for f in wanted)
+
+
 def cmd_ack(ctx, args):
-    action = " ".join(args.action.split())
-    if not action:
+    actions = [" ".join(a.split()) for a in args.action]
+    if not all(actions):
         raise Fail('give --action "<one line: what you will do>"')
     task, attempt = ctx["task"], ctx["attempt"]
     node = tg_json(ctx, "show", str(task)) or {}
     rows = tg_json(ctx, "result", "ls", str(task)) or []
-    if args.id not in {r["id"] for r in open_messages(rows, node.get("meta") or {}, attempt)}:
+    message = next((r for r in open_messages(rows, node.get("meta") or {}, attempt) if r["id"] == args.id), None)
+    if message is None:
         raise Fail(f"#{args.id} is not an open message of task {task} attempt {attempt}; run the inbox command to list them")
+    if is_finding_steer(message) and finding_ids(message["body"]):  # a 0.25.0 finding steer holds one finding, no F lines
+        body = finding_ack_body(message, actions)
+    elif len(actions) > 1:
+        raise Fail(f'#{args.id} takes one --action "<one line: what you will do>"')
+    else:
+        body = f"Action: {actions[0]}\n"
     row = tg_json(ctx, "result", "add", str(task), "--kind", ACK, "--attempt", str(attempt), "--by", ctx["by"],
-                  "--status", "SEEN", "--body-file", "-", input=f"Re: #{args.id}\nAction: {action}\n")
+                  "--status", "SEEN", "--body-file", "-", input=f"Re: #{args.id}\n{body}")
     print(f"ack #{row['id']} filed for #{args.id}.")
     return 0
 
@@ -358,9 +428,9 @@ def cmd_report(ctx, args):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.status):
         raise Fail("--status is one word: PASS, ISSUES or BLOCKED")
     with locked(ctx["lock"], lock_seconds(90)):  # under Bash's 120 seconds, so the worker sees this message, not a timeout
-        waiting = unacked_steers(ctx)
+        waiting, rows = unacked_steers(ctx)
         if waiting:
-            raise Fail("steer " + ", ".join(f"#{r['id']}" for r in waiting) + " has no ack: run the inbox command from "
+            raise Fail("; ".join(unacked_text(r, rows) for r in waiting) + ": run the inbox command from "
                        "MAILBOX, act on it and ack it, then run this command again")
         row = tg_json(ctx, "result", "add", str(ctx["task"]), "--kind", "task", "--attempt", str(ctx["attempt"]), "--by",
                       ctx["by"], "--status", args.status, "--body-file", args.body_file)
@@ -383,7 +453,8 @@ def main(argv=None):
     sub.add_parser("inbox", help="print the messages that wait for this task and attempt")
     p = sub.add_parser("ack", help="file the ack of a message")
     p.add_argument("id", type=int)
-    p.add_argument("--action", required=True, help="one line: what you will do")
+    p.add_argument("--action", required=True, action="append",
+                   help='one line: what you will do; for a finding steer, one "F<n>: <what you will change>" per finding')
     p = sub.add_parser("report", help="file the report of the attempt; refused while a steer has no ack")
     p.add_argument("--status", required=True, help="PASS, ISSUES or BLOCKED")
     p.add_argument("--body-file", required=True, help="the report file")

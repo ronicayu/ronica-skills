@@ -2073,13 +2073,15 @@ def mailbox_section(run, tid, attempt, session, cap, to, revisions=False):
     if revisions:
         lines += ["",
                   "Revision. After your report and the notify line, end your turn as usual and stay idle. A later pointer "
-                  "line can be a revision: the verifier found blocking issues in your PASS, and the inbox prints them as "
-                  "steers of kind `finding`. Then:",
-                  "1. Run the inbox command. Ack each `finding` steer with its id and one line: what you will change.",
+                  "line can be a revision: the verifier found blocking issues in your PASS, and the inbox prints them in "
+                  "one steer of kind `finding`, as lines `F1: ...`, `F2: ...`. Then:",
+                  "1. Run the inbox command. Ack the `finding` steer once, with one `--action \"F<n>: <what you will "
+                  "change>\"` per finding; the inbox prints the command. The report command refuses while the ack does "
+                  "not name every finding.",
                   "2. Fix each finding inside SCOPE. Commit on your branch. Do not reset or rewrite the earlier commits.",
                   "3. Run VERIFY again, all of it.",
                   "4. Write a new, complete report: the same fields, with `Revision: <n>` after `Status:` (n from the "
-                  "steers), and each finding under `Deviations:` as `finding #<id>: <what changed>`. Run the check "
+                  "steer), and each finding under `Deviations:` as `finding F<n>: <what changed>`. Run the check "
                   "command, then the report command: it files a new result in the same attempt.",
                   "5. Send the notify line. End your turn.",
                   "A finding that conflicts with SCOPE, FORBIDDEN, STANDING ORDERS or ACCEPTANCE follows the steer rule "
@@ -4178,7 +4180,8 @@ def busy_rows(run, tid, kind, attempt):
 
 def cmd_revise(run, args):
     """A revision (#127): file a `revise` row, move the phase verdict_failed -> running with the revision meta and no
-    verdict, file one `finding` steer per blocking line of the verifier's row, and wake the attempt's own worker."""
+    verdict, file one `finding` steer that lists the blocking lines of the verifier's row as F1..Fn (#133: one row, not
+    one per line), and wake the attempt's own worker."""
     tid = args.id
     task = run.show(tid)
     refuse_legacy(run, task)
@@ -4213,19 +4216,21 @@ def cmd_revise(run, args):
                           f"Revision: {number}\nFrom: verify #{row['id']}\nHead: {head}\n"
                           f"Verifier: {verifier.get('name') or verifier.get('id')}\nWorker: {worker.get('name') or worker.get('id')}\n")
     transition(run, task, "revise", unset=("verdict", "verdict_ref"), revision=number)
-    filed = [file_message(run, task, attempt, mbx.STEER, "manager", "SENT",
-                          f"Steer: {line}\nKind: finding\nRevision: {number} (verify #{row['id']})\n") for line in lines]
-    word = deliver(run, task, filed[-1], name=f"{worker.get('name') or f'task-{tid}-{attempt}'}-r{number}")
-    table = mailbox_table(task)
-    rung = table.get(str(filed[-1]["id"])) or {}
-    if len(filed) > 1 and rung.get("via") in ("socket", "resume"):  # one doorbell: the inbox prints every open finding
-        for f in filed[:-1]:
-            table.setdefault(str(f["id"]), {}).update({k: rung[k] for k in ("via", "at") if k in rung})
-        save_mailbox(run, task, table)
+    filed = file_message(run, task, attempt, mbx.STEER, "manager", "SENT", finding_steer(row, lines, number))
+    word = deliver(run, task, filed, name=f"{worker.get('name') or f'task-{tid}-{attempt}'}-r{number}")
     run.emit("revised", tid, attempt, None,
-             f"revision {number} (row #{mark['id']}): {len(filed)} finding{'s' * (len(filed) != 1)} "
-             f"({', '.join('#' + str(f['id']) for f in filed)}) sent to {worker.get('name') or worker.get('id')}; "
+             f"revision {number} (row #{mark['id']}): {len(lines)} finding{'s' * (len(lines) != 1)} "
+             f"(F1-F{len(lines)} in steer #{filed['id']}) sent to {worker.get('name') or worker.get('id')}; "
              f"{DELIVERED[word]}", None if word == "died" else "run.py record")
+
+
+def finding_steer(row, lines, number):
+    """The body of a revision's one `finding` steer: a summary line, then each blocking line of the verifier's row as
+    `F<n>: <line>`. The worker's one ack names each F<n> (mailbox.finding_ack_body)."""
+    count = f"{len(lines)} blocking finding{'s' * (len(lines) != 1)}"
+    return (f"Steer: {count} of verify #{row['id']}; fix each, and ack this steer once with one line per finding\n"
+            f"Kind: finding\nRevision: {number} (verify #{row['id']})\n"
+            + "".join(f"F{i}: {line}\n" for i, line in enumerate(lines, 1)))
 
 
 def cmd_answer(run, args):
@@ -7357,8 +7362,9 @@ def cmd_check_report(args):
         for field, token, line in missing_paths(body, os.getcwd()):
             problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
                             "path, or say on that line that it was deleted or removed")
-    for row in unacked_steers_of(args.mailbox):
-        problems.append(f"steer #{row['id']} has no ack: run the inbox command in MAILBOX, act on it and ack it, "
+    waiting, rows = unacked_steers_of(args.mailbox)
+    for row in waiting:
+        problems.append(f"{mbx.unacked_text(row, rows)}: run the inbox command in MAILBOX, act on it and ack it, "
                         "then list it under Deviations")
     if problems:
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
@@ -7405,14 +7411,15 @@ def verifier_problems(body, status):
 
 
 def unacked_steers_of(ctx_path):
-    """The steers of a worker's attempt that it has not acked, read through the context file of its brief. With no
-    context file, or when Taskgraph cannot be read, there is nothing to name: check-report stays what it was."""
+    """(the steers of a worker's attempt that it has not acked, the task's rows), read through the context file of its
+    brief. With no context file, or when Taskgraph cannot be read, there is nothing to name: check-report stays what it
+    was."""
     if not ctx_path:
-        return []
+        return [], []
     try:
         return mbx.unacked_steers(mbx.read_ctx(ctx_path))
     except (mbx.Fail, ValueError, KeyError, TypeError, OSError):
-        return []
+        return [], []
 
 
 def cell(value):

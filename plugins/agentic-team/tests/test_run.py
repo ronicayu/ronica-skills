@@ -12155,7 +12155,7 @@ class RevisionTest(Base):
         """The woken worker acks its findings, commits a fix and files PASS again; its new row is idle afterwards."""
         head = self.commit_file("fix.txt", text, cwd=wt)
         self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nRevision: 1\nBranch: worktree-task-1\nHead: {head}\n"
-                        f"Worktree: {wt}\nDeviations: finding #x: fixed\nCheckpoint: {CHECKPOINT}\n", by="task-1-1")
+                        f"Worktree: {wt}\nDeviations: finding F1: fixed\nCheckpoint: {CHECKPOINT}\n", by="task-1-1")
         rows = json.load(open(self.agents_file))
         for row in rows:
             if row["id"].startswith("sess-copy"):
@@ -12194,12 +12194,14 @@ class RevisionTest(Base):
         self.assertIn(f"Revision: 1\nFrom: verify #{self.verify_row}\nHead: {head}\nVerifier: verify-1-1\n", marks[0]["body"])
         self.assertIn("revision 1", self.one(events, "revised")["detail"])
 
-    def test_revise_files_one_finding_steer_per_blocking_line(self):
+    def test_revise_files_one_finding_steer_with_every_blocking_line(self):
         lines = ("src/a.py:1: one", "src/b.py:2: two", "docs/c.md: three")
         task, wt, head, events = self.revised(lines=lines)
         steers = [r for r in self.results(task) if r["kind"] == "steer"]
         self.assertEqual([r["body"] for r in steers],
-                         [f"Steer: blocking: {x}\nKind: finding\nRevision: 1 (verify #{self.verify_row})\n" for x in lines])
+                         [f"Steer: 3 blocking findings of verify #{self.verify_row}; fix each, and ack this steer once with "
+                          f"one line per finding\nKind: finding\nRevision: 1 (verify #{self.verify_row})\n"
+                          + "".join(f"F{i}: blocking: {x}\n" for i, x in enumerate(lines, 1))])
         self.assertEqual({r["author"] for r in steers}, {"manager"})
         self.assertEqual(sorted(self.meta(task)["mailbox"]), sorted(str(r["id"]) for r in steers))
         resumes = [c for c in self.calls("--bg") if "--resume" in c]
@@ -12209,7 +12211,23 @@ class RevisionTest(Base):
         self.assertEqual((chain["id"], chain["kind"], chain["resumed_from"], chain["revision"], chain["sessionId"]),
                          ("sess-copy", "task", "sess-task-1-1", 1, "copy-" + self.W))
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
-        self.assertIn("3 findings", self.one(events, "revised")["detail"])
+        self.assertIn(f"3 findings (F1-F3 in steer #{steers[0]['id']})", self.one(events, "revised")["detail"])
+
+    def test_the_rows_of_a_revision_follow_the_list_order_not_the_id(self):
+        import run as runner
+        local = 10**15  # the Taskgraph GitHub backend's range for local result kinds
+        rows = [{"id": 40, "kind": "task", "attempt": 1}, {"id": local + 1, "kind": "steer", "attempt": 1},
+                {"id": 50, "kind": "revise", "attempt": 1, "author": "manager"}, {"id": local + 2, "kind": "ack", "attempt": 1},
+                {"id": 60, "kind": "task", "attempt": 1}, {"id": 70, "kind": "task", "attempt": 2}]
+        self.assertEqual([r["id"] for r in runner.current_rows(rows, 1)], [local + 2, 60])
+        self.assertEqual([r["id"] for r in runner.current_rows(rows[:2], 1)], [40, local + 1])
+
+    def test_revise_of_one_blocking_line(self):
+        task, wt, head, events = self.revised()
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.assertIn("Steer: 1 blocking finding of verify", steer["body"])
+        self.assertTrue(steer["body"].endswith("\nF1: blocking: src/a.py:1: a check fails\n"))
+        self.assertIn("1 finding (F1-F1", self.one(events, "revised")["detail"])
 
     def test_revise_refused_for_unlabelled_issues(self):
         task, wt, head, _ = self.failed(close=False)
@@ -12332,13 +12350,19 @@ class RevisionTest(Base):
             return subprocess.run([sys.executable, self.MAILBOX_PY, "--ctx", ctx, *args], capture_output=True, text=True,
                                   env=self.env)
 
-        steers = [r["id"] for r in self.results(task) if r["kind"] == "steer"]
+        (steer,) = [r["id"] for r in self.results(task) if r["kind"] == "steer"]
         self.assertEqual(mailbox("report", "--status", "PASS", "--body-file", report).returncode, 2)
-        self.assertEqual(mailbox("ack", str(steers[0]), "--action", "fix a").returncode, 0)
+        self.assertIn("missing F2", mailbox("ack", str(steer), "--action", "F1: fix a").stderr)
+        self.add_result(task, "SEEN", f"Re: #{steer}\nAction: one line per finding: F1\nF1: fix a\n", kind="ack",
+                        by="task-1-1")  # filed past the ack command: it names F1 only
         out = mailbox("report", "--status", "PASS", "--body-file", report)
         self.assertEqual(out.returncode, 2)
-        self.assertIn(f"#{steers[1]}", out.stderr)
-        self.assertEqual(mailbox("ack", str(steers[1]), "--action", "fix b").returncode, 0)
+        self.assertIn(f"steer #{steer} has no ack that names each of its findings (missing: F2;", out.stderr)
+        check = self.run_cmd("check-report", report, "--mailbox", ctx)
+        self.assertEqual(check.returncode, 2)
+        self.assertIn("(missing: F2;", check.stderr)
+        out = mailbox("ack", str(steer), "--action", "F1: fix a", "--action", "F2: fix b")
+        self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(mailbox("report", "--status", "PASS", "--body-file", report).returncode, 0, out.stderr)
 
     # --- the second PASS and the verifier's resume

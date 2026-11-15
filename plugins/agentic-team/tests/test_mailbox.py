@@ -265,9 +265,55 @@ class MailboxTest(unittest.TestCase):
         steer = self.message("steer", "Steer: x\n")
         self.message("answer", "Re: #1\nAnswer: y\n", status="ANSWERED")
         ctx = mailbox.read_ctx(self.ctx_path)
-        self.assertEqual([r["id"] for r in mailbox.unacked_steers(ctx)], [steer])
+        self.assertEqual([r["id"] for r in mailbox.unacked_steers(ctx)[0]], [steer])
         self.mb("ack", str(steer), "--action", "ok")
-        self.assertEqual(mailbox.unacked_steers(ctx), [])
+        self.assertEqual(mailbox.unacked_steers(ctx)[0], [])
+
+    FINDINGS = ("Steer: 2 blocking findings of verify #7; fix each, and ack this steer once with one line per finding\n"
+                "Kind: finding\nRevision: 1 (verify #7)\nF1: blocking: src/a.py:1: one\nF2: blocking: src/b.py:2: two\n")
+
+    def test_a_finding_steer_takes_one_ack_that_names_every_finding(self):
+        steer = self.message("steer", self.FINDINGS)
+        out = self.mb("inbox").stdout
+        self.assertIn("    F2: blocking: src/b.py:2: two", out)
+        self.assertIn(f'ack {steer} --action "F1: <what you will change>" --action "F2: <what you will change>"', out)
+        for actions, why in (((), "missing F1, F2"), (("F1: fix a",), "missing F2"), (("fix both",), "not 'fix both'"),
+                             (("F1: a", "F3: c"), "F3 is not a finding of steer"), (("F1: a", "F1: b"), "F1 is named twice")):
+            if not actions:
+                continue
+            refused = self.mb("ack", str(steer), *sum((["--action", a] for a in actions), []))
+            self.assertEqual(refused.returncode, 2, actions)
+            self.assertIn(why, refused.stderr)
+        self.assertEqual(self.rows("ack"), [])
+        refused = self.report()
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn(f"steer #{steer} has no ack that names each of its findings (missing: F1, F2", refused.stderr)
+        self.message("ack", f"Re: #{steer}\nAction: one line per finding: F1\nF1: fix a\n", by="task-1-1", status="SEEN",
+                     listed=False)  # filed with tg, past the ack command: it does not name F2
+        self.assertIn("(missing: F2;", self.report().stderr)
+        self.assertIn(f"#{steer} steer by manager", self.mb("inbox").stdout)
+        acked = self.mb("ack", str(steer), "--action", "F2: test  the empty file", "--action", "F1: keep the last line")
+        self.assertEqual(acked.returncode, 0, acked.stderr)
+        self.assertEqual(self.rows("ack")[-1]["body"], f"Re: #{steer}\nAction: one line per finding: F1, F2\n"
+                                                       "F1: keep the last line\nF2: test the empty file\n")
+        self.assertIn("No messages for task", self.mb("inbox").stdout)
+        self.assertEqual(self.report().returncode, 0)
+
+    def test_a_finding_steer_without_f_lines_takes_a_one_line_ack(self):
+        steer = self.message("steer", "Steer: blocking: src/a.py:1: one\nKind: finding\nRevision: 1 (verify #7)\n")
+        self.assertNotIn("holds findings", self.mb("inbox").stdout)
+        self.assertEqual(self.mb("ack", str(steer), "--action", "fix a").returncode, 0)
+        self.assertEqual(self.report().returncode, 0)
+
+    def test_finding_helpers(self):
+        self.assertEqual(mailbox.finding_ids(self.FINDINGS), ["F1", "F2"])
+        self.assertEqual(mailbox.finding_ids("F1:\nF2:  \nF10: x\nF0: y\n F3: z\n"), ["F10"])
+        steer = {"id": 5, "kind": "steer", "body": self.FINDINGS}
+        self.assertEqual(mailbox.missing_findings(steer, {"body": "Re: #5\nF2: b\n"}), ["F1"])
+        self.assertEqual(mailbox.missing_findings({"id": 6, "kind": "steer", "body": "Steer: x\nF1: a\n"}, None), [])
+        rows = [steer, {"id": 8, "kind": "ack", "attempt": 1, "body": "Re: #5\nF1: a\n"}]
+        self.assertEqual(mailbox.acked_ids(rows, 1), set())
+        self.assertEqual(mailbox.acked_ids(rows + [{"id": 9, "kind": "ack", "attempt": 1, "body": "Re: #5\nF1: a\nF2: b\n"}], 1), {5})
 
     def test_the_commands_need_a_readable_context_and_a_reachable_tg(self):
         none = subprocess.run([sys.executable, MAILBOX, "inbox"], capture_output=True, text=True, env=self.env)
@@ -311,7 +357,7 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(self.mb("ack", str(second), "--action", "use b").returncode, 0)
         self.assertIn("No messages for task", self.mb("inbox").stdout)  # the older answer is settled, not open
         ctx = mailbox.read_ctx(self.ctx_path)
-        self.assertEqual(mailbox.unacked_steers(ctx), [])
+        self.assertEqual(mailbox.unacked_steers(ctx)[0], [])
         other = self.message("answer", "Re: #999\nAnswer: c\n", status="ANSWERED")  # another ask: stays open
         self.assertIn(f"#{other} answer", self.mb("inbox").stdout)
 
@@ -334,7 +380,8 @@ class MailboxTest(unittest.TestCase):
         steer = self.message("steer", "Steer: one\n")
         out = self.report()
         self.assertEqual(out.returncode, 2)
-        self.assertIn(f"steer #{steer} has no ack", out.stderr)
+        self.assertIn(f"steer #{steer} has no ack: run the inbox command", out.stderr)
+        self.assertEqual(self.mb("ack", str(steer), "--action", "a", "--action", "b").returncode, 2)  # one line only
         self.assertEqual([r for r in self.rows() if r["kind"] == "task"], [])
         self.mb("ack", str(steer), "--action", "ok")
         out = self.report("ISSUES")
