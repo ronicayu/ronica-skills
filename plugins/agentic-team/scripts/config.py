@@ -41,6 +41,9 @@ resumes), and the seconds between two reads of Taskgraph in `run.py wait`.
 reports, the worker report in a verify brief): the UTF-8 bytes of one report and of
 all of them in one brief.
 
+[rounds] sets the policy of `run.py round`: the rounds a task may have without
+--attempt, and whether a round's PASS always goes to a verifier.
+
 Python callers (run.py) may import load(root), problems(config),
 resolve_model(config, name) and profile_path(config, name).
 """
@@ -174,6 +177,10 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "carried_total_bytes": ("posint", 12000),
     },
     "notifications": {"skill": ("str", "")},
+    "rounds": {
+        "cap": ("posint", 3),
+        "verify": ("choice:always,by-risk", "always"),
+    },
 }
 
 TYPE_NAMES = {
