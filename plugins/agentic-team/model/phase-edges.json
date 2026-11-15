@@ -1,5 +1,5 @@
 {
-  "about": "The steps between phases of Lifecycle.tla in check.cfg and check-pr.cfg, as [from, event, to] of phase-view.mjs (\"none\" is run.py's None). Written by phase-edges.mjs; tests/test_run.py checks them against TRANSITIONS.",
+  "about": "The steps between phases of Lifecycle.tla in check.cfg, check-pr.cfg and check-revise.cfg, as [from, event, to] of phase-view.mjs (\"none\" is run.py's None). Written by phase-edges.mjs; tests/test_run.py checks them against TRANSITIONS.",
   "edges": [
     ["awaiting_merge","merged","merged"],
     ["awaiting_merge","round","running"],
@@ -26,6 +26,7 @@
     ["verdict_failed","close_waits, merged","merged"],
     ["verdict_failed","launch","running"],
     ["verdict_failed","merged","merged"],
+    ["verdict_failed","revise","running"],
     ["verdict_failed","round_cancel","awaiting_merge"],
     ["verifying","close_failed","verdict_failed"],
     ["verifying","close_waits","awaiting_merge"],

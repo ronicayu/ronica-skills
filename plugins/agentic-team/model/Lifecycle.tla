@@ -1,6 +1,6 @@
 ---- MODULE Lifecycle ----
-\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.23.0; the lifecycle of 0.19.0, PR-1 of #97, with the rounds of
-\* #119): one task, its attempts,
+\* The task-attempt lifecycle of scripts/run.py (agentic-team 0.24.0; the lifecycle of 0.19.0, PR-1 of #97, with the rounds of
+\* #119 and the revisions of #127): one task, its attempts,
 \* one worker session and one verifier session at a time, the result rows of the current attempt, the meta that
 \* decides the next step, and the request in pr mode. Line numbers are of scripts/run.py at that version.
 \*
@@ -37,10 +37,17 @@ CONSTANTS MAX_ATTEMPTS,  \* line 124: MAX_ATTEMPTS = 3; the configs use 2
           REGRESS_97,    \* a passing close runs `tg done` at once, before the merge (before 0.19.0, #97)
           REGRESS_119,   \* a conflict's only way to new work is the redo hint: abandon, then launch (before 0.23.0, #119)
           ROUND_CAP,     \* [rounds] cap: the rounds without --attempt (the code's default is 3; the configs use 2, the overviews 1)
-          ROUND_VERIFY   \* [rounds] verify: "always" (a round's PASS goes to a verifier) or "by-risk" (the rule of a plain attempt)
+          ROUND_VERIFY,  \* [rounds] verify: "always" (a round's PASS goes to a verifier) or "by-risk" (the rule of a plain attempt)
+          REVISION_CAP,  \* [verify] revisions_per_attempt (#127; the code's default is 2; 0 turns revisions off)
+          SEAT,          \* [verify] seat: "task" (the verifier works in the task worktree) or "own" (a verify-<id>-<n> folder)
+          REGRESS_127C,  \* revise ignores the cap
+          REGRESS_127H,  \* the resumed verifier is not moved to the new head (its folder, or its brief, stays at the old one)
+          REGRESS_127W,  \* verify starts the verifier while the worker is still busy in the same folder
+          REGRESS_127A   \* the report check ignores an unacked finding steer
 
 ASSUME MERGE_MODE \in {"local", "pr"}
 ASSUME ROUND_VERIFY \in {"always", "by-risk"}
+ASSUME SEAT \in {"task", "own"}
 
 VARIABLES
   status,        \* Taskgraph status: "open", "in_progress", "done"
@@ -72,13 +79,22 @@ VARIABLES
   mainConflicts, \* local mode: the verified commit conflicts with the target (git merge-tree, or merge_branch's conflict)
   roundPushed,   \* the request's head is not round_from any more: a CI verify of the round pushed the round's head (CI
                  \* verify is out of the model otherwise, so one environment step stands for it)
-  unverifiedMerge \* record recorded the merge of a head that no verdict covers (a round's pushed head; merged_by=operator)
+  unverifiedMerge, \* record recorded the merge of a head that no verdict covers (a round's pushed head; merged_by=operator)
+  \* #127, revisions (run.py revise <id>: the same worker and verifier sessions fix and judge again, in the same attempt):
+  revision,      \* the revision meta: 0, or the revisions of this attempt so far
+  workerKept,    \* the attempt's worker filed PASS and is kept for a revision (keep time not over, not stopped)
+  verifierKept,  \* the attempt's verifier filed its row and is kept for a resume
+  findingsOpen,  \* a finding steer of this revision has no ack
+  verifierAt,    \* the revision whose head the verifier's seat shows
+  vvRev          \* the revision whose head the newest verifier row judged
 
 vars == <<status, attempt, abandoned, verdict, merged, pr, mainHas,
           lastTask, stopReason, workerResult, vv, vIssues, vManager, vNewer, vfiled,
           worker, verifier, vreport, wtDirty, stopOrder, fault, faulted,
-          inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
+          inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge,
+          revision, workerKept, verifierKept, findingsOpen, verifierAt, vvRev>>
 RoundVars == <<inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
+RevVars == <<revision, workerKept, verifierKept, findingsOpen, verifierAt, vvRev>>
 
 \* ---------------------------------------------------------------- values
 
@@ -113,7 +129,7 @@ VerifierStates == {"none", "busy", "idle", "idleQuiet", "idleBlocked", "prompt",
 OpenPr == {"pending", "clean", "behind", "blocked", "dirty"}
 PrStates == {"none", "merged", "closed"} \cup OpenPr
 Hints == {"launch", "verify", "verifyAgain", "close", "closeManual", "abandon", "stop", "merged", "record",
-          "round", "roundCancel", "none"}
+          "round", "roundCancel", "revise", "none"}
 
 PrMode == MERGE_MODE = "pr"
 
@@ -174,6 +190,22 @@ Phase ==
   ELSE IF verifier # "none" \/ vv # "none" \/ vManager # "none" THEN "verifying"
   ELSE "reported"
 
+\* ---------------------------------------------------------------- revisions (#127)
+
+\* States past this bound are checked but not explored (only REGRESS_127C passes the cap).
+RevisionBound == revision <= REVISION_CAP + 1
+
+\* revision_possible: the verdict is a verifier's verify-failed with blocking lines (REGRESS_89 restores the unlabelled
+\* case), below the cap, both sessions kept and finished (turn over, idle, resumable), no STOP order, no fault. With
+\* REVISION_CAP = 0 it is FALSE, and no revision step is enabled: the lifecycle of 0.23.0.
+RevisionOK ==
+  /\ REVISION_CAP > 0
+  /\ revision < REVISION_CAP \/ REGRESS_127C
+  /\ verdict = "verify-failed" /\ vv = "verify-failed" /\ vManager # "manual"
+  /\ vIssues = "blocking" \/ REGRESS_89
+  /\ workerKept /\ verifierKept /\ worker = "finished" /\ verifier = "finished"
+  /\ ~stopOrder /\ fault = "none"
+
 \* ---------------------------------------------------------------- record
 
 \* retry_next, lines 730-739: below the cap `run.py launch`; from MAX_ATTEMPTS on `run.py abandon <id> <mode>
@@ -193,12 +225,12 @@ StoppedNext == IF inRound THEN "roundCancel" ELSE IF stopReason = "pause" \/ REG
 ArrivedNext(st) ==                                                      \* record_arrived, lines 3535-3547
   IF st = "PASS" THEN
      IF inRound /\ roundSame THEN "close"
-     ELSE IF HIGH_RISK \/ (inRound /\ ROUND_VERIFY = "always") THEN "verify"   \* ci, risk high, a kind that is not code
+     ELSE IF HIGH_RISK \/ (inRound /\ ROUND_VERIFY = "always") \/ revision > 0 THEN "verify"   \* ci, risk high, a kind that is not code, a revision (#127)
      ELSE "closeManual"
   ELSE IF st = "ISSUES" THEN RetryNext                                  \* line 3542
   ELSE RetryNextOld                                                     \* line 3544: "answer it and ..."
 UnclosedNext(v) ==                                                      \* unclosed_next, lines 923-934
-  IF v = "verify-failed" THEN RetryNextOld                              \* "fix round: ..."
+  IF v = "verify-failed" THEN (IF RevisionOK THEN "revise" ELSE RetryNextOld)   \* #127 "revise: ...", else "fix round: ..."
   ELSE IF v = "check-only" THEN "verifyAgain"                           \* "verify --again ..., or accept it"
   ELSE "close"
 \* The unknown hint, lines 3859-3863 (#58): `claude logs <sid>; if it has stopped working, run.py stop <id>,
@@ -328,10 +360,18 @@ Record ==
        /\ vreport' = o.vreport /\ wtDirty' = o.wtDirty /\ merged' = o.merged /\ pr' = o.pr
        /\ vIssues' = IF o.vv = vv THEN vIssues ELSE "none"             \* a salvaged report is a passing one
        /\ status' = IF o.merged # merged THEN "done" ELSE status         \* a merge record runs `tg done` (mark_merged)
+       /\ vvRev' = IF o.vv # vv THEN verifierAt ELSE vvRev              \* a salvaged verifier row judged its seat's head
+       /\ workerKept' = (workerKept /\ o.worker = worker)               \* a session that record stops is not kept
+       /\ verifierKept' = (verifierKept /\ o.verifier = verifier)
   /\ UNCHANGED <<attempt, abandoned, verdict, mainHas, stopReason, stopOrder, fault, faulted>>
-  /\ UNCHANGED RoundVars
+  /\ UNCHANGED RoundVars /\ UNCHANGED <<revision, findingsOpen, verifierAt>>
 
 \* ---------------------------------------------------------------- launch
+
+\* #127: a new attempt (launch, round) starts with no revision; launch stops both kept sessions as idle and filed.
+RevReset ==
+  /\ revision' = 0 /\ workerKept' = FALSE /\ verifierKept' = FALSE /\ findingsOpen' = FALSE
+  /\ verifierAt' = 0 /\ vvRev' = 0
 
 \* cmd_launch, lines 2333-2552, without --attempt, --base, --model. Lines 2373-2398: a live row refuses the
 \* launch, unless every live row is idle_and_filed; then launch stops them (stopped-idle, 2386-2395) and goes
@@ -367,6 +407,7 @@ Launch ==
   /\ wtDirty' = FALSE                                                   \* lines 2489-2499: WIP is committed
   /\ UNCHANGED <<abandoned, merged, pr, mainHas, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+  /\ RevReset                                                           \* launch stops both kept sessions (#127)
 
 \* The launch stopped the idle sessions (2386-2395) and then refused (2412 or 2413): the rows ended, nothing else.
 LaunchStopsIdleThenRefuses ==
@@ -379,6 +420,8 @@ LaunchStopsIdleThenRefuses ==
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+  /\ workerKept' = FALSE /\ verifierKept' = FALSE                     \* the kept sessions are stopped too (#127)
+  /\ UNCHANGED <<revision, findingsOpen, verifierAt, vvRev>>
 
 \* ---------------------------------------------------------------- verify
 
@@ -390,6 +433,8 @@ VerifyAccepted ==
   /\ fault = "none"
   /\ workerResult = "PASS"                                              \* worker_for, lines 2659-2671
   /\ ~(Live(verifier) /\ ~VerifierOver(verifier))                       \* lines 2700-2703
+  \* #127: in the task worktree the verifier starts only once the worker's turn is over (REGRESS_127W drops the check).
+  /\ (SEAT = "task" /\ ~REGRESS_127W) => worker # "busy"
 VerifyUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vManager, vNewer, worker, wtDirty, stopOrder, fault, faulted>>
@@ -399,8 +444,10 @@ VerifyPlain ==
   /\ Hint = "verify"
   /\ VerifyAccepted
   /\ vv = "none"                                                        \* lines 2690-2695: else --again
+  /\ ~(revision > 0 /\ verifierKept)                                    \* #127: a kept verifier is resumed (VerifyResume)
   /\ verifier' = "busy" /\ vfiled' = FALSE /\ vreport' = FALSE          \* 2704-2708 stop the old one; 2751 start
-  /\ UNCHANGED vIssues /\ VerifyUnchanged
+  /\ verifierAt' = revision /\ verifierKept' = FALSE
+  /\ UNCHANGED vIssues /\ VerifyUnchanged /\ UNCHANGED <<revision, workerKept, findingsOpen, vvRev>>
 
 \* --again also after an unlabelled verify-failed row (its hint since 8006a3c): the row stays, with its Issues:
 \* lines (vIssues describes the vv row, so it changes only with vv), until the new verifier's row replaces it.
@@ -408,9 +455,22 @@ VerifyAgain ==
   /\ Hint = "verifyAgain"
   /\ VerifyAccepted
   /\ verifier' = "busy" /\ vfiled' = FALSE /\ vreport' = FALSE
-  /\ UNCHANGED vIssues /\ VerifyUnchanged
+  /\ verifierAt' = revision /\ verifierKept' = FALSE                   \* a new verifier; the kept one is stopped (#127)
+  /\ UNCHANGED vIssues /\ VerifyUnchanged /\ UNCHANGED <<revision, workerKept, findingsOpen, vvRev>>
+
+\* #127: cmd_verify resumes the kept verifier of a revision; with seat own it moves the folder to the new head first.
+VerifyResume ==
+  /\ Hint = "verify"
+  /\ VerifyAccepted
+  /\ revision > 0 /\ verifierKept /\ vv = "none"
+  /\ verifier' = "busy" /\ vfiled' = FALSE /\ vreport' = FALSE
+  /\ verifierAt' = IF REGRESS_127H THEN verifierAt ELSE revision
+  /\ UNCHANGED <<vIssues, revision, workerKept, verifierKept, findingsOpen, vvRev>> /\ VerifyUnchanged
 
 \* ---------------------------------------------------------------- close
+
+\* #127: stop_live, abandon and the merge record also stop the kept idle sessions; the revision meta stays.
+StopKept == workerKept' = FALSE /\ verifierKept' = FALSE /\ UNCHANGED <<revision, findingsOpen, verifierAt, vvRev>>
 
 \* stop_live, lines 5313-5333: stop the live worker (a STOPPED row with Reason: close, no Head line) and, since
 \* 0.12.0 (#57), the live verifier (no row). Before (REGRESS_57) a verifier stayed live.
@@ -419,6 +479,7 @@ StopLive ==
   /\ lastTask' = IF Live(worker) THEN "STOPPED" ELSE lastTask
   /\ stopReason' = IF Live(worker) THEN "close" ELSE stopReason
   /\ verifier' = IF Live(verifier) /\ ~REGRESS_57 THEN AfterStop(verifier) ELSE verifier
+  /\ StopKept
 
 \* publish with catch_up (lines 4818-4879) once the host shows the request in state s:
 \* clean is merged (pr_status), unless a STOP order holds it; behind goes to the host's rebase (host_catch_up,
@@ -471,6 +532,7 @@ CloseAsPassing == StopLive /\ Finish /\ status' = StatusAfter(merged')
 CloseNotPassing ==
   /\ status' = status
   /\ UNCHANGED <<worker, verifier, lastTask, stopReason, merged, pr, mainHas, mainConflicts>>
+  /\ UNCHANGED RevVars
 
 \* cmd_close, lines 5535-5621, with choose_verdict, lines 5384-5411. L is --verdict, or "auto" for none.
 \* close never refuses on a role: verify_kind (2161-2176) reads the kind stored at launch (0.18.0).
@@ -521,6 +583,7 @@ Stop ==
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+  /\ workerKept' = FALSE /\ UNCHANGED <<revision, verifierKept, findingsOpen, verifierAt, vvRev>>
 
 \* cmd_abandon, lines 5712-5762: stops the task's live worker sessions (5722-5727) and, since 0.12.0 (#57),
 \* its live verifier (5728-5731). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
@@ -535,6 +598,7 @@ Abandon ==
   /\ UNCHANGED <<status, attempt, verdict, merged, pr, mainHas, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+  /\ StopKept
 
 \* cmd_merged, lines 5657-5671, through mark_merged. No modelled event names it, so it never fires (NOTES.md).
 Merged ==
@@ -544,6 +608,7 @@ Merged ==
   /\ UNCHANGED <<attempt, abandoned, verdict, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+  /\ StopKept
 
 \* ---------------------------------------------------------------- round (#119)
 
@@ -563,6 +628,7 @@ StartRound ==
   /\ vv' = "none" /\ vIssues' = "none" /\ vManager' = "none" /\ vNewer' = FALSE /\ vfiled' = TRUE
   /\ worker' = "busy" /\ verifier' = "none" /\ vreport' = FALSE /\ wtDirty' = FALSE
   /\ UNCHANGED <<status, abandoned, merged, pr, mainHas, mainConflicts, stopOrder, fault, faulted, unverifiedMerge>>
+  /\ RevReset
 
 \* record_round's round-not-needed line: the verified head would merge as it is.
 ConflictGone == inRound /\ IF PrMode THEN pr \in {"clean", "behind", "blocked"} ELSE ~mainConflicts
@@ -610,20 +676,20 @@ NotSessions == <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastT
                  vv, vIssues, vManager, vNewer, vfiled, vreport, wtDirty, stopOrder, fault, faulted,
                  inRound, roundSame, rounds, mainConflicts, roundPushed, unverifiedMerge>>
 
-WorkerEnds == ~End /\ worker = "busy" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerExits == ~End /\ worker = "stopping" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerFails == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "failed" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerIdles == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "idle" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerAsks == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "idleBlocked" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerPrompted == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "prompt" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
+WorkerEnds == ~End /\ worker = "busy" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerExits == ~End /\ worker = "stopping" /\ worker' = "finished" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerFails == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "failed" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerIdles == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "idle" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerAsks == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "idleBlocked" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerPrompted == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "prompt" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
 \* #65: the process dies (kill -9, a crash): the row stays live with no status and no pid. The CLI may start it
 \* again (status idle, a new pid), or the row stays; after 30 quiet minutes it counts as ended (ghostGone).
-WorkerGhosts == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "ghost" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerGhostReturns == ~End /\ FULL_ENV /\ worker = "ghost" /\ worker' = "idle" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
-WorkerGhostStays == ~End /\ FULL_ENV /\ worker \in {"ghost", "ghostStopped"} /\ worker' = "ghostGone" /\ UNCHANGED verifier /\ UNCHANGED NotSessions
+WorkerGhosts == ~End /\ FULL_ENV /\ worker = "busy" /\ worker' = "ghost" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerGhostReturns == ~End /\ FULL_ENV /\ worker = "ghost" /\ worker' = "idle" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+WorkerGhostStays == ~End /\ FULL_ENV /\ worker \in {"ghost", "ghostStopped"} /\ worker' = "ghostGone" /\ UNCHANGED verifier /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
 
 
-\* A worker files one result per attempt, as its last step (worker.md "Report": run check-report, fix what it
+\* A worker files one result per revision of an attempt, as its last step (worker.md "Report": run check-report, fix what it
 \* names, then the one report command). A report that check-report refuses (too few Evidence: lines, a path
 \* that does not exist) is rewritten, or filed as it is when the worker cannot fix it (step 1 -> 2): either
 \* way the row that lands is one of these three, so the refusal is no state of its own. Its process may still
@@ -633,33 +699,38 @@ WorkerFilesUnchanged ==
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted,
               inRound, rounds, mainConflicts, roundPushed, unverifiedMerge>>
 \* A round's PASS is the same change as round_from, or not (same_change): a free choice. Outside a round it is FALSE.
+\* #127: mailbox.py report refuses while a finding steer has no ack (REGRESS_127A drops the check). A worker that filed PASS
+\* is kept for a revision.
+ReportAllowed == ~findingsOpen \/ REGRESS_127A
 WorkerFilesPass ==
   /\ ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "PASS" /\ workerResult' = "PASS"
+  /\ ReportAllowed
   /\ roundSame' \in (IF inRound THEN BOOLEAN ELSE {FALSE})
   /\ WorkerFilesUnchanged
+  /\ workerKept' = (REVISION_CAP > 0) /\ UNCHANGED <<revision, verifierKept, findingsOpen, verifierAt, vvRev>>
 WorkerFilesIssues ==
   ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "ISSUES" /\ workerResult' = "ISSUES"
-  /\ UNCHANGED roundSame /\ WorkerFilesUnchanged
+  /\ ReportAllowed /\ UNCHANGED roundSame /\ WorkerFilesUnchanged /\ UNCHANGED RevVars
 WorkerFilesBlocked ==
   ~End /\ worker = "busy" /\ workerResult = "none" /\ lastTask' = "BLOCKED" /\ workerResult' = "BLOCKED"
-  /\ UNCHANGED roundSame /\ WorkerFilesUnchanged
+  /\ ReportAllowed /\ UNCHANGED roundSame /\ WorkerFilesUnchanged /\ UNCHANGED RevVars
 
 WorkerDirties ==
   /\ ~End /\ FULL_ENV /\ worker = "busy" /\ ~wtDirty /\ wtDirty' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, stopOrder, fault, faulted>>
-  /\ UNCHANGED RoundVars
+  /\ UNCHANGED RoundVars /\ UNCHANGED RevVars
 
-VerifierEnds == ~End /\ verifier = "busy" /\ verifier' = "finished" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierFails == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "failed" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierIdles == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "idle" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierWakes == ~End /\ FULL_ENV /\ verifier = "idle" /\ verifier' = "busy" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierQuiet == ~End /\ FULL_ENV /\ verifier = "idle" /\ verifier' = "idleQuiet" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierAsks == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "idleBlocked" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierPrompted == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "prompt" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierGhosts == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "ghost" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierGhostReturns == ~End /\ FULL_ENV /\ verifier = "ghost" /\ verifier' = "idle" /\ UNCHANGED worker /\ UNCHANGED NotSessions
-VerifierGhostStays == ~End /\ FULL_ENV /\ verifier \in {"ghost", "ghostStopped"} /\ verifier' = "ghostGone" /\ UNCHANGED worker /\ UNCHANGED NotSessions
+VerifierEnds == ~End /\ verifier = "busy" /\ verifier' = "finished" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierFails == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "failed" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierIdles == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "idle" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierWakes == ~End /\ FULL_ENV /\ verifier = "idle" /\ verifier' = "busy" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierQuiet == ~End /\ FULL_ENV /\ verifier = "idle" /\ verifier' = "idleQuiet" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierAsks == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "idleBlocked" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierPrompted == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "prompt" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierGhosts == ~End /\ FULL_ENV /\ verifier = "busy" /\ verifier' = "ghost" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierGhostReturns == ~End /\ FULL_ENV /\ verifier = "ghost" /\ verifier' = "idle" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
+VerifierGhostStays == ~End /\ FULL_ENV /\ verifier \in {"ghost", "ghostStopped"} /\ verifier' = "ghostGone" /\ UNCHANGED worker /\ UNCHANGED NotSessions /\ UNCHANGED RevVars
 
 \* The verifier files its one verify row (result_command, 1720-1725: a plain `tg result add`). Its brief runs
 \* `check-report --verifier` first (1761, 1775-1780; verifier_problems 5809-5825): an ISSUES report needs a
@@ -669,11 +740,14 @@ VerifierFilesUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vManager, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
+\* #127: the row judges the head the verifier's seat shows, and the verifier is kept for a resume.
 VerifierFiles ==
   /\ ~End /\ verifier = "busy"
   /\ vv' \in Levels /\ vNewer' = TRUE /\ vfiled' = TRUE
   /\ vIssues' = IF vv' = "verify-failed" THEN "blocking" ELSE "none"
   /\ VerifierFilesUnchanged
+  /\ vvRev' = verifierAt /\ verifierKept' = (REVISION_CAP > 0)
+  /\ UNCHANGED <<revision, workerKept, findingsOpen, verifierAt>>
 
 \* The check is advisory: worker.md "Report" step 1 says that a problem the session cannot fix, or a refused
 \* command, goes on to step 2, the filing, and the filing command checks nothing (ALLOW_UNCHECKED_REPORT). So
@@ -683,17 +757,20 @@ VerifierFilesUnchecked ==
   /\ ~End /\ verifier = "busy"
   /\ vv' = "verify-failed" /\ vNewer' = TRUE /\ vfiled' = TRUE /\ vIssues' = "unlabelled"
   /\ VerifierFilesUnchanged
+  /\ vvRev' = verifierAt /\ verifierKept' = (REVISION_CAP > 0)
+  /\ UNCHANGED <<revision, workerKept, findingsOpen, verifierAt>>
 
 VerifierLeavesReport ==
   /\ ~End /\ FULL_ENV /\ verifier = "busy" /\ ~vreport /\ vreport' = TRUE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, wtDirty, stopOrder, fault, faulted>>
-  /\ UNCHANGED RoundVars
+  /\ UNCHANGED RoundVars /\ UNCHANGED RevVars
 
 \* The code host, in pr mode. BaseUnchanged leaves out pr and the round variables.
 BaseUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
+  /\ UNCHANGED RevVars
 HostUnchanged == BaseUnchanged /\ UNCHANGED RoundVars
 HostDecides == ~End /\ PrMode /\ pr = "pending" /\ pr' \in {"clean", "behind", "blocked", "dirty"} /\ HostUnchanged
 TargetMoves == ~End /\ PrMode /\ pr \in {"clean", "blocked"} /\ pr' = "behind" /\ HostUnchanged
@@ -716,7 +793,7 @@ OperatorMerges ==
   /\ ~End /\ ~PrMode /\ Awaiting /\ ~mainHas /\ mainHas' = TRUE /\ mainConflicts' = FALSE
   /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, lastTask, stopReason, workerResult,
                  vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
-  /\ UNCHANGED <<inRound, roundSame, rounds, roundPushed, unverifiedMerge>>
+  /\ UNCHANGED <<inRound, roundSame, rounds, roundPushed, unverifiedMerge>> /\ UNCHANGED RevVars
 \* #119, local mode: the target branch moves and conflicts with the verified commit (git merge-tree); or it clears.
 MainConflicts ==
   /\ ~End /\ FULL_ENV /\ ~PrMode /\ (Awaiting \/ inRound) /\ ~mainHas /\ ~mainConflicts /\ mainConflicts' = TRUE
@@ -730,7 +807,7 @@ MainConflictClears ==
 OrdersUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, fault, faulted>>
-  /\ UNCHANGED RoundVars
+  /\ UNCHANGED RoundVars /\ UNCHANGED RevVars
 OperatorOrdersStop == ~End /\ OPERATOR_PAUSES /\ ~stopOrder /\ stopOrder' = TRUE /\ OrdersUnchanged
 OperatorLiftsStop == ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE /\ OrdersUnchanged
 
@@ -743,10 +820,40 @@ OperatorLiftsStop == ~End /\ OPERATOR_PAUSES /\ stopOrder /\ stopOrder' = FALSE 
 FaultUnchanged ==
   UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, lastTask, stopReason, workerResult,
               vv, vIssues, vManager, vNewer, vfiled, worker, verifier, vreport, wtDirty, stopOrder>>
-  /\ UNCHANGED RoundVars
+  /\ UNCHANGED RoundVars /\ UNCHANGED RevVars
 RoleBreaks == ~End /\ FAULTS /\ ~faulted /\ fault' = "role" /\ faulted' = TRUE /\ FaultUnchanged
 ExcludeBreaks == ~End /\ FAULTS /\ ~faulted /\ fault' = "exclude" /\ faulted' = TRUE /\ FaultUnchanged
 OperatorRepairs == ~End /\ fault # "none" /\ fault' = "none" /\ UNCHANGED faulted /\ FaultUnchanged
+
+\* ---------------------------------------------------------------- revisions (#127)
+
+\* cmd_revise: one revise row; one tg edit (phase verdict_failed -> running, revision, verdict and verdict_ref unset); one
+\* finding steer per blocking line; one doorbell wakes the kept worker in the same folder. The verifier stays idle.
+Revise ==
+  /\ Hint = "revise"
+  /\ status = "in_progress" /\ ~abandoned /\ RevisionOK
+  /\ revision' = revision + 1 /\ verdict' = "none"
+  /\ lastTask' = "none" /\ stopReason' = "none" /\ workerResult' = "none"
+  /\ vv' = "none" /\ vIssues' = "none" /\ vManager' = "none" /\ vNewer' = FALSE /\ vfiled' = TRUE
+  /\ worker' = "busy" /\ findingsOpen' = TRUE /\ roundSame' = FALSE
+  /\ UNCHANGED <<status, attempt, abandoned, merged, pr, mainHas, verifier, vreport, wtDirty, stopOrder, fault,
+                 faulted, workerKept, verifierKept, verifierAt, vvRev,
+                 inRound, rounds, mainConflicts, roundPushed, unverifiedMerge>>
+
+\* The woken worker acks every finding steer (mailbox.py ack, one per finding) before it may report.
+WorkerAcksFindings ==
+  /\ ~End /\ worker = "busy" /\ findingsOpen
+  /\ findingsOpen' = FALSE
+  /\ UNCHANGED <<revision, workerKept, verifierKept, verifierAt, vvRev, worker, verifier>>
+  /\ UNCHANGED NotSessions
+
+\* Time: the keep time ends ([verify] keep_sessions_minutes), or the session is gone; record then stops it.
+WorkerKeepEnds ==
+  /\ ~End /\ workerKept /\ workerKept' = FALSE
+  /\ UNCHANGED <<revision, verifierKept, findingsOpen, verifierAt, vvRev, worker, verifier>> /\ UNCHANGED NotSessions
+VerifierKeepEnds ==
+  /\ ~End /\ verifierKept /\ verifierKept' = FALSE
+  /\ UNCHANGED <<revision, workerKept, findingsOpen, verifierAt, vvRev, worker, verifier>> /\ UNCHANGED NotSessions
 
 \* ---------------------------------------------------------------- spec
 
@@ -759,6 +866,8 @@ Init ==
   /\ stopOrder = FALSE /\ fault = "none" /\ faulted = FALSE
   /\ inRound = FALSE /\ roundSame = FALSE /\ rounds = 0 /\ mainConflicts = FALSE
   /\ roundPushed = FALSE /\ unverifiedMerge = FALSE
+  /\ revision = 0 /\ workerKept = FALSE /\ verifierKept = FALSE /\ findingsOpen = FALSE
+  /\ verifierAt = 0 /\ vvRev = 0
 
 Next ==
   \/ Launch \/ LaunchStopsIdleThenRefuses \/ VerifyPlain \/ VerifyAgain \/ CloseAuto \/ CloseManual
@@ -774,6 +883,7 @@ Next ==
   \/ RoleBreaks \/ ExcludeBreaks \/ OperatorRepairs
   \/ StartRound \/ RoundCancel \/ RoundMerged
   \/ TargetConflicts \/ ConflictClears \/ RoundHeadPushed \/ MainConflicts \/ MainConflictClears
+  \/ Revise \/ WorkerAcksFindings \/ VerifyResume \/ WorkerKeepEnds \/ VerifierKeepEnds
 
 Spec == Init /\ [][Next]_vars
 
@@ -797,6 +907,9 @@ TypeOK ==
   /\ fault \in Faults /\ faulted \in BOOLEAN
   /\ inRound \in BOOLEAN /\ roundSame \in BOOLEAN /\ mainConflicts \in BOOLEAN
   /\ roundPushed \in BOOLEAN /\ unverifiedMerge \in BOOLEAN /\ rounds \in 0..ROUND_CAP
+  /\ revision \in 0..(REVISION_CAP + 2)    \* one past RevisionBound, as for attempt: such states are checked, not explored
+  /\ workerKept \in BOOLEAN /\ verifierKept \in BOOLEAN /\ findingsOpen \in BOOLEAN
+  /\ verifierAt \in 0..(REVISION_CAP + 2) /\ vvRev \in 0..(REVISION_CAP + 2)
   /\ Hint \in Hints
 
 \* Once the verifier's session ended or its turn ended, the attempt has a verify row that covers it, or
@@ -840,7 +953,8 @@ PauseFinishedFirst ==
 \* `claude stop` cannot end it, it ends by itself after 30 quiet minutes, and cleanup removes it with `claude rm`
 \* once the task is done (#65). Before 0.12.1 (REGRESS_65) cleanup skipped it as live, so it was left.
 LeftAtEnd(s) == Live(s) /\ (~Ghost(s) \/ REGRESS_65)
-NoSessionLeftAtEnd == End => (~LeftAtEnd(worker) /\ ~LeftAtEnd(verifier))
+\* #127: a session kept idle for a revision is stopped too (stop_live, abandon, the merge record).
+NoSessionLeftAtEnd == End => (~LeftAtEnd(worker) /\ ~LeftAtEnd(verifier) /\ ~workerKept /\ ~verifierKept)
 
 \* idle_and_filed (2323-2331): "launch stops such a session itself instead of refusing." A launch that stops the
 \* idle rows and passes every other check starts the next attempt; it does not refuse on the row it stopped.
@@ -864,8 +978,9 @@ OneRequestPerTask == [][pr # "none" => pr' # "none"]_vars
 \* a verifier's verify-failed verdict drives the next step (a fix round, or abandon at the cap), its report has
 \* a `blocking:` line. A Manager's own verify-failed (close --verdict) is not a verifier's finding. Since
 \* 8006a3c such a verdict is never recorded: record hints `verify --again`, close refuses (REGRESS_89 undoes both).
+\* #127: a revision is a fix round inside the attempt, so the revise hint needs a blocking line too.
 FixRoundNeedsBlocking ==
-  (verdict = "verify-failed" /\ vv = verdict /\ vManager # "manual" /\ Hint \in {"launch", "abandon"})
+  (verdict = "verify-failed" /\ vv = verdict /\ vManager # "manual" /\ Hint \in {"launch", "abandon", "revise"})
     => vIssues = "blocking"
 
 \* #119: a round has no passing verdict beside it: its phase is in flight, never awaiting_merge, and the task is in
@@ -875,5 +990,20 @@ RoundIsInFlight == inRound => (~Closed /\ status = "in_progress")
 \* #119: following record's hints never abandons a task that waits for its merge: a conflict gets a round on the same
 \* request. REGRESS_119 (the redo hint at a conflict: abandon, then launch --attempt) breaks it.
 NoHintAbandonsWaitingWork == [][(abandoned' /\ ~abandoned) => ~Awaiting]_vars
+
+\* #127: revisions are bounded: a revision starts only below the cap. REGRESS_127C breaks it.
+RevisionCap == [][revision' > revision => revision < REVISION_CAP]_vars
+
+\* #127: the closing verdict judges the final head: a passing close that rests on a verifier row rests on a row about the
+\* newest revision's head. REGRESS_127H (the resumed verifier still sees the old head) breaks it.
+ClosingVerdictOnFinalHead ==
+  (Closed /\ vManager \notin {"manual", "carried"}) => vvRev = revision
+
+\* #127: with the verifier in the task worktree, the worker and the verifier never work in it at once. REGRESS_127W
+\* breaks it.
+NoConcurrentWriters == (SEAT = "task") => ~(worker = "busy" /\ verifier = "busy")
+
+\* #127: a revision's report comes after the ack of every finding. REGRESS_127A breaks it.
+FindingsAckedBeforeReport == (workerResult # "none") => ~findingsOpen
 
 ====

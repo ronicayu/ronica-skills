@@ -12038,6 +12038,11 @@ class TransitionTest(unittest.TestCase):
         with self.assertRaises(runner.TransitionError):
             runner.next_phase({"id": 7, "meta": {}}, "no_such_event")
 
+    def test_transitions_has_revise_row(self):
+        import run as runner
+        self.assertEqual(runner.TRANSITIONS[("verdict_failed", "revise")], "running")
+        self.assertEqual([key for key in runner.TRANSITIONS if key[1] == "revise"], [("verdict_failed", "revise")])
+
     def test_no_phase_is_none(self):
         import run as runner
         self.assertEqual(runner.next_phase({"id": 7}, "launch"), "running")

@@ -917,6 +917,7 @@ ROUND_FIELDS = ("round", "round_from", "round_verdict", "round_onto")  # a round
 #   abandon          abandon drops the task
 #   round            round starts a new attempt of a task that waits for its merge, on the same request (#119)
 #   round_cancel     round --cancel ends a round: the task waits again at its verified head
+#   revise           revise relays a verifier's blocking findings to the attempt's own worker: a revision (#127)
 # repoint (#111) sends no event: the task stays awaiting_merge and follows another request, so it has no row here.
 # record sends seen_<phase> when the fields and rows say <phase> (settle_phase): for a task with no phase (the
 # backfill), for an in-flight phase the rows moved on, and for awaiting_merge with a merged_at.
@@ -949,6 +950,7 @@ TRANSITIONS: dict[tuple[str | None, str], str] = {
     ("awaiting_merge", "seen_merged"): "merged",
     ("awaiting_merge", "round"): "running",
     **{(p, "round_cancel"): "awaiting_merge" for p in ROUND},
+    ("verdict_failed", "revise"): "running",  # #127: a revision of the same attempt, by the same sessions
 }
 
 
