@@ -85,6 +85,16 @@ export const step = (action, from, to) => {
     case "SomeoneMerges": return "a reviewer merges the request on the code host";
     case "SomeoneCloses": return "a reviewer closes the request on the code host";
     case "SomeoneReopens": return "a reviewer reopens the request on the code host";
+    case "StartRound": return "the Manager starts a round on the same request";
+    case "RoundCancel": return "the Manager cancels the round; the task waits again at its verified head";
+    case "RoundMerged": return from.roundPushed && !from.roundSame
+      ? "the Manager's record finds the request merged at a head no verdict covers"
+      : "the Manager's record finds the request merged during the round";
+    case "TargetConflicts": return "another merged request makes the request conflict";
+    case "ConflictClears": return "the conflict goes away";
+    case "RoundHeadPushed": return "a CI verify of the round pushes the round's head";
+    case "MainConflicts": return "the target branch moves and conflicts with the branch";
+    case "MainConflictClears": return "the conflict with the target branch goes away";
     default: return action;
   }
 };

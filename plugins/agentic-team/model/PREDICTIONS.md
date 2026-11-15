@@ -226,3 +226,28 @@ Written from the model before any run; this session could not run TLC. New in th
 | overview.cfg with `phase-view.mjs` (optional, a chart) | 16 of the 18 edges, in a chart: without FULL_ENV no worker goes idle or gets stuck, so there is no `running -> stopped` (neither the hinted stop nor record's stop of a stuck worker) and no `running -> abandoned` (the unknown hint at the cap). |
 
 If the regenerated file differs: an extra edge with a `record` label means a `Record` path moves the phase in a way the view does not name (read it in the dump, then fix the view or the model). An extra `seen_*` edge means an environment step moves a phase (`WorkerFiles*` aside), which the model did not do before. A missing edge means my reading of a hint was wrong; the test then names the table row that lost its model edge, and the row needs an exclusion with a reason, or the model a fix.
+
+# agentic-team 0.23.0 (#119, rounds)
+
+Written from the model before any run; this session could not run TLC or SANY. New in the model: the constants
+`ROUND_CAP`, `ROUND_VERIFY` and `REGRESS_119`; the variables `inRound`, `roundSame`, `rounds`, `mainConflicts`,
+`roundPushed` and `unverifiedMerge`; the actions `StartRound`, `RoundCancel`, `RoundMerged`; the environment steps
+`TargetConflicts`, `ConflictClears`, `RoundHeadPushed`, `MainConflicts`, `MainConflictClears`; the rules
+`RoundIsInFlight` and `NoHintAbandonsWaitingWork`; and changed `NoMergeWithoutPassingVerdict` and `AttemptCap`. Every
+config sets `ROUND_CAP = 2` (the overviews `1`), `ROUND_VERIFY = "always"` and `REGRESS_119 = FALSE`, except
+`regress-119.cfg` (`REGRESS_119 = TRUE`).
+
+| Config | Expect |
+|---|---|
+| check.cfg, check-pr.cfg | Every rule holds, no dead end. More states than 15,566 and 16,718 (six variables; a closed task can now start up to two rounds, each a full attempt), I guess three to six times as many. |
+| pause.cfg, pause-pr.cfg, peel-1.cfg, faults.cfg, faults-pr.cfg | Every rule holds; more states. |
+| overview.cfg, overview-pr.cfg | Every rule holds. More states than 110 and 134: `overview.cfg` reaches a round through a local merge conflict (`LocalMergeStep` may set `mainConflicts`), `overview-pr.cfg` through a request the host marks dirty. If a count passes the statechart command's 516-state budget, the README chart (`assets/diagrams/attempt-statechart.mmd`) cannot be regenerated as a full chart; then note it and keep the old chart, or draw it with `ROUND_CAP = 0` in a copy of the config. |
+| each regress config of 0.22.3 | It breaks its own rule as in "Results (0.19.0)", and no other rule (the new rules hold there: no hint abandons a waiting task, and a round is never closed). |
+| regress-119.cfg | Breaks `NoHintAbandonsWaitingWork` in 7 steps: you launch, the task session reports PASS, you start a verifier, the verifier files artifact-verified, the verifier session ends, you close and the request opens dirty, you abandon. Nothing else breaks. |
+| check.cfg and check-pr.cfg through `phase-edges.mjs` | The 31 edges of `phase-edges.json` (28 table rows once each `close_waits, merged` is split), so `git diff --exit-code phase-edges.json` is empty. New: `awaiting_merge, round, running`; `<p>, round_cancel, awaiting_merge` for running, stopped, reported, verifying and verdict_failed (both configs: a failed round's hint, or the round-not-needed line after `ConflictClears` or `MainConflictClears`); `<p>, merged, merged` for the same five (check-pr.cfg only: `SomeoneMerges` during a round, then `RoundMerged`); `reported, close_waits, awaiting_merge` (the carry: a round's PASS with the same change goes to close with no verifier); `reported, close_waits, merged, merged` (check.cfg only: the carry, and the local merge succeeds). |
+
+If a rule breaks: `NoMergeWithoutPassingVerdict` points at a merge path that writes neither a carried row nor
+`unverifiedMerge`; `RoundIsInFlight` at a path that closes or finishes a round without clearing `inRound`;
+`AttemptCap` at a round whose `rounds` did not grow; a dead end in a round state means a round hint whose action is
+refused (check `RoundCancel`'s guard first). A missing `round_cancel` or `merged` edge for one of the five phases means
+my reading of the reachable round states was wrong: find out why before adding an exclusion.
