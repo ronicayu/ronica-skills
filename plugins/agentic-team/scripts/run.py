@@ -2862,7 +2862,16 @@ def cmd_launch(run, args):
                           + ". If the worker is gone, the resume fails and files DIED, and the launch is free again")
     nxt = args.attempt or current + 1
     if latest and latest[-1]["status"] == "STOPPED" and not HEAD_ANY.search(latest[-1]["body"]):
-        raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
+        # A STOPPED row with no Head: is either a stop whose WIP record has not committed yet, or a row an older
+        # run.py wrote (0.22.3's close wrote none). Only uncommitted work in the folder means the first.
+        dirty = (run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip()
+                 if wt_there and os.path.isdir(wt) else "")
+        if dirty:
+            raise Refused(f"#{tid} attempt {current} is stopped and its WIP is not committed yet; run run.py record first")
+        run.emit("warn", tid, current, None,
+                 f"STOPPED row #{latest[-1]['id']} has no Head: (an older run.py wrote it); "
+                 + (f"{rel} is clean at {wt_head[:7]}, so the retry continues there" if wt_head
+                    else "there is no task folder, so nothing is left to commit"))
     refuse_past_cap(tid, nxt, latest, args.attempt)
     # THE WORKTREE. A first attempt creates it at the base: --base, else the fetched target branch (pr) or HEAD
     # (local). A retry continues in it, at its HEAD. `mode` says which, and what a failed start may undo.

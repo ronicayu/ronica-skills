@@ -2223,6 +2223,23 @@ class RunTest(Base):
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), base)
         self.assertIn(f"Head: {base}", self.results(task)[-1]["body"])
 
+    def test_36_an_older_stopped_row_with_no_head_and_a_clean_folder_lets_launch_go_on(self):
+        task = self.running_task()
+        wt = self.worktree("task-1")
+        base = self.git("rev-parse", "HEAD", cwd=wt)
+        self.add_result(task, "STOPPED", f"Session: s\nWorktree: {wt}\nBranch: b\nStopped: now\nReason: close\nFiles: None\n",
+                        by="manager")  # as 0.22.3's close wrote it: no Head line
+        self.agents()
+        events = self.events("launch", str(task), "--attempt", "2", "--dry-run")
+        warn = [e for e in self.named(events, "warn") if "has no Head:" in e["detail"]]
+        self.assertEqual(len(warn), 1, events)
+        self.assertIn(f"is clean at {base[:7]}", warn[0]["detail"])
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("x\n")
+        out = self.run_cmd("launch", str(task), "--attempt", "2", "--dry-run")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("its WIP is not committed yet; run run.py record first", out.stderr)
+
     def test_36_a_pause_after_a_verdict_files_its_head(self):
         task = self.running_task()
         wt = self.worktree("task-1")
