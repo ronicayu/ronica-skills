@@ -4073,7 +4073,7 @@ def mailbox_events(run, task, attempt, th, deliver_ok=True):
                 if acks:
                     via = {"resume": "resume", "socket": "socket"}.get(entry.get("via"), "hook" if entry.get("hook") else "pending")
                     run.emit(f"{word}-seen", tid, attempt, None,
-                             f"#{row['id']} acked by {acks[-1].get('author')} (via {via}): {mbx.field_line(acks[-1]['body'], 'Action')}")
+                             f"#{row['id']} acked by {acks[-1].get('author')} (via {via}): {mbx.ack_action(acks[-1]['body'])}")
                 if not th.unacked():
                     lower_flag(run, tid, attempt)
             continue
@@ -4319,7 +4319,7 @@ def cmd_inbox(run, args):
         body = r.get("body") or ""
         text = {mbx.ASK: mbx.ask_question(body), mbx.ANSWER: f"re #{mbx.ref_of(body)}: {mbx.field_line(body, 'Answer')}",
                 mbx.STEER: f"{mbx.field_line(body, 'Kind')}: {mbx.field_line(body, 'Steer')}",
-                mbx.ACK: f"re #{mbx.ref_of(body)}: {mbx.field_line(body, 'Action')}"}[r["kind"]]
+                mbx.ACK: f"re #{mbx.ref_of(body)}: {mbx.ack_action(body)}"}[r["kind"]]
         state = ""
         if r["kind"] in (mbx.ANSWER, mbx.STEER):
             acked = r["id"] in mbx.acked_ids(rows, r.get("attempt"))

@@ -12363,6 +12363,7 @@ class RevisionTest(Base):
         self.assertIn("(missing: F2;", check.stderr)
         out = mailbox("ack", str(steer), "--action", "F1: fix a", "--action", "F2: fix b")
         self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("one line per finding: F1, F2; F1: fix a; F2: fix b", self.one(self.events("record"), "steer-seen")["detail"])
         self.assertEqual(mailbox("report", "--status", "PASS", "--body-file", report).returncode, 0, out.stderr)
 
     # --- the second PASS and the verifier's resume

@@ -132,6 +132,13 @@ def acked_ids(rows, attempt):
     return found
 
 
+def ack_action(body):
+    """The `Action:` line of an ack, followed by its `F<n>: <action>` lines (the ack of a `finding` steer), on one line."""
+    import re
+    lines = [field_line(body, "Action")] + [m.group(0).strip() for m in re.finditer(r"(?m)^F[1-9][0-9]*:[ \t]*\S.*$", body or "")]
+    return "; ".join(line for line in lines if line)
+
+
 def unacked_text(steer, rows):
     """`steer #<id> has no ack`, and for a `finding` steer the findings that the newest ack of it leaves out."""
     if not (is_finding_steer(steer) and finding_ids(steer["body"])):

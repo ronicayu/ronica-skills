@@ -313,6 +313,9 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mailbox.missing_findings({"id": 6, "kind": "steer", "body": "Steer: x\nF1: a\n"}, None), [])
         rows = [steer, {"id": 8, "kind": "ack", "attempt": 1, "body": "Re: #5\nF1: a\n"}]
         self.assertEqual(mailbox.acked_ids(rows, 1), set())
+        self.assertEqual(mailbox.ack_action("Re: #5\nAction: one line per finding: F1, F2\nF1: a\nF2: b\n"),
+                         "one line per finding: F1, F2; F1: a; F2: b")
+        self.assertEqual(mailbox.ack_action("Re: #5\nAction: skip it\n"), "skip it")
         self.assertEqual(mailbox.acked_ids(rows + [{"id": 9, "kind": "ack", "attempt": 1, "body": "Re: #5\nF1: a\nF2: b\n"}], 1), {5})
 
     def test_the_commands_need_a_readable_context_and_a_reachable_tg(self):
