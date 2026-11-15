@@ -713,17 +713,18 @@ def own_sessions(run, tid, kind=None, attempt=None):
 
 
 def live_count(run):
-    """The live session rows that hold a slot. A kept idle/working row (idle_kept) holds none, as a kept idle row
-    with state done holds none."""
+    """The live session rows that hold a slot. With revisions on for its task, a kept idle/working row (idle_kept) holds
+    none, as a kept idle row with state done holds none."""
     found = {}
 
-    def rows_of(tid):
-        if tid not in found:
-            found[tid] = run.results_for(tid)
-        return found[tid]
+    def kept(s):
+        if s.task_id not in found:
+            task = run.show(s.task_id)
+            # with revisions off nothing stops a kept row (kept_rows), so it keeps its slot
+            found[s.task_id] = (run.results_for(s.task_id), wanted_attempt(task)) if revision_cap(run, task) > 0 else None
+        return found[s.task_id] is not None and idle_kept(s, found[s.task_id][0], found[s.task_id][1])
 
-    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost
-               and not (s.status == "idle" and idle_kept(s, rows_of(s.task_id), s.attempt)))
+    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost and not (s.status == "idle" and kept(s)))
 
 
 def wanted_attempt(task):
@@ -829,18 +830,32 @@ def revision_rows(rows, attempt, revision):
 
 def turn_ended(s, rows, attempt):
     """Session.turn_over, or a live idle row that waits on nothing once the session's work is filed: a resumed `--bg`
-    session that ended its turn reads idle/working (#137). The work counts in the session's own revision (a row tied
-    by folder only: the current one): a worker report for a worker, a verify row under its name for a verifier. An
-    idle/working row with nothing filed may have said it will check back, so its turn is not over."""
+    session that ended its turn reads idle/working (#137). The work counts in the session's own revision, and after the
+    row's startedAt when it has one: a worker report for a recorded worker, a verify row under its name for a verifier
+    (a verifier row tied by folder only: in the current revision). An idle/working row with nothing filed may have said
+    it will check back, so its turn is not over."""
     if s.turn_over:
         return True
     if not (s.live and s.status == "idle" and not s.stuck):
         return False
+    if s.kind == "task" and not s.recorded:  # tied by folder only: no report is known to be its own
+        return False
     attempt = s.attempt or attempt
     mine = revision_rows(rows, attempt, s.revision) if s.recorded else current_rows(rows, attempt)
+    started = s.row.get("startedAt")
+    mine = [r for r in mine or [] if not isinstance(started, (int, float)) or filed_since(r, started / 1000)]
     if s.kind == "task":
-        return any(is_worker_result(r) for r in mine or [])
-    return any(r["kind"] == "verify" and r.get("author") == s.label for r in mine or [])
+        return any(is_worker_result(r) for r in mine)
+    return any(r["kind"] == "verify" and r.get("author") == s.label for r in mine)
+
+
+def filed_since(row, moment):
+    """True when the row was filed at or after `moment` (seconds; the row's time has whole seconds), or has no time."""
+    try:
+        at = datetime.datetime.fromisoformat(str(row.get("at")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return True
+    return at + 1 > moment
 
 
 def idle_kept(s, rows, attempt):
@@ -3992,7 +4007,8 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         row_of_copy = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == new), None) or {}
         copy = {"id": new, "kind": "task", "attempt": attempt, "name": s.name or s.wtname, "worktree": s.wtname,
                 "model": session_model(task, s.sid), **profile_field(s.profile),
-                **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {})}
+                **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {}),
+                **({"revision": revision_of(task)} if revision_of(task) else {})}
         run.set_meta(task, sessions=recorded_sessions(task) + [copy])
         stop_session(run, s.sid, check=False, profile=s.profile)  # keep one live session
         run._sessions = None
@@ -4003,9 +4019,23 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
     if getattr(s, "rowless", False) and not any(isinstance(r, dict) and r.get("id") == s.sid for r in run.agents(s.profile)):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: resumed {s.sid}, but claude agents does not list it yet")
     forget_stopped(run, s.sid)
+    mark_revision(run, task, s.sid)
     run.resumed.add((tid, attempt))
     lower_flag(run, tid, attempt)
     return settle("resume", "resume")
+
+
+def mark_revision(run, task, sid):
+    """A session woken under its own id works in the task's current revision: its `sessions` entry says so, so that a
+    report of an earlier revision never ends its turn (turn_ended)."""
+    revision = revision_of(task)
+    entries = recorded_sessions(task)
+    found = [e for e in entries if e.get("id") == sid and (e.get("revision") or 0) != revision]
+    if revision and found:
+        for e in found:
+            e["revision"] = revision
+        run.set_meta(task, sessions=entries)
+        run._sessions = None
 
 
 def new_row(run, profile, folder, since, exclude=()):
@@ -7161,7 +7191,7 @@ def cmd_close(run, args):
         level, manual, override = str(meta["round_verdict"]), False, None
     if moved:
         run.emit("rebased", tid, attempt, None, f"same change at {ref[:7]} (verified at {moved[:7]}); verdict_ref moves")
-    if not busy_rows(run, tid, "verify", attempt):  # after every refusal: a verifier in the task worktree left changes
+    if not busy_rows(run, tid, "verify", attempt, rows):  # after every refusal: a verifier in the task worktree left changes
         stash_leftovers(run, task, attempt)
     passing = level in PASSING[kind]
     phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")

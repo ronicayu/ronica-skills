@@ -12839,6 +12839,50 @@ class RevisionTest(Base):
         self.assertNotIn(["stop", "sess-copy"], self.calls("stop"))
         self.assertEqual(self.one(events, "slots")["detail"], "1/2 live")
 
+    def test_137_pending_retry_wake_records_the_revision(self):
+        task, wt, head, _ = self.failed()
+        self.events("revise", str(task), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="rate limited"))
+        self.assertEqual({e["via"] for e in self.meta(task)["mailbox"].values()}, {"pending"})
+        self.events("record")  # the retry wakes the same session id
+        worker = [e for e in self.meta(task)["sessions"] if e["id"] == "sess-task-1-1"][0]
+        self.assertEqual(worker.get("revision"), 1)
+        self.set_row("sess-task-1-1", status="idle", state="working", pid=4300)
+        events = self.events("record")  # mid-revision: the PASS of revision 0 does not end its turn
+        self.assertNotIn("sess-task-1-1", [e["session"] for e in self.named(events, "kept-session-stopped")])
+        self.assertEqual(self.one(events, "slots")["detail"], "1/2 live")
+
+    def test_137_a_report_before_the_row_started_does_not_end_its_turn(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.set_row("sess-copy", status="idle", state="working", startedAt=int((time.time() + 120) * 1000))
+        self.assertIn("the worker's turn is not over: sess-copy", self.refused("verify", str(task)))
+
+    def test_137_an_unrecorded_worker_row_owns_no_report(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        rows = json.load(open(self.agents_file))
+        self.agents(*rows, {"id": "sess-x", "name": "x", "cwd": wt, "status": "idle", "state": "working", "pid": 4700})
+        self.assertIn("the worker's turn is not over: sess-x", self.refused("verify", str(task)))
+
+    def test_137_close_stashes_leftovers_of_an_idle_working_verifier(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.ok("verify", str(task))
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.add_result(task, "ISSUES", self.issues(("src/a.py:2: still wrong",)), kind="verify", by="verify-1-1")
+        self.touch(wt, "gen.txt")
+        events = self.events("close", str(task))
+        self.one(events, "verifier-leftovers")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+
+    def test_137_revisions_off_an_idle_working_worker_keeps_its_slot(self):
+        self.write_config('[verify]\nseat = "task"\nrevisions_per_attempt = 0\n')
+        task = self.add_task()
+        self.ok("launch", str(task))
+        wt, head = self.pass_report(task)
+        self.agents({"id": "sess-task-1-1", "name": "task-1-1", "cwd": wt, "status": "idle", "state": "working", "pid": 4242})
+        self.assertEqual(self.one(self.events("record"), "slots")["detail"], "1/2 live")
+
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")

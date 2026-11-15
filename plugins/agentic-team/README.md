@@ -173,9 +173,9 @@ is written once and a retry does not change it.
 
 `run.py verify` starts the verifier in the task worktree, read only, once the
 worker's turn is over (`[verify] seat = "task"`, the default): no new folder.
-A worker row with status `idle` that waits on nothing counts as over once the
-worker's report of its revision is filed: a resumed session that ended its turn
-reads `idle/working`.
+A recorded worker row with status `idle` that waits on nothing counts as over
+once the worker's report of its revision is filed after the row started: a
+resumed session that ended its turn reads `idle/working`.
 It falls back to a worktree of its own (`verify-<id>-<attempt>`, then `-2`,
 `-3` for a second verifier), fresh at the commit under review, with a
 `seat-fallback` line, when the task folder is dirty, is not at the worker's
@@ -183,7 +183,8 @@ It falls back to a worktree of its own (`verify-<id>-<attempt>`, then `-2`,
 report (before that, `verify` refuses and names the busy session), and always
 with `seat = "own"`. In a revision the same wait applies before the kept
 verifier is resumed in the task worktree; after it, a new verifier starts in a
-folder of its own (a session resumes only in the folder of its conversation). A verifier folder goes when its verdict is recorded:
+folder of its own (a session resumes only in the folder of its conversation).
+A verifier folder goes when its verdict is recorded:
 `close`, the next `launch`, `round`, `round --cancel` and `abandon` remove each
 clean `verify-*` folder that no session uses and whose `HEAD` and branch tip are
 the `Head` of a worker or `STOPPED` row, with its branch; else one `kept` line
@@ -414,8 +415,10 @@ than `[verify] keep_sessions_minutes`), and when the verdict is not a verifier
 session's (a CI run's, or the Manager's `close --verdict`). `record` stops a
 kept session once its keep time ends, or once a failed verdict can have no
 revision (`kept-session-stopped`); `launch`, a passing `close` and `abandon`
-stop them too. An idle kept session holds no slot: one with state `done`, and
-one that reads `idle/working` once its work of its revision is filed. The two sessions take turns
+stop them too. An idle kept session holds no slot: one with state `done`, and,
+while revisions are on for the task, one that reads `idle/working` once its work
+of its revision is filed. With revisions off nothing stops the latter, so it
+keeps its slot. The two sessions take turns
 in the task worktree, because the CLI locks no worktree: `revise` refuses while
 the verifier still works, and `verify` refuses while the worker still works,
 naming the busy session. Before `revise` and `close`, a change that the
@@ -1597,7 +1600,7 @@ Taskgraph either: they stay on the old machine. Copy the standing orders and run
 
 ### Upgrading from 0.25.0
 
-Version 0.25.1 (issue #137) fixes a `verify` in a revision that refused for good: a resumed worker that ended its turn reads `idle/working`, and `verify` counted it as busy. A live row with status `idle` that waits on nothing now counts as turn over once its work of its revision is filed (a worker report for a worker, a verify row under its name for a verifier); with nothing filed it still works. This applies to `verify` (both seats, attempt 1 too), `revise` and the checks for a later revision. In a revision with seat `task`, `verify` now waits `[verify] seat_wait_minutes` after the worker's report for a worker that is still busy, then starts a new verifier in a folder of its own. Such a kept `idle/working` session is kept like an idle `done` one: it holds no slot of `[sessions] max_parallel`, and `record` stops it (`kept-session-stopped`) once `[verify] keep_sessions_minutes` pass after its newest row of the revision. No migration.
+Version 0.25.1 (issue #137) fixes a `verify` in a revision that refused for good: a resumed worker that ended its turn reads `idle/working`, and `verify` counted it as busy. A live row with status `idle` that waits on nothing now counts as turn over once its work of its revision is filed after the row started (a worker report for a recorded worker, a verify row under its name for a verifier); with nothing filed it still works. Every resume of a worker in a revision, a retry too, records the revision on its `sessions` entry. This applies to `verify` (both seats, attempt 1 too), `revise` and the checks for a later revision. In a revision with seat `task`, `verify` now waits `[verify] seat_wait_minutes` after the worker's report for a worker that is still busy, then starts a new verifier in a folder of its own. While revisions are on for the task, such an `idle/working` session is kept like an idle `done` one: it holds no slot of `[sessions] max_parallel`, and `record` stops it (`kept-session-stopped`) once `[verify] keep_sessions_minutes` pass after its newest row of the revision. No migration.
 
 ### Upgrading from 0.24.1
 
