@@ -3197,12 +3197,12 @@ def cmd_verify(run, args):
             replaced = f"the verifier of revision {revision - 1} cannot be resumed ({why}); a new verifier starts"
     if resume is not None:
         return verify_resume(run, args, task, attempt, rows, worker, ref, resume, role)
+    seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, replaced)  # may refuse: before any stop
     if not args.dry_run:
         for s in [s for s in verifiers if s.live]:  # its turn is over and it filed nothing; it only holds a slot
             record_row(run, task, s, attempt)
             stop_session(run, s.sid, check=False, profile=s.profile)
             run._sessions = None
-    seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, replaced)
     names = {s.label for s in own_sessions(run, tid, "verify", attempt)}
     names |= {e.get("name") for e in recorded_sessions(task) if e.get("kind") == "verify" and e.get("attempt") == attempt}
     reuse = None
@@ -5810,7 +5810,7 @@ def verdict_comment(run, task, attempt, level, ref, kind, source):
     the comment by. `source` is the verify result the verdict comes from, or None."""
     tid = task["id"]
     closes = level in PASSING[kind]
-    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, attempt, kind, task)}."
+    state = "The task is closed." if closes else f"The task stays in progress; next: {unclosed_next(tid, level, attempt, kind, task, run)}."
     by = f"by {source['author']} (verify result #{source['id']})" if source else "with no verify result on file"
     evidence = ""
     if source:
