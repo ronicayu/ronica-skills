@@ -2311,14 +2311,16 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                              "only": UPSTREAM_FIELDS, "always": True, "label": f"Upstream #{dep['id']}: {dep['title']}"})
         upstream = fit_carried(upstream, config["brief"]["carried_report_bytes"], config["brief"]["carried_total_bytes"], tg_cmd)
         autonomy = config["autonomy"]
-        round_goal = (f"\n\nThis attempt is a `{meta.get('round')}` round: the change passed at `{meta['round_from']}`; ROLE says "
-                      "what this round does to it." if rounding else "")
+        round_goal = (f"This attempt is a `{meta.get('round')}` round: the change passed at `{meta['round_from']}`; ROLE says "
+                      "what this round does to it. The task text below says what the change is for. Any branch, base, target "
+                      "or commit it names comes from an earlier attempt and does not apply: ROLE's commits win.\n\n"
+                      if rounding else "")
         round_setup = (f"Attempt {attempt}, a `{meta.get('round')}` round. Your worktree is at `{base}` on branch "
                        f"`{task_branch(tid)}`: the head that passed. If `git rev-parse HEAD` is not `{base}`, report BLOCKED and "
                        "change nothing. ROLE names the one command that moves the branch in this round; run it as ROLE says, "
                        "and nothing else that moves the branch. Do not push." if rounding else None)
         values.update({
-            "GOAL": f"{task['title']}. {why}{round_goal}",
+            "GOAL": f"{round_goal}{task['title']}. {why}",
             "SCOPE": (str(meta["scope"]).strip() + (
                 f"\n\nAlso allowed outside SCOPE, nothing more: {adjacent_text(config)}. List each such change under "
                 "`Deviations:` as `adjacent: <kind>: <path>`." if adjacent_text(config) else "")),

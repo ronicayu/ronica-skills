@@ -11803,6 +11803,15 @@ class RoundTest(Base):
         role = self.section(self.brief(task), "ROLE")
         self.assertIn(f"Task {task} (Sweep domains) of demo; {{{{ROUND_FROM}}}} and {{{{NOPE}}}} stay.", role)
 
+    def test_119_round_goal_comes_first_and_old_branch_lines_do_not_apply(self):
+        task, wt, head, onto = self.waiting()
+        self.tg("edit", str(task), "--notes", "Why: domains drift.\n\nRebase round by hand: start from origin/old-base (896308d), "
+                "rebase onto origin/master (153c2d3).\n\n- [ ] Domains match")
+        goal = self.section(self.ok("round", str(task), "rebase", "--dry-run").stdout, "GOAL")
+        self.assertTrue(goal.startswith(f"This attempt is a `rebase` round: the change passed at `{head}`"), goal)
+        self.assertLess(goal.index("ROLE's commits win"), goal.index("origin/old-base"))
+        self.assertIn("comes from an earlier attempt and does not apply", goal)
+
     def test_119_a_project_role_replaces_or_extends_rebase(self):
         task, wt, head, onto = self.waiting()
         folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
