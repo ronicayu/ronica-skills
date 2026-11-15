@@ -1632,6 +1632,20 @@ the handshake history, which `run.py inbox` showed, and the evidence behind the 
 ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is what the meta table above already
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 
+### Upgrading from 0.25.0
+
+Version 0.26.0 (issue #133) cuts the result rows that a project on the Taskgraph GitHub backend posts as comments.
+First, add the `[projects."<name>".results]` block with `local = ["ack", "steer"]` (Taskgraph 1.21.0 or later; see
+[Result kinds on the Taskgraph GitHub backend](#result-kinds-on-the-taskgraph-github-backend)); `config.py check`
+warns until it is there. On the local SQLite store nothing changes. Second, a revision sends all blocking findings in
+one `finding` steer, `F1` to `Fn`, and the worker acks it once with one `F<n>: <action>` line per finding
+(`mailbox.py ack <id> --action "F1: ..." --action "F2: ..."`); the report stays refused until the ack names every
+finding, and a report lists each under `Deviations:` as `finding F<n>: <what changed>` (see [Messaging](#messaging),
+Finding steers). A revision that 0.25.0 started (one steer per finding) still works: each of those steers has no `F`
+lines and takes the old one-line ack. `run.py` now reads "the rows after the newest `revise` row" in the order of
+`tg result ls`, not by id, since local rows have ids of their own range. No lifecycle, phase or model change; no
+migration.
+
 ### Upgrading from 0.24.1
 
 Version 0.25.0 (issue #130) changes three rules; no lifecycle, phase or model change. First, ask first: a worker asks the Manager before it reports `ISSUES` or `BLOCKED` for a question one answer can settle, and its `ISSUES` or `BLOCKED` report has an `Asked:` line (ask ids, or `none: <one-line reason>`); `check-report` without `--verifier` refuses one without it (see [Messaging](#messaging), Ask first). A session started before the upgrade whose check command runs the 0.25.0 `run.py` gets that refusal for an `ISSUES` or `BLOCKED` report; the message names the rule and the line to add, and the report command itself does not check it. Second, a check that fails once and passes on a rerun with no change is a `flake:` follow-up, not `ISSUES`; `flake` is a new Follow-ups label (it shows in `status`). Third, the Manager starts the new read-only subagent `agentic-team:dependency-check` (model `sonnet`) with the Agent tool before the first attempt of each task and before a later attempt on a different base (the run playbook, step 4); it is not skipped for docs-only tasks. `Asked` is a report field: `report_field` stops at it, and a carried report keeps it first after `Status` when it is cut. The software-engineer role asks at once, instead of `BLOCKED` at once, when its census shows that ACCEPTANCE does not fit SCOPE, and the rebase role asks with the conflicting hunks before it reports `BLOCKED`. The dependency check is read-only by instruction: agent frontmatter cannot limit Bash to some commands. The Manager's "Brief frozen" rule now lets SCOPE widen to answer such an ask. No migration.
