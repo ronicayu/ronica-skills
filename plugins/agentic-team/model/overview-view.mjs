@@ -3,7 +3,7 @@
 // Labels are for the product reader (statechart SKILL.md, "Pick the chart"): each state names its subject, each arrow
 // starts with its actor, and `glossary` explains every actor and short noun. The actors have the names of view.mjs.
 
-export const title = "Task attempt lifecycle (agentic-team 0.19.0)";
+export const title = "Task attempt lifecycle (agentic-team 0.23.0)";
 
 // Closed: a passing close happened (Lifecycle.tla `Closed`). Since 0.19.0 the task stays in progress until the merge.
 const closed = (v) => v.verdict === "artifact-verified";
@@ -139,4 +139,5 @@ export const glossary = {
   "idle session": "A task or verifier session that has filed its result and waits; the next attempt stops it.",
   "request": "The pull request or merge request for the task's branch on the code host.",
   "merged at once": "The close merges the branch, or records the task as merged because the branch has no commit to merge.",
+  round: "A new attempt of a task that waits for its merge, on the same request: run.py round <id> <kind>; the rebase kind resolves a conflict with the target.",
 };
