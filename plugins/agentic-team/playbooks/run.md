@@ -45,6 +45,17 @@ every report, and on every wake (step 6).
      run the hint: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" steer <id> --file <same text> --interrupt`.
    - `deliver-fallback`: the socket post did not work, or was not acked, and `run` used the next transport; the line says why.
      `deliver-copy`: a resume started a copy and `run` stopped the original; nothing to do.
+   - A `verdict` or `unclosed` line for `verify-failed` whose `next:` is `revise: run.py revise <id>`: run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" revise <id>` first, before any fix round. It sends each blocking finding to
+     the same worker session, in the same worktree and attempt (a revision). `revised` needs nothing more: drain on
+     the next wake; the worker's new `PASS` hints `run.py verify <id>`, which resumes the same verifier on the new
+     head. Only when the hint names `fix round: run.py launch <id>` (over the cap, a session gone, a CI or a Manager
+     verdict) start a fix round. In a round the order is the same: `revise` before `round --cancel`.
+   - `verifier-leftovers`: the verifier changed files in the task worktree; `run` stashed them under the named
+     message before the worker resumed. Read the stash only if the verdict depends on it; nothing to do otherwise.
+   - `seat-fallback`: the verifier got a folder of its own (the line says why). Nothing to do.
+   - `kept-session-stopped`: `run` stopped a worker or verifier kept idle for a revision (its keep time ended, or
+     no revision can follow). Nothing to do.
    - `stopped-idle`: a session of the task was idle, or waited on a prompt, with its work filed, so `launch`
      (or `record`, for a verifier after its verdict) stopped it and went on. Nothing to do.
    - `unknown`: read `claude logs <sid>` for the session state only, and drain again later. If the
@@ -122,12 +133,12 @@ every report, and on every wake (step 6).
    - When the verifier's verdict is weaker than your evidence, run
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" close <id> --verdict <level> --override-verifier "<why>" --ran "<run id or URL, what you saw>"`.
      An upgrade needs a run id or a link in `--ran`. `verify-failed` is never
-     overridden; start a fix round.
+     overridden; run `revise` when the hint names it, else start a fix round.
    - Verdict levels: `artifact-verified` (the real output was exercised or
      read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
      `check-only` (static checks only, not enough for behavior);
      `verify-blocked` (the check could not run; retry when fixed);
-     `verify-failed` (start a fix round, do not just re-verify). The brief
+     `verify-failed` (`revise` when the hint names it, else a fix round; do not just re-verify). The brief
      defines each level for the task's verify kind.
    - A verifier's `Follow-ups: decision: <question>` line becomes a Taskgraph
      decision (see Escalation in the Manager index); it does not lower the verdict.
