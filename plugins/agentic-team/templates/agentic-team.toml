@@ -62,6 +62,7 @@ always_pause = []           # decisions that always need the operator
 
 [verify]
 # kind = "code"             # "code" | "schema" | "design-doc": the verify kind of a task without a verify_kind meta
+# ci_ref_prefix = "ci-"     # verify --ci-ref pushes the worker's head to <prefix><id>-<attempt>; match your CI's push filter
 
 [scope]
 # adjacent = []             # changes a worker may make outside a task's SCOPE without BLOCKED; off by default. Kinds:

@@ -1089,8 +1089,11 @@ def unclosed_next(task_id, verdict, attempt, kind="code", task=None, run=None):
     if verdict == "test-verified" and verdict not in PASSING[kind]:
         return (f"test-verified does not close a {kind} task; run.py verify {task_id} --again for artifact-verified, "
                 f'or run.py close {task_id} --verdict artifact-verified --override-verifier "<why>" --ran "<run id or URL>"')
-    if verdict == "check-only":
-        return f"run.py verify {task_id} --again for a stronger verdict, or accept it"
+    if verdict == "check-only":  # no command accepts check-only: it closes only through a stronger verdict
+        level = "test-verified" if "test-verified" in PASSING.get(kind, CLOSING) else "artifact-verified"
+        ci = " (add --ci-ref when only a CI run can prove the change)" if run is not None and run.pr_mode else ""
+        return (f"run.py verify {task_id} --again for a stronger verdict{ci}, or run.py close {task_id} --verdict {level} "
+                f'--override-verifier "<why>" --ran "<CI run URL or artifact link>"')
     return f"run run.py close {task_id}"
 
 
@@ -2222,6 +2225,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         else:
             setup += ("\n- Base commit: none; the output is outside git. Skip the steps that need the base commit and "
                       "say so under Ran:.")
+        if ci_entry := ci_ref_for(task, attempt, ref):
+            setup += "\n- " + ci_ref_text(run, ci_entry)
         with open(os.path.join(PLUGIN_ROOT, "templates", f"verify-{vkind}.md")) as fh:
             method = fh.read().strip()
         where, place = verify_skill(run, ref)
@@ -3217,6 +3222,8 @@ def cmd_verify(run, args):
     if is_sha(ref):  # the verifier compares HEAD with this text, so give the full SHA
         full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
         ref = full.stdout.strip() if full.returncode == 0 else ref
+    if args.ci_ref:
+        refuse_ci_ref(run, task, ref)
     revision = revision_of(task)
     resume, replaced = None, ""
     if revision > 0 and not args.again:
@@ -3266,6 +3273,8 @@ def cmd_verify(run, args):
         effort = args.effort
     check_cap(run, getattr(args, "dry_run", False))
     where = verify_skill(run, ref)[0] or "none"
+    if args.ci_ref:
+        push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role, seat=folder)
     if args.dry_run:
         print(claude_line(run, profile, folder, name, model, effort), file=sys.stderr)
@@ -3419,6 +3428,8 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         run.git("branch", "-f", f"worktree-{folder}", ref, check=False)
     else:
         check_cap(run, getattr(args, "dry_run", False))
+    if args.ci_ref:
+        push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
@@ -3475,6 +3486,7 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              f"- Old head: `{old or 'unknown'}`. New head: `{new}`. You run in {where}. If "
              f"`git --no-optional-locks rev-parse HEAD` is not `{new}`, report BLOCKED.",
              f"- The change since your last verdict: `{diff}`.",
+             *([f"- {ci_ref_text(run, ci_entry)}"] if (ci_entry := ci_ref_for(task, attempt, new)) else []),
              "- First check that each of your findings below is fixed. Then run the full method of your first brief again "
              "on the new head: every VERIFY command, the project verify skill, and every ACCEPTANCE line, not only the "
              "findings. A fix can break a line that passed before.",
@@ -3492,11 +3504,106 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
     return "\n".join(lines) + (notify or "") + "\n"
 
 
+# ------------------------------------------------------------------ CI refs (#140)
+# `verify --ci-ref` pushes the worker's head to a scratch branch, <[verify] ci_ref_prefix><id>-<attempt>, never the
+# request's branch, so CI runs on a change before close; the verifier only reads the runs. The `ci_refs` meta lists what
+# was pushed; a passing close and abandon delete those branches.
+
+def ci_refs(task):
+    found = (task.get("meta") or {}).get("ci_refs")
+    return [e for e in found if isinstance(e, dict) and e.get("ref")] if isinstance(found, list) else []
+
+
+def ci_ref_for(task, attempt, head):
+    return next((e for e in reversed(ci_refs(task)) if e.get("attempt") == attempt and e.get("head") == head), None)
+
+
+def refuse_ci_ref(run, task, ref):
+    if not run.pr_mode:
+        raise Refused('--ci-ref needs merge.mode = "pr": CI runs on a branch pushed to merge.remote')
+    if not is_sha(ref):
+        raise Refused(f"--ci-ref pushes a commit; the output under review is {ref}")
+
+
+def push_ci_ref(run, task, attempt, head, dry_run=False):
+    """Push `head` to the attempt's scratch branch and record it in `ci_refs`. A dry run records it only in the task
+    dict this command holds, so the brief shows it."""
+    tid, meta = task["id"], task.setdefault("meta", {})
+    name = f"{run.config['verify']['ci_ref_prefix']}{tid}-{attempt}"
+    if name in (meta.get("pr_branch") or f"task-{tid}", run.target(task)):
+        raise Refused(f"the CI ref {name} would be the request's branch or its target; change [verify] ci_ref_prefix")
+    entry = {"ref": name, "head": head, "attempt": attempt}
+    kept = [e for e in ci_refs(task) if e["ref"] != name] + [entry]
+    if dry_run:
+        meta["ci_refs"] = kept
+        return entry
+    remote = run.config["merge"]["remote"]
+    seen = run.git("ls-remote", remote, f"refs/heads/{name}", check=False)
+    if seen.returncode != 0:
+        raise Refused(f"git ls-remote {remote} failed: {first_line(seen.stderr)}", 1)
+    old = (seen.stdout.split() or [""])[0]
+    if old != head:
+        ok, why = run.host().push(head, name, old)
+        if not ok:
+            raise Refused(f"push of {head[:7]} to {remote}/{name} failed: {why}; fix the cause, then run.py verify "
+                          f"{tid} --again --ci-ref", 1)
+    run.set_meta(task, ci_refs=kept)
+    run.emit("ci-ref", tid, attempt, None, f"{head[:7]} on {remote}/{name}" + (" (already there)" if old == head else "")
+             + "; not the request's branch; a passing close or abandon deletes it")
+    return entry
+
+
+def drop_ci_refs(run, task):
+    """Delete the scratch branches of `ci_refs` on the remote. One that cannot be deleted stays listed, with a warning."""
+    refs = ci_refs(task)
+    if not refs:
+        return
+    remote, kept, gone = run.config["merge"]["remote"], [], []
+    for entry in refs:
+        try:
+            ok, why = run.host().delete_branch(entry["ref"])
+        except codehost.HostError as exc:  # Refused too
+            ok, why = False, str(exc)
+        if not ok:
+            seen = run.git("ls-remote", remote, f"refs/heads/{entry['ref']}", check=False)
+            ok = seen.returncode == 0 and not seen.stdout.strip()  # already gone
+        if ok:
+            gone.append(entry["ref"])
+        else:
+            kept.append(entry)
+            run.emit("warn", task["id"], entry.get("attempt"), None, f"CI ref {remote}/{entry['ref']} not deleted: {why}",
+                     f"git push {remote} --delete refs/heads/{entry['ref']}")
+    if kept:
+        run.set_meta(task, ci_refs=kept)
+    else:
+        run.unset_meta(task, "ci_refs")
+    if gone:
+        run.emit("ci-ref-deleted", task["id"], wanted_attempt(task), None, ", ".join(f"{remote}/{g}" for g in gone))
+
+
+def ci_ref_text(run, entry):
+    """The verifier's instructions for the CI runs on a scratch branch."""
+    ref, head = entry["ref"], entry["head"]
+    if run.host_class()[0].name == "gitlab":
+        find, wait, log = (f"glab ci list --ref {ref}", f"glab ci status --branch {ref} --live", "glab ci trace <job id>")
+    else:
+        find = f"gh run list --branch {ref} --commit {head} --json databaseId,workflowName,status,conclusion,url"
+        wait, log = "gh run watch <run id> --exit-status", "gh run view <run id> --log-failed"
+    return (f"CI ref: run.py pushed the head `{head}` to the scratch branch `{ref}` on "
+            f"`{run.config['merge']['remote']}`, not to the request's branch, so CI runs on it as on any push. Find the "
+            f"runs of that commit with `{find}`, wait for each with `{wait}`, and read a failed job with `{log}`. Push, "
+            "re-run, cancel and dispatch nothing. Judge the runs: a green run that exercises the changed workflow or job "
+            "is `test-verified`; a red run is `verify-failed`, with a `blocking:` line for each failed job; no run of "
+            "that commit on that branch, or no run that exercises the change, is `check-only` with the reason. Put the "
+            "URL of each run you judged under `Ran:`.")
+
+
 def verify_ci(run, args, task, name):
     """verify_mode ci:<name>: push the branch, open the request, and let the CI run on its head decide."""
     tid = task["id"]
-    if args.ref or args.model or args.effort or args.dry_run:
-        raise Refused("verify_mode=ci runs on the branch head and starts no session; drop --ref/--model/--effort/--dry-run")
+    if args.ref or args.model or args.effort or args.dry_run or args.ci_ref:
+        raise Refused("verify_mode=ci runs on the branch head and starts no session; "
+                      "drop --ref/--model/--effort/--dry-run/--ci-ref")
     attempt = refuse_unless_running(run, task)
     rows, worker = worker_for(run, tid, attempt, args.result, task)
     head = tail_or_none(HEAD_ANY.search(worker["body"]))
@@ -7151,6 +7258,7 @@ def cmd_close(run, args):
     # tasks that depend on it do not get ready.
     stop_live(run, task, attempt, branch)
     drop_verifier_folders(run, task)
+    drop_ci_refs(run, task)
     run.emit("closed", tid, attempt, None, f"{level} at {ref}; branch {branch}"
              + (f"; the verdict of the round's verified head carries over: {carried}" if carried else ""))
     base = no_change(run, task, ref)
@@ -7289,6 +7397,7 @@ def cmd_abandon(run, args):
     run.edit_meta(tid, abandoned=args.mode, phase=phase)
     drop_mailbox(run, task, history=False)
     removed = set(drop_verifier_folders(run, task))
+    drop_ci_refs(run, task)
     names = {s.wtname for s in own_sessions(run, tid)}
     if os.path.isdir(run.wt_dir):
         names |= {e for e in os.listdir(run.wt_dir) if (wt_kind(e) or (None, None))[1] == tid or
@@ -7621,6 +7730,9 @@ def build_parser():
     p.add_argument("--effort")
     p.add_argument("--profile", help="Claude profile of the verifier: a name from [profiles], or default (overrides the tier)")
     p.add_argument("--again", action="store_true", help="start a new verifier after a verify-blocked verdict or a no-verdict line")
+    p.add_argument("--ci-ref", action="store_true",
+                   help="push the worker's head to the scratch branch <[verify] ci_ref_prefix><id>-<attempt> (not the "
+                        "request's branch) so the verifier judges its CI runs; merge.mode = pr")
     p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("record", help="read the queue and print one line per event")

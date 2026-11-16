@@ -130,6 +130,11 @@ class Host:
         why = next((line for line in said if line.startswith("!")), said[0] if said else lines[0] if lines else "")
         return out.returncode == 0, why
 
+    def delete_branch(self, branch):
+        """Delete the remote branch. Returns (ok, first line git said)."""
+        out = self.call(["git", "-C", self.root, "push", self.remote, "--delete", f"refs/heads/{branch}"])
+        return out.returncode == 0, first_line(out.stderr) or first_line(out.stdout)
+
     def update_branch(self, number):
         """Ask the host to rebase the request onto its target branch. Returns (kind, why). kind is "ok" (the host
         took the request; read rebase_status until the head moves), "current" (already up to date), "conflict",

@@ -2733,6 +2733,41 @@ class RunTest(Base):
         self.assertEqual(meta["verdict"], "check-only")
         self.assertTrue(re.fullmatch(r"[0-9a-f]{40}", meta["verdict_ref"]))
 
+    def test_140_check_only_hint_names_the_ways_to_a_closing_verdict(self):
+        for kind, level in (("code", "test-verified"), ("schema", "artifact-verified")):
+            with self.subTest(kind):
+                task = self.running_task(verify_kind=kind)
+                self.pass_report(task)
+                hint = self.one(self.events("close", str(task), "--verdict", "check-only"), "verdict")["next"]
+                self.assertEqual(hint, f"run.py verify {task} --again for a stronger verdict, or run.py close {task} "
+                                       f'--verdict {level} --override-verifier "<why>" --ran "<CI run URL or artifact link>"')
+                self.assertNotIn("accept", hint)
+
+    def test_140_verify_brief_has_the_ci_and_guard_mutation_rules(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\nFiles: out.txt\n")
+        method = " ".join(self.section(self.ok("verify", str(task), "--dry-run").stdout, "VERIFY").split())
+        for line in ("A change that only CI runs (a CI workflow or job file, such as `.github/workflows/*.yml` or "
+                     "`.gitlab-ci.yml`) is proved by a CI run of its head.",
+                     "With no CI ref, report `check-only` and say under `Ran:` that only a CI run proves the change; "
+                     "the Manager then runs `run.py verify <id> --again --ci-ref`.",
+                     "Also `test-verified`: a green CI run on the CI ref that exercises the changed workflow or job.",
+                     "Guard mutations are test evidence. When you break the code under test on purpose, in a copy in "
+                     "your scratch folder, and every break turns the covering tests red, the tests prove that code",
+                     "that is `test-verified`, not `check-only`, also for a behaviour change those tests cover.",
+                     "`check-only`: static checks or a read-through only, with no test, mutation or CI run that proves "
+                     "the change."):
+            self.assertIn(line, method)
+        self.assertNotIn("CI ref: run.py pushed", self.ok("verify", str(task), "--dry-run").stdout)
+
+    def test_140_ci_ref_needs_pr_mode(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        out = self.run_cmd("verify", str(task), "--ci-ref")
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn('--ci-ref needs merge.mode = "pr"', out.stderr)
+        self.assertEqual(self.calls("--bg"), [])
+
     def test_48_test_verified_does_not_close_a_schema_or_design_doc_task(self):
         for kind in ("schema", "design-doc"):
             with self.subTest(kind):
@@ -7073,6 +7108,74 @@ class PrTest(Base):
         lookup = ("pr list", "pr create") if self.host == "github" else (f"api projects/{self.project}/merge_requests?", f"api -X POST projects/{self.project}/merge_requests -f")
         self.assertEqual([c for c in self.host_log()[seen:] if " ".join(c).startswith(lookup)], [])
         self.assertEqual(self.checkout(), before)
+
+    # --- verify --ci-ref (#140)
+
+    def ci_ref_verified(self):
+        """A pr-mode task whose verifier started with --ci-ref. Returns (task, head, events of the verify)."""
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("verify", str(task), "--ci-ref")
+        return task, head, events
+
+    @both_hosts
+    def test_140_verify_ci_ref_pushes_a_scratch_branch_and_a_passing_close_deletes_it(self):
+        task, head, events = self.ci_ref_verified()
+        self.assertEqual(self.one(events, "ci-ref")["detail"],
+                         f"{head[:7]} on origin/ci-{task}-1; not the request's branch; a passing close or abandon deletes it")
+        self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)
+        self.assertIsNone(self.remote_sha(f"task-{task}"))
+        self.assertEqual(self.meta(task)["ci_refs"], [{"ref": f"ci-{task}-1", "head": head, "attempt": 1}])
+        self.one(events, "verifying")
+        self.verifier_row(task, head, verdict="check-only", ran="read the workflow")
+        hint = self.one(self.events("close", str(task)), "verdict")["next"]
+        self.assertIn(f"run.py verify {task} --again for a stronger verdict (add --ci-ref when only a CI run can prove "
+                      f"the change), or run.py close {task} --verdict test-verified", hint)
+        self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)  # a check-only close keeps it for verify --again
+        self.verifier_row(task, head, verdict="test-verified", ran="https://ci.example/runs/7")
+        closed = self.events("close", str(task))
+        self.assertEqual(self.one(closed, "ci-ref-deleted")["detail"], f"origin/ci-{task}-1")
+        self.one(closed, "closed")
+        self.assertIsNone(self.remote_sha(f"ci-{task}-1"))
+        self.assertEqual(self.remote_sha(f"task-{task}"), head)
+        self.assertNotIn("ci_refs", self.meta(task))
+
+    @both_hosts
+    def test_140_abandon_deletes_the_ci_ref(self):
+        task, head, events = self.ci_ref_verified()
+        self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)
+        self.assertEqual(self.one(self.events("abandon", str(task), "stuck"), "ci-ref-deleted")["detail"],
+                         f"origin/ci-{task}-1")
+        self.assertIsNone(self.remote_sha(f"ci-{task}-1"))
+        self.assertNotIn("ci_refs", self.meta(task))
+
+    @both_hosts
+    def test_140_ci_ref_brief_names_the_branch_the_commit_and_the_verdict_rules(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        context = " ".join(self.section(self.ok("verify", str(task), "--ci-ref", "--dry-run").stdout, "CONTEXT").split())
+        self.assertIsNone(self.remote_sha(f"ci-{task}-1"))  # a dry run pushes nothing
+        self.assertNotIn("ci_refs", self.meta(task))
+        self.assertIn(f"CI ref: run.py pushed the head `{head}` to the scratch branch `ci-{task}-1` on `origin`, not to "
+                      "the request's branch", context)
+        find = (f"gh run list --branch ci-{task}-1 --commit {head}" if self.host == "github"
+                else f"glab ci list --ref ci-{task}-1")
+        self.assertIn(f"`{find}", context)
+        for rule in ("a green run that exercises the changed workflow or job is `test-verified`",
+                     "a red run is `verify-failed`, with a `blocking:` line for each failed job",
+                     "no run of that commit on that branch, or no run that exercises the change, is `check-only` with "
+                     "the reason", "Put the URL of each run you judged under `Ran:`."):
+            self.assertIn(rule, context)
+
+    @both_hosts
+    def test_140_verify_ci_ref_again_on_the_same_head_does_not_push_twice(self):
+        task, head, events = self.ci_ref_verified()
+        self.add_result(task, "BLOCKED", f"Status: BLOCKED\nVerdict: verify-blocked\nHead: {head}\n", kind="verify",
+                        by=f"verify-{task}-1")
+        self.agents(self.finished(f"task-{task}"))
+        again = self.events("verify", str(task), "--again", "--ci-ref")
+        self.assertIn("(already there)", self.one(again, "ci-ref")["detail"])
+        self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)
 
     # --- verify_mode = ci:<name>
 

@@ -75,7 +75,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
                                              "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code", "revisions_per_attempt": 2, "keep_sessions_minutes": 60, "seat": "task",
-                                         "seat_wait_minutes": 5})
+                                         "seat_wait_minutes": 5, "ci_ref_prefix": "ci-"})
         self.assertEqual(cfg["roles"], {"default": ""})
         self.assertEqual(cfg["scope"], {"adjacent": []})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))

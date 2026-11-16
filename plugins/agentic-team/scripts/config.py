@@ -174,6 +174,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "keep_sessions_minutes": ("posint", 60),
         "seat": ("choice:task,own", "task"),
         "seat_wait_minutes": ("posint", 5),
+        "ci_ref_prefix": ("nonempty", "ci-"),
     },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
