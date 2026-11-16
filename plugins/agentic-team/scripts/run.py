@@ -116,6 +116,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -239,6 +240,8 @@ CATCH_UP_POLLS = 20  # reads of the request after the host took a rebase, at mos
 CATCH_UP_WAIT = 3  # seconds between two of those reads
 AFTER_REBASE_TIMEOUT = 600  # seconds that [merge] after_rebase runs at most
 AFTER_REBASE_TAIL = 5  # lines of its output that an event keeps
+AFTER_REBASE_CACHE = 100  # results that .agentic-team/after-rebase-cache.json keeps
+CHECK_PASS, CHECK_FAIL, CHECK_SKIPPED = "pass", "fail", "could not check"
 
 
 def poll_pause(seconds):
@@ -6209,6 +6212,8 @@ def publish(run, task, branch, head, catch_up=False):
                               f"host, then run.py close {tid}; or fetch it and run.py adopt {tid} --branch <b> --head <sha>")
         run.set_meta(task, pushed=head, pr_branch=pr_branch)
     elif pushed != head:
+        if not rebase_checked(run, task, branch, head, pushed):
+            return False
         ok, why = host.push(f"refs/heads/{branch}", pr_branch, pushed)
         if not ok:
             seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False)
@@ -6251,6 +6256,29 @@ def publish(run, task, branch, head, catch_up=False):
     else:
         request_gate(run, task, number)
     return True
+
+
+def rebase_checked(run, task, branch, head, pushed):
+    """False, with a line that says why, when `head` is a rebase of the pushed head onto a newer target (a rebase
+    round's result, a rebase by hand) and [merge] after_rebase fails on it, or cannot run. Nothing is pushed then."""
+    if not run.config["merge"]["after_rebase"]:
+        return True
+    ref = run.target_ref(task)
+    if (run.git("merge-base", head, ref, check=False).stdout.strip()
+            == run.git("merge-base", pushed, ref, check=False).stdout.strip()):
+        return True
+    tid, attempt = task["id"], wanted_attempt(task) or 1
+    state, bad = check_head(run, task, head)
+    if state == CHECK_PASS:
+        return True
+    if state == CHECK_SKIPPED:
+        run.emit("pr-rebased", tid, attempt, None, f"{head[:7]} is a rebase of {pushed[:7]}; not pushed, not checked: {bad}",
+                 f"fix the cause, then run.py close {tid}")
+    else:
+        run.emit("conflict", tid, attempt, None, f"after_rebase failed on {head[:7]}, a rebase of {pushed[:7]}: {bad}; "
+                 f"nothing is pushed, pushed stays {pushed[:7]}",
+                 conflict_next(run, task, decision_text(f"Fix {branch} so that after_rebase passes", task)))
+    return False
 
 
 def push_refused(run, task, pushed, why):
@@ -6326,44 +6354,86 @@ def host_catch_up(run, task, branch, head, p):
 
 
 def after_rebase_check(run, cwd):
-    """(True, "") when [merge] after_rebase is not set or exits 0 in `cwd`, else (False, why): the exit code and the
-    last lines of its output."""
+    """(state, why) of [merge] after_rebase run in `cwd`: CHECK_PASS when it is not set or exits 0, CHECK_FAIL with the
+    exit code and the last lines of its output, CHECK_SKIPPED when it ran too long (its process group is killed)."""
     command = run.config["merge"]["after_rebase"]
     if not command:
-        return True, ""
+        return CHECK_PASS, ""
+    proc = subprocess.Popen(command, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            errors="replace", stdin=subprocess.DEVNULL, start_new_session=True)
     try:
-        out = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True, errors="replace",
-                             stdin=subprocess.DEVNULL, timeout=AFTER_REBASE_TIMEOUT)
+        output, _ = proc.communicate(timeout=AFTER_REBASE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, f"`{command}` ran longer than {AFTER_REBASE_TIMEOUT} seconds"
-    if out.returncode == 0:
-        return True, ""
-    lines = (out.stdout + out.stderr).strip().splitlines()[-AFTER_REBASE_TAIL:]
-    return False, f"`{command}` exited {out.returncode}" + (": " + " | ".join(lines) if lines else "")
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return CHECK_SKIPPED, f"`{command}` ran longer than {AFTER_REBASE_TIMEOUT} seconds"
+    if proc.returncode == 0:
+        return CHECK_PASS, ""
+    lines = output.strip().splitlines()[-AFTER_REBASE_TAIL:]
+    return CHECK_FAIL, f"`{command}` exited {proc.returncode}" + (": " + " | ".join(lines) if lines else "")
+
+
+def check_cache_lock(run):
+    return mbx.locked(os.path.join(run.run_dir, "locks", "after-rebase-cache.lock"), mbx.lock_seconds(10))
+
+
+def check_cache_read(run):
+    try:
+        with open(os.path.join(run.run_dir, "after-rebase-cache.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, list) and len(v) == 2} if isinstance(data, dict) else {}
 
 
 def check_head(run, task, sha, merge=None):
-    """after_rebase for a commit that no task worktree holds: it runs in a temporary detached worktree of `sha`, which
-    is removed again. With `merge`, that commit is merged into `sha` first, without a commit: the tree a rebase
-    onto `sha` would give. Returns (ok, why)."""
-    if not run.config["merge"]["after_rebase"]:
-        return True, ""
+    """(state, why) of after_rebase for a commit that no task worktree holds: it runs in a temporary detached worktree
+    of `sha`, which is removed again. With `merge`, that commit is merged into `sha` first, without a commit: the tree
+    a rebase onto `sha` would give. A pass or a failure is kept in .agentic-team/after-rebase-cache.json under the two
+    commits and the command, so a later `record` does not run the command again; CHECK_SKIPPED (a machine problem)
+    is never kept."""
+    command = run.config["merge"]["after_rebase"]
+    if not command:
+        return CHECK_PASS, ""
+    key = "\0".join([command, sha, merge or ""])
+    try:
+        with check_cache_lock(run):
+            hit = check_cache_read(run).get(key)
+    except mbx.Fail:
+        hit = None
+    if hit:
+        return hit[0], hit[1]
     path = os.path.join(run.root, ".claude", "worktrees", f"after-rebase-{task['id']}")
+    if os.path.isfile(path):
+        os.remove(path)
     shutil.rmtree(path, ignore_errors=True)
     run.git("worktree", "prune", check=False)
     added = run.git("worktree", "add", "-q", "--detach", path, sha, check=False)
     if added.returncode != 0:
-        return False, f"git worktree add failed: {first_line(added.stderr)}"
+        return CHECK_SKIPPED, f"git worktree add failed: {first_line(added.stderr)}"
     try:
-        if merge:
-            merged = run.git("merge", "--no-commit", "--no-ff", merge, cwd=path, check=False)
-            if merged.returncode != 0:
-                return False, f"git merge failed: {first_line(merged.stderr or merged.stdout)}"
-        return after_rebase_check(run, path)
+        merged = run.git("merge", "--no-commit", "--no-ff", merge, cwd=path, check=False) if merge else None
+        if merged is not None and merged.returncode != 0:
+            return CHECK_SKIPPED, f"git merge failed: {first_line(merged.stderr or merged.stdout)}"
+        state, why = after_rebase_check(run, path)
     finally:
         run.git("worktree", "remove", "--force", path, check=False)
         shutil.rmtree(path, ignore_errors=True)
         run.git("worktree", "prune", check=False)
+    if state != CHECK_SKIPPED:
+        try:
+            with check_cache_lock(run):
+                cache = check_cache_read(run)
+                cache.pop(key, None)
+                cache[key] = [state, why]
+                temp = os.path.join(run.run_dir, f".after-rebase-cache.json.{os.getpid()}")
+                with open(temp, "w", encoding="utf-8") as fh:
+                    json.dump(dict(list(cache.items())[-AFTER_REBASE_CACHE:]), fh)
+                os.replace(temp, os.path.join(run.run_dir, "after-rebase-cache.json"))
+        except (OSError, mbx.Fail):
+            pass
+    return state, why
 
 
 def fetch_head(run, task, new):
@@ -6379,10 +6449,11 @@ def fetch_head(run, task, new):
 
 def move_head(run, task, branch, new):
     """verdict_ref and pushed move to `new`, a head that carries the same change. A task branch that still holds the
-    verified head is kept as caught_up_from."""
+    verified head, the one pushed, is kept as caught_up_from; a branch that run.py rebased since is not."""
     meta = task["meta"]
     tip = commit_of(run, f"refs/heads/{branch}")
-    keep = {"caught_up_from": tip} if tip and tip == commit_of(run, str(meta.get("verdict_ref") or "")) else {}
+    held = commit_of(run, str(meta.get("pushed") or ""))
+    keep = {"caught_up_from": tip} if tip and tip == held and tip == commit_of(run, str(meta.get("verdict_ref") or "")) else {}
     run.set_meta(task, verdict_ref=new, pushed=new, **keep)
 
 
@@ -6398,16 +6469,20 @@ def take_host_head(run, task, branch, new, p):
         run.emit("pr-rebased", tid, attempt, None, f"{label} head is {new[:7]}: the host rebased {old[:7]}; not checked: {why}",
                  f"fix the cause, then run.py close {tid}")
         return
-    run.unset_meta(task, "host_rebase")
     same, reason = same_change(run, task, old, new)
+    state, bad = check_head(run, task, new) if same else (CHECK_PASS, "")
+    if state == CHECK_SKIPPED:  # host_rebase stays: the next close or record tries again
+        run.emit("pr-rebased", tid, attempt, None, f"{label} head is {new[:7]}: the host rebased {old[:7]}; not checked: {bad}",
+                 f"fix the cause, then run.py close {tid}")
+        return
+    run.unset_meta(task, "host_rebase")
     if not same:
         run.emit("changed", tid, attempt, None,
                  f"the host rebased {label} onto {target} at {new[:7]}, and the diff changed ({reason}); "
                  f"pushed stays {old[:7]}, so run.py does not merge it",
                  decision_text(f"Rebase {branch} onto {target} by hand for {label}", task))
         return
-    ok, bad = check_head(run, task, new)
-    if not ok:
+    if state == CHECK_FAIL:
         run.emit("conflict", tid, attempt, None,
                  f"the host rebased {label} onto {target} at {new[:7]}, and after_rebase failed: {bad}; "
                  f"pushed stays {old[:7]}, so run.py does not merge it",
@@ -6421,20 +6496,27 @@ def take_host_head(run, task, branch, new, p):
 def foreign_rebase_of(run, task, new):
     """True when someone other than run.py moved the request branch from the pushed head to `new` (fetched here), and
     `new` carries the same change as the pushed head."""
-    return not fetch_head(run, task, new) and same_change(run, task, task["meta"]["pushed"], new)[0]
+    try:
+        return not fetch_head(run, task, new) and same_change(run, task, task["meta"]["pushed"], new)[0]
+    except Refused:  # the target cannot be fetched: the caller says the head changed, as before
+        return False
 
 
 def accept_foreign(run, task, branch, new):
     """Take the rebase of someone else (a merge queue, a person) that foreign_rebase_of found: when [merge] after_rebase
     passes on `new`, verdict_ref and pushed move to it and the result is "taken"; else pushed stays, a conflict line
-    says why and the result is ""."""
+    (or, when the check could not run, a pr-rebased line) says why and the result is ""."""
     tid, meta = task["id"], task["meta"]
     attempt, host = wanted_attempt(task) or 1, run.host()
     old, number = meta["pushed"], meta.get("pr")
     label = host.label(int(number)) if number else f"{run.config['merge']['remote']}/{meta.get('pr_branch') or f'task-{tid}'}"
     target = run.target(task)
-    ok, bad = check_head(run, task, new)
-    if not ok:
+    state, bad = check_head(run, task, new)
+    if state == CHECK_SKIPPED:
+        run.emit("pr-rebased", tid, attempt, None, f"{label} head is {new[:7]}: rebased by someone else from {old[:7]}; "
+                 f"not checked: {bad}", "fix the cause, then run.py record")
+        return ""
+    if state == CHECK_FAIL:
         run.emit("conflict", tid, attempt, None,
                  f"{label} was rebased by someone else onto {target} at {new[:7]}, and after_rebase failed: {bad}; "
                  f"pushed stays {old[:7]}, so run.py does not merge it",
@@ -6501,8 +6583,14 @@ def rebase_branch(run, task, branch, head, p):
         run.emit("changed", tid, attempt, None, f"the rebase onto {target} changed the diff ({reason}); restored {head[:7]}",
                  decision_text(f"Rebase {branch} onto {target} by hand for {label}", task))
         return
-    ok, bad = after_rebase_check(run, wt)
-    if not ok:
+    state, bad = after_rebase_check(run, wt)
+    if state == CHECK_SKIPPED:
+        run.git("reset", "--keep", head, cwd=wt)
+        run.emit("pr-behind", tid, attempt, None,
+                 f"{label} is behind {target}; after_rebase could not run after rebasing {branch}: {bad}; restored {head[:7]}",
+                 f"fix the cause, then run.py close {tid}")
+        return
+    if state == CHECK_FAIL:
         run.git("reset", "--keep", head, cwd=wt)
         run.emit("conflict", tid, attempt, None,
                  f"after_rebase failed after rebasing {branch} onto {remote}/{target}: {bad}; restored {head[:7]}",
@@ -6764,7 +6852,8 @@ def conflicts_with_target(run, task, head, p=None, checked=False):
     """The `rebase` round kind: (True, onto, why) when the change at `head` conflicts with the task's target, as the host
     says (request `p` is DIRTY) or as `git merge-tree --write-tree <target> <head>` finds; else (False, onto, why). `onto`
     is the target commit: the fetched remote branch in pr mode, the local target branch in local mode. With `checked`, a
-    change that merges cleanly but fails [merge] after_rebase on the merged tree counts as a conflict too."""
+    change that merges cleanly but fails [merge] after_rebase on the merged tree counts as a conflict too; when that check
+    cannot run, the answer is (None, onto, why)."""
     name = target_name(run, task)
     onto = commit_of(run, run.target_ref(task) if run.pr_mode else f"refs/heads/{name}")
     if not onto:
@@ -6779,9 +6868,11 @@ def conflicts_with_target(run, task, head, p=None, checked=False):
     if out.returncode != 0:
         return False, onto, f"git merge-tree failed: {first_line(out.stderr) or 'no output'}"
     if checked:
-        ok, bad = check_head(run, task, onto, merge=head)
-        if not ok:
+        state, bad = check_head(run, task, onto, merge=head)
+        if state == CHECK_FAIL:
             return True, onto, f"{head[:7]} merges into {name} at {onto[:7]} without a conflict, but after_rebase failed: {bad}"
+        if state == CHECK_SKIPPED:
+            return None, onto, f"after_rebase could not run on {head[:7]} merged into {name} at {onto[:7]}: {bad}"
     return False, onto, f"{head[:7]} merges into {name} at {onto[:7]} with no conflict"
 
 
@@ -6882,6 +6973,8 @@ def start_round(run, args):
             raise Refused(f"{label} head is {p.head[:7]}, not the pushed {str(meta['pushed'])[:7]}: someone else pushed; "
                           f"the operator decides (reset the branch and push, or merge by hand and run.py merged {tid})")
     needed, onto, why = ROUND_KINDS[kind](run, task, start, p)
+    if needed is None:
+        raise Refused(f"#{tid}: cannot tell whether a {kind} round is needed: {why}; fix the cause, then rerun")
     if not needed:
         then = (f"run.py close {tid} catches it up" if p is not None and p.merge_state == "BEHIND"
                 else "run.py record follows " + ("the request" if run.pr_mode else "the branch"))
@@ -7077,7 +7170,9 @@ def record_round(run, snap, task):
     check = ROUND_KINDS.get(str(kind))
     if check and commit_of(run, start):
         needed, _, why = check(run, task, start, p)
-        if not needed:
+        if needed is None:
+            run.emit("pr-pending", tid, attempt, None, f"the {kind} round: {why}", "run.py record later")
+        elif not needed:
             run.emit("round-not-needed", tid, attempt, None, f"the {kind} round is no longer needed: {why}",
                      f"run.py round {tid} --cancel (the verified head {start[:7]} goes back as it is), or let the round finish")
     return False

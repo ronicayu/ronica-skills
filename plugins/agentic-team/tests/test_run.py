@@ -8,6 +8,7 @@ logs every call and answers from files the test writes. Nothing here starts a
 real Claude session or reaches a real code host.
 """
 
+import contextlib
 import datetime
 import functools
 import json
@@ -412,6 +413,10 @@ class Base(unittest.TestCase):
                          self.unlisted_pairs)
 
     # --- helpers
+
+    def open_folder(self, folder):
+        with contextlib.suppress(OSError):
+            os.chmod(folder, 0o755)
 
     def git(self, *args, cwd=None):
         out = subprocess.run(["git", "-C", cwd or self.root, *args], capture_output=True, text=True)
@@ -8161,6 +8166,110 @@ class PrTest(Base):
         self.no_check_worktree()
 
     @both_hosts
+    def test_138_a_lease_push_over_a_rebase_that_loses_the_race_is_refused(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        self.ok("verify", str(task))
+        self.ok("close", str(task))
+        self.advance_main()
+        new = self.host_rebases()
+        other = os.path.join(self.dir, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=other)
+        self.git("checkout", "-q", "-b", "task-1", "origin/task-1", cwd=other)
+        stranger = self.commit_file("stranger.txt", "x\n", cwd=other)
+        count = os.path.join(self.dir, "pushes")
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:  # the second push of close (the lease at the rebase) meets a push of someone else
+            fh.write(f"#!/bin/sh\nn=$(cat {count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {count}\n"
+                     f"[ $n -eq 2 ] && env -u GIT_DIR -u GIT_WORK_TREE git -C {other} push -q origin task-1\nexit 0\n")
+        os.chmod(hook, 0o755)
+        self.ok("launch", str(task))
+        head2 = self.wt_commit(wt, "two.txt")
+        self.pass_report(task, attempt=2, wt=wt, head=head2)
+        self.agents(self.finished("task-1"), self.finished("task-1", 2))
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertIn(f"origin/task-1 is not at {new[:7]}; someone else pushed", self.one(events, "push-refused")["detail"])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, stranger))
+
+    @both_hosts
+    def test_138_a_local_catch_up_that_meets_a_rebase_by_someone_else_takes_theirs(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        self.git("config", "user.name", "queue", cwd=os.path.join(self.dir, "clone"))  # their commit is not byte-equal to ours
+        new = self.host_rebases()  # theirs lands first; the host still shows the old head
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        self.assertEqual(len(self.by_someone_else(events)), 1)
+        self.assertEqual(self.named(events, "push-refused"), [])
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], self.remote_sha()), (new, new))
+        self.assertNotIn("caught_up_from", meta)  # the local branch is our rebase, not the verified head
+
+    @both_hosts
+    def test_139_a_cached_result_is_not_run_again_and_a_leftover_folder_is_cleared(self):
+        task, wt, head = self.published()
+        log = os.path.join(self.dir, "check.log")
+        self.after_rebase(f"echo x >> {log}; test ! -f moved.txt")
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        leftover = os.path.join(self.root, ".claude", "worktrees", "after-rebase-1")
+        os.makedirs(leftover)
+        with open(os.path.join(leftover, "junk.txt"), "w") as fh:
+            fh.write("x\n")
+        for _ in range(2):
+            self.one(self.events("record"), "conflict")
+            self.no_check_worktree()
+        with open(log) as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+
+    @both_hosts
+    def test_139_a_check_that_cannot_run_is_not_a_conflict_and_is_not_cached(self):
+        task, wt, head = self.published()
+        self.after_rebase("test ! -f moved.txt")
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        folder = os.path.join(self.root, ".claude", "worktrees")
+        os.makedirs(folder, exist_ok=True)
+        os.chmod(folder, 0o500)
+        self.addCleanup(self.open_folder, folder)
+        events = self.events("record")
+        self.assertIn("not checked: git worktree add failed", self.one(events, "pr-rebased")["detail"])
+        self.assertEqual(self.named(events, "conflict") + self.by_someone_else(events), [])
+        self.assertEqual(self.meta(task)["pushed"], head)
+        os.chmod(folder, 0o755)
+        self.one(self.events("record"), "conflict")  # it runs now, and the failure is real
+
+    def test_139_a_timeout_kills_the_process_group(self):
+        import run as runner
+        pidfile = os.path.join(self.dir, "pid")
+        fake = types.SimpleNamespace(config={"merge": {"after_rebase": f"echo $$ > {pidfile}; sleep 30 | cat"}})
+        with unittest.mock.patch.object(runner, "AFTER_REBASE_TIMEOUT", 1):
+            state, why = runner.after_rebase_check(fake, self.dir)
+        self.assertEqual(state, runner.CHECK_SKIPPED)
+        self.assertIn("ran longer than 1 seconds", why)
+        with open(pidfile) as fh:
+            pid = int(fh.read())
+        for _ in range(50):
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("a child of the check still runs")
+
+    def test_138_a_target_that_cannot_be_fetched_reads_as_a_changed_head(self):
+        import run as runner
+        with unittest.mock.patch.object(runner, "fetch_head", return_value=""), \
+                unittest.mock.patch.object(runner, "same_change", side_effect=runner.Refused("git fetch failed")):
+            self.assertFalse(runner.foreign_rebase_of(None, {"meta": {"pushed": "a" * 40}}, "b" * 40))
+
+    @both_hosts
     def test_103_a_push_that_a_pre_push_hook_refuses_is_push_failed_with_the_hook_line(self):
         task, wt, head = self.published()
         self.local_catch_up()
@@ -11884,6 +11993,50 @@ class RoundTest(Base):
         self.assertIn("rebase round 1 of 3", event["detail"])
         self.assertEqual(self.git("worktree", "list").count("after-rebase"), 0)
         self.assertFalse(os.path.exists(os.path.join(self.root, ".claude", "worktrees", f"after-rebase-{task}")))
+
+    def test_139_record_checks_a_round_once_and_a_check_that_cannot_run_starts_no_round(self):
+        task, wt, head, onto = self.waiting(conflict=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        folder = os.path.join(self.root, ".claude", "worktrees")
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test ! -f other.txt\'\n')
+        os.makedirs(folder, exist_ok=True)
+        os.chmod(folder, 0o500)
+        self.addCleanup(self.open_folder, folder)
+        self.assertIn("cannot tell whether a rebase round is needed: after_rebase could not run",
+                      self.refused("round", str(task), "rebase"))
+        os.chmod(folder, 0o755)
+        self.started(task)
+        log = os.path.join(self.dir, "check.log")
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'echo x >> {log}; test ! -f other.txt\'\n')
+        self.agents(self.row("task-1", 2))
+        self.fake_host(head=head, merge_state="CLEAN")
+        for _ in range(2):
+            self.assertEqual(self.named(self.events("record"), "round-not-needed"), [])
+        with open(log) as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test -f other.txt\'\n')
+        os.chmod(folder, 0o500)
+        line = self.one(self.events("record"), "pr-pending")
+        self.assertIn("the rebase round: after_rebase could not run", line["detail"])
+        self.assertEqual(self.named(self.events("record"), "round-not-needed"), [])
+
+    @both_hosts
+    def test_139_a_round_result_that_fails_the_check_is_not_pushed(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.pass_report(task, attempt=2, wt=wt, head=new)
+        self.agents(self.finished("task-1", 2))
+        self.one(self.events("record"), "arrived")
+        self.add_result(task, "PASS", "Status: PASS\nVerdict: artifact-verified\n", kind="verify", attempt=2, by="verify-1-2")
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test ! -f f.txt\'\n')
+        self.fake_host(head=head, merge_state="DIRTY")
+        conflict = self.one(self.events("close", str(task)), "conflict")
+        self.assertIn(f"after_rebase failed on {new[:7]}, a rebase of {head[:7]}", conflict["detail"])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test -f f.txt\'\n')
+        events = self.events("close", str(task))  # resumed close: the check passes now, and the head is pushed
+        self.assertEqual(self.one(events, "pushed")["detail"], f"{new[:7]} to origin/task-1")
 
     def test_119_round_refusals(self):
         task, wt, head, onto = self.waiting()
