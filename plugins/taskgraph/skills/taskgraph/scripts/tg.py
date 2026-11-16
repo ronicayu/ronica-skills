@@ -791,8 +791,8 @@ def set_status(store, conn, args, status):
         # a task that is done already keeps its done_at, so a repeated tg done changes no history
         conn.execute(
             "UPDATE tasks SET done_at=CASE WHEN ?='done' THEN (CASE WHEN status='done' AND done_at IS NOT NULL THEN done_at ELSE ? END) END,"
-            " status=?, updated_at=? WHERE id=?",
-            (status, ts, status, ts, args.id),
+            " status=?, updated_at=CASE WHEN status=? THEN updated_at ELSE ? END WHERE id=?",
+            (status, ts, status, status, ts, args.id),
         )
     data = load(conn)[args.id]
     holder = store.claimant_of(conn, args.id) if status == "in_progress" else None

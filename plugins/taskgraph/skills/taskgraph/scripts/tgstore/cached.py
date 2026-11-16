@@ -482,6 +482,10 @@ class CachedRemoteStore:
                 self.remote.check_deadline(outcome, fresh[i])
             pushed = self.remote.push(plan, fresh)
         self.finish(conn, plan, pushed, local_rows, new_pending)
+        stamped = pushed.updated_at if pushed else {}
+        for i, t in before.items():  # a write that sent nothing to GitHub did not move its updated_at
+            if i not in stamped and i not in self.claimed:
+                conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (t["updated_at"], i))
         for i, outcome in self.claimed.items():
             self.store_claims(conn, self.resolve_id(i), outcome.claims)
         if journal:

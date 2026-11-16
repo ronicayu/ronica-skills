@@ -714,3 +714,33 @@ def test_a_gate_repeated_after_a_refresh_keeps_the_updated_at_of_the_first_gate(
     again = env.ok("gate", str(a), "release", "--label", "Review by legal")
     assert len(env.writes()) == writes
     assert again["updated_at"] == first["updated_at"] and again["meta"] == first["meta"]
+
+
+def test_a_write_response_without_updated_at_still_lands(env, fake, monkeypatch):
+    from tgstore.github.gh import Gh
+
+    def bare(method):
+        original = getattr(Gh, method)
+
+        def call(self, path, body):
+            r = original(self, path, body)
+            if isinstance(r.body, dict):
+                r.body.pop("updated_at", None)
+            return r
+        return call
+
+    monkeypatch.setattr(Gh, "post", bare("post"))
+    monkeypatch.setattr(Gh, "patch", bare("patch"))
+    a = env.ok("add", "A")["id"]
+    assert env.ok("edit", str(a), "--title", "B")["title"] == "B"
+    assert env.ok("done", str(a))["status"] == "done"
+    assert len(fake.state()["issues"]) == 1
+
+
+def test_an_edit_of_local_meta_only_leaves_updated_at_alone(env, fake):
+    a = env.ok("add", "A")["id"]
+    fake.fault(clock_offset=3600)
+    first = env.ok("edit", str(a), "--title", "B")["updated_at"]
+    assert env.ok("edit", str(a), "--meta", "session=s1")["updated_at"] == first
+    env.age(3600)
+    assert env.ok("show", str(a))["updated_at"] == first
