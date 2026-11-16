@@ -239,6 +239,15 @@ CATCH_UP_POLLS = 20  # reads of the request after the host took a rebase, at mos
 CATCH_UP_WAIT = 3  # seconds between two of those reads
 
 
+def poll_pause(seconds):
+    """Sleep between two polls. AGENTIC_TEAM_TEST_POLL_SCALE (a number, set by tests only) scales the pause; default 1."""
+    try:
+        scale = float(os.environ["AGENTIC_TEAM_TEST_POLL_SCALE"])
+    except (KeyError, ValueError):
+        scale = 1.0
+    time.sleep(seconds * max(scale, 0.0))
+
+
 class Refused(codehost.HostError):
     """A refusal or tool failure: `code` is the exit code, `message` goes to stderr."""
 
@@ -3979,7 +3988,7 @@ def wait_for_exit(run, s):
     """True once `claude agents` shows the session with no process. Bounded: RESUME_POLLS reads."""
     for number in range(RESUME_POLLS):
         if number:
-            time.sleep(RESUME_WAIT)
+            poll_pause(RESUME_WAIT)
         row = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == s.sid), None)
         if row is None or not row.get("pid"):
             return True
@@ -6295,7 +6304,7 @@ def host_catch_up(run, task, branch, head, p):
         return
     for number in range(CATCH_UP_POLLS):
         if number:
-            time.sleep(CATCH_UP_WAIT)
+            poll_pause(CATCH_UP_WAIT)
         busy, error, new = host.rebase_status(p.number)
         if busy:
             continue

@@ -350,6 +350,9 @@ def both_hosts(test):
     return wrapper
 
 
+POLL_SCALE = 0.02  # the share of each pause between polls that the tests keep
+
+
 class Base(unittest.TestCase):
     host = "github"
 
@@ -391,12 +394,22 @@ class Base(unittest.TestCase):
             "FAKE_DOCKER": os.path.join(self.dir, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(self.dir, "docker.log"),
             "FAKE_GH": os.path.join(self.dir, "gh.json"), "FAKE_GH_LOG": os.path.join(self.dir, "gh.log"),
             "FAKE_GLAB": os.path.join(self.dir, "glab.json"), "FAKE_GLAB_LOG": os.path.join(self.dir, "glab.log"),
+            "AGENTIC_TEAM_TEST_POLL_SCALE": str(POLL_SCALE),  # the pauses between polls of a stop and of a host rebase
         })
         self.project = urlquote(codehost.parse_remote(self.origin)[1], safe="")  # the GitLab project path
+        self.transitions = os.path.join(self.dir, "logged", "transitions.jsonl")
+        self.unlisted_pairs = []  # the pairs a test sends on purpose that TRANSITIONS lacks
         self.write_config()
 
     def tearDown(self):
+        import run as runner
+        steps = []
+        if os.path.isfile(self.transitions):
+            with open(self.transitions) as fh:
+                steps = [tuple(json.loads(line)) for line in fh]
         self._tmp.cleanup()
+        self.assertEqual([s for s in steps if runner.TRANSITIONS.get((s[0], s[1])) != s[2] or s[2] is None],
+                         self.unlisted_pairs)
 
     # --- helpers
 
@@ -542,8 +555,33 @@ class Base(unittest.TestCase):
             found = [json.loads(line) for line in fh if line.strip()]
         return [c for c in found if command is None or c[0] == command]
 
+    def logged_run(self):
+        """A wrapper of run.py that logs each (phase, event, phase) that next_phase looks up; tearDown checks that each
+        one is a row of TRANSITIONS. A pair the table lacks is logged with no phase after it."""
+        wrapper = os.path.join(self.dir, "logged", "run.py")
+        if not os.path.isfile(wrapper):
+            os.makedirs(os.path.dirname(wrapper), exist_ok=True)
+            with open(wrapper, "w") as fh:
+                fh.write(textwrap.dedent(f"""\
+                    import json, sys
+                    sys.path.insert(0, {os.path.dirname(RUN)!r})
+                    import run
+                    lookup = run.next_phase
+                    def logged(task, event):
+                        step = [run.stored_phase(task), event, None]
+                        try:
+                            step[2] = lookup(task, event)
+                            return step[2]
+                        finally:
+                            with open({self.transitions!r}, "a") as fh:
+                                fh.write(json.dumps(step) + "\\n")
+                    run.next_phase = logged
+                    run.main()
+                    """))
+        return wrapper
+
     def run_cmd(self, *args, pre=(), tg=TG, env=None, root=None):
-        cmd = [sys.executable, RUN, "--root", root or self.root]
+        cmd = [sys.executable, self.logged_run(), "--root", root or self.root]
         if tg:
             cmd += ["--tg", tg]
         return subprocess.run(cmd + list(pre) + list(args), capture_output=True, text=True,
@@ -645,7 +683,7 @@ class Base(unittest.TestCase):
             sections[re.sub(r" \(\d+\)$", "", block.splitlines()[0])] = block
         return sections
 
-    def hold_lock(self, name, seconds=2.5):
+    def hold_lock(self, name, seconds=1.0):
         """A process that holds a lock file of the run directory (`locks/<name>`) for a while. It prints `locked` first."""
         lock = os.path.join(self.root, ".agentic-team", "locks", name)
         holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys,time\n"
@@ -5426,6 +5464,7 @@ class RunTest(Base):
         self.assertEqual([e["id"] for e in self.meta(stuck_task)["sessions"]], ["sess-task-2-1"])
 
     def test_99_a_transition_error_in_record_stays_with_its_task(self):
+        self.unlisted_pairs = [("reported", "seen_running", None)]
         odd = self.running_task(phase="reported")  # a hand edit: the attempt has no row, so the rows say running
         other = self.running_task()
         self.agents(self.finished(f"task-{other}"))
@@ -7894,7 +7933,7 @@ class PrTest(Base):
                               **self.rebase_polls(busy, busy, {"rebase_in_progress": False, "merge_error": None, "sha": new})})
         started = time.time()
         events = self.events("close", str(task))
-        self.assertGreaterEqual(time.time() - started, 6)  # two waits of 3 seconds between three reads
+        self.assertGreaterEqual(time.time() - started, 6 * POLL_SCALE)  # two waits of 3 seconds between three reads
         self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
         polls = [c for c in self.host_log() if c == ["api", f"projects/{self.project}/merge_requests/1?include_rebase_in_progress=true"]]
         self.assertEqual(len(polls), 3)
@@ -7915,7 +7954,7 @@ class PrTest(Base):
             json.dump(table, fh)
         reads, started = len(self.host_calls("pr view")), time.time()
         events = self.events("close", str(task))
-        self.assertGreaterEqual(time.time() - started, 3)
+        self.assertGreaterEqual(time.time() - started, 3 * POLL_SCALE)
         self.assertEqual(self.one(events, "rebased")["detail"], f"onto main at {new[:7]} on the host; same change as {head[:7]}")
         self.assertEqual(len(self.host_calls("pr view")) - reads, 3)  # publish, then two reads for the new head
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
@@ -9227,7 +9266,7 @@ class DeliveryTest(Base):
                 try:
                     start = time.monotonic()
                     self.run_cmd(command, str(task), *args)  # whatever it decides, it first waits for the lock
-                    self.assertGreater(time.monotonic() - start, 1.5, command)
+                    self.assertGreater(time.monotonic() - start, 0.6, command)
                 finally:
                     self.release(holder)
         self.assertEqual(len([r for r in self.results(task) if r["kind"] == "steer"]), 0)  # none of them filed a steer: answer and steer refused or came after
@@ -9240,7 +9279,7 @@ class DeliveryTest(Base):
         try:
             start = time.monotonic()
             self.ok("record")  # deliver inside record runs inside record's lock
-            self.assertGreater(time.monotonic() - start, 1.5)
+            self.assertGreater(time.monotonic() - start, 0.6)
         finally:
             self.release(holder)
         self.assertTrue(os.path.isfile(os.path.join(self.root, ".agentic-team", "locks", "task-1.lock")))
@@ -9296,11 +9335,11 @@ class DeliveryTest(Base):
 
     def test_r4_8_the_stopped_sessions_file_has_its_own_lock(self):
         task = self.worker(status="busy", state="working", pid=4242)
-        holder = self.hold_lock("stopped-sessions.lock", 2.5)  # another task's command is rewriting the file
+        holder = self.hold_lock("stopped-sessions.lock")  # another task's command is rewriting the file
         try:
             start = time.monotonic()
             self.ok("stop", str(task))  # appends the stopped id once the file is free
-            self.assertGreater(time.monotonic() - start, 1.5)
+            self.assertGreater(time.monotonic() - start, 0.6)
         finally:
             self.release(holder)
         self.assertEqual(self.stopped_ids(), ["sess-task-1-1"])
@@ -13393,82 +13432,6 @@ class TransitionTest(unittest.TestCase):
                 self.assertEqual((len(x["edge"]), bool(x["why"].strip())), (3, True), x)
         self.assertEqual(explain(code - model, exclusions["code"]), ([], []))
         self.assertEqual(explain(model - code, exclusions["model"]), ([], []))
-
-
-class LoggedTransitions:
-    """Runs run.py through a wrapper that logs each (phase, event, phase) that next_phase looks up, and checks at the end
-    of the test that each one is a row of TRANSITIONS. A pair the table lacks is logged with no phase after it."""
-
-    def setUp(self):
-        super().setUp()
-        folder = os.path.join(self.dir, "logged")
-        os.makedirs(folder)
-        self.transitions, self.logged_run = os.path.join(folder, "transitions.jsonl"), os.path.join(folder, "run.py")
-        with open(self.logged_run, "w") as fh:
-            fh.write(textwrap.dedent(f"""\
-                import json, sys
-                sys.path.insert(0, {os.path.dirname(RUN)!r})
-                import run
-                lookup = run.next_phase
-                def logged(task, event):
-                    step = [run.stored_phase(task), event, None]
-                    try:
-                        step[2] = lookup(task, event)
-                        return step[2]
-                    finally:
-                        with open({self.transitions!r}, "a") as fh:
-                            fh.write(json.dumps(step) + "\\n")
-                run.next_phase = logged
-                run.main()
-                """))
-
-    def run_cmd(self, *args, pre=(), tg=TG, env=None, root=None):
-        cmd = [sys.executable, self.logged_run, "--root", root or self.root]
-        if tg:
-            cmd += ["--tg", tg]
-        return subprocess.run(cmd + list(pre) + list(args), capture_output=True, text=True,
-                              cwd=self.dir, env=env or self.env)
-
-    def tearDown(self):
-        import run as runner
-        steps = []
-        if os.path.isfile(self.transitions):
-            with open(self.transitions) as fh:
-                steps = [tuple(json.loads(line)) for line in fh]
-        super().tearDown()
-        self.assertEqual([s for s in steps if runner.TRANSITIONS.get((s[0], s[1])) != s[2] or s[2] is None], [])
-
-
-def logged(cls, *names):
-    """`cls` through LoggedTransitions, with only the tests `names`, or all of them when none is given."""
-    skip = {n: None for n in unittest.TestLoader().getTestCaseNames(cls) if names and n not in names}
-    return type(f"Logged{cls.__name__}", (LoggedTransitions, cls), {"__module__": __name__, **skip})
-
-
-LoggedPhaseTest = logged(PhaseTest)
-# The tests below send the (phase, event) pairs that PhaseTest does not.
-LoggedRunTest = logged(
-    RunTest, "test_105_an_old_ghost_worker_counts_as_ended", "test_78_a_stuck_session_gets_the_prompt_hint_not_a_model_change",
-    "test_36_stop_stops_the_live_session_of_a_shared_folder_only", "test_104_abandon_stops_a_live_verifier",
-    "test_101_verify_again_stops_an_idle_verifier", "test_62_repeating_a_close_files_one_manager_verdict",
-    "test_87_filed_earlier_reads_the_model_from_the_session_when_the_row_has_none",
-    "test_59_launch_repairs_an_open_task_with_a_live_session", "test_43_abandoned_tasks_are_skipped",
-    "test_34_finished_session_with_a_complete_report_is_salvaged",
-    "test_23_a_missing_worktree_and_branch_start_again_at_the_last_head",
-    "test_106_close_then_launch_after_a_verify_failed_verdict", "test_88_launch_and_verify_record_the_model_of_the_session",
-    "test_74_adopt_brings_a_branch_under_run_py", "test_101_status_shows_a_verifier_with_no_result",
-    "test_101_a_verifier_that_ended_is_salvaged_from_its_report_file",
-    "test_36_an_unrecorded_row_is_recorded_for_the_attempt_it_was_filed_for")
-LoggedRoleTest = logged(
-    RoleTest, "test_03_adopt_stores_the_role_and_close_still_finds_no_session",
-    "test_04_a_verify_kind_meta_set_after_launch_beats_the_stored_kind",
-    "test_03b_a_changed_or_deleted_role_file_fails_no_command_but_verify")
-LoggedRoundTest = logged(
-    RoundTest, "test_119_cancel_returns_to_waiting_at_the_verified_head", "test_119_a_failed_round_hints_cancel",
-    "test_119_request_merged_during_the_round", "test_119_record_sees_a_local_conflict_and_a_local_round_merges")
-LoggedDeliveryTest = logged(
-    DeliveryTest, "test_b2_a_settled_ask_of_an_earlier_attempt_is_not_pasted_as_open",
-    "test_fix10_every_command_that_changes_a_task_waits_for_its_lock")
 
 
 if __name__ == "__main__":
