@@ -525,6 +525,8 @@ class CachedRemoteStore:
             for number, db_id in pushed.db_ids.items():
                 if number in ids.values():
                     conn.execute("INSERT INTO remote_tasks (task_id, node_id, db_id, meta, fingerprint) VALUES (?, ?, ?, '{}', NULL)", (number, pushed.node_ids.get(number, ""), db_id))
+            for number, stamp in pushed.updated_at.items():  # the remote's clock, as the next pull will show it
+                conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (stamp, number))
             for number, meta in pushed.meta.items():
                 conn.execute("UPDATE remote_tasks SET meta=? WHERE task_id=?", (json.dumps(meta, ensure_ascii=False), number))
                 touched.add(number)

@@ -703,3 +703,14 @@ def test_tg_done_before_an_outside_close(env, fake):
     fake.edit_issue(a, state="closed", state_reason="completed")  # the outside close happens again later: a no-op on GitHub
     shown = env.ok("--fresh", "show", str(a))
     assert shown["status"] == "done" and "gates" not in shown["meta"] and fake.issue(a)["body"] == closed["body"]
+
+
+def test_a_gate_repeated_after_a_refresh_keeps_the_updated_at_of_the_first_gate(env, fake):
+    a = env.ok("add", "A")["id"]
+    fake.fault(clock_offset=3600)  # GitHub's clock is not ours
+    first = env.ok("gate", str(a), "release", "--label", "Review by legal")
+    env.age(3600)
+    writes = len(env.writes())
+    again = env.ok("gate", str(a), "release", "--label", "Review by legal")
+    assert len(env.writes()) == writes
+    assert again["updated_at"] == first["updated_at"] and again["meta"] == first["meta"]

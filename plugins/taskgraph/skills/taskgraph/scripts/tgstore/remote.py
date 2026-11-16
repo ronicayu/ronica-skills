@@ -108,6 +108,7 @@ class Pushed:
     ids: dict = field(default_factory=dict)  # provisional id -> number
     db_ids: dict = field(default_factory=dict)  # number -> database id (created tasks)
     node_ids: dict = field(default_factory=dict)
+    updated_at: dict = field(default_factory=dict)  # number -> updated_at the remote gave the task when the push wrote it
     meta: dict = field(default_factory=dict)  # number -> the shared meta the remote now holds, for the tasks whose body was read or written
     flushed: set = field(default_factory=set)  # numbers whose pending rows were consumed
     dropped: list = field(default_factory=list)  # (number, key): pending rows dropped because the remote has a newer value
