@@ -3035,6 +3035,12 @@ def cmd_launch(run, args):
             notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
                             "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
             text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+        if run.pr_mode:
+            moved = restack(run, task, branch, base, then=f"run.py launch {tid} --attempt {nxt}")
+            if moved != base:
+                notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
+                base = moved
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
     elif mode == "reattach":
         if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
             raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
@@ -3044,6 +3050,16 @@ def cmd_launch(run, args):
         if out.returncode != 0:
             raise Refused(f"git worktree add failed: {out.stderr.strip() or out.stdout.strip()}", 1)
         notes.append(f"reattached {branch} at {base[:7]}")
+        if run.pr_mode:
+            try:
+                moved = restack(run, task, branch, base, then=f"run.py launch {tid} --attempt {nxt}")
+            except Refused:
+                run.git("worktree", "remove", "--force", wt, check=False)
+                raise
+            if moved != base:
+                notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
+                base = moved
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
     else:
         add_worktree(run, worktree, base)
     created = mode in ("first", "base", "head")
@@ -6191,6 +6207,90 @@ def post_verdict(run, task, attempt, level, ref, kind):
              + ("; replaced the earlier verdict comment" if replaced else ""))
 
 
+def rebase_blocker(run, tid, branch, wt):
+    """Why the task worktree `wt` cannot be rebased now (missing, a live session, uncommitted changes, another branch), or None."""
+    if not os.path.isdir(wt):
+        return "worktree missing"
+    if any(s.live for s in own_sessions(run, tid, "task")):
+        return "session live"
+    if run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip():
+        return "worktree dirty"
+    if run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() != branch:
+        return f"{branch} is not checked out there"
+    return None
+
+
+def stale_base(run, task, head):
+    """(base, target, stale) when the task's base meta is a commit of another request that the target does not hold
+    (stacked: --base a dependency's branch) although the target already holds its change, as a rebase merge (every
+    commit has its patch there) or a squash merge (merging the base's change into the target changes nothing) leaves
+    it; `stale` is the base's commits the target lacks, newest first. Else None: no base, the base is not under
+    `head`, the target holds the base itself, or the dependency is not merged."""
+    base = commit_of(run, str((task.get("meta") or {}).get("base") or ""))
+    if not base or run.git("merge-base", "--is-ancestor", base, head, check=False).returncode != 0:
+        return None
+    try:
+        target = run.target_ref(task)
+    except codehost.HostError:  # the remote or host cannot be reached: the push says so
+        return None
+    if run.git("merge-base", "--is-ancestor", base, target, check=False).returncode == 0:
+        return None
+    stale = run.git("rev-list", f"{target}..{base}", check=False).stdout.split()
+    if not stale:
+        return None
+    cherry = run.git("cherry", target, base, check=False).stdout.split("\n")
+    landed = bool(cherry) and all(line.startswith("- ") for line in cherry if line)
+    if not landed:
+        merged = run.git("merge-tree", "--write-tree", f"--merge-base={run.git('merge-base', base, target, check=False).stdout.strip()}",
+                         target, base, check=False)
+        tree = run.git("rev-parse", f"{target}^{{tree}}", check=False).stdout.strip()
+        landed = merged.returncode == 0 and merged.stdout.split("\n", 1)[0].strip() == tree
+    return (base, target, stale) if landed else None
+
+
+def restack(run, task, branch, head, then=None):
+    """The head to publish: `head`, or, when the task's stacked base merged into the target under other SHAs
+    (stale_base), the head after rebasing the task's own commits (base..head) onto the target in the idle task
+    worktree. verdict_ref moves with it. Refuses, with the stale commits named, when the worktree cannot be rebased,
+    the rebase conflicts, changes the diff, or fails [merge] after_rebase; the branch is then as it was. `then` is the
+    command to rerun after a fix by hand (default run.py close)."""
+    found = stale_base(run, task, head)
+    if not found:
+        return head
+    base, target, stale = found
+    tid, attempt = task["id"], wanted_attempt(task) or 1
+    wt, rel = task_worktree(run, tid), f".claude/worktrees/task-{tid}"
+    named = "; ".join(run.git("log", "-1", "--format=%h %s", c).stdout.strip() for c in stale[:5])
+    named += f"; and {len(stale) - 5} more" if len(stale) > 5 else ""
+    fix = (f"run.py round {tid} rebase" if stored_phase(task) == "awaiting_merge" and task["meta"].get("pr")
+           else f"git -C {rel} rebase --onto {target} {base[:7]} {branch}, then {then or f'run.py close {tid}'}")
+    refuse = f"{branch} carries commits of its stacked base {base[:7]} that {target} holds under other SHAs ({named}); "
+    why = rebase_blocker(run, tid, branch, wt)
+    if not why and run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip() != head:
+        why = f"the worktree is not at {head[:7]}"
+    if why:
+        raise Refused(f"{refuse}cannot rebase them away: {why}; fix: {fix}")
+    own = run.git("rev-list", "--count", f"{base}..{head}", cwd=wt).stdout.strip()
+    if run.git("rebase", "--onto", target, base, cwd=wt, check=False).returncode != 0:
+        run.git("rebase", "--abort", cwd=wt, check=False)
+        raise Refused(f"{refuse}rebasing the own commits onto {target} conflicted; rebase aborted; fix: {fix}")
+    new = run.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    same, reason = same_change(run, task, head, new)
+    if not same:
+        run.git("reset", "--keep", head, cwd=wt)
+        raise Refused(f"{refuse}rebasing the own commits onto {target} changed the diff ({reason}); restored {head[:7]}; fix: {fix}")
+    state, bad = after_rebase_check(run, wt)
+    if state != CHECK_PASS:
+        run.git("reset", "--keep", head, cwd=wt)
+        raise Refused(f"{refuse}after_rebase {'failed' if state == CHECK_FAIL else 'could not run'} after rebasing the own "
+                      f"commits onto {target}: {bad}; restored {head[:7]}; fix: {fix}")
+    if commit_of(run, str(task["meta"].get("verdict_ref") or "")) == head:
+        run.set_meta(task, verdict_ref=new)
+    run.emit("rebased", tid, attempt, None, f"{own} own commit{'s' * (own != '1')} onto {target} at {new[:7]}; the stacked base "
+             f"{base[:7]} is merged under other SHAs ({named}); same change as {head[:7]}")
+    return new
+
+
 def publish(run, task, branch, head, catch_up=False):
     """Push `head`, the tip of local `branch`, to <remote>/<pr_branch> and make sure a request exists.
     With catch_up (from close) it then reads the request: rebase when behind, merge when clean.
@@ -6199,6 +6299,7 @@ def publish(run, task, branch, head, catch_up=False):
     attempt = wanted_attempt(task) or 1
     host, remote = run.host(), run.config["merge"]["remote"]
     head = run.git("rev-parse", "--verify", f"{head}^{{commit}}").stdout.strip()
+    head = restack(run, task, branch, head)
     pr_branch, pushed, pushed_now = meta.get("pr_branch") or f"task-{tid}", meta.get("pushed"), False
     if not pushed:
         ok, why = host.push(f"refs/heads/{branch}", pr_branch, "")
@@ -6558,15 +6659,7 @@ def rebase_branch(run, task, branch, head, p):
     attempt, host, remote = wanted_attempt(task) or 1, run.host(), run.config["merge"]["remote"]
     label, target = host.label(p.number), p.base_branch
     wt = task_worktree(run, tid)
-    why = None
-    if not os.path.isdir(wt):
-        why = "worktree missing"
-    elif any(s.live for s in own_sessions(run, tid, "task")):
-        why = "session live"
-    elif run.git("status", "--porcelain", cwd=wt, check=False).stdout.strip():
-        why = "worktree dirty"
-    elif run.git("branch", "--show-current", cwd=wt, check=False).stdout.strip() != branch:
-        why = f"{branch} is not checked out there"
+    why = rebase_blocker(run, tid, branch, wt)
     if why:
         run.emit("pr-behind", tid, attempt, None, f"{label} is behind {target}; cannot rebase: {why}",
                  f"rebase {branch} by hand, then run.py close {tid}")

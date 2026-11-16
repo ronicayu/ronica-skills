@@ -669,6 +669,19 @@ the operator's standing permission for `run.py` to push task branches to
    `#<n> (repointed from #<own>)`.
 7. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
+**Stacked base that merged under other SHAs.** A task launched with `--base` on another request's branch holds that
+request's commits. When the request later merged by rebase or squash, the target holds its change but not its commits.
+Before `close` publishes (and before `launch` continues a retry in the same branch), `run.py` looks at the commits of
+the `base` meta that the target lacks. The base counts as merged when `git cherry` finds every one of them in the target
+(a rebase merge), or when merging the base into the target changes nothing (a squash merge). Then it rebases only the
+task's own commits (`git rebase --onto <target> <base>`) in the idle task worktree, checks `same_change` on that span,
+runs `[merge] after_rebase`, moves `verdict_ref`, and prints `rebased`. It refuses, with each stale commit named (short SHA
+and subject), when the worktree is missing, dirty, has a live session or is not at the head to publish, when the rebase
+conflicts or changes the diff, or when the check fails; the branch is then as it was. The fix it names is
+`git -C .claude/worktrees/task-<id> rebase --onto <target> <base> <branch>` before the request exists, and
+`run.py round <id> rebase` once it does. A base that the target does not hold, and whose change it does not hold either
+(the dependency is still open), is published as before.
+
 **Rebase tolerance.** A rebase moves the commit that a verdict names. `close`
 and the push accept a branch at a new head when the change is the same. The
 change id is a hash of `git diff -U0 base tip` without line numbers or blob
@@ -1702,6 +1715,10 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.27.1
+
+Version 0.27.2 (issue #129) stops `close` from publishing the commits of a stacked base that already merged under other SHAs; no lifecycle, phase or model change. A task launched with `--base` on a request that later merged by rebase or squash now has its own commits rebased onto the target before the push, or `close` refuses and names the stale commits (see "Stacked base that merged under other SHAs"). `launch` of a retry does the same in the task branch. No new config key, no migration.
 
 ### Upgrading from 0.27.0
 

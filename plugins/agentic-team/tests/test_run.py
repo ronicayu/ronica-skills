@@ -7755,6 +7755,138 @@ class PrTest(Base):
         self.one(events, "rebased")
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
 
+    # --- 0.27.2: a stacked base that merged under other SHAs is not published (#129)
+
+    def stacked_task(self):
+        """A task launched with --base on a two-commit dependency branch, with one own commit, not closed yet.
+        Returns (task, wt, head, dep_commits)."""
+        self.pr_config()
+        self.git("checkout", "-q", "-b", "dep")
+        first = self.commit_file("dep.txt", "work\n")
+        second = self.commit_file("dep2.txt", "more\n")
+        self.git("checkout", "-q", "main")
+        task = self.running_task(base=json.dumps(second))
+        wt = self.worktree("task-1", base="dep")
+        head = self.wt_commit(wt, "out.txt")
+        self.pass_report(task, wt=wt, head=head)
+        self.agents(self.finished("task-1"))
+        return task, wt, head, (first, second)
+
+    def close_stacked(self, task, head):
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        return self.run_cmd("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+
+    def land_dep(self, squash):
+        """The dependency merges into origin/main: its two commits one by one (a rebase merge), or as one commit."""
+        self.advance_main("dep.txt", "work\n")
+        if not squash:
+            return self.advance_main("dep2.txt", "more\n")
+        clone = os.path.join(self.dir, "clone")
+        with open(os.path.join(clone, "dep2.txt"), "w") as fh:
+            fh.write("more\n")
+        self.git("add", "-A", cwd=clone)
+        self.git("commit", "-q", "--amend", "-m", "squash: dep", cwd=clone)
+        self.git("push", "-q", "-f", "origin", "main", cwd=clone)
+        return self.git("rev-parse", "HEAD", cwd=clone)
+
+    @both_hosts
+    def test_129_close_rebases_the_own_commits_when_the_stacked_base_merged_by_rebase(self):
+        task, wt, head, dep = self.stacked_task()
+        self.land_dep(squash=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertNotEqual(new, head)
+        self.assertEqual(self.git("rev-list", "origin/main..{}".format(new)).split(), [new])
+        self.assertIn("1 own commit onto origin/main", self.one(events, "rebased")["detail"])
+        self.assertIn(f"same change as {head[:7]}", self.one(events, "rebased")["detail"])
+        meta = self.meta(task)
+        self.assertEqual((meta["verdict_ref"], meta["pushed"], self.remote_sha()), (new, new, new))
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+
+    @both_hosts
+    def test_129_close_rebases_the_own_commits_when_the_stacked_base_merged_by_squash(self):
+        task, wt, head, dep = self.stacked_task()
+        self.land_dep(squash=True)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertEqual(self.git("rev-list", f"origin/main..{new}").split(), [new])
+        self.one(events, "rebased")
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+
+    @both_hosts
+    def test_129_a_conflict_refuses_with_the_stale_commits_named(self):
+        task, wt, head, dep = self.stacked_task()
+        self.land_dep(squash=False)
+        self.advance_main("out.txt", "theirs\n")  # the own commit adds out.txt too
+        out = self.close_stacked(task, head)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        for sha in dep:
+            self.assertIn(sha[:7], out.stderr)
+        self.assertIn("conflicted; rebase aborted", out.stderr)
+        self.assertIn(f"git -C .claude/worktrees/task-1 rebase --onto origin/main {dep[1][:7]} worktree-task-1", out.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        self.assertNotIn("pushed", self.meta(task))
+
+    @both_hosts
+    def test_129_a_failing_after_rebase_check_refuses_and_restores_the_head(self):
+        task, wt, head, dep = self.stacked_task()
+        self.after_rebase("echo boom >&2; exit 3")
+        self.land_dep(squash=False)
+        out = self.close_stacked(task, head)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("after_rebase failed after rebasing the own commits onto origin/main", out.stderr)
+        self.assertIn(f"restored {head[:7]}", out.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertNotIn("pushed", self.meta(task))
+
+    @both_hosts
+    def test_129_a_request_already_published_names_the_round_command(self):
+        task, wt, head, dep = self.stacked_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.land_dep(squash=False)
+        self.advance_main("out.txt", "theirs\n")
+        out = self.run_cmd("close", str(task))
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("fix: run.py round 1 rebase", out.stderr)
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+
+    @both_hosts
+    def test_129_a_retry_launch_rebases_the_own_commits_of_a_merged_stacked_base(self):
+        task, wt, head, dep = self.stacked_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.land_dep(squash=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("launch", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertEqual(self.git("rev-list", f"origin/main..{new}").split(), [new])
+        self.assertIn(f"rebased worktree-task-1 onto the target: {head[:7]} -> {new[:7]}", self.one(events, "launched")["detail"])
+        self.one(events, "rebased")
+
+    @both_hosts
+    def test_129_a_dirty_worktree_refuses_before_any_rebase(self):
+        task, wt, head, dep = self.stacked_task()
+        self.land_dep(squash=False)
+        with open(os.path.join(wt, "scratch.txt"), "w") as fh:
+            fh.write("x\n")
+        out = self.close_stacked(task, head)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("cannot rebase them away: worktree dirty", out.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+
+    @both_hosts
+    def test_129_an_unmerged_stacked_base_is_published_as_before(self):
+        task, wt, head, dep = self.stacked_task()
+        self.advance_main("unrelated.txt")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertEqual(self.named(events, "rebased"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+        self.assertEqual(self.git("rev-list", "--count", f"origin/main..{head}"), "3")
+
     @both_hosts
     def test_85_a_failing_ls_remote_is_reported_not_read_as_a_deleted_branch(self):
         task, wt, head = self.published()
