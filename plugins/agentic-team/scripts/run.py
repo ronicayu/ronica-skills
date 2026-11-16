@@ -1091,7 +1091,8 @@ def unclosed_next(task_id, verdict, attempt, kind="code", task=None, run=None):
                 f'or run.py close {task_id} --verdict artifact-verified --override-verifier "<why>" --ran "<run id or URL>"')
     if verdict == "check-only":  # no command accepts check-only: it closes only through a stronger verdict
         level = "test-verified" if "test-verified" in PASSING.get(kind, CLOSING) else "artifact-verified"
-        ci = " (add --ci-ref when only a CI run can prove the change)" if run is not None and run.pr_mode else ""
+        ci = (" (add --ci-ref when only a CI run can prove the change)"
+              if kind == "code" and run is not None and run.pr_mode else "")
         return (f"run.py verify {task_id} --again for a stronger verdict{ci}, or run.py close {task_id} --verdict {level} "
                 f'--override-verifier "<why>" --ran "<CI run URL or artifact link>"')
     return f"run run.py close {task_id}"
@@ -3222,7 +3223,8 @@ def cmd_verify(run, args):
     if is_sha(ref):  # the verifier compares HEAD with this text, so give the full SHA
         full = run.git("rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
         ref = full.stdout.strip() if full.returncode == 0 else ref
-    if args.ci_ref:
+    ci = wants_ci_ref(args, task, attempt, ref)
+    if ci:
         refuse_ci_ref(run, task, ref)
     revision = revision_of(task)
     resume, replaced = None, ""
@@ -3235,7 +3237,7 @@ def cmd_verify(run, args):
         elif why:
             replaced = f"the verifier of revision {revision - 1} cannot be resumed ({why}); a new verifier starts"
     if resume is not None:
-        return verify_resume(run, args, task, attempt, rows, worker, ref, resume, role)
+        return verify_resume(run, args, task, attempt, rows, worker, ref, resume, role, ci)
     seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, replaced)  # may refuse: before any stop
     if replaced and not args.dry_run:
         stop_kept(run, task, attempt, "a new verifier replaces it", only=("verify",))
@@ -3273,7 +3275,7 @@ def cmd_verify(run, args):
         effort = args.effort
     check_cap(run, getattr(args, "dry_run", False))
     where = verify_skill(run, ref)[0] or "none"
-    if args.ci_ref:
+    if ci:
         push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role, seat=folder)
     if args.dry_run:
@@ -3390,7 +3392,7 @@ def resume_reason(run, task, entry, rows):
     return None
 
 
-def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
+def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=False):
     """verify in a revision (#127): resume the attempt's kept verifier on the new head, with a short revision brief. With
     seat own its folder moves to the new head first; with seat task the folder is already there, once the worker's turn
     is over. The resume makes a new session id, recorded as the next entry of the chain."""
@@ -3428,7 +3430,7 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
         run.git("branch", "-f", f"worktree-{folder}", ref, check=False)
     else:
         check_cap(run, getattr(args, "dry_run", False))
-    if args.ci_ref:
+    if ci:
         push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
@@ -3487,6 +3489,8 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              f"`git --no-optional-locks rev-parse HEAD` is not `{new}`, report BLOCKED.",
              f"- The change since your last verdict: `{diff}`.",
              *([f"- {ci_ref_text(run, ci_entry)}"] if (ci_entry := ci_ref_for(task, attempt, new)) else []),
+             f"- A CI run counts only for the commit it ran on: a run of the old head, or of any commit but `{new}`, "
+             "proves nothing about the new head.",
              "- First check that each of your findings below is fixed. Then run the full method of your first brief again "
              "on the new head: every VERIFY command, the project verify skill, and every ACCEPTANCE line, not only the "
              "findings. A fix can break a line that passed before.",
@@ -3518,11 +3522,21 @@ def ci_ref_for(task, attempt, head):
     return next((e for e in reversed(ci_refs(task)) if e.get("attempt") == attempt and e.get("head") == head), None)
 
 
+def wants_ci_ref(args, task, attempt, ref):
+    """--ci-ref, or a CI ref already pushed for this attempt: a later verify of the attempt (a revision, --again) moves
+    it to the new head, so the verifier never judges the runs of an old commit."""
+    return bool(args.ci_ref or (is_sha(ref) and any(e.get("attempt") == attempt for e in ci_refs(task))))
+
+
 def refuse_ci_ref(run, task, ref):
     if not run.pr_mode:
         raise Refused('--ci-ref needs merge.mode = "pr": CI runs on a branch pushed to merge.remote')
     if not is_sha(ref):
         raise Refused(f"--ci-ref pushes a commit; the output under review is {ref}")
+    kind = verify_kind(run, task)
+    if kind != "code":
+        raise Refused(f"--ci-ref is for a code task: a CI run gives at most test-verified, which does not close a "
+                      f"{kind} task")
 
 
 def push_ci_ref(run, task, attempt, head, dry_run=False):
@@ -3591,8 +3605,10 @@ def ci_ref_text(run, entry):
         wait, log = "gh run watch <run id> --exit-status", "gh run view <run id> --log-failed"
     return (f"CI ref: run.py pushed the head `{head}` to the scratch branch `{ref}` on "
             f"`{run.config['merge']['remote']}`, not to the request's branch, so CI runs on it as on any push. Find the "
-            f"runs of that commit with `{find}`, wait for each with `{wait}`, and read a failed job with `{log}`. Push, "
-            "re-run, cancel and dispatch nothing. Judge the runs: a green run that exercises the changed workflow or job "
+            f"runs of that commit with `{find}`, wait for each with `{wait}`, and read a failed job with `{log}`. A run "
+            "can take a few minutes to show up: list again every 30 seconds for at least 5 minutes before you decide "
+            "that there is none. A watch can outlast the 10-minute limit of one Bash call: run it in the background, "
+            "or run it again until the run has finished. Push, re-run, cancel and dispatch nothing. Judge the runs: a green run that exercises the changed workflow or job "
             "is `test-verified`; a red run is `verify-failed`, with a `blocking:` line for each failed job; no run of "
             "that commit on that branch, or no run that exercises the change, is `check-only` with the reason. Put the "
             "URL of each run you judged under `Ran:`.")
@@ -6789,6 +6805,7 @@ def cancel_round(run, args):
     else:
         branch_gate(run, task, branch)
     drop_verifier_folders(run, task)
+    drop_ci_refs(run, task)
     run.emit("round-cancelled", tid, attempt, None,
              f"the {kind} round ended; {branch} is back at {start[:7]} with verdict {verdict}"
              + (f"; the round's head {head[:7]} is kept in {kept}" if head else ""), "run.py record")
@@ -7149,6 +7166,7 @@ def mark_merged(run, task, by, unset=(), **extra):
     elif extra:
         run.set_meta(task, **extra)
     finish_merged(run, task)
+    drop_ci_refs(run, task)
 
 
 def finish_merged(run, task):

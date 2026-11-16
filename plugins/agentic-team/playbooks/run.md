@@ -144,7 +144,7 @@ every report, and on every wake (step 6).
    - Verdict levels: `artifact-verified` (the real output was exercised or
      read); `test-verified` (VERIFY passes and covers every ACCEPTANCE line);
      `check-only` (static checks only, not enough for behavior; it never
-     closes: run `verify <id> --again`, with `--ci-ref` in pr mode when only a
+     closes: run `verify <id> --again`, with `--ci-ref` for a code task in pr mode when only a
      CI run can prove the change, such as a CI workflow edit, or override with
      the CI run URL or artifact link in `--ran`);
      `verify-blocked` (the check could not run; retry when fixed);
