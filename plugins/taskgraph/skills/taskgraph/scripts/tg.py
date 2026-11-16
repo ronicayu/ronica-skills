@@ -1348,7 +1348,12 @@ def result_line(row, with_task=True):
 
 def result_rows(conn, where="", params=()):
     sql = f"SELECT r.*, t.project, t.title FROM results r JOIN tasks t ON t.id = r.task_id {where} ORDER BY r.id"
-    return [dict(r) for r in conn.execute(sql, params)]
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_results'").fetchone():
+        # a GitHub cache: a local row sorts after the remote row it was added after
+        after = dict(conn.execute("SELECT id, after FROM local_results").fetchall())
+        rows.sort(key=lambda r: (after[r["id"]], 1, r["id"]) if r["id"] in after else (r["id"], 0, 0))
+    return rows
 
 
 def cmd_result_add(store, conn, args):
@@ -1378,7 +1383,8 @@ def cmd_result_ls(store, conn, args):
             params.append(wanted)
     rows = result_rows(conn, ("WHERE " + " AND ".join(where)) if where else "", params)
     if args.latest:
-        rows = sorted({r["task_id"]: r for r in rows}.values(), key=lambda r: r["id"])
+        newest = {r["task_id"]: r["id"] for r in rows}
+        rows = [r for r in rows if newest[r["task_id"]] == r["id"]]
     if args.id is not None:
         rows = [{k: r[k] for k in RESULT_COLUMNS} for r in rows]
     if args.brief:

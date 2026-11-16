@@ -14,6 +14,7 @@ from tgstore.github.remote import GitHubRemote
 
 LOCAL = ("sessions", "session", "cleanup_kept", "host_rebase")
 DEFERRED = ("tokens", "model", "started_at")
+LOCAL_RESULTS = ("ack", "steer")
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +26,7 @@ class Env:
     def __init__(self, fake, tmp_path, monkeypatch):
         self.fake = fake
         self.cache = tmp_path / "cache.db"
-        self.entry = Entry("demo", "github", "o/demo", cache=str(self.cache), local=LOCAL, deferred=DEFERRED)
+        self.entry = Entry("demo", "github", "o/demo", cache=str(self.cache), local=LOCAL, deferred=DEFERRED, local_results=LOCAL_RESULTS)
         monkeypatch.setattr(tg, "open_store", lambda args: CachedRemoteStore(GitHubRemote(self.entry), self.entry, tg.load, "demo"))
 
     def run(self, *args):
@@ -404,6 +405,50 @@ def test_result_from_another_machine_arrives_with_the_pull(env, fake):
     fake.add_comment(a, "a human remark")
     rows = env.ok("--fresh", "result", "ls", str(a))
     assert [(r["status"], r["kind"], r["attempt"], r["author"], r["body"]) for r in rows] == [("ISSUES", "verify", 2, "other-host", "found 2 problems")]
+
+
+def test_a_local_result_kind_stays_in_the_cache_and_makes_no_call(env, fake):
+    from tgstore.cached import LOCAL_RESULT_BASE
+    a = env.ok("add", "A")["id"]
+    fake.clear_log()
+    row = env.ok("result", "add", str(a), "--kind", "ack", "--status", "SEEN", "--attempt", "1", "--by", "w", "--body", "Re: #1\n")
+    assert fake.calls() == [] and fake.comments(a) == []
+    assert row["id"] > LOCAL_RESULT_BASE and row["kind"] == "ack" and row["body"] == "Re: #1\n" and row["task_id"] == a
+    second = env.ok("result", "add", str(a), "--kind", "steer", "--status", "SENT", "--by", "manager")
+    assert second["id"] == row["id"] + 1 and fake.comments(a) == []
+    assert [r["id"] for r in env.ok("result", "ls", str(a))] == [row["id"], second["id"]]
+
+
+def test_local_rows_keep_their_place_and_survive_every_refresh(env, fake):
+    a = env.ok("add", "A")["id"]
+    first = env.ok("result", "add", str(a), "--kind", "verify", "--status", "ISSUES", "--by", "v")
+    steer = env.ok("result", "add", str(a), "--kind", "steer", "--status", "SENT", "--by", "manager")
+    report = env.ok("result", "add", str(a), "--status", "PASS", "--by", "w")
+    ack = env.ok("result", "add", str(a), "--kind", "ack", "--status", "SEEN", "--by", "w")
+    assert len(fake.comments(a)) == 2  # the verify row and the report
+    order = [first["id"], steer["id"], report["id"], ack["id"]]
+    assert [r["id"] for r in env.ok("result", "ls", str(a))] == order
+    env.age(31)
+    fake.add_comment(a, "a human remark")  # moves the comment count: the pull re-reads the comments of #a
+    assert [r["id"] for r in env.ok("--fresh", "result", "ls", str(a))] == order
+    env.ok("sync", "--full")
+    assert [r["id"] for r in env.ok("result", "ls", str(a))] == order
+    assert [r["kind"] for r in env.ok("result", "ls", str(a))] == ["verify", "steer", "task", "ack"]
+
+
+def test_a_local_row_needs_the_task_and_goes_with_it(env, fake):
+    assert "no such task: 99" in env.fail("result", "add", "99", "--kind", "ack", "--status", "SEEN")
+    a = env.ok("add", "A")["id"]
+    env.ok("result", "add", str(a), "--kind", "ack", "--status", "SEEN")
+    env.ok("rm", str(a))
+    assert env.sql("SELECT COUNT(*) FROM results") == [(0,)] and env.sql("SELECT COUNT(*) FROM local_results") == [(0,)]
+
+
+def test_a_comment_id_in_the_local_range_is_refused(env, fake):
+    from tgstore.cached import LOCAL_RESULT_BASE
+    a = env.ok("add", "A")["id"]
+    fake.fault(next_comment_id=LOCAL_RESULT_BASE)
+    assert "in tg's range of local result ids" in env.fail("result", "add", str(a), "--status", "PASS")
 
 
 def test_status_changes_go_to_github(env, fake):

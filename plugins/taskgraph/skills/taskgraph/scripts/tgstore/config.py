@@ -4,14 +4,14 @@ import hashlib
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tgstore.base import StoreError
 
 NAME = ".taskgraph.toml"
 BACKENDS = ("github",)
-KEYS = {"backend", "repo", "label", "cache_ttl", "full_every", "cache", "claimant", "meta"}
+KEYS = {"backend", "repo", "label", "cache_ttl", "full_every", "cache", "claimant", "meta", "results"}
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class Entry:
     claimant: str | None = None
     local: tuple = ()
     deferred: tuple = ()
+    local_results: tuple = ()  # result kinds kept in the cache only
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,26 @@ def find_config(cwd=None, env=None):
     return None
 
 
+def main_folder(folder):
+    """The folder in the main checkout that matches `folder` in a git worktree (the same folder outside one): each
+    worktree has its own copy of a committed .taskgraph.toml, and they must share one cache."""
+    common = git_common_dir(folder)
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, cwd=folder, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return folder
+    if common is None or common.name != ".git" or not top:
+        return folder
+    return common.parent / folder.relative_to(Path(top).resolve())
+
+
+def anchored(entry, folder):
+    # a relative cache path is read from the .taskgraph.toml's folder, not from the current folder
+    if entry.cache and not Path(entry.cache).expanduser().is_absolute():
+        return replace(entry, cache=str(main_folder(folder) / entry.cache))
+    return entry
+
+
 def checkout_id(cwd=None):
     common = git_common_dir(Path(cwd or Path.cwd()).resolve())
     return hashlib.sha1(str(common or Path(cwd or Path.cwd()).resolve()).encode()).hexdigest()[:8]
@@ -82,10 +103,10 @@ def number(name, table, key, default, minimum):
     return value
 
 
-def words(name, meta, key):
-    value = meta.get(key, [])
+def words(name, table, key, section="meta", what="keys"):
+    value = table.get(key, [])
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        bad(name, f"meta.{key} must be a list of keys")
+        bad(name, f"{section}.{key} must be a list of {what}")
     return tuple(value)
 
 
@@ -111,9 +132,12 @@ def entry_from(name, table):
     both = sorted(set(local) & set(deferred))
     if both:
         bad(name, f"meta key {both[0]} is in both local and deferred")
+    results = table.get("results", {})
+    if not isinstance(results, dict) or set(results) - {"local"}:
+        bad(name, "results takes only local")
     return Entry(
         name, backend, repo, table.get("label", "taskgraph"), number(name, table, "cache_ttl", 30, 0), number(name, table, "full_every", 600, 60),
-        table.get("cache"), table.get("claimant"), local, deferred,
+        table.get("cache"), table.get("claimant"), local, deferred, words(name, results, "local", "results", "result kinds"),
     )
 
 
@@ -134,7 +158,8 @@ def load_config(path):
     projects = data.get("projects", {})
     if not isinstance(projects, dict):
         raise StoreError(f"{NAME}: projects must be a table")
-    return Config(path, {name: entry_from(name, table) for name, table in projects.items()})
+    folder = path.resolve().parent
+    return Config(path, {name: anchored(entry_from(name, table), folder) for name, table in projects.items()})
 
 
 def project_entry(config, project):

@@ -1747,6 +1747,31 @@ def test_result_ls_order_and_filters(tg, logged):
     assert ids(tg("result", "ls", str(a), "--latest", "--status", "ISSUES")) == [log[0]]
 
 
+def test_local_result_kinds_read_back_in_order_with_the_others(tg, raw):
+    # On --backend=github-fake, ack and steer are local result kinds (conftest); the local store keeps every row.
+    a = add(tg, "A")
+    rows = [
+        tg("result", "add", str(a), "--status", "OPEN", "--kind", "revise", "--attempt", "1", "--body", "r"),
+        tg("result", "add", str(a), "--status", "SENT", "--kind", "steer", "--attempt", "1", "--by", "manager", "--body", "s"),
+        tg("result", "add", str(a), "--status", "SEEN", "--kind", "ack", "--attempt", "1", "--by", "w", "--body", "k"),
+        tg("result", "add", str(a), "--status", "PASS", "--attempt", "1", "--by", "w", "--body", "report"),
+    ]
+    assert len({r["id"] for r in rows}) == 4
+    listed = tg("result", "ls", str(a))
+    assert [(r["kind"], r["body"]) for r in listed] == [("revise", "r"), ("steer", "s"), ("ack", "k"), ("task", "report")]
+    assert ids(listed) == ids(rows)
+    assert [r["kind"] for r in tg("--fresh", "result", "ls", str(a))] == ["revise", "steer", "ack", "task"]
+    assert ids(tg("result", "ls", str(a), "--kind", "ack")) == [rows[2]["id"]]
+    assert ids(tg("result", "ls", str(a), "--latest")) == [rows[3]["id"]]
+    assert [r["id"] for r in tg("show", str(a))["results"]] == ids(rows)
+    text = raw("--project", "demo", "result", "add", str(a), "--status", "SEEN", "--kind", "ack").stdout.strip()
+    assert re.fullmatch(rf"result #\d+ added to #{a} \(ack SEEN\)", text)
+    if os.environ.get("FAKE_GH_STATE"):
+        state = json.loads(Path(os.environ["FAKE_GH_STATE"]).read_text())
+        posted = [c["body"] for c in state["comments"].values() if c["issue"] == a]
+        assert len(posted) == 2 and '"kind":"revise"' in posted[0] and '"kind":"task"' in posted[1]
+
+
 @pytest.mark.sqlite_only("uses a second project in the same store, or --all-projects across projects; a GitHub store holds one project")
 def test_result_ls_without_id_covers_the_project(tg, raw, logged):
     a, b, log = logged
