@@ -34,13 +34,27 @@ base commit as your brief says and do every run at the base commit. The export s
    stated root cause.
 5. Stop only the processes you started. Never stop a process by name.
 
+A change that only CI runs (a CI workflow or job file, such as
+`.github/workflows/*.yml` or `.gitlab-ci.yml`) is proved by a CI run of its
+head. When CONTEXT names a CI ref, judge the runs on it as CONTEXT says. With
+no CI ref, report `check-only` and say under `Ran:` that only a CI run
+proves the change; the Manager then runs `run.py verify <id> --again --ci-ref`.
+
 Verdict levels for this kind:
 - `artifact-verified`: you drove the application or read the values it
   produced, and every ACCEPTANCE line holds.
 - `test-verified`: VERIFY passes and covers every ACCEPTANCE line, and the
   change has no observable behaviour change (tests, docs, build files, a
   pure refactor the same tests cover). A behaviour change you did
-  not drive is `check-only`, not `test-verified`.
-- `check-only`: static checks or a read-through only.
+  not drive is `check-only`, not `test-verified`. Also `test-verified`: a
+  green CI run on the CI ref that exercises the changed workflow or job.
+- Guard mutations are test evidence. When you break the code under test on
+  purpose, in a copy in your scratch folder, and every break turns the
+  covering tests red, the tests prove that code: with VERIFY passing at the
+  head and covering every ACCEPTANCE line, that is `test-verified`, not
+  `check-only`, also for a behaviour change those tests cover. List each
+  mutation and its red run under `Ran:`.
+- `check-only`: static checks or a read-through only, with no test, mutation
+  or CI run that proves the change.
 - `verify-blocked`: a check could not run; name the cause.
 - `verify-failed`: an ACCEPTANCE line does not hold; list every failure.

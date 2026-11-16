@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import re
 import sys
 import tempfile
@@ -75,7 +76,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
                                              "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code", "revisions_per_attempt": 2, "keep_sessions_minutes": 60, "seat": "task",
-                                         "seat_wait_minutes": 5})
+                                         "seat_wait_minutes": 5, "ci_ref_prefix": "ci-"})
         self.assertEqual(cfg["roles"], {"default": ""})
         self.assertEqual(cfg["scope"], {"adjacent": []})
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
@@ -188,6 +189,19 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("get", "merge.host")[:2], (0, "gitlab\n"))
         self.write(MINIMAL + '[merge]\nremote = " "\n')
         self.assertIn("merge.remote must be a non-empty string", " ".join(config.problems(config.load(self.root))))
+
+    def test_140_ci_ref_prefix_makes_a_valid_branch_name(self):
+        for good in ("ci-", "agentic/ci-", "ci/", "CI_run.x-"):
+            with self.subTest(good):
+                self.write(MINIMAL + f'[verify]\nci_ref_prefix = "{good}"\n')
+                self.assertEqual(config.problems(config.load(self.root)), [])
+                check = subprocess.run(["git", "check-ref-format", "--branch", f"{good}1-1"], capture_output=True)
+                self.assertEqual(check.returncode, 0, good)
+        for bad in ("ci", "-ci-", "/ci-", ".ci-", "c i-", "ci..x-", "ci//x-", "ci/.x-", "ci./", "ci.lock/", "ci~-", "", " "):
+            with self.subTest(bad):
+                self.write(MINIMAL + f'[verify]\nci_ref_prefix = "{bad}"\n')
+                self.assertIn("verify.ci_ref_prefix must be a branch name prefix that ends with - or /",
+                              " ".join(config.problems(config.load(self.root))))
 
     def test_remove_worktrees_must_be_a_boolean(self):
         self.write(MINIMAL + "[merge]\nremove_worktrees = false\n")

@@ -689,6 +689,52 @@ attempt. `artifact-verified` stays a Manager override. On GitHub `<name>` is a
 workflow file or name; on GitLab it is `pipeline` or a job name. A CI
 `test-verified` does not close a `schema` or `design-doc` task.
 
+**CI ref for a session verifier.** A change that only CI can prove, such as a
+change to `.github/workflows/ci.yml`, has no other run to judge before `close`,
+and `close` pushes the request only after a closing verdict. `run.py verify <id>
+--ci-ref` (with `--again` after a first verdict) pushes the worker's `Head` to a
+scratch branch, `<[verify] ci_ref_prefix><id>-<attempt>` (default `ci-<id>-<attempt>`),
+never to the request's branch, and prints a `ci-ref` line. CI runs there as on any
+push, so the branch prefix must match the push filter of the workflow; a
+workflow that runs only on `pull_request` never runs on a scratch branch (the
+verifier then says `check-only`), and the request's own run comes only after a
+closing verdict, because `close` pushes the request. Add a `push` trigger for the
+prefix, such as `on: { pull_request: {}, push: { branches: ["ci-**"] } }`, or
+override with other evidence. The verifier stays read only: run.py pushes, and the brief names the branch, the
+commit and the read-only commands that find the runs, wait for them and read a
+failed job (`gh run list --branch <ref> --commit <sha>`, `gh run watch`, `gh run
+view --log-failed`; `glab ci list --ref`, `glab ci status --live`, `glab ci
+trace` on GitLab; these glab flags are UNVERIFIED, like the other GitLab calls).
+The verifier runs them with the operator's `gh` or `glab` login; no allow rule
+is needed in auto mode for these read-only calls, and a verifier that cannot
+run them says `check-only` with the reason. The brief tells it to list the runs
+again for at least 5 minutes before it decides there is none (a run shows up
+late), and to run a watch in the background, or again, when it outlasts the
+10-minute limit of one Bash call. A green run that exercises the changed workflow or job is
+`test-verified`; a red run is `verify-failed` with a `blocking:` line per failed
+job; no run of that commit, or no run that exercises the change, is `check-only`
+with the reason. The verifier puts each run's URL under `Ran:`. The `ci_refs`
+meta lists the pushed branches; a passing `close` and `abandon` delete them on
+the remote (`ci-ref-deleted`), and a branch that cannot be deleted stays listed
+with a `warn` line that names the `git push --delete` to run. A `close` that does
+not pass keeps them. Once an attempt has a CI ref, every later `verify` of that
+attempt (`--again`, or the verify of a revision) pushes the new head to it
+without the flag, and the brief names the new commit; a revision brief also says
+that a run of any other commit proves nothing. `round --cancel` and every
+recorded merge delete the branches too. `--ci-ref` is for a `code` task (a CI run
+gives at most `test-verified`) and needs `merge.mode = "pr"`; with `verify_mode = ci:<name>` it is refused, because that
+mode already pushes the request's branch.
+
+**Check-only never closes.** No command accepts `check-only`: `close
+--verdict check-only` records it and the task stays in progress. The `next:`
+hint names the two ways on: `run.py verify <id> --again` for a stronger verdict
+(with `--ci-ref` for a `code` task in pr mode when only a CI run can prove the change), or `run.py
+close <id> --verdict test-verified --override-verifier "<why>" --ran "<CI run URL
+or artifact link>"` (`artifact-verified` for a `schema` or `design-doc` task).
+Guard mutations count as test evidence: a verifier that breaks the code under
+test on purpose, in a scratch copy, and sees every break turn the covering tests
+red reports `test-verified`, not `check-only`.
+
 **Override.** `run.py close <id> --verdict <level> --override-verifier "<why>"`
 changes a verifier's verdict and files the reason. An upgrade needs a run id or
 a link in `--ran`. `verify-failed` is never upgraded; it needs a fix round.
@@ -751,7 +797,7 @@ session's message or the end of `wait` wakes it.
 |---------|--------------|
 | `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. It refuses a task in a round (`round <id> --cancel` ends it). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
-| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`, in the task worktree (read only) or a folder of its own (`[verify] seat`; `seat-fallback` says why it took its own folder). In a revision it resumes the attempt's kept verifier with a revision brief, or starts a new one in the same seat when that verifier is gone. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
+| `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`, in the task worktree (read only) or a folder of its own (`[verify] seat`; `seat-fallback` says why it took its own folder). In a revision it resumes the attempt's kept verifier with a revision brief, or starts a new one in the same seat when that verifier is gone. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--ci-ref` (push the worker's `Head` to the scratch branch `ci-<id>-<attempt>` for the verifier to judge its CI runs; pr mode), `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
 | `revise <id>` | After a verifier session's `verify-failed` verdict with `blocking:` lines, files a `revise` row, sets `revision`, moves the phase to `running` with no verdict, files one `finding` steer that lists the blocking lines as `F1` to `Fn` and wakes the attempt's own worker session: a revision (see [Revisions](#revisions-fix-in-place)). Refused when no revision is possible (the message names the old path, `launch` or `abandon`), under a STOP order (exit 3), while the verifier still works, and on a full session cap. Prints `revised`, and `verifier-leftovers` when it stashed the verifier's changes. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
 | `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. In a round, a PASS with the same change as the verified head and no verifier verdict keeps the round's old verdict (a `Carried:` row). |
@@ -930,6 +976,7 @@ pattern.
 | `keep_sessions_minutes` | positive integer | `60` | How long the worker and the verifier stay idle after their newest row of the revision, waiting for a revision; then `record` stops them. |
 | `seat` | `"task"`, `"own"` | `"task"` | Where the verifier runs: `"task"`, the task worktree, read only, after the worker's turn; `"own"`, a `verify-<id>-<n>` folder, as before 0.24.0. |
 | `seat_wait_minutes` | positive integer | `5` | How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) before the verifier gets a folder of its own. In a revision, a new verifier then replaces the kept one. |
+| `ci_ref_prefix` | branch name prefix | `"ci-"` | The prefix of the scratch branch that `verify --ci-ref` pushes: `<prefix><id>-<attempt>`. ASCII letters, digits, `.`, `_`, `-` and `/`; no leading `-`, `.` or `/`, no `..` or `//`; it ends with `-` or `/`. Pick one that the push filter of your CI workflow matches. |
 
 ### `[scope]`
 
@@ -1491,7 +1538,7 @@ for the task's current `attempt` and the task has no `verdict`.
 ## Task metadata
 
 Task notes hold the purpose and acceptance criteria, following the Taskgraph
-skill. Metadata holds everything else, 41 keys:
+skill. Metadata holds everything else, 42 keys:
 
 | Key | Set by | Meaning |
 |-----|--------|---------|
@@ -1505,6 +1552,7 @@ skill. Metadata holds everything else, 41 keys:
 | `base` | first `launch`, `adopt` | The commit the task branch forked from. Written once; a retry keeps it. The verified change is `base..Head`. |
 | `target` | `launch --base <branch>`, `adopt --pr` | The branch the change merges into when it is not `merge.base`. |
 | `verdict`, `verdict_ref`, `tokens` | `close` | `artifact-verified`, `test-verified`, `check-only`, `verify-blocked`, or `verify-failed`, tied to the worker's `Head:` commit SHA (or to output checksums when the output is outside git). `verdict_ref` moves to the new head after an accepted rebase. `tokens` is `"<out>/<in>"`, from the session transcript under the task's worktree path (the session whose id is recorded for the current attempt); the cache counts are printed on the `tokens` event line. When there are none, that line names the reason (no session id, folder not found, no matching transcript); a full session id is also looked up in the other project folders under `~/.claude/projects`. |
+| `ci_refs` | `verify`, `close`, `abandon`, `round --cancel`, merge | A JSON list `[{"ref", "head", "attempt"}]` of the scratch branches that `verify --ci-ref` pushed for CI runs. A passing `close`, `abandon`, `round --cancel` and a recorded merge delete the branches on the remote and the key; one that could not be deleted stays listed. |
 | `pr` | publish, `adopt`, `repoint` | The request number (GitHub PR number, GitLab MR `iid`). On a repointed task, the request it follows. |
 | `pr_branch` | publish, `adopt`, `repoint` | The branch on the remote that the request's head is. Default `task-<id>`. |
 | `repointed_at`, `repointed_from`, `repointed_branch`, `repointed_pushed` | `repoint` | `repointed_at` marks a task that follows another task's request: when it was last repointed. The other three keep the task's own request (number, branch, pushed head) from the first repoint; a key the task had no value for is not written. The next `launch` moves them back to `pr`, `pr_branch` and `pushed` and removes all four. |
@@ -1564,6 +1612,7 @@ the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
 | `round`, `round_from`, `round_verdict`, `round_onto`, `rounds` | on the issue | `close`, `record` and `round --cancel` read them back, and another machine must see that a round runs. |
 | `revision`, `revisions` | on the issue | `record`, `verify` and `close` read `revision` back, and another machine must see that a revision runs; `revisions` is a plan key, like `risk`. |
 | `abandoned` | on the issue | The only marker of an abandoned task. |
+| `ci_refs` | on the issue | The scratch branches on the remote that a passing `close` or `abandon` must delete, from any machine. |
 | `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
 
 The plan keys (`scope`, `verify`, `verify_kind`, `verify_mode`, `tier`, `role`,
@@ -1645,6 +1694,10 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.26.0
+
+Version 0.27.0 (issue #140) adds a verify path for changes that only CI can prove and corrects the `check-only` hint; no lifecycle, phase or model change. The `next:` hint of a `check-only` verdict said "or accept it", but no command accepts `check-only`; it now names `run.py verify <id> --again` (with `--ci-ref` in pr mode) or `run.py close <id> --verdict test-verified --override-verifier "<why>" --ran "<CI run URL or artifact link>"`. New: `run.py verify <id> --ci-ref` pushes the worker's `Head` to the scratch branch `ci-<id>-<attempt>` (new key `[verify] ci_ref_prefix`), the verifier judges the CI runs there, later verifies of the attempt move the branch to the new head, and a passing `close`, `abandon`, `round --cancel` or a recorded merge deletes it (new meta `ci_refs`). The `code` verifier method now says that guard mutations which all turn the tests red are test evidence (`test-verified`, not `check-only`), and how to judge a CI-only change. No migration; a running verifier keeps the brief it started with.
 
 ### Upgrading from 0.25.1
 

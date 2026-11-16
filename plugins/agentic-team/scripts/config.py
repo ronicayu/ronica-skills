@@ -60,6 +60,7 @@ import datetime
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -109,6 +110,10 @@ DISPOSABLE_DEFAULT = (
     ".agentic-team/", ".agentic-team-scratch/",
 )
 
+
+# A prefix that makes `<prefix><id>-<attempt>` a valid branch name (git check-ref-format --branch), kept simple: ASCII
+# letters, digits, `.`, `_`, `-` and `/`, no leading `-`, `.` or `/`, and an end of `-` or `/`.
+REF_PREFIX = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]*[-/]")
 
 TASKGRAPH_TOML = ".taskgraph.toml"
 # The meta keys that run.py writes as run-time state, by their class on the Taskgraph GitHub backend: "local" stays in
@@ -176,6 +181,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "keep_sessions_minutes": ("posint", 60),
         "seat": ("choice:task,own", "task"),
         "seat_wait_minutes": ("posint", 5),
+        "ci_ref_prefix": ("refprefix", "ci-"),
     },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
@@ -200,6 +206,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
 TYPE_NAMES = {
     "str": "a string",
     "nonempty": "a non-empty string",
+    "refprefix": "a branch name prefix that ends with - or /",
     "list": "a list of strings",
     "patterns": "a list of path patterns",
     "adjacent": "a list of adjacent-change kinds",
@@ -386,6 +393,9 @@ def type_ok(kind, value):
         return isinstance(value, str)
     if kind == "nonempty":
         return isinstance(value, str) and bool(value.strip())
+    if kind == "refprefix":
+        return (isinstance(value, str) and bool(REF_PREFIX.fullmatch(value))
+                and not any(bad in value for bad in ("..", "//", "/.", "./", ".lock/")))
     if kind == "list":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "patterns":

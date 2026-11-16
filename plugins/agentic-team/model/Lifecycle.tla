@@ -231,7 +231,7 @@ ArrivedNext(st) ==                                                      \* recor
   ELSE RetryNextOld                                                     \* line 3544: "answer it and ..."
 UnclosedNext(v) ==                                                      \* unclosed_next, lines 923-934
   IF v = "verify-failed" THEN (IF RevisionOK THEN "revise" ELSE RetryNextOld)   \* #127 "revise: ...", else "fix round: ..."
-  ELSE IF v = "check-only" THEN "verifyAgain"                           \* "verify --again ..., or accept it"
+  ELSE IF v = "check-only" THEN "verifyAgain"                           \* "verify --again ..., or close ... --override-verifier" (#140)
   ELSE "close"
 \* The unknown hint, lines 3859-3863 (#58): `claude logs <sid>; if it has stopped working, run.py stop <id>,
 \* then run.py record and run.py launch <id>`; at the cap `run.py abandon <id> unknown (...), or run.py stop <id>,
