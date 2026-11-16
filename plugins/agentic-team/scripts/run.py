@@ -237,6 +237,8 @@ WAIT_HOST_INTERVAL = 300  # seconds between two reads of the code host in pr mod
 WAKE_NEXT = "run.py record, then run.py wait again while work is in flight"
 CATCH_UP_POLLS = 20  # reads of the request after the host took a rebase, at most
 CATCH_UP_WAIT = 3  # seconds between two of those reads
+AFTER_REBASE_TIMEOUT = 600  # seconds that [merge] after_rebase runs at most
+AFTER_REBASE_TAIL = 5  # lines of its output that an event keeps
 
 
 def poll_pause(seconds):
@@ -6215,11 +6217,13 @@ def publish(run, task, branch, head, catch_up=False):
             if not seen.stdout.split():
                 raise Refused(f"remote branch {remote}/{pr_branch} is gone (the host may delete it after a merge or a close); "
                               f"unset the pr, pr_branch and pushed meta of #{tid} to publish again")
-            push_refused(run, task, pushed, why)
-            return False
-        run.set_meta(task, pushed=head)
-        run.emit("pushed", tid, attempt, None, f"{head[:7]} to {remote}/{pr_branch}", "run.py record")
-        pushed_now = True
+            if not push_over_foreign(run, task, branch, head, pushed, why):
+                return False
+            pushed_now = meta["pushed"] == head
+        else:
+            run.set_meta(task, pushed=head)
+            run.emit("pushed", tid, attempt, None, f"{head[:7]} to {remote}/{pr_branch}", "run.py record")
+            pushed_now = True
     target, number = run.target(task), meta.get("pr")
     if not number:
         found = host.find_pr(pr_branch)
@@ -6321,17 +6325,76 @@ def host_catch_up(run, task, branch, head, p):
              f"run.py record later; then run.py close {tid}")
 
 
+def after_rebase_check(run, cwd):
+    """(True, "") when [merge] after_rebase is not set or exits 0 in `cwd`, else (False, why): the exit code and the
+    last lines of its output."""
+    command = run.config["merge"]["after_rebase"]
+    if not command:
+        return True, ""
+    try:
+        out = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True, errors="replace",
+                             stdin=subprocess.DEVNULL, timeout=AFTER_REBASE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"`{command}` ran longer than {AFTER_REBASE_TIMEOUT} seconds"
+    if out.returncode == 0:
+        return True, ""
+    lines = (out.stdout + out.stderr).strip().splitlines()[-AFTER_REBASE_TAIL:]
+    return False, f"`{command}` exited {out.returncode}" + (": " + " | ".join(lines) if lines else "")
+
+
+def check_head(run, task, sha, merge=None):
+    """after_rebase for a commit that no task worktree holds: it runs in a temporary detached worktree of `sha`, which
+    is removed again. With `merge`, that commit is merged into `sha` first, without a commit: the tree a rebase
+    onto `sha` would give. Returns (ok, why)."""
+    if not run.config["merge"]["after_rebase"]:
+        return True, ""
+    path = os.path.join(run.root, ".claude", "worktrees", f"after-rebase-{task['id']}")
+    shutil.rmtree(path, ignore_errors=True)
+    run.git("worktree", "prune", check=False)
+    added = run.git("worktree", "add", "-q", "--detach", path, sha, check=False)
+    if added.returncode != 0:
+        return False, f"git worktree add failed: {first_line(added.stderr)}"
+    try:
+        if merge:
+            merged = run.git("merge", "--no-commit", "--no-ff", merge, cwd=path, check=False)
+            if merged.returncode != 0:
+                return False, f"git merge failed: {first_line(merged.stderr or merged.stdout)}"
+        return after_rebase_check(run, path)
+    finally:
+        run.git("worktree", "remove", "--force", path, check=False)
+        shutil.rmtree(path, ignore_errors=True)
+        run.git("worktree", "prune", check=False)
+
+
+def fetch_head(run, task, new):
+    """The empty string when the request branch is fetched and holds `new`, else why not. This does not touch the
+    task worktree."""
+    meta, remote = task["meta"], run.config["merge"]["remote"]
+    pr_branch = meta.get("pr_branch") or f"task-{task['id']}"
+    fetched = run.git("fetch", remote, f"refs/heads/{pr_branch}", check=False)
+    if fetched.returncode != 0:
+        return first_line(fetched.stderr)
+    return "" if commit_of(run, new) else f"{new[:7]} is not on {remote}/{pr_branch}"
+
+
+def move_head(run, task, branch, new):
+    """verdict_ref and pushed move to `new`, a head that carries the same change. A task branch that still holds the
+    verified head is kept as caught_up_from."""
+    meta = task["meta"]
+    tip = commit_of(run, f"refs/heads/{branch}")
+    keep = {"caught_up_from": tip} if tip and tip == commit_of(run, str(meta.get("verdict_ref") or "")) else {}
+    run.set_meta(task, verdict_ref=new, pushed=new, **keep)
+
+
 def take_host_head(run, task, branch, new, p):
     """The host rebased the request from the pushed head to `new`. Fetch the request branch; this does not touch
-    the task worktree. Keep `new` when it carries the same change: verdict_ref and pushed move to it. Else pushed
-    stays, so record says pr-changed and never merges it."""
+    the task worktree. Keep `new` when it carries the same change and passes [merge] after_rebase: verdict_ref and
+    pushed move to it. Else pushed stays, so record says pr-changed and never merges it."""
     tid, meta = task["id"], task["meta"]
-    attempt, remote = wanted_attempt(task) or 1, run.config["merge"]["remote"]
+    attempt = wanted_attempt(task) or 1
     label, target, old = run.host().label(p.number), p.base_branch, meta["pushed"]
-    pr_branch = meta.get("pr_branch") or f"task-{tid}"
-    fetched = run.git("fetch", remote, f"refs/heads/{pr_branch}", check=False)
-    if fetched.returncode != 0 or not commit_of(run, new):
-        why = first_line(fetched.stderr) if fetched.returncode != 0 else f"{new[:7]} is not on {remote}/{pr_branch}"
+    why = fetch_head(run, task, new)
+    if why:
         run.emit("pr-rebased", tid, attempt, None, f"{label} head is {new[:7]}: the host rebased {old[:7]}; not checked: {why}",
                  f"fix the cause, then run.py close {tid}")
         return
@@ -6343,11 +6406,68 @@ def take_host_head(run, task, branch, new, p):
                  f"pushed stays {old[:7]}, so run.py does not merge it",
                  decision_text(f"Rebase {branch} onto {target} by hand for {label}", task))
         return
-    tip = commit_of(run, f"refs/heads/{branch}")
-    keep = {"caught_up_from": tip} if tip and tip == commit_of(run, str(meta.get("verdict_ref") or "")) else {}
-    run.set_meta(task, verdict_ref=new, pushed=new, **keep)
+    ok, bad = check_head(run, task, new)
+    if not ok:
+        run.emit("conflict", tid, attempt, None,
+                 f"the host rebased {label} onto {target} at {new[:7]}, and after_rebase failed: {bad}; "
+                 f"pushed stays {old[:7]}, so run.py does not merge it",
+                 conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
+        return
+    move_head(run, task, branch, new)
     run.emit("rebased", tid, attempt, None, f"onto {target} at {new[:7]} on the host; same change as {old[:7]}",
              "run.py record later; the host's CI tests the new head")
+
+
+def foreign_rebase_of(run, task, new):
+    """True when someone other than run.py moved the request branch from the pushed head to `new` (fetched here), and
+    `new` carries the same change as the pushed head."""
+    return not fetch_head(run, task, new) and same_change(run, task, task["meta"]["pushed"], new)[0]
+
+
+def accept_foreign(run, task, branch, new):
+    """Take the rebase of someone else (a merge queue, a person) that foreign_rebase_of found: when [merge] after_rebase
+    passes on `new`, verdict_ref and pushed move to it and the result is "taken"; else pushed stays, a conflict line
+    says why and the result is ""."""
+    tid, meta = task["id"], task["meta"]
+    attempt, host = wanted_attempt(task) or 1, run.host()
+    old, number = meta["pushed"], meta.get("pr")
+    label = host.label(int(number)) if number else f"{run.config['merge']['remote']}/{meta.get('pr_branch') or f'task-{tid}'}"
+    target = run.target(task)
+    ok, bad = check_head(run, task, new)
+    if not ok:
+        run.emit("conflict", tid, attempt, None,
+                 f"{label} was rebased by someone else onto {target} at {new[:7]}, and after_rebase failed: {bad}; "
+                 f"pushed stays {old[:7]}, so run.py does not merge it",
+                 conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
+        return ""
+    move_head(run, task, branch, new)
+    run.emit("rebased", tid, attempt, None,
+             f"{label} was rebased by someone else onto {target} at {new[:7]}; same change as {old[:7]}, accepted",
+             "run.py record later; the host's CI tests the new head")
+    return "taken"
+
+
+def push_over_foreign(run, task, branch, head, pushed, why):
+    """The push of `head` over `pushed` failed and the remote branch exists. When it moved to a rebase of the same
+    change by someone else: if `head` carries that change too, take their head (accept_foreign); else push `head`
+    again with the lease at theirs. Returns "taken", "pushed", or "" when run.py stopped (push_refused or a failed
+    after_rebase said why)."""
+    meta, remote = task["meta"], run.config["merge"]["remote"]
+    pr_branch = meta.get("pr_branch") or f"task-{task['id']}"
+    seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False)
+    at = seen.stdout.split()[0] if seen.returncode == 0 and seen.stdout.split() else ""
+    if at and at != pushed and foreign_rebase_of(run, task, at):
+        if same_change(run, task, pushed, head)[0]:
+            return accept_foreign(run, task, branch, at)
+        ok, why = run.host().push(f"refs/heads/{branch}", pr_branch, at)
+        if ok:
+            run.set_meta(task, pushed=head)
+            run.emit("pushed", task["id"], wanted_attempt(task) or 1, None,
+                     f"{head[:7]} to {remote}/{pr_branch}, over the rebase of someone else at {at[:7]}", "run.py record")
+            return "pushed"
+        pushed = at
+    push_refused(run, task, pushed, why)
+    return ""
 
 
 def rebase_branch(run, task, branch, head, p):
@@ -6381,11 +6501,18 @@ def rebase_branch(run, task, branch, head, p):
         run.emit("changed", tid, attempt, None, f"the rebase onto {target} changed the diff ({reason}); restored {head[:7]}",
                  decision_text(f"Rebase {branch} onto {target} by hand for {label}", task))
         return
+    ok, bad = after_rebase_check(run, wt)
+    if not ok:
+        run.git("reset", "--keep", head, cwd=wt)
+        run.emit("conflict", tid, attempt, None,
+                 f"after_rebase failed after rebasing {branch} onto {remote}/{target}: {bad}; restored {head[:7]}",
+                 conflict_next(run, task, decision_text(f"Rebase {branch} onto {target} for {label}", task)))
+        return
     run.set_meta(task, verdict_ref=new)
     run.emit("rebased", tid, attempt, None, f"onto {remote}/{target} at {new[:7]}; same change as {head[:7]}")
     ok, why = host.push(f"refs/heads/{branch}", meta["pr_branch"], meta["pushed"])
     if not ok:
-        push_refused(run, task, meta["pushed"], why)
+        push_over_foreign(run, task, branch, new, meta["pushed"], why)
         return
     run.set_meta(task, pushed=new)
     run.emit("pushed", tid, attempt, None, f"{new[:7]} to {remote}/{meta['pr_branch']}")
@@ -6420,14 +6547,11 @@ def pr_status(run, snap, task, p):
     elif p.head != pushed and meta.get("host_rebase") == pushed:
         run.emit("pr-rebased", tid, None, None, f"{label} head is {p.head[:7]}: the host rebased {pushed[:7]}; not checked yet",
                  f"run.py close {tid} (checks that the change is the same and records the new head)")
+    elif p.head != pushed and foreign_rebase_of(run, task, p.head):
+        accept_foreign(run, task, task_branch(tid), p.head)
     elif p.head != pushed:
-        lost = ("host_rebase" in run.local_meta and run.config["merge"]["catch_up"] == "host"
-                and "host_rebase" not in meta)
         run.emit("pr-changed", tid, None, None, f"{label} head is {p.head[:7]}, not the pushed {pushed[:7]}; not merged by run.py",
-                 f"the operator decides: reset the branch to {pushed[:7]} and push, or merge by hand and run.py merged {tid} --by operator"
-                 + (f"; if run.py asked the host to rebase it and this machine's Taskgraph cache lost the local "
-                    f"`host_rebase` meta: tg edit {tid} --meta host_rebase={pushed}, then run.py close {tid} checks the "
-                    "host's head" if lost else ""))
+                 f"the operator decides: reset the branch to {pushed[:7]} and push, or merge by hand and run.py merged {tid} --by operator")
     elif p.merge_state == "UNKNOWN":
         run.emit("pr-pending", tid, None, None, f"{label} state {p.raw_state}", "run.py record later")
     elif p.merge_state == "DRAFT":
@@ -6636,10 +6760,11 @@ def target_name(run, task):
             or run.git("branch", "--show-current", check=False).stdout.strip() or "HEAD")
 
 
-def conflicts_with_target(run, task, head, p=None):
+def conflicts_with_target(run, task, head, p=None, checked=False):
     """The `rebase` round kind: (True, onto, why) when the change at `head` conflicts with the task's target, as the host
     says (request `p` is DIRTY) or as `git merge-tree --write-tree <target> <head>` finds; else (False, onto, why). `onto`
-    is the target commit: the fetched remote branch in pr mode, the local target branch in local mode."""
+    is the target commit: the fetched remote branch in pr mode, the local target branch in local mode. With `checked`, a
+    change that merges cleanly but fails [merge] after_rebase on the merged tree counts as a conflict too."""
     name = target_name(run, task)
     onto = commit_of(run, run.target_ref(task) if run.pr_mode else f"refs/heads/{name}")
     if not onto:
@@ -6653,10 +6778,18 @@ def conflicts_with_target(run, task, head, p=None):
         return True, onto, f"it conflicts with {name} at {onto[:7]} (git merge-tree)"
     if out.returncode != 0:
         return False, onto, f"git merge-tree failed: {first_line(out.stderr) or 'no output'}"
+    if checked:
+        ok, bad = check_head(run, task, onto, merge=head)
+        if not ok:
+            return True, onto, f"{head[:7]} merges into {name} at {onto[:7]} without a conflict, but after_rebase failed: {bad}"
     return False, onto, f"{head[:7]} merges into {name} at {onto[:7]} with no conflict"
 
 
-ROUND_KINDS = {"rebase": conflicts_with_target}
+def rebase_round(run, task, head, p=None):
+    return conflicts_with_target(run, task, head, p, checked=True)
+
+
+ROUND_KINDS = {"rebase": rebase_round}
 
 
 def round_next(run, task):

@@ -7993,21 +7993,172 @@ class PrTest(Base):
         self.assertNotIn("host_rebase", meta)
         self.assertEqual(len(self.update_calls()), 1)
 
-    def test_a_host_rebase_whose_local_host_rebase_meta_was_lost_says_how_to_take_it(self):
-        env, tg = self.github_store()
+    # --- 0.27.1: a rebase by someone else with the same change (#138), and [merge] after_rebase (#139)
+
+    def foreign_push(self, name="stranger.txt"):
+        """Someone else adds a commit on top of origin's task-1. Returns its sha."""
+        other = os.path.join(self.dir, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=other)
+        self.git("checkout", "-q", "-b", "task-1", "origin/task-1", cwd=other)
+        sha = self.commit_file(name, "x\n", cwd=other)
+        self.git("push", "-q", "origin", "task-1", cwd=other)
+        return sha
+
+    def after_rebase(self, command, catch_up="host"):
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\ncatch_up = "{catch_up}"\nafter_rebase = \'{command}\'\n')
+
+    def no_check_worktree(self):
+        self.assertNotIn("after-rebase", self.git("worktree", "list"))
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude", "worktrees", "after-rebase-1")))
+
+    def by_someone_else(self, events):
+        return [e for e in self.named(events, "rebased") if "by someone else" in e["detail"]]
+
+    @both_hosts
+    def test_138_close_accepts_a_rebase_of_the_same_change_by_someone_else(self):
         task, wt, head = self.published()
         self.advance_main()
-        self.fake_host(head=head, merge_state="BEHIND", extra=self.update_answer("failed"))
-        self.one(self.events("close", str(task)), "pr-behind")
-        self.tg("edit", str(task), "--unset-meta", "host_rebase")  # the cache that held it is gone
+        new = self.host_rebases()  # a merge queue rebases the request
+        self.git("fetch", "-q", "origin")
+        self.git("rebase", "-q", "origin/main", cwd=wt)  # and the branch here moves too: close has a head to push
+        self.git("commit", "-q", "--amend", "-m", "reworded", cwd=wt)  # to another commit than theirs
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        taken = self.by_someone_else(events)
+        self.assertEqual(len(taken), 1)
+        self.assertIn(f"rebased by someone else onto main at {new[:7]}", taken[0]["detail"])
+        self.assertIn(f"same change as {head[:7]}", taken[0]["detail"])
+        self.assertEqual(self.named(events, "push-refused"), [])
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["verdict_ref"], self.remote_sha()), (new, new, new))
+        self.assertEqual(len(self.create_calls()), 1)
+
+    @both_hosts
+    def test_138_close_pushes_a_new_head_over_a_rebase_of_old_content(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
+        self.ok("verify", str(task))
+        self.ok("close", str(task))
+        self.advance_main()
+        new = self.host_rebases()
+        self.ok("launch", str(task))
+        head2 = self.wt_commit(wt, "two.txt")
+        self.pass_report(task, attempt=2, wt=wt, head=head2)
+        self.agents(self.finished("task-1"), self.finished("task-1", 2))
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
+        self.assertIn(f"{head2[:7]} to origin/task-1, over the rebase of someone else at {new[:7]}", self.one(events, "pushed")["detail"])
+        self.assertEqual(self.named(events, "push-refused"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head2, head2))
+
+    @both_hosts
+    def test_138_a_push_over_a_changed_branch_is_still_refused(self):
+        task, wt, head = self.published()
+        self.advance_main()
+        self.git("fetch", "-q", "origin")
+        self.git("rebase", "-q", "origin/main", cwd=wt)
+        stranger = self.foreign_push()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.assertIn(f"origin/task-1 is not at {head[:7]}; someone else pushed", self.one(events, "push-refused")["detail"])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, stranger))
+
+    @both_hosts
+    def test_138_record_accepts_a_same_change_rebase_and_refuses_a_changed_one(self):
+        task, wt, head = self.published()
+        self.advance_main()
         new = self.host_rebases()
         self.fake_host(head=new, merge_state="UNKNOWN")
-        self.assertNotIn("host_rebase", self.one(self.events("record"), "pr-changed")["next"])  # SQLite: never lost
-        line = self.one(self.events("record", env=env, tg=tg), "pr-changed")
-        self.assertIn(f"tg edit 1 --meta host_rebase={head}, then run.py close 1 checks the host's head", line["next"])
-        self.tg("edit", str(task), "--meta", f"host_rebase={head}")
-        self.one(self.events("close", str(task), env=env, tg=tg), "rebased")
+        events = self.events("record")
+        self.assertEqual(len(self.by_someone_else(events)), 1)
+        self.assertEqual(self.named(events, "pr-changed"), [])
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["verdict_ref"]), (new, new))
+        stranger = self.foreign_push()
+        self.fake_host(head=stranger, merge_state="UNKNOWN")
+        line = self.one(self.events("record"), "pr-changed")
+        self.assertIn(f"head is {stranger[:7]}, not the pushed {new[:7]}", line["detail"])
         self.assertEqual(self.meta(task)["pushed"], new)
+
+    @both_hosts
+    def test_139_a_passing_check_runs_in_the_rebased_worktree_and_changes_nothing(self):
+        task, wt, head = self.published()
+        log = os.path.join(self.dir, "check.log")
+        self.after_rebase(f"test -f moved.txt && pwd >> {log}", catch_up="local")
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.one(events, "rebased")
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (new, new))
+        with open(log) as fh:
+            self.assertEqual(os.path.realpath(fh.read().strip()), os.path.realpath(wt))
+
+    @both_hosts
+    def test_139_a_failing_check_after_a_local_rebase_restores_the_head(self):
+        task, wt, head = self.published()
+        self.after_rebase("echo boom >&2; exit 3", catch_up="local")
+        self.advance_main()
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        conflict = self.one(events, "conflict")
+        self.assertIn("after_rebase failed after rebasing worktree-task-1 onto origin/main: `echo boom >&2; exit 3` "
+                      f"exited 3: boom; restored {head[:7]}", conflict["detail"])
+        self.assertIn("run.py round 1 rebase", conflict["next"])
+        self.assertEqual(self.named(events, "rebased") + self.named(events, "pushed"), [])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["verdict_ref"], self.remote_sha()), (head, head, head))
+
+    @both_hosts
+    def test_139_a_host_rebase_is_checked_in_a_temporary_worktree_that_goes_away(self):
+        task, wt, head = self.published()
+        log = os.path.join(self.dir, "check.log")
+        self.after_rebase(f"test -f moved.txt && pwd >> {log}")
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=head, merge_state="BEHIND", then={"head": new, "merge_state": "UNKNOWN"},
+                       extra=self.update_answer("ok"))
+        self.one(self.events("close", str(task)), "rebased")
+        self.assertEqual((self.meta(task)["pushed"], self.meta(task)["verdict_ref"]), (new, new))
+        with open(log) as fh:
+            self.assertEqual(os.path.basename(fh.read().strip()), "after-rebase-1")
+        self.no_check_worktree()
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+
+    @both_hosts
+    def test_139_a_failing_check_refuses_a_host_rebase(self):
+        task, wt, head = self.published()
+        self.after_rebase("test ! -f moved.txt")
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=head, merge_state="BEHIND", then={"head": new, "merge_state": "UNKNOWN"},
+                       extra=self.update_answer("ok"))
+        conflict = self.one(self.events("close", str(task)), "conflict")
+        self.assertIn(f"the host rebased {self.label()} onto main at {new[:7]}, and after_rebase failed: "
+                      f"`test ! -f moved.txt` exited 1; pushed stays {head[:7]}", conflict["detail"])
+        self.assertIn("run.py round 1 rebase", conflict["next"])
+        meta = self.meta(task)
+        self.assertEqual((meta["pushed"], meta["verdict_ref"]), (head, head))
+        self.assertNotIn("host_rebase", meta)
+        self.no_check_worktree()
+
+    @both_hosts
+    def test_139_a_failing_check_refuses_a_rebase_by_someone_else(self):
+        task, wt, head = self.published()
+        self.after_rebase("test ! -f moved.txt")
+        self.advance_main()
+        new = self.host_rebases()
+        self.fake_host(head=new, merge_state="UNKNOWN")
+        events = self.events("record")
+        conflict = self.one(events, "conflict")
+        self.assertIn(f"was rebased by someone else onto main at {new[:7]}, and after_rebase failed", conflict["detail"])
+        self.assertEqual(self.by_someone_else(events), [])
+        self.assertEqual(self.meta(task)["pushed"], head)
+        self.no_check_worktree()
 
     @both_hosts
     def test_103_a_push_that_a_pre_push_hook_refuses_is_push_failed_with_the_hook_line(self):
@@ -11721,6 +11872,18 @@ class RoundTest(Base):
         self.assertIn(f"This change passed with verdict test-verified at `{head}`.", brief)
         self.assertNotIn("{{ROUND_", brief)
         self.assertIn("task-1-2 (rebase round)", self.status_sections()["In flight"])
+
+    @both_hosts
+    def test_139_a_failing_check_makes_a_rebase_round_though_git_finds_no_conflict(self):
+        task, wt, head, onto = self.waiting(conflict=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test -f other.txt\'\n')
+        self.assertIn("with no conflict; run.py record follows the request", self.refused("round", str(task), "rebase"))
+        self.write_config(f'[merge]\nmode = "pr"\nhost = "{self.host}"\nafter_rebase = \'test ! -f other.txt\'\n')
+        event = self.started(task)
+        self.assertIn("rebase round 1 of 3", event["detail"])
+        self.assertEqual(self.git("worktree", "list").count("after-rebase"), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude", "worktrees", f"after-rebase-{task}")))
 
     def test_119_round_refusals(self):
         task, wt, head, onto = self.waiting()
