@@ -559,7 +559,14 @@ the operator's standing permission for `run.py` to push task branches to
    hook, credentials, or a protected branch: `push-failed`, with git's line. If
    someone else moved the remote branch while our head stayed, `record` prints
    `pr-changed`; `push-refused` appears when our head moved too, with where the
-   remote branch is and git's line.
+   remote branch is and git's line. One case is accepted: someone else (a
+   merge-queue manager, a person) rebased the request branch and it carries
+   the same change as `pushed` (#138). `record` and `close` fetch it and, in
+   place of `pr-changed`, move `verdict_ref` and `pushed` to it (`rebased ...
+   by someone else`). When `close` has a new head to push (a new attempt), it
+   pushes over that rebase, with the lease set to the head it found: the
+   rebase held only old content. A different change is refused as before.
+   `[merge] after_rebase` (below) also runs on an accepted rebase.
 5. **Round.** `run.py round <id> rebase` (#119) starts a new attempt of a task
    that waits for its merge and whose change conflicts with its target, on the
    same branch and the same request. It takes a task with
@@ -924,6 +931,7 @@ profile.
 | `base` | string | `""` | The branch requests target. `""` means the host's default branch, asked once per `run.py` command. A task launched with `--base <branch>` targets that branch instead (meta `target`). |
 | `method` | `"merge"`, `"squash"`, `"rebase"` | `"merge"` | How `record` merges. GitHub: `gh pr merge --merge\|--squash\|--rebase`. GitLab: the project's merge method setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two values add nothing. |
 | `catch_up` | `"host"` or `"local"` | `"host"` | How `close` catches up a request that is behind its target, in `pr` mode. `host`: it asks the host to rebase the request (GitHub `gh pr update-branch --rebase`, GitLab `PUT merge_requests/<iid>/rebase`) and pushes nothing; a host that cannot rebase or refuses this user falls back to `local`. `local`: it rebases the branch in its idle worktree and pushes it under the lease. |
+| `after_rebase` | string | `""` | A shell command that checks the tree after every rebase that `run.py` does, takes from the host, or accepts from someone else, and on a rebase onto a newer target that `close` is about to push (the result of a rebase round or of a rebase by hand). Empty means no check. It runs in its own process group with a 10-minute timeout; an event keeps the last 5 lines of its output. A timeout, and a problem on this machine (a temporary worktree that cannot be made), are not a failure: nothing is accepted, pushed or started, a line says the check could not run, and the result is not kept. A pass or a failure is kept per (head, target, command) in `.agentic-team/after-rebase-cache.json`, so `record` runs the command once for each head. A non-zero exit counts as a conflict: `run.py round <id> rebase` starts a round when the merge of the head into the target passes `git merge-tree` but fails the check (the check runs in a temporary worktree of that merge); a local catch-up rebase (`catch_up = "local"`) runs it in the task worktree and, on a failure, puts the old head back and prints `conflict`; a rebase taken from the host or from someone else (#138) runs it in a temporary detached worktree of the new head under `.claude/worktrees/after-rebase-<id>`, which `run.py` always removes, and on a failure `pushed` stays and `conflict` is printed. Example: `after_rebase = 'test "$(alembic heads \| wc -l)" -eq 1'` fails a rebase that leaves two Alembic heads. |
 | `remove_worktrees` | boolean | `true` | `true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no session, process or container uses them, a clean tree whose ignored files are all disposable, a merged `HEAD`); see the cleanup section. `false`: it removes nothing, and prints `kept <folder>: merge.remove_worktrees is false` once, at the merge. |
 | `disposable` | list of patterns | `[]` | Ignored paths that `run.py` may delete with a merged worktree, added to the default list. An entry `"!<pattern>"` turns off one default pattern. See [Disposable patterns](#disposable-patterns). |
 
@@ -1694,6 +1702,10 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.27.0
+
+Version 0.27.1 (issues #138 and #139) accepts a rebase by someone else and adds a project check after every rebase; no lifecycle, phase or model change. A request branch that a merge-queue manager rebased with the same change no longer ends in `push-refused` (`close`) or `pr-changed` (`record`): `run.py` accepts the new head, or pushes a new head over it. New optional key `[merge] after_rebase = "<shell command>"`; empty or absent keeps the 0.27.0 behaviour. See the `after_rebase` row of the `[merge]` table. The `pr-changed` hint no longer mentions the lost local `host_rebase` meta, because `record` now takes that rebase when the change is the same. No migration. A new agent type that a release adds (for example `agentic-team:dependency-check`) loads only after a Claude session restart, so restart it after the update.
 
 ### Upgrading from 0.26.0
 

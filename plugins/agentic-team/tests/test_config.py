@@ -72,9 +72,10 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(cfg["models"]["verifier"])
         self.assertEqual(cfg["constraints"]["forbidden"], [])
         self.assertEqual(cfg["merge"], {"mode": "local", "host": "auto", "remote": "origin", "base": "", "method": "merge",
-                                       "catch_up": "host", "draft": False, "remove_worktrees": True, "disposable": []})
-        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "draft",
-                                             "remove_worktrees", "disposable"})
+                                       "catch_up": "host", "after_rebase": "", "draft": False, "remove_worktrees": True,
+                                       "disposable": []})
+        self.assertEqual(set(cfg["merge"]), {"mode", "host", "remote", "base", "method", "catch_up", "after_rebase",
+                                             "draft", "remove_worktrees", "disposable"})
         self.assertEqual(cfg["verify"], {"kind": "code", "revisions_per_attempt": 2, "keep_sessions_minutes": 60, "seat": "task",
                                          "seat_wait_minutes": 5, "ci_ref_prefix": "ci-"})
         self.assertEqual(cfg["roles"], {"default": ""})
@@ -202,6 +203,13 @@ class ConfigTest(unittest.TestCase):
                 self.write(MINIMAL + f'[verify]\nci_ref_prefix = "{bad}"\n')
                 self.assertIn("verify.ci_ref_prefix must be a branch name prefix that ends with - or /",
                               " ".join(config.problems(config.load(self.root))))
+
+    def test_after_rebase_is_a_string_and_empty_by_default(self):
+        self.write(MINIMAL + '[merge]\nafter_rebase = "test -f ok"\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "merge.after_rebase")[:2], (0, "test -f ok\n"))
+        self.write(MINIMAL + "[merge]\nafter_rebase = 3\n")
+        self.assertEqual(config.problems(config.load(self.root)), ["merge.after_rebase must be a string, not 3"])
 
     def test_remove_worktrees_must_be_a_boolean(self):
         self.write(MINIMAL + "[merge]\nremove_worktrees = false\n")

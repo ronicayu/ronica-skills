@@ -171,6 +171,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "base": ("str", ""),
         "method": ("choice:merge,squash,rebase", "merge"),
         "catch_up": ("choice:host,local", "host"),
+        "after_rebase": ("str", ""),
         "draft": ("bool", False),
         "remove_worktrees": ("bool", True),
         "disposable": ("patterns", []),
