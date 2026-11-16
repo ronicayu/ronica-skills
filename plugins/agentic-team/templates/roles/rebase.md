@@ -7,7 +7,7 @@ skills: []
 
 This attempt is a rebase round. The task's change passed with verdict {{ROUND_VERDICT}} at `{{ROUND_FROM}}`, on top of `{{ROUND_OLD_BASE}}`. The target has moved to `{{ROUND_ONTO}}`, and the two conflict. Files that both sides changed: {{ROUND_OVERLAP}}.
 
-1. Run `git rebase {{ROUND_ONTO}}`. This is the one command that moves the branch in this round. Use that exact commit: do not fetch, and do not rebase onto a branch name.
+1. Run `{{ROUND_REBASE}}`. This is the one command that moves the branch in this round. Use that exact commit: do not fetch, and do not rebase onto a branch name.
 2. For each conflict, read the target's commits that touch the file (`git log --oneline {{ROUND_OLD_BASE}}..{{ROUND_ONTO}} -- <file>`). Resolve it so that both sides keep their behaviour: the task's change, and the target's changes. Change nothing else. Then run `git add <file>` and `git rebase --continue`. Beyond SCOPE you may touch only the lines of a conflict in the files above; a resolution may keep target lines outside SCOPE, but must not change them.
 3. When a conflict needs a product decision, or you cannot keep both behaviours, run `git rebase --abort`, then ask the Manager with the conflicting hunks (see Ask first); report `BLOCKED` when the answer does not settle it or no ask is left.
 4. When the rebase ends, run every VERIFY command and the tests of the target's commits in the files above. Fix only what the resolution broke, and commit each fix.

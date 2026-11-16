@@ -7757,19 +7757,25 @@ class PrTest(Base):
 
     # --- 0.27.2: a stacked base that merged under other SHAs is not published (#129)
 
-    def stacked_task(self):
-        """A task launched with --base on a two-commit dependency branch, with one own commit, not closed yet.
-        Returns (task, wt, head, dep_commits)."""
+    def stacked_task(self, with_dep=False, **meta):
+        """A task launched with --base on a two-commit dependency branch, with one own commit, not closed yet. With
+        `with_dep` a task before it is that dependency (merged, holding the branch). Returns (task, wt, head, dep_commits)."""
         self.pr_config()
         self.git("checkout", "-q", "-b", "dep")
         first = self.commit_file("dep.txt", "work\n")
         second = self.commit_file("dep2.txt", "more\n")
         self.git("checkout", "-q", "main")
-        task = self.running_task(base=json.dumps(second))
-        wt = self.worktree("task-1", base="dep")
+        deps = ()
+        if with_dep:
+            dep_task = self.add_task("Dependency", start=True, verdict_ref=second, pushed=second,
+                                     merged_at="2026-01-01T00:00:00Z")
+            self.tg("done", str(dep_task))
+            deps = (dep_task,)
+        task = self.running_task(base=json.dumps(second), depends=deps, **meta)
+        wt = self.worktree(f"task-{task}", base="dep")
         head = self.wt_commit(wt, "out.txt")
         self.pass_report(task, wt=wt, head=head)
-        self.agents(self.finished("task-1"))
+        self.agents(self.finished(f"task-{task}"))
         return task, wt, head, (first, second)
 
     def close_stacked(self, task, head):
@@ -7865,6 +7871,133 @@ class PrTest(Base):
         self.assertEqual(self.git("rev-list", f"origin/main..{new}").split(), [new])
         self.assertIn(f"rebased worktree-task-1 onto the target: {head[:7]} -> {new[:7]}", self.one(events, "launched")["detail"])
         self.one(events, "rebased")
+
+    @both_hosts
+    def test_129_a_check_that_edits_a_tracked_file_and_fails_leaves_the_head_restored(self):
+        task, wt, head, dep = self.stacked_task()
+        self.after_rebase("echo y >> out.txt; exit 3")
+        self.land_dep(squash=False)
+        out = self.close_stacked(task, head)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn(f"restored {head[:7]}", out.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+
+    @both_hosts
+    def test_129_the_check_of_the_restack_is_not_run_again_by_the_push(self):
+        task, wt, head, dep = self.stacked_task()
+        log = os.path.join(self.dir, "check.log")
+        self.after_rebase(f"echo x >> {log}")
+        self.land_dep(squash=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        with open(log) as fh:
+            self.assertEqual(len(fh.read().splitlines()), 1)
+        self.ok("close", str(task))
+        with open(log) as fh:
+            self.assertEqual(len(fh.read().splitlines()), 1)
+
+    @both_hosts
+    def test_129_a_squashed_base_that_the_target_changed_again_is_stale_when_its_dependency_task_is_merged(self):
+        task, wt, head, dep = self.stacked_task(with_dep=True)
+        self.land_dep(squash=True)
+        self.advance_main("dep.txt", "work edited\n")  # the same lines: merge-tree conflicts
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertEqual(self.git("rev-list", f"origin/main..{new}").split(), [new])
+        self.one(events, "rebased")
+        self.assertEqual(self.meta(task)["pushed"], new)
+
+    @both_hosts
+    def test_129_an_unmerged_base_with_no_open_dependency_gets_a_warning(self):
+        task, wt, head, dep = self.stacked_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertIn(f"stacked base {dep[1][:7]} is not in origin/main and no open dependency holds it",
+                      self.one(events, "warn")["detail"])
+
+    @both_hosts
+    def test_129_a_rebase_round_of_a_stale_base_rebases_onto_the_target_from_the_base(self):
+        task, wt, head, dep = self.stacked_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.land_dep(squash=False)
+        onto = self.advance_main("out.txt", "theirs\n")
+        self.fake_host(head=head, merge_state="DIRTY")
+        text = self.ok("round", str(task), "rebase", "--dry-run").stdout
+        self.assertIn(f"Run `git rebase --onto {onto} {dep[1]}`.", text)
+
+    @both_hosts
+    def test_129_a_kept_worker_is_stopped_before_verify_ci_rebases(self):
+        task, wt, head, dep = self.stacked_task(verify_mode="ci:ci.yml", revisions=1)
+        self.agents({**self.finished(f"task-{task}"), "pid": 4242})
+        self.land_dep(squash=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        out = self.run_cmd("verify", str(task))
+        self.assertNotIn("session live", out.stderr)
+        self.assertIn(["stop", f"sess-task-{task}-1"], self.calls("stop"))
+        self.assertNotEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
+
+    @both_hosts
+    def test_129_a_live_session_refuses_verify_ci_with_its_own_command(self):
+        task, wt, head, dep = self.stacked_task(verify_mode="ci:ci.yml")
+        self.agents(self.row(f"task-{task}"))
+        self.land_dep(squash=False)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        out = self.run_cmd("verify", str(task))
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("session live", out.stderr)
+        self.assertIn(f"then run.py verify {task}", out.stderr)
+
+    @both_hosts
+    def test_129_a_reattach_launch_that_is_refused_removes_the_worktree_it_added(self):
+        task, wt, head, dep = self.stacked_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents()
+        self.land_dep(squash=False)
+        self.advance_main("out.txt", "theirs\n")
+        self.git("worktree", "remove", "--force", wt)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        out = self.run_cmd("launch", str(task))
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("conflicted; rebase aborted", out.stderr)
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(self.git("rev-parse", "worktree-task-1"), head)
+
+    @both_hosts
+    def test_129_a_reattach_launch_rebases_the_own_commits(self):
+        task, wt, head, dep = self.stacked_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.agents()
+        self.land_dep(squash=False)
+        self.git("worktree", "remove", "--force", wt)
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        events = self.events("launch", str(task))
+        new = self.git("rev-parse", "worktree-task-1")
+        self.assertEqual(self.git("rev-list", f"origin/main..{new}").split(), [new])
+        self.assertIn("rebased worktree-task-1 onto the target", self.one(events, "launched")["detail"])
+
+    @both_hosts
+    def test_129_a_retry_launch_rebases_after_committing_the_wip(self):
+        task, wt, head, dep = self.stacked_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.land_dep(squash=False)
+        with open(os.path.join(wt, "wip.txt"), "w") as fh:
+            fh.write("w\n")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.events("launch", str(task))
+        new = self.git("rev-parse", "HEAD", cwd=wt)
+        self.assertEqual(len(self.git("rev-list", f"origin/main..{new}").split()), 2)  # own commit and the WIP
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt)[:8], "WIP task")
+
+    @both_hosts
+    def test_129_launch_dry_run_does_not_restack(self):
+        task, wt, head, dep = self.stacked_task()
+        self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\n")
+        self.land_dep(squash=False)
+        self.ok("launch", str(task), "--dry-run")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), head)
 
     @both_hosts
     def test_129_a_dirty_worktree_refuses_before_any_rebase(self):
