@@ -26,7 +26,8 @@ when agentic-team is not installed there. Without [profiles] nothing changes.
 
 When the .taskgraph.toml that tg finds maps taskgraph.project to the GitHub
 backend, `check` warns (exit 0) for each run-time meta key of RUNTIME_META that
-is in neither meta.local nor meta.deferred of that project.
+is in neither meta.local nor meta.deferred of that project, and for each result
+kind of LOCAL_RESULT_KINDS that is not in its results.local.
 
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
@@ -123,6 +124,7 @@ RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
 }
+LOCAL_RESULT_KINDS = ("ack", "steer")  # the recommended [projects."<name>".results] local list (#133)
 
 
 def system_timezone():
@@ -598,7 +600,7 @@ def taskgraph_file(root, env=None):
 
 
 def taskgraph_store(root, project, env=None):
-    """{"path", "local", "deferred"} when tg's .taskgraph.toml maps `project` to the GitHub backend, else None (no
+    """{"path", "local", "deferred", "results_local"} when tg's .taskgraph.toml maps `project` to the GitHub backend, else None (no
     file, the project is not in it, or the local SQLite store). A file that does not parse is None too: tg reports
     it itself on its first call."""
     path = taskgraph_file(root, env)
@@ -615,12 +617,15 @@ def taskgraph_store(root, project, env=None):
     meta = table.get("meta") if isinstance(table.get("meta"), dict) else {}
     keys = {name: tuple(v for v in meta.get(name) or () if isinstance(v, str)) if isinstance(meta.get(name), list) else ()
             for name in ("local", "deferred")}
-    return {"path": path, **keys}
+    results = table.get("results") if isinstance(table.get("results"), dict) else {}
+    local = results.get("local")
+    return {"path": path, **keys, "results_local": tuple(v for v in local if isinstance(v, str)) if isinstance(local, list) else ()}
 
 
 def taskgraph_warnings(config):
     """One warning per run-time key (RUNTIME_META) that the project's GitHub-backend entry in .taskgraph.toml has in
-    neither meta.local nor meta.deferred: each such write edits the issue. None for the SQLite store."""
+    neither meta.local nor meta.deferred: each such write edits the issue. One per result kind of LOCAL_RESULT_KINDS
+    missing from its results.local: each such row is an issue comment. None for the SQLite store."""
     project = config["taskgraph"]["project"]
     store = taskgraph_store(config.root, project) if isinstance(project, str) and project.strip() else None
     if store is None:
@@ -628,7 +633,10 @@ def taskgraph_warnings(config):
     block = f'[projects."{project}".meta] in {store["path"]}'
     return [f"taskgraph: the GitHub backend sends run-time meta key {key!r} to the issue on each write; add it to "
             f"{kind} under {block}"
-            for kind, keys in RUNTIME_META.items() for key in keys if key not in store["local"] + store["deferred"]]
+            for kind, keys in RUNTIME_META.items() for key in keys if key not in store["local"] + store["deferred"]] + [
+        f"taskgraph: the GitHub backend posts each {kind!r} result row as an issue comment, and comments share GitHub's "
+        f'rate limit on creating content; add {kind!r} to local under [projects."{project}".results] in {store["path"]}'
+        for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]]
 
 
 def plugin_problems(config):

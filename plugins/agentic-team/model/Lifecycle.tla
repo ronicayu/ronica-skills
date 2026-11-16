@@ -828,7 +828,8 @@ OperatorRepairs == ~End /\ fault # "none" /\ fault' = "none" /\ UNCHANGED faulte
 \* ---------------------------------------------------------------- revisions (#127)
 
 \* cmd_revise: one revise row; one tg edit (phase verdict_failed -> running, revision, verdict and verdict_ref unset); one
-\* finding steer per blocking line; one doorbell wakes the kept worker in the same folder. The verifier stays idle.
+\* finding steer that lists every blocking line as F1..Fn; one doorbell wakes the kept worker in the same folder. The
+\* verifier stays idle.
 Revise ==
   /\ Hint = "revise"
   /\ status = "in_progress" /\ ~abandoned /\ RevisionOK
@@ -840,7 +841,7 @@ Revise ==
                  faulted, workerKept, verifierKept, verifierAt, vvRev,
                  inRound, rounds, mainConflicts, roundPushed, unverifiedMerge>>
 
-\* The woken worker acks every finding steer (mailbox.py ack, one per finding) before it may report.
+\* The woken worker acks the finding steer before it may report: one ack that names every F<n> (mailbox.py ack).
 WorkerAcksFindings ==
   /\ ~End /\ worker = "busy" /\ findingsOpen
   /\ findingsOpen' = FALSE

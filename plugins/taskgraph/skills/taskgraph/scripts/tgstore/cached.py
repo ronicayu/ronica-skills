@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS pending_meta (
 CREATE TABLE IF NOT EXISTS claims (comment_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, token TEXT, claimant TEXT, voids TEXT NOT NULL DEFAULT '[]', at TEXT);
 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS remote_conflicts (task_id INTEGER NOT NULL, source TEXT NOT NULL, message TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS local_results (id INTEGER PRIMARY KEY REFERENCES results(id) ON DELETE CASCADE, after INTEGER NOT NULL);
 """
+LOCAL_RESULT_BASE = 10**15  # local result ids are above it; GitHub comment ids are far below
 PENDING_AGE = 900  # seconds before a full pull sends deferred rows by itself
 PARENT_TYPES = ("task", "objective")
 IN_PROGRESS = "tg:in-progress"
@@ -216,7 +218,8 @@ class CachedRemoteStore:
                     self.set_edges(conn, number, blockers, known, removed)
             for number, rows in delta.results.items():
                 if number in known:
-                    conn.execute("DELETE FROM results WHERE task_id=?", (number,))
+                    self.check_remote_ids(r["id"] for r in rows)
+                    conn.execute("DELETE FROM results WHERE task_id=? AND id < ?", (number, LOCAL_RESULT_BASE))
                     conn.executemany(
                         "INSERT OR REPLACE INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         [(r["id"], number, r["at"], r["status"], r["kind"], r["attempt"], r["author"], r["body"]) for r in rows],
@@ -604,7 +607,14 @@ class CachedRemoteStore:
 
     # -- results, claims, identity ----------------------------------------------------------------------------------
 
+    def check_remote_ids(self, ids):
+        high = [i for i in ids if i >= LOCAL_RESULT_BASE]
+        if high:
+            raise StoreError(f"GitHub comment id {high[0]} is in tg's range of local result ids (from {LOCAL_RESULT_BASE + 1}); update tg")
+
     def add_result(self, conn, task_id, row):
+        if row.kind in self.entry.local_results:
+            return self.add_local_result(conn, task_id, row)
         from tgstore.github.gh import HttpError
 
         try:
@@ -621,11 +631,30 @@ class CachedRemoteStore:
             if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 raise StoreError(f"no such task: {task_id}")
         out = self.remote.post_result(task_id, row)
+        self.check_remote_ids([out["id"]])
         with conn:
             conn.execute(
                 "INSERT INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (out["id"], task_id, out["at"], row.status, row.kind, row.attempt, row.author, row.body),
             )
+        return out
+
+    def add_local_result(self, conn, task_id, row):
+        # No call to GitHub: the row lives in this cache only. It sorts after every result the cache holds now.
+        if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+            self.refresh(conn, wait=True)
+            if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+                raise StoreError(f"no such task: {task_id}")
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            last = get_state(conn, "local_result_id", LOCAL_RESULT_BASE)
+            high = conn.execute("SELECT MAX(id) FROM local_results").fetchone()[0]
+            new = max(last, high or LOCAL_RESULT_BASE) + 1
+            after = conn.execute("SELECT MAX(id) FROM results WHERE id < ?", (LOCAL_RESULT_BASE,)).fetchone()[0] or 0
+            out = {"id": new, "task_id": task_id, "at": now(), "status": row.status, "kind": row.kind, "attempt": row.attempt, "author": row.author, "body": row.body}
+            conn.execute("INSERT INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (:id, :task_id, :at, :status, :kind, :attempt, :author, :body)", out)
+            conn.execute("INSERT INTO local_results (id, after) VALUES (?, ?)", (new, after))
+            put_state(conn, "local_result_id", new)
         return out
 
     def claimant(self, conn):
