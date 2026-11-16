@@ -76,12 +76,15 @@ repo = "owner/name"
 label = "taskgraph"                # optional, default "taskgraph"
 cache_ttl = 30                     # optional, seconds a read may use the cache
 full_every = 600                   # optional, seconds between full pulls (at least 60)
-cache = "~/.taskgraph/cache/github/owner/name.db"   # optional
+cache = "~/.taskgraph/cache/github/owner/name.db"   # optional; a relative path is read from this file's folder, in the main checkout of a git worktree
 claimant = "me@laptop"             # optional; default "<gh login>@<host>:<checkout id>"; TASKGRAPH_CLAIMANT overrides
 
 [projects."my-project".meta]
 local = ["sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"]   # stay in the cache on this machine, never sent
 deferred = ["tokens", "model", "started_at"]                      # sent with the next write to the same issue, or by `sync`
+
+[projects."my-project".results]
+local = ["ack", "steer"]           # result kinds kept in the cache on this machine, never posted as comments
 ```
 
 The file is found through `$TASKGRAPH_CONFIG` (a path; an empty value turns it off), else the first `.taskgraph.toml` in the current folder or a parent, else the main checkout of a git worktree. `--db` does not apply to a GitHub project.
@@ -95,14 +98,16 @@ If someone closes the issue outside tg, tg reads the task as done. The close lea
 ```mermaid
 flowchart LR
   TG["tg command"] -->|"all reads"| C[("cache: SQLite, same schema")]
-  TG ==>|"write-through: status, structure, notes, results, claims"| GH[("GitHub Issues")]
-  TG -->|"local-only meta"| C
+  TG ==>|"write-through: status, structure, notes, results of other kinds, claims"| GH[("GitHub Issues")]
   TG -->|"deferred meta"| PM[("pending rows")]
+  TG -->|"local-only meta and results"| C
   GH -->|"refresh after cache_ttl: free 304 probe, pull what changed"| C
   PM -.->|"next write to the issue, or tg sync"| GH
 ```
 
 Reads come from the cache and refresh when it is older than `cache_ttl` (a probe that finds nothing costs no rate limit). Every write command refreshes first, validates against the fresh cache, sends the change to GitHub, and only then commits; if GitHub refuses, nothing changes in the cache and the error says what GitHub already applied. GitHub wins for every shared field. History for `changes` and `report` starts at the first pull on a machine, and baselines stay on the machine.
+
+A result of a kind under `results.local` stays in this machine's cache and is never posted as a comment, so it costs no API call: GitHub's secondary rate limit on creating comments is shared by every process on one `gh` login. `result add` checks the task in the cache (refreshing it only when the task is not there), and `result add`, `result ls`, `show` and `export` show the row like any other. Any kind name may be listed; a kind that tg does not know is allowed. A local row's id is above 10^15 (the first is 1000000000000001) and counts up on each machine; GitHub comment ids are far below that, and a comment id in that range stops tg with an error rather than mixing the two. Among the oldest-first results, a local row sorts right after the newest result the cache held when it was added, so the rows that one machine adds read back in the order it added them; a comment from another machine that the cache had not pulled yet sorts after it. A refresh, `sync --full` included, replaces only the rows that came from GitHub. Like local meta, a local row exists only in this cache: other machines and people never see it, and it is gone when the cache is deleted or on a new machine, and with its task when the task leaves the cache. A project on the local SQLite store has no `.taskgraph.toml` entry: every result is local there and nothing changes.
 
 Limits: dependencies cannot cross projects (one repository is one project); at most 50 blockers per task, 100 sub-issues per parent, 8 issues in a parent chain; a body above 260,000 bytes is refused (GitHub truncates silently at 262,144); a long result is split into several comments and joined when read; people can break tg's rules in the GitHub UI, and tg then shows a conflict on the task instead of failing. A meta block that tg cannot read is never overwritten: fix or delete it on GitHub. Two Managers of agentic-team must not run the same project at once (agentic-team, not tg, would treat the other machine's tasks as dead). A refresh reads GitHub before it takes the cache lock, so a write that commits in between can be shown with older GitHub data until the next refresh (at most `cache_ttl`). With any `.taskgraph.toml` present, tg needs Python 3.11, also for a project the file does not name.
 

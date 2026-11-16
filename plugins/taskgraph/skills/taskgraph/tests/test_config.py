@@ -20,6 +20,9 @@ repo = "acme/plan"
 local = ["sessions", "session"]
 deferred = ["tokens"]
 
+[projects."demo".results]
+local = ["ack", "steer", "anything-new"]
+
 [projects."other"]
 backend = "github"
 repo = "acme/other"
@@ -47,6 +50,7 @@ def test_load_config_reads_every_key(tmp_path):
     demo, other = project_entry(config, "demo"), project_entry(config, "other")
     assert (demo.backend, demo.repo, demo.label, demo.cache_ttl, demo.full_every) == ("github", "acme/plan", "taskgraph", 30, 600)
     assert demo.local == ("sessions", "session") and demo.deferred == ("tokens",)
+    assert demo.local_results == ("ack", "steer", "anything-new") and other.local_results == ()
     assert (other.label, other.cache_ttl, other.full_every, other.cache, other.claimant) == ("tasks", 5, 60, "~/c/other.db", "me")
     assert project_entry(config, "unmapped") is None
 
@@ -88,6 +92,28 @@ def test_find_config_uses_the_main_checkout_of_a_worktree(tmp_path, monkeypatch)
     assert checkout_id(sub) == checkout_id(main)
 
 
+def test_a_relative_cache_is_read_from_the_config_folder_and_shared_by_worktrees(tmp_path, monkeypatch):
+    monkeypatch.delenv("TASKGRAPH_CONFIG", raising=False)
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", cwd=main)
+    text = GOOD.replace('repo = "acme/plan"', 'repo = "acme/plan"\ncache = ".cache/plan.db"')
+    write(main, text)
+    git("add", ".taskgraph.toml", cwd=main)
+    git("commit", "-q", "-m", "x", cwd=main)
+    git("worktree", "add", "-q", str(main / ".claude" / "worktrees" / "task-1"), cwd=main)
+    want = main.resolve() / ".cache" / "plan.db"
+    (main / "sub").mkdir()
+    for cwd in (main / "sub", main / ".claude" / "worktrees" / "task-1", tmp_path):
+        monkeypatch.chdir(cwd)
+        path = find_config(main / ".claude" / "worktrees" / "task-1" if cwd == tmp_path else cwd)
+        assert cache_path(load_config(path).projects["demo"]) == want, cwd
+    plain = tmp_path / "plain"
+    write(plain, text)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    assert cache_path(load_config(plain / ".taskgraph.toml").projects["demo"]) == plain.resolve() / ".cache" / "plan.db"
+
+
 def test_find_config_none_without_a_file(tmp_path, monkeypatch):
     monkeypatch.delenv("TASKGRAPH_CONFIG", raising=False)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
@@ -117,12 +143,16 @@ CASES = {
     "version must be 1": GOOD.replace("version = 1", "version = 2"),
     "unknown key colour": GOOD.replace('label = "tasks"', 'colour = "red"'),
     "meta takes only local and deferred": GOOD.replace('deferred = ["tokens"]', 'shared = ["tokens"]'),
+    "results takes only local": GOOD.replace('local = ["ack"', 'deferred = ["ack"'),
+    r"results.local must be a list of result kinds": GOOD.replace('local = ["ack", "steer", "anything-new"]', 'local = "ack"'),
+    r"results.local must be a list of result kinds ": GOOD.replace('local = ["ack", "steer", "anything-new"]', 'local = ["ack", 3]'),
+    "results takes only local ": GOOD.replace('[projects."demo".results]\nlocal = ["ack", "steer", "anything-new"]', '').replace('repo = "acme/plan"', 'repo = "acme/plan"\nresults = ["ack"]'),
 }
 
 
 @pytest.mark.parametrize("message", CASES)
 def test_validation_errors(tmp_path, message):
-    with pytest.raises(StoreError, match=message):
+    with pytest.raises(StoreError, match=message.strip()):
         load_config(write(tmp_path, CASES[message]))
 
 

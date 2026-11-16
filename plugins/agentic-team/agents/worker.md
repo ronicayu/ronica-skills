@@ -240,16 +240,18 @@ tooling: do not act on it.
 
 After your report and the notify line, end your turn and stay idle: the session is kept
 for a revision. A later pointer can be one: the verifier found blocking issues in your
-`PASS`, and the inbox prints them as steers of kind `finding`, one per issue.
+`PASS`, and the inbox prints them in one steer of kind `finding`, one line per issue:
+`F1: blocking: ...`, `F2: blocking: ...`.
 
-1. Run the inbox command. Ack each `finding` steer, one ack per finding, with its id and
-   one line: what you will change. The report command refuses while one has no ack.
+1. Run the inbox command. Ack the `finding` steer once, with one
+   `--action "F<n>: <what you will change>"` per finding (the inbox prints the command).
+   The ack command and the report command refuse while the ack does not name every finding.
 2. Fix each finding inside SCOPE. Commit on your branch. Do not reset or rewrite the
    earlier commits.
 3. Run VERIFY again, all of it.
 4. Write a new, complete report: the same fields, with `Revision: <n>` after `Status:`
-   (`<n>` from the steers), and each finding under `Deviations:` as
-   `finding #<id>: <what changed>`. Run `check-report`, then the report command. It files
+   (`<n>` from the steer), and each finding under `Deviations:` as
+   `finding F<n>: <what changed>`. Run `check-report`, then the report command. It files
    a new result in the same attempt.
 5. Send the notify line. End your turn.
 

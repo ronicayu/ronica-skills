@@ -392,11 +392,14 @@ sequence:
 3. `run.py close` records `verify-failed` and hints `revise: run.py revise <id>`.
 4. `run.py revise <id>` files a `revise` row, moves the phase
    `verdict_failed -> running` with `revision=<r>` and no verdict, files one
-   steer of kind `finding` per `blocking:` line, and wakes the same worker
+   steer of kind `finding` that lists every `blocking:` line as `F1` to `Fn`
+   (see [Messaging](#messaging), Finding steers), and wakes the same worker
    session (`claude --bg --resume <sessionId> --name <name>-r<r>`).
-5. The worker acks each finding (one ack per finding: `mailbox.py report`
-   refuses while one has no ack), fixes it in the same worktree, runs VERIFY
-   again and files a new, complete report in the same attempt.
+5. The worker acks the steer once, with one `F<n>: <action>` line per finding
+   (`mailbox.py report` refuses while the ack does not name each finding),
+   fixes each finding in the same worktree, runs VERIFY again and files a new,
+   complete report in the same attempt, with each finding under `Deviations:`
+   as `finding F<n>: <what changed>`.
 6. `record` hints `run.py verify <id>`, which resumes the same verifier session
    with a short revision brief: the old and the new head, the diff, the worker's
    new report and the verifier's own findings. The verifier checks each
@@ -749,7 +752,7 @@ session's message or the end of `wait` wakes it.
 | `launch <id>` | Renders the brief, creates the task worktree at the base (or continues in it on a retry), starts the worker, and records `session`, `model`, `attempt`, `sessions`, `started_at`, and, on the first launch, `base`. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt`, `--base <sha\|branch>`, `--dry-run`. If an open task already has a live session, it records the start instead (`repaired`). It stops a session of the task that is idle with its work filed, or a worker that waits on a prompt after its result (`stopped-idle`), instead of refusing. It refuses a task in a round (`round <id> --cancel` ends it). |
 | `adopt <id>` | Brings a branch started outside `run.py` under the Manager. Options: `--branch`, `--head`, `--pr`, `--base`. It launches nothing. |
 | `verify <id>` | Starts a verifier for a `PASS` result, pinned to its `Head`, in the task worktree (read only) or a folder of its own (`[verify] seat`; `seat-fallback` says why it took its own folder). In a revision it resumes the attempt's kept verifier with a revision brief, or starts a new one in the same seat when that verifier is gone. Options: `--ref`, `--result`, `--model`, `--effort`, `--profile`, `--again`, `--dry-run`. In CI mode (`verify_mode = ci:<name>`) it pushes the branch and finds or starts the CI run instead of a session. |
-| `revise <id>` | After a verifier session's `verify-failed` verdict with `blocking:` lines, files a `revise` row, sets `revision`, moves the phase to `running` with no verdict, files one `finding` steer per blocking line and wakes the attempt's own worker session: a revision (see [Revisions](#revisions-fix-in-place)). Refused when no revision is possible (the message names the old path, `launch` or `abandon`), under a STOP order (exit 3), while the verifier still works, and on a full session cap. Prints `revised`, and `verifier-leftovers` when it stashed the verifier's changes. |
+| `revise <id>` | After a verifier session's `verify-failed` verdict with `blocking:` lines, files a `revise` row, sets `revision`, moves the phase to `running` with no verdict, files one `finding` steer that lists the blocking lines as `F1` to `Fn` and wakes the attempt's own worker session: a revision (see [Revisions](#revisions-fix-in-place)). Refused when no revision is possible (the message names the old path, `launch` or `abandon`), under a STOP order (exit 3), while the verifier still works, and on a full session cap. Prints `revised`, and `verifier-leftovers` when it stashed the verifier's changes. |
 | `record` | Reads the queue and prints one line per event: results that arrived, dead, stuck, and stopped sessions, verdicts, merges, open decisions, free slots, and ready tasks. In `pr` mode it also reads the request state, the CI runs, and merges. |
 | `close <id>` | Records the verdict and tokens, stops the task's live worker and verifier sessions, and merges, pushes and opens a request, or lists the branch as ready to merge. A passing verdict sets `phase=awaiting_merge`, and the task stays in progress until its change is merged; a verdict that does not pass sets `phase=verdict_failed`. Accepts a rebased branch with the same change. Options: `--verdict`, `--ref`, `--ran`, `--override-verifier`. Rerun it on a task that waits for its merge: it resumes at the merge or the push. In `pr` mode it posts the verdict as a comment on the request (`commented`, or `comment-failed`), and it catches up a request that is behind its target (`[merge] catch_up`). A task whose branch holds no commit beyond its base is recorded as merged (`merged_by=no-change`) without a merge, a push or a request. In a round, a PASS with the same change as the verified head and no verifier verdict keeps the round's old verdict (a `Carried:` row). |
 | `round <id> <kind>` | Starts a new attempt of a task that waits for its merge, on the same branch and request: kind `rebase`, for a change that conflicts with its target. Options: `--keyword`, `--tier`, `--model`, `--effort`, `--profile`, `--attempt <n>` (also lifts `[rounds] cap`), `--dry-run`. `round <id> --cancel` ends a round: the task waits again at its verified head. Prints `round-started` or `round-cancelled`. See "Round" under [Merging through pull or merge requests](#merging-through-pull-or-merge-requests). |
@@ -1156,10 +1159,24 @@ answered and has not acked is never filed `DIED` or `stuck`, and `launch` refuse
 is acked, the older answers to it are settled. `steer` refuses an attempt that has a filed report, whatever the process
 shows, and takes a waiting or parked worker. The worker's `inbox` prints every unacked row of its attempt.
 
-**Finding steers (#127).** `run.py revise` files one steer of kind `finding` per `blocking:` line of the
-verifier's row (`Steer: blocking: ...`, `Kind: finding`, `Revision: <r> (verify #<row>)`); `run.py steer --kind finding`
-is refused. A finding is a steer, so the worker acks each one (one ack per finding) and `mailbox.py report`,
-`check-report --mailbox` and `record`'s salvage refuse a report while one has no ack. A `revise` row opens the attempt
+**Finding steers (#127, #133).** `run.py revise` files one steer of kind `finding` that holds every `blocking:` line
+of the verifier's row, numbered `F1` to `Fn`; `run.py steer --kind finding` is refused. The body:
+
+```text
+Steer: 2 blocking findings of verify #57; fix each, and ack this steer once with one line per finding
+Kind: finding
+Revision: 1 (verify #57)
+F1: blocking: src/a.py:12: the parser drops the last line
+F2: blocking: tests/test_a.py: no test covers an empty file
+```
+
+The worker answers with one ack, `mailbox.py ack <id> --action "F1: <what I will change>" --action "F2: ..."`,
+whose body is `Re: #<id>`, `Action: one line per finding: F1, F2` and one `F<n>: <action>` line per finding. `ack`
+refuses an ack that leaves out a finding, names one twice, or names one the steer does not hold. The steer counts as
+acked only through an ack that names each of its findings, so `mailbox.py report`, `check-report --mailbox` and
+`record`'s salvage refuse a report until then, and name the missing findings. One row each way keeps a revision to two
+result rows however many findings it has (#133: on the Taskgraph GitHub backend each row is a comment, unless its kind
+is [local](#result-kinds-on-the-taskgraph-github-backend)). A `revise` row opens the attempt
 to messages again: a steer filed after it is delivered, not carried, because "ended" means a report of the current
 revision (the rows after the newest `revise` row). One doorbell wakes the kept worker: a resume with
 `--name <name>-r<r>`, whose new session id `run.py` records. The worker does not answer the verifier; a finding that
@@ -1229,10 +1246,10 @@ only there and exports the base to `<run dir>/scratch/<session>/base`, outside
 the repository, so the task's test runner never collects it; it runs git with
 `--no-optional-locks`. A worker brief, while revisions are on, has a
 `Revision.` paragraph in MAILBOX: after its report the worker stays idle; a
-later pointer can be a revision, whose `finding` steers it acks one by one,
-fixes in SCOPE with new commits, and answers with a new, complete report
-(`Revision: <n>` after `Status:`, each finding under `Deviations:` as
-`finding #<id>: <what changed>`). A resumed verifier gets a short revision brief
+later pointer can be a revision, whose one `finding` steer it acks once with
+one `F<n>: <action>` line per finding, fixes in SCOPE with new commits, and
+answers with a new, complete report (`Revision: <n>` after `Status:`, each
+finding under `Deviations:` as `finding F<n>: <what changed>`). A resumed verifier gets a short revision brief
 (`briefs/task-<id>-<n>-verify-r<r>.md`): the old and new heads, the diff, the
 worker's new report, its own earlier findings, and the order to run the full
 method again on the new head.
@@ -1455,9 +1472,9 @@ text there. Each result has a `kind`, a `status`, an `attempt`, and an author (`
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | The verifier or the Manager | The verifier files the same report plus a `Verdict:` line. A report that `record` recovers is filed under the verifier's name. The Manager files its own verdict for a `risk=low` task, and `BLOCKED` for a verifier stopped while waiting on a permission prompt before it filed a verdict. A `BLOCKED` row has no `Verdict:` line, so it does not hide a verdict filed before it. |
 | `ask` | `OPEN` | The worker (`--by` its session name) | A question for the Manager: `Question:`, `Options:`, `Default:`, `Blocking: yes\|no`, `Why:`. |
 | `answer` | `ANSWERED` | `run.py` (`--by manager` or `operator`) | `Re: #<ask id>`, `Answer:`, `Source: manager\|operator\|default\|decision #<id>`. |
-| `steer` | `SENT` | `run.py` (`--by manager` or `operator`) | `Steer:`, `Kind: info\|redirect\|wrap-up`, or `Kind: finding` with `Revision: <r> (verify #<row>)` for a verifier's blocking line that `revise` relays. |
+| `steer` | `SENT` | `run.py` (`--by manager` or `operator`) | `Steer:`, `Kind: info\|redirect\|wrap-up`, or `Kind: finding` with `Revision: <r> (verify #<row>)` and one `F<n>: blocking: ...` line per blocking line of the verifier's row that `revise` relays. |
 | `revise` | `OPEN` | `run.py revise` (`--by manager`) | The start of a revision: `Revision:`, `From: verify #<row>`, `Head:` (the head the verifier judged), `Verifier:`, `Worker:`. The rows of the attempt after it are the revision's: a revision adds a second task row and a second verify row to the attempt. |
-| `ack` | `SEEN` | The worker | `Re: #<message id>`, `Action:` (one line). The only proof that a message was delivered. |
+| `ack` | `SEEN` | The worker | `Re: #<message id>`, `Action:` (one line); the ack of a `finding` steer adds one `F<n>: <action>` line per finding. The only proof that a message was delivered. |
 | `verify` | `PASS`, `ISSUES`, `BLOCKED` | `ci` | The CI run on the pushed head, in `verify_mode = ci:<name>`: `Verdict:`, `Workflow:`, `Run:`, `Head:`, `Branch:`, `Conclusion:`. |
 
 `verify` results by `manager` carry `Verdict:` and `Ran:`; an override adds
@@ -1597,6 +1614,51 @@ The run folder `.agentic-team/` (the standing orders, the `notify-to` session,
 the inbox files, the list of stopped sessions) and the worktrees are not in
 Taskgraph either: they stay on the old machine. Copy the standing orders and run
 `run.py notify-to` again on the new one.
+
+### Result kinds on the Taskgraph GitHub backend
+
+On the GitHub backend every result row is an issue comment, and GitHub's secondary rate limits on creating comments
+(per minute and per hour) are shared by every session on one `gh` login: the Manager, each worker and each verifier.
+The mailbox handshake adds rows fast (a steer and its ack for each message), so keep those kinds in this machine's
+Taskgraph cache with Taskgraph 1.21.0 or later (#133). Add this block next to the meta block:
+
+```toml
+[projects."<name>".results]
+local = ["ack", "steer"]
+```
+
+A row of a `local` kind is never posted; `tg result add` and `tg result ls` work as before, and the worker's
+`mailbox.py`, which runs `tg` on the same machine, reads the same cache: tg finds the main checkout's
+`.taskgraph.toml` (or the worktree's committed copy) and reads a relative `cache` path from the main checkout's folder,
+so the default `~/.taskgraph/cache/...` path and a relative one are shared by every worktree; an absolute path must be
+the same for all of them. `config.py check` prints a warning (and still
+exits 0) for each of these kinds that the project's entry does not list. `ask` and `answer` stay on the issue by
+default: they hold the worker's question and the Manager's decision, which a person or another machine may want to
+read. A project may add them to `local` too; then a lost cache also loses the questions and the answers, and an answer
+that came from a `decision` task stays in that task's notes.
+
+When the cache is lost (see [When the local cache is lost](#when-the-local-cache-is-lost)), the local rows go with it:
+the handshake history, which `run.py inbox` showed, and the evidence behind the `steer-seen` and `answer-seen` lines.
+`record` still works, because every place that reads a steer or an ack starts from the ids in the `mailbox` and
+`mailbox_ids` meta, which are local keys and are lost at the same time: with no listed steer, no steer waits for an
+ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is what the meta table above already
+says: answer again the asks that `record` prints, and steer again what a worker had not acked.
+Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
+may match a new steer.
+
+### Upgrading from 0.25.1
+
+Version 0.26.0 (issue #133) cuts the result rows that a project on the Taskgraph GitHub backend posts as comments.
+First, add the `[projects."<name>".results]` block with `local = ["ack", "steer"]` (Taskgraph 1.21.0 or later; see
+[Result kinds on the Taskgraph GitHub backend](#result-kinds-on-the-taskgraph-github-backend)); `config.py check`
+warns until it is there. On the local SQLite store nothing changes. Second, a revision sends all blocking findings in
+one `finding` steer, `F1` to `Fn`, and the worker acks it once with one `F<n>: <action>` line per finding
+(`mailbox.py ack <id> --action "F1: ..." --action "F2: ..."`); the report stays refused until the ack names every
+finding, and a report lists each under `Deviations:` as `finding F<n>: <what changed>` (see [Messaging](#messaging),
+Finding steers). A revision that 0.25.0 started (one steer per finding) still works: each of those steers has no `F`
+lines and takes the old one-line ack. `run.py` now reads "the rows after the newest `revise` row" in the order of
+`tg result ls`, not by id, since local rows have ids of their own range. No lifecycle, phase or model change; no
+migration.
 
 ### Upgrading from 0.25.0
 
