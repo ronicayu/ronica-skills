@@ -12790,6 +12790,143 @@ class RevisionTest(Base):
         self.assertIn("no revision follows a worker ISSUES", stopped["detail"])
         self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
 
+    # --- #137: a resumed session that ended its turn reads idle/working
+
+    def set_row(self, sid, **fields):
+        rows = json.load(open(self.agents_file))
+        for row in rows:
+            if row["id"] == sid:
+                row.update(fields)
+        self.agents(*rows)
+
+    def test_137_verify_resumes_after_idle_working_worker_report(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.set_row("sess-copy", status="idle", state="working")
+        events = self.events("verify", str(task))
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", self.V, "--name", "verify-1-1-r1"])
+        self.assertIn("seat task-1", self.one(events, "verifying")["detail"])
+        self.assertEqual(self.named(events, "seat-fallback"), [])
+        self.assertNotIn(["stop", "sess-copy"], self.calls("stop"))
+
+    def test_137_idle_working_worker_with_no_report_is_not_verified(self):
+        task, wt, head, _ = self.revised()
+        self.set_row("sess-copy", status="idle", state="working")
+        self.assertIn("no worker result", self.refused("verify", str(task)))
+        self.assertEqual([c for c in self.calls("--bg") if c[:3] == ["--bg", "--resume", self.V]], [])
+
+    def test_137_busy_worker_after_report_falls_back_after_seat_wait(self):
+        task, wt, head, _ = self.revised()
+        new = self.commit_file("fix.txt", "fixed\n", cwd=wt)
+        worker = self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {new}\nCheckpoint: {CHECKPOINT}\n",
+                                 by="task-1-1")["id"]
+        self.set_row("sess-copy", status="busy", state="working")
+        out = self.refused("verify", str(task))
+        self.assertIn("the worker's turn is not over: sess-copy", out)
+        self.assertIn("after 5 minutes a new verifier gets a folder of its own", out)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE id=?", (RevisionTest.old(6), worker))
+        events = self.events("verify", str(task))
+        self.assertIn("still busy", self.one(events, "seat-fallback")["detail"])
+        self.assertIn("cannot be resumed", self.one(events, "verifying")["detail"])
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-verify-1-1"])
+        self.assertEqual([c for c in self.calls("--bg") if c[:3] == ["--bg", "--resume", self.V]], [])
+        started = [c for c in self.calls("--bg") if "--resume" not in c][-1]
+        self.assertEqual(started[started.index("--worktree") + 1], "verify-1-1-2")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt_path("verify-1-1-2")), new)
+
+    def test_137_second_revision_resumes_idle_working_sessions(self):
+        task, wt, head, _ = self.failed()
+        self.one(self.events("revise", str(task)), "revised")
+        self.second_pass(task, wt, text="fix 1\n")
+        self.set_row("sess-copy", status="idle", state="working")
+        self.ok("verify", str(task))
+        for entry in self.meta(task)["sessions"]:
+            if entry.get("sessionId"):
+                self.transcript("task-1", entry["sessionId"])
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.add_result(task, "ISSUES", self.issues(("src/a.py:1: still wrong",)), kind="verify", by="verify-1-1")
+        self.assertEqual(self.one(self.events("close", str(task)), "verdict")["next"], "revise: run.py revise 1")
+        self.one(self.events("revise", str(task)), "revised")
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", "copy-" + self.W, "--name", "task-1-1-r2"])
+        self.second_pass(task, wt, text="fix 2\n")
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.ok("verify", str(task))
+        resume = [c for c in self.calls("--bg") if "--resume" in c][-1]
+        self.assertEqual(resume[:5], ["--bg", "--resume", "copy-" + self.V, "--name", "verify-1-1-r2"])
+
+    def test_137_idle_working_worker_with_report_is_kept_then_stopped(self):
+        task, wt, head, _ = self.failed(close=False)
+        self.set_row("sess-task-1-1", state="working")
+        events = self.events("record")
+        self.assertEqual(self.named(events, "kept-session-stopped"), [])
+        self.assertEqual(self.one(events, "slots")["detail"], "0/2 live")
+        self.assertEqual(self.calls("stop"), [])
+        worker = [r for r in self.results(task) if r["kind"] == "task"][-1]["id"]
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE id=?", (RevisionTest.old(90), worker))
+        events = self.events("record")
+        self.assertEqual([e["session"] for e in self.named(events, "kept-session-stopped")], ["sess-task-1-1"])
+        self.assertIn(["stop", "sess-task-1-1"], self.calls("stop"))
+        with open(os.path.join(self.root, ".agentic-team", "stopped-sessions")) as fh:
+            self.assertIn("sess-task-1-1", fh.read().split())
+
+    def test_137_mid_turn_idle_worker_is_not_stopped_as_kept(self):
+        task, wt, head, _ = self.revised()
+        self.set_row("sess-copy", status="idle", state="working")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE results SET at=? WHERE task_id=? AND kind='task'", (RevisionTest.old(90), task))
+        events = self.events("record")
+        self.assertNotIn("sess-copy", [e["session"] for e in self.named(events, "kept-session-stopped")])
+        self.assertNotIn(["stop", "sess-copy"], self.calls("stop"))
+        self.assertEqual(self.one(events, "slots")["detail"], "1/2 live")
+
+    def test_137_pending_retry_wake_records_the_revision(self):
+        task, wt, head, _ = self.failed()
+        self.events("revise", str(task), env=dict(self.env, FAKE_CLAUDE_RESUME_FAIL="rate limited"))
+        self.assertEqual({e["via"] for e in self.meta(task)["mailbox"].values()}, {"pending"})
+        self.events("record")  # the retry wakes the same session id
+        worker = [e for e in self.meta(task)["sessions"] if e["id"] == "sess-task-1-1"][0]
+        self.assertEqual(worker.get("revision"), 1)
+        self.set_row("sess-task-1-1", status="idle", state="working", pid=4300)
+        events = self.events("record")  # mid-revision: the PASS of revision 0 does not end its turn
+        self.assertNotIn("sess-task-1-1", [e["session"] for e in self.named(events, "kept-session-stopped")])
+        self.assertEqual(self.one(events, "slots")["detail"], "1/2 live")
+
+    def test_137_a_report_before_the_row_started_does_not_end_its_turn(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.set_row("sess-copy", status="idle", state="working", startedAt=int((time.time() + 120) * 1000))
+        self.assertIn("the worker's turn is not over: sess-copy", self.refused("verify", str(task)))
+
+    def test_137_an_unrecorded_worker_row_owns_no_report(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        rows = json.load(open(self.agents_file))
+        self.agents(*rows, {"id": "sess-x", "name": "x", "cwd": wt, "status": "idle", "state": "working", "pid": 4700})
+        self.assertIn("the worker's turn is not over: sess-x", self.refused("verify", str(task)))
+
+    def test_137_close_stashes_leftovers_of_an_idle_working_verifier(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.ok("verify", str(task))
+        self.set_row("sess-copy-2", status="idle", state="working")
+        self.add_result(task, "ISSUES", self.issues(("src/a.py:2: still wrong",)), kind="verify", by="verify-1-1")
+        self.touch(wt, "gen.txt")
+        events = self.events("close", str(task))
+        self.one(events, "verifier-leftovers")
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+
+    def test_137_revisions_off_an_idle_working_worker_keeps_its_slot(self):
+        self.write_config('[verify]\nseat = "task"\nrevisions_per_attempt = 0\n')
+        task = self.add_task()
+        self.ok("launch", str(task))
+        wt, head = self.pass_report(task)
+        self.agents({"id": "sess-task-1-1", "name": "task-1-1", "cwd": wt, "status": "idle", "state": "working", "pid": 4242})
+        self.assertEqual(self.one(self.events("record"), "slots")["detail"], "1/2 live")
+
     @staticmethod
     def old(minutes):
         return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")

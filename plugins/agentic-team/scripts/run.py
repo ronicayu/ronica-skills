@@ -713,7 +713,18 @@ def own_sessions(run, tid, kind=None, attempt=None):
 
 
 def live_count(run):
-    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost)
+    """The live session rows that hold a slot. With revisions on for its task, a kept idle/working row (idle_kept) holds
+    none, as a kept idle row with state done holds none."""
+    found = {}
+
+    def kept(s):
+        if s.task_id not in found:
+            task = run.show(s.task_id)
+            # with revisions off nothing stops a kept row (kept_rows), so it keeps its slot
+            found[s.task_id] = (run.results_for(s.task_id), wanted_attempt(task)) if revision_cap(run, task) > 0 else None
+        return found[s.task_id] is not None and idle_kept(s, found[s.task_id][0], found[s.task_id][1])
+
+    return sum(1 for s in run.sessions() if s.kind and s.live and not s.ghost and not (s.status == "idle" and kept(s)))
 
 
 def wanted_attempt(task):
@@ -805,6 +816,54 @@ def current_rows(rows, attempt):
     mine = [r for r in rows if r.get("attempt") == attempt]
     marks = [i for i, r in enumerate(mine) if r["kind"] == REVISE and r.get("author") == "manager"]
     return mine[marks[-1] + 1:] if marks else mine
+
+
+def revision_rows(rows, attempt, revision):
+    """The rows of `attempt` filed in its revision `revision` (0: before the first `revise` row), or None when the
+    attempt has no such revision."""
+    mine = [r for r in rows if r.get("attempt") == attempt]
+    marks = sorted(r["id"] for r in mine if r["kind"] == REVISE and r.get("author") == "manager")
+    if revision > len(marks):
+        return None
+    start = marks[revision - 1] if revision else 0
+    end = marks[revision] if revision < len(marks) else None
+    return [r for r in mine if r["id"] > start and (end is None or r["id"] < end)]
+
+
+def turn_ended(s, rows, attempt):
+    """Session.turn_over, or a live idle row that waits on nothing once the session's work is filed: a resumed `--bg`
+    session that ended its turn reads idle/working (#137). The work counts in the session's own revision, and after the
+    row's startedAt when it has one: a worker report for a recorded worker, a verify row under its name for a verifier
+    (a verifier row tied by folder only: in the current revision). An idle/working row with nothing filed may have said
+    it will check back, so its turn is not over."""
+    if s.turn_over:
+        return True
+    if not (s.live and s.status == "idle" and not s.stuck):
+        return False
+    if s.kind == "task" and not s.recorded:  # tied by folder only: no report is known to be its own
+        return False
+    attempt = s.attempt or attempt
+    mine = revision_rows(rows, attempt, s.revision) if s.recorded else current_rows(rows, attempt)
+    started = s.row.get("startedAt")
+    mine = [r for r in mine or [] if not isinstance(started, (int, float)) or filed_since(r, started / 1000)]
+    if s.kind == "task":
+        return any(is_worker_result(r) for r in mine)
+    return any(r["kind"] == "verify" and r.get("author") == s.label for r in mine)
+
+
+def filed_since(row, moment):
+    """True when the row was filed at or after `moment` (seconds; the row's time has whole seconds), or has no time."""
+    try:
+        at = datetime.datetime.fromisoformat(str(row.get("at")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return True
+    return at + 1 > moment
+
+
+def idle_kept(s, rows, attempt):
+    """A live row whose turn ended only by its filed work (turn_ended, not Session.turn_over), with a process: kept idle
+    for a revision like a row with state done and a pid (kept_rows)."""
+    return s.live and not s.turn_over and bool(s.row.get("pid")) and turn_ended(s, rows, attempt)
 
 
 def task_rows(rows, attempt=None, kind="task", history=False):
@@ -1148,7 +1207,8 @@ def kept_reason(run, task, kind, rows):
         return f"the {word} session {entry['id']} has no full session id on file"
     row = next((s for s in run.sessions() if s.sid == entry["id"]), None)
     # a verifier still in its turn after its row is kept: revise waits for it (busy_rows)
-    if row is not None and (row.state in ("failed", "stopped") or (row.live and (kind == "task" or row.stuck))):
+    if row is not None and (row.state in ("failed", "stopped")
+                            or (row.live and (row.stuck if kind == "verify" else not turn_ended(row, rows, attempt)))):
         return f"the {word} session {row.describe()} is {'still running' if row.live else row.state}"
     if entry["id"] in stopped_ids(run):
         return f"the {word} session {entry['id']} was stopped"
@@ -3215,7 +3275,7 @@ def cmd_verify(run, args):
         ignore_reports(run)
         ignore_scratch(run)
     verifiers = own_sessions(run, tid, "verify", attempt)
-    running = [s for s in verifiers if s.live and not verifier_over(run, s)]
+    running = [s for s in verifiers if s.live and not (verifier_over(run, s) or turn_ended(s, rows, attempt))]
     if running:
         raise Refused(f"verifier {running[0].describe()} is still running")
     if is_sha(ref):  # the verifier compares HEAD with this text, so give the full SHA
@@ -3228,12 +3288,13 @@ def cmd_verify(run, args):
         entry = newest_entry(task, "verify", attempt)
         why = resume_reason(run, task, entry, rows) if entry else "no verifier is recorded"
         if why is None and (entry.get("revision") or 0) < revision:
-            resume = entry
-        elif why:
+            why = resume_seat_wait(run, task, attempt, rows, worker, entry)
+            resume = None if why else entry
+        if why:
             replaced = f"the verifier of revision {revision - 1} cannot be resumed ({why}); a new verifier starts"
     if resume is not None:
         return verify_resume(run, args, task, attempt, rows, worker, ref, resume, role)
-    seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, replaced)  # may refuse: before any stop
+    seat, why_own = verifier_seat_choice(run, task, attempt, worker, ref, rows, replaced)  # may refuse: before any stop
     if replaced and not args.dry_run:
         stop_kept(run, task, attempt, "a new verifier replaces it", only=("verify",))
     if not args.dry_run:
@@ -3317,7 +3378,7 @@ def folder_reusable(run, folder, ref):
     return not any(s.live and (s.wtname == folder or cwd_in(s.cwd, os.path.realpath(path))) for s in run.sessions())
 
 
-def verifier_seat_choice(run, task, attempt, worker, ref, replaced=""):
+def verifier_seat_choice(run, task, attempt, worker, ref, rows, replaced=""):
     """("task" or "own", why it fell back to "own" or None). The task worktree serves when [verify] seat is "task", the
     output is a commit, the folder is clean and at the worker's Head, and the worker's turn is over; a worker that is
     still busy is waited for ([verify] seat_wait_minutes after its report: refused, the command is run again), then the
@@ -3339,7 +3400,7 @@ def verifier_seat_choice(run, task, attempt, worker, ref, replaced=""):
     head = run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
     if head != commit_of(run, ref):
         return "own", f"{rel} is at {head[:7]}, not the worker's Head {ref[:7]}; the verifier gets a folder of its own"
-    busy = busy_rows(run, tid, "task", attempt)
+    busy = busy_rows(run, tid, "task", attempt, rows)
     if busy:
         wait = run.config["verify"]["seat_wait_minutes"]
         if minutes_since(worker.get("at")) < wait:
@@ -3368,7 +3429,7 @@ def resume_reason(run, task, entry, rows):
     if not entry.get("sessionId"):
         return f"session {entry['id']} has no full session id on file"
     row = next((s for s in run.sessions() if s.sid == entry["id"]), None)
-    if row is not None and (row.live or row.state in ("failed", "stopped")):
+    if row is not None and ((row.live and not turn_ended(row, rows, wanted_attempt(task))) or row.state in ("failed", "stopped")):
         return f"session {row.describe()} is {'still running' if row.live else row.state}"
     if entry["id"] in stopped_ids(run):
         return f"session {entry['id']} was stopped"
@@ -3385,6 +3446,24 @@ def resume_reason(run, task, entry, rows):
     return None
 
 
+def resume_seat_wait(run, task, attempt, rows, worker, entry):
+    """None when the kept verifier `entry` may be resumed in its folder now. A verifier in the task worktree waits for
+    the worker's turn to end: refused until [verify] seat_wait_minutes after the worker's report, then why it cannot be
+    resumed. Its conversation is kept under that folder, so it cannot resume elsewhere; a new verifier gets a folder of
+    its own (verifier_seat_choice)."""
+    tid = task["id"]
+    if entry.get("worktree") != f"task-{tid}":
+        return None
+    busy = busy_rows(run, tid, "task", attempt, rows)
+    if not busy:
+        return None
+    wait, rel = run.config["verify"]["seat_wait_minutes"], f".claude/worktrees/task-{tid}"
+    if minutes_since(worker.get("at")) < wait:
+        raise Refused(f"the worker's turn is not over: {busy[0].describe()} still works in {rel}; run run.py verify "
+                      f"{tid} again once it is idle (after {wait} minutes a new verifier gets a folder of its own)")
+    return f"the worker {busy[0].describe()} is still busy in {rel} {wait} minutes after its report"
+
+
 def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
     """verify in a revision (#127): resume the attempt's kept verifier on the new head, with a short revision brief. With
     seat own its folder moves to the new head first; with seat task the folder is already there, once the worker's turn
@@ -3396,11 +3475,7 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role):
     marks = [r for r in rows if r.get("attempt") == attempt and r["kind"] == REVISE and r.get("author") == "manager"]
     old = mbx.field_line(marks[-1]["body"], "Head") if marks else ""
     judged = [r for r in task_rows(rows, attempt, "verify", history=True) if r.get("author") == name and verdict_of(r)]
-    if folder == f"task-{tid}":
-        busy = busy_rows(run, tid, "task", attempt)
-        if busy:
-            raise Refused(f"the worker's turn is not over: {busy[0].describe()} still works in {rel}; run run.py verify "
-                          f"{tid} again once it is idle")
+    if folder == f"task-{tid}":  # resume_seat_wait found the worker's turn over
         dirty = run.git("status", "--porcelain", cwd=path, check=False).stdout.splitlines()
         if dirty:  # the worker's own files: never judged, and never stashed as a verifier's leftovers
             raise Refused(f"{rel} has uncommitted changes ({files_text([d[3:] for d in dirty], 5)}); the worker commits "
@@ -3936,7 +4011,8 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         row_of_copy = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == new), None) or {}
         copy = {"id": new, "kind": "task", "attempt": attempt, "name": s.name or s.wtname, "worktree": s.wtname,
                 "model": session_model(task, s.sid), **profile_field(s.profile),
-                **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {})}
+                **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {}),
+                **({"revision": revision_of(task)} if revision_of(task) else {})}
         run.set_meta(task, sessions=recorded_sessions(task) + [copy])
         stop_session(run, s.sid, check=False, profile=s.profile)  # keep one live session
         run._sessions = None
@@ -3947,9 +4023,23 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
     if getattr(s, "rowless", False) and not any(isinstance(r, dict) and r.get("id") == s.sid for r in run.agents(s.profile)):
         run.emit("deliver-fallback", tid, attempt, s.sid, f"#{row['id']}: resumed {s.sid}, but claude agents does not list it yet")
     forget_stopped(run, s.sid)
+    mark_revision(run, task, s.sid)
     run.resumed.add((tid, attempt))
     lower_flag(run, tid, attempt)
     return settle("resume", "resume")
+
+
+def mark_revision(run, task, sid):
+    """A session woken under its own id works in the task's current revision: its `sessions` entry says so, so that a
+    report of an earlier revision never ends its turn (turn_ended)."""
+    revision = revision_of(task)
+    entries = recorded_sessions(task)
+    found = [e for e in entries if e.get("id") == sid and (e.get("revision") or 0) != revision]
+    if revision and found:
+        for e in found:
+            e["revision"] = revision
+        run.set_meta(task, sessions=entries)
+        run._sessions = None
 
 
 def new_row(run, profile, folder, since, exclude=()):
@@ -4171,10 +4261,11 @@ def stash_leftovers(run, task, attempt):
              f"git -C .claude/worktrees/task-{tid} stash list shows it")
 
 
-def busy_rows(run, tid, kind, attempt):
+def busy_rows(run, tid, kind, attempt, rows=None):
     """The session rows of a kind for the attempt whose turn is not over: the other side waits for them (taking turns in
-    one folder; the CLI locks no worktree)."""
-    return [s for s in own_sessions(run, tid, kind, attempt) if s.live and not s.turn_over]
+    one folder; the CLI locks no worktree). With the task's result `rows`, a turn also ends as turn_ended says."""
+    return [s for s in own_sessions(run, tid, kind, attempt)
+            if s.live and not (turn_ended(s, rows, attempt) if rows is not None else s.turn_over)]
 
 
 def cmd_revise(run, args):
@@ -4197,7 +4288,7 @@ def cmd_revise(run, args):
         raise Refused(f"#{tid} attempt {attempt} cannot have a revision: {why}; the old path: "
                       + retry_next(tid, attempt, lead="fix round: ", task=task))
     verify_role(run, task)  # refused when the attempt's role file is missing or broken, as launch would be
-    busy = busy_rows(run, tid, "verify", attempt)
+    busy = busy_rows(run, tid, "verify", attempt, rows)
     if busy:
         raise Refused(f"the verifier session {busy[0].describe()} is still working in the attempt; run run.py record, and "
                       "revise once its turn is over")
@@ -4944,13 +5035,13 @@ def record_task(run, snap, task, unmanaged):
 
 def kept_rows(run, task, attempt=None):
     """The task's worker and verifier rows that ended their turn but whose process still runs (a pid): sessions kept
-    idle for a revision. None of them when revisions are off for the task, so a project with revisions_per_attempt = 0
-    sees no such stop."""
+    idle for a revision, an idle/working row whose work is filed too (idle_kept). None of them when revisions are off
+    for the task, so a project with revisions_per_attempt = 0 sees no such stop."""
     if revision_cap(run, task) <= 0:
         return []
-    gone = stopped_ids(run)
-    return [s for s in own_sessions(run, task["id"], attempt=attempt) if s.kind in ("task", "verify") and not s.live
-            and s.row.get("pid") and s.state != "stopped" and s.sid not in gone]
+    gone, rows, current = stopped_ids(run), run.results_for(task["id"]), wanted_attempt(task)
+    return [s for s in own_sessions(run, task["id"], attempt=attempt) if s.kind in ("task", "verify") and s.sid not in gone
+            and (idle_kept(s, rows, current) or not s.live and s.row.get("pid") and s.state != "stopped")]
 
 
 def stop_kept(run, task, attempt, why, only=None):
@@ -7107,7 +7198,7 @@ def cmd_close(run, args):
         level, manual, override = str(meta["round_verdict"]), False, None
     if moved:
         run.emit("rebased", tid, attempt, None, f"same change at {ref[:7]} (verified at {moved[:7]}); verdict_ref moves")
-    if not busy_rows(run, tid, "verify", attempt):  # after every refusal: a verifier in the task worktree left changes
+    if not busy_rows(run, tid, "verify", attempt, rows):  # after every refusal: a verifier in the task worktree left changes
         stash_leftovers(run, task, attempt)
     passing = level in PASSING[kind]
     phase = next_phase(task, ("close_waits" if is_sha(ref) else "close_merged") if passing else "close_failed")
