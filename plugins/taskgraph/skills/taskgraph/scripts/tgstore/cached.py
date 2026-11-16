@@ -482,6 +482,10 @@ class CachedRemoteStore:
                 self.remote.check_deadline(outcome, fresh[i])
             pushed = self.remote.push(plan, fresh)
         self.finish(conn, plan, pushed, local_rows, new_pending)
+        stamped = pushed.updated_at if pushed else {}
+        for i, t in before.items():  # a write that sent nothing to GitHub did not move its updated_at
+            if i not in stamped and i not in self.claimed:
+                conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (t["updated_at"], i))
         for i, outcome in self.claimed.items():
             self.store_claims(conn, self.resolve_id(i), outcome.claims)
         if journal:
@@ -525,6 +529,8 @@ class CachedRemoteStore:
             for number, db_id in pushed.db_ids.items():
                 if number in ids.values():
                     conn.execute("INSERT INTO remote_tasks (task_id, node_id, db_id, meta, fingerprint) VALUES (?, ?, ?, '{}', NULL)", (number, pushed.node_ids.get(number, ""), db_id))
+            for number, stamp in pushed.updated_at.items():  # the remote's clock, as the next pull will show it
+                conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (stamp, number))
             for number, meta in pushed.meta.items():
                 conn.execute("UPDATE remote_tasks SET meta=? WHERE task_id=?", (json.dumps(meta, ensure_ascii=False), number))
                 touched.add(number)

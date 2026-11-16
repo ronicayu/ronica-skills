@@ -263,6 +263,8 @@ class GitHubRemote:
                 ids[c.id] = r["number"]
                 pushed.db_ids[r["number"]] = r["id"]
                 pushed.node_ids[r["number"]] = r.get("node_id", "")
+                if r.get("updated_at"):
+                    pushed.updated_at[r["number"]] = r["updated_at"]
                 pushed.meta[r["number"]] = dict(c.meta)
                 return f"created #{r['number']}"
 
@@ -324,6 +326,8 @@ class GitHubRemote:
             if patch:
                 def update(e=e, patch=patch, consumed=consumed, body=body):
                     r = gh.patch(f"{base}/issues/{e.id}", patch).body
+                    if r.get("updated_at"):
+                        pushed.updated_at[e.id] = r["updated_at"]
                     if body is not None and "body" in patch:
                         self.checked(f"#{e.id}", body, r)
                     if consumed:
@@ -343,7 +347,9 @@ class GitHubRemote:
             patch = {"state": "closed", "state_reason": "not_planned", "labels": [l for l in f.labels if l != IN_PROGRESS] + [REMOVED]}
 
             def remove(n=n, patch=patch):
-                gh.patch(f"{base}/issues/{n}", patch)
+                r = gh.patch(f"{base}/issues/{n}", patch).body
+                if r.get("updated_at"):
+                    pushed.updated_at[n] = r["updated_at"]
                 return f"closed #{n} as not planned"
 
             ops.append((f"remove #{n}", remove))

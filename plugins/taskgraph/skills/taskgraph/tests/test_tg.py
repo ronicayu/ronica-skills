@@ -2226,3 +2226,10 @@ def test_gate_set_and_clear_show_in_changes(tg, raw, db):
     tg("gate", str(a), "release", "--clear")
     gates = [(o, n) for _, f, o, n in events(db) if f == "meta.gates"]
     assert len(gates) == 2 and gates[0][0] is None and gates[1][1] is None
+
+
+def test_done_twice_keeps_updated_at(tg):
+    a = add(tg, "A")
+    first = tg("done", str(a))
+    again = tg("done", str(a))
+    assert again["updated_at"] == first["updated_at"] and again["done_at"] == first["done_at"]
