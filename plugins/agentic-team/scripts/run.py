@@ -3584,7 +3584,7 @@ def drop_ci_refs(run, task):
 def ci_ref_text(run, entry):
     """The verifier's instructions for the CI runs on a scratch branch."""
     ref, head = entry["ref"], entry["head"]
-    if run.host_class()[0].name == "gitlab":
+    if run.host_class()[0].name == "gitlab":  # UNVERIFIED: glab flags from its documentation, untested
         find, wait, log = (f"glab ci list --ref {ref}", f"glab ci status --branch {ref} --live", "glab ci trace <job id>")
     else:
         find = f"gh run list --branch {ref} --commit {head} --json databaseId,workflowName,status,conclusion,url"

@@ -683,12 +683,17 @@ and `close` pushes the request only after a closing verdict. `run.py verify <id>
 --ci-ref` (with `--again` after a first verdict) pushes the worker's `Head` to a
 scratch branch, `<[verify] ci_ref_prefix><id>-<attempt>` (default `ci-<id>-<attempt>`),
 never to the request's branch, and prints a `ci-ref` line. CI runs there as on any
-push, so the branch prefix must match the push filter of the workflow. The
-verifier stays read only: run.py pushes, and the brief names the branch, the
+push, so the branch prefix must match the push filter of the workflow; a
+workflow that runs only on `pull_request` never runs on a scratch branch (the
+verifier then says `check-only`): add a `push` filter for the prefix, or override
+with the URL of the request's own run after `close`. The verifier stays read only: run.py pushes, and the brief names the branch, the
 commit and the read-only commands that find the runs, wait for them and read a
 failed job (`gh run list --branch <ref> --commit <sha>`, `gh run watch`, `gh run
 view --log-failed`; `glab ci list --ref`, `glab ci status --live`, `glab ci
-trace` on GitLab). A green run that exercises the changed workflow or job is
+trace` on GitLab; these glab flags are UNVERIFIED, like the other GitLab calls).
+The verifier runs them with the operator's `gh` or `glab` login; no allow rule
+is needed in auto mode for these read-only calls, and a verifier that cannot
+run them says `check-only` with the reason. A green run that exercises the changed workflow or job is
 `test-verified`; a red run is `verify-failed` with a `blocking:` line per failed
 job; no run of that commit, or no run that exercises the change, is `check-only`
 with the reason. The verifier puts each run's URL under `Ran:`. The `ci_refs`
@@ -1572,6 +1577,7 @@ the Taskgraph CLI reference). Every key that `run.py` writes, and its class:
 | `round`, `round_from`, `round_verdict`, `round_onto`, `rounds` | on the issue | `close`, `record` and `round --cancel` read them back, and another machine must see that a round runs. |
 | `revision`, `revisions` | on the issue | `record`, `verify` and `close` read `revision` back, and another machine must see that a revision runs; `revisions` is a plan key, like `risk`. |
 | `abandoned` | on the issue | The only marker of an abandoned task. |
+| `ci_refs` | on the issue | The scratch branches on the remote that a passing `close` or `abandon` must delete, from any machine. |
 | `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
 
 The plan keys (`scope`, `verify`, `verify_kind`, `verify_mode`, `tier`, `role`,
