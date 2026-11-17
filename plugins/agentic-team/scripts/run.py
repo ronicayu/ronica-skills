@@ -2214,6 +2214,19 @@ def verified_report(rows, task):
     return found[-1] if found else latest_worker([r for r in rows if (r.get("attempt") or 0) < (attempt or 0)])
 
 
+def task_own_base(run, task, base):
+    """The commit that the task's own change starts from, for check-report --base: the task's base meta when it is an
+    ancestor of the attempt's start `base`, else `base`. "" in a round (its commits are the verified change, replayed
+    onto the target) and when none is known."""
+    meta = task.get("meta") or {}
+    if in_round(task):
+        return ""
+    own = str(meta.get("base") or "")
+    if own and base and run.git("merge-base", "--is-ancestor", own, base, check=False).returncode == 0:
+        return commit_of(run, own) or ""
+    return base or ""
+
+
 def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None):
     """The brief text. Taskgraph is the only source of task content. `role` is the task's role, or the round kind's role
     in a round: its Method goes into a worker brief and its Review into a verifier brief, with the {{NAME}} variables of
@@ -2248,6 +2261,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
                    if kind != "verify" else "")
     verifier_arg = " --verifier" if kind == "verify" else ""
+    if kind != "verify":
+        for prefix in config["report"]["require_ran"].get(verify_kind(run, task, strict=False), []):
+            worker_args += f" --require-ran {quote(prefix)}"
+        if own_base := task_own_base(run, task, base):
+            worker_args += f" --base {own_base}"
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -2266,7 +2284,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                           f"check-report {quote(report)}{worker_args}{verifier_arg}"),
         "CHECK_NOTE": (" It also names a steer of the Manager that you have not acked, a `PASS` report with fewer "
                        "`Evidence:` lines than ACCEPTANCE lines, a path in backticks under `Files:`, `Evidence:` or "
-                       "`Ran:` that does not exist in your worktree, and an `ISSUES` or `BLOCKED` report with no "
+                       "`Ran:` that does not exist in your worktree, a `PASS` report whose `Files:` leaves out a file "
+                       "that your commits changed, a `PASS` report with no `Ran:` line for a prefix that the project "
+                       "requires, and an `ISSUES` or `BLOCKED` report with no "
                        "`Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
@@ -7960,6 +7980,12 @@ def cmd_check_report(args):
                             "a report with blocking issues has not verified the work")
     else:
         problems += asked_problems(body, status.group(1) if status else None)
+    if not args.verifier and status and status.group(1) == "PASS":
+        if args.require_ran:
+            problems += ran_problems(body, args.require_ran)
+        changed = own_changed_files(args.base, os.getcwd()) if args.base else None
+        if changed:
+            problems += files_problems(body, changed)
     if not args.verifier and status and status.group(1) != "BLOCKED":
         for field, token, line in missing_paths(body, os.getcwd()):
             problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
@@ -7975,6 +8001,49 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+FILES_DIR_LIMIT = 20  # more changed files than this: a directory entry under `Files:` covers the files under it
+
+
+def ran_problems(body, prefixes):
+    """The [report] require_ran rule of a worker PASS report: one problem naming the required prefixes that no `Ran:` line
+    starts with. A list marker and backticks in front of a line are ignored."""
+    lines = [FOLLOW_UP_BULLET.sub("", raw.strip()).lstrip("`*").strip() for raw in report_field(strip_comments(body or ""), "Ran").splitlines()]
+    missing = [p for p in prefixes if not any(line.startswith(p) for line in lines)]
+    if not missing:
+        return []
+    return ["PASS needs a `Ran:` line that starts with each of " + ", ".join(f"`{p}`" for p in prefixes)
+            + " (the project's [report] require_ran); missing: " + ", ".join(f"`{p}`" for p in missing)
+            + ". Run the step and paste its result as that line, or report ISSUES"]
+
+
+def own_changed_files(base, cwd):
+    """The files that `git diff --name-only <base>...HEAD` lists in `cwd`: the task's own changes (a rename counts as its
+    new path, a deletion as the deleted path), without what a rebase brought in from the target. None when git cannot
+    say (no repository, an unknown base)."""
+    try:
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "diff", "--name-only", "-z", "--find-renames",
+                               f"{base}...HEAD"], cwd=cwd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [f for f in done.stdout.split("\0") if f] if done.returncode == 0 else None
+
+
+def files_problems(body, changed):
+    """The `Files:` rule of a worker PASS report: every file of `changed` is named under `Files:`. With more than
+    FILES_DIR_LIMIT changed files, a directory entry (`src/`) names the files under it."""
+    text = report_field(strip_comments(body or ""), "Files")
+    tokens = {t.rstrip(".").removeprefix("./") for t in SCOPE_TOKEN.findall(text)}
+    tokens |= {PATH_LINE_SUFFIX.sub("", t).removeprefix("./") for t in BACKTICKED.findall(text)}
+    dirs = {t if t.endswith("/") else t + "/" for t in tokens if t} if len(changed) > FILES_DIR_LIMIT else set()
+    left = [f for f in changed if f not in tokens and not any(f.startswith(d) for d in dirs)]
+    if not left:
+        return []
+    shown = ", ".join(f"`{f}`" for f in left[:10]) + (f", and {len(left) - 10} more" if len(left) > 10 else "")
+    return [f"`Files:` leaves out {len(left)} file{'s' * (len(left) != 1)} that this task changed "
+            f"(`git diff --name-only <base>...HEAD`): {shown}; list each"
+            + ("" if len(changed) > FILES_DIR_LIMIT else f", or, when more than {FILES_DIR_LIMIT} files changed, name a directory such as `src/`")]
 
 
 def asked_problems(body, status):
@@ -8303,6 +8372,10 @@ def build_parser():
                    "`blocking:` label on every Issues line, and a report with only non-blocking findings is a PASS")
     p.add_argument("--acceptance", type=int, metavar="N", help="a PASS report needs at least N non-empty lines "
                    "under Evidence:, one for each ACCEPTANCE line of the task")
+    p.add_argument("--require-ran", action="append", default=[], metavar="PREFIX", help="a worker PASS report needs "
+                   "a `Ran:` line that starts with PREFIX (repeat it; the brief passes [report] require_ran)")
+    p.add_argument("--base", metavar="SHA", help="the commit the task's own change starts from: a worker PASS report "
+                   "must name under `Files:` each file that `git diff --name-only SHA...HEAD` lists")
 
     p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,

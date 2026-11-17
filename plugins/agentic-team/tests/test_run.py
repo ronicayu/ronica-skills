@@ -5809,7 +5809,7 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.17.0: its evidence
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1 --base {self.git("rev-parse", "HEAD")}')  # 0.16.0: also its steers; 0.17.0: its evidence; 0.28.0: its base
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
@@ -5872,7 +5872,7 @@ class RunTest(Base):
     def test_109_a_worker_brief_names_the_acceptance_count_and_a_verifier_brief_none(self):
         task = self.add_task(notes="Why: reason.\n- [ ] one\n- [ ] two\n- [ ] three")
         report = self.section(self.brief(task), "REPORT")
-        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3`', report)
+        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3 --base ', report)
         other = self.running_task()
         self.add_result(other, "PASS", f"Task: {other}\nStatus: PASS\nHead: {SHA_A}\n")
         verify = self.section(self.ok("verify", str(other), "--dry-run").stdout, "REPORT")
@@ -6413,6 +6413,94 @@ class Issue89Test(Base):
         self.assertEqual((code, out), (0, "ok\n"))
         self.assertIn("warning: the report has more than one `Issues:` field; write a single `Issues:` field, one finding per line", err)
         self.assertNotIn("warning", self.check(self.report("ISSUES", Issues="\nblocking: one\nblocking: two"), "--verifier")[2])
+
+    # --- [report] require_ran
+
+    def test_check_report_names_the_required_ran_lines_a_pass_report_lacks(self):
+        ran = "\n`make test`: ok\nreuse: searched src/: nothing to reuse"
+        flags = ("--require-ran", "reuse:", "--require-ran", "mutation:")
+        code, out, err = self.check(self.report(Ran=ran), *flags)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("missing: `mutation:`", err)
+        self.assertNotIn("missing: `reuse:`", err)
+        self.assertEqual(self.check(self.report(Ran=ran + "\n- mutation: deleted the guard, test_x failed"), *flags),
+                         (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Ran=ran, Asked="none: the timebox ran out"), *flags)[0], 0)
+        self.assertEqual(self.check(self.report(Ran=ran)), (0, "ok\n", ""))  # no [report] require_ran: as before
+
+    def test_the_worker_brief_passes_the_required_ran_prefixes_of_its_verify_kind(self):
+        self.write_config('[report]\nrequire_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }\n')
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(' --require-ran "reuse:" --require-ran "mutation:"', command)
+        self.assertNotIn("self-check:", command)
+        command = self.section(self.brief(self.add_task(verify_kind="design-doc")), "REPORT")
+        self.assertIn(' --require-ran "self-check:"', command)
+        self.assertNotIn("reuse:", command)
+        verify = self.verify_text(self.running_task())
+        self.assertNotIn("--require-ran", verify)
+
+    # --- Files: against git
+
+    def in_repo(self, path, *flags):
+        out = subprocess.run([sys.executable, RUN, "check-report", path, *flags], capture_output=True, text=True, cwd=self.root)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_check_report_refuses_a_pass_whose_files_leave_out_a_changed_file(self):
+        with open(os.path.join(self.root, "old.txt"), "w") as fh:
+            fh.write("old\n")
+        with open(os.path.join(self.root, "moved.txt"), "w") as fh:
+            fh.write("a long line to be detected as a rename\n" * 5)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "setup")
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/new.py", "x\n")
+        os.remove(os.path.join(self.root, "old.txt"))
+        self.git("mv", "moved.txt", "renamed.txt")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "own")
+        self.git("checkout", "-q", "main")  # the target moves on: its file is not the task's own
+        self.commit_file("target.txt", "t\n")
+        self.git("checkout", "-q", "task")
+        flags = ("--base", "main")
+        code, out, err = self.in_repo(self.report(Files="`src/new.py`"), *flags)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("`Files:` leaves out 2 files that this task changed", err)
+        self.assertIn("`old.txt`", err)
+        self.assertIn("`renamed.txt`", err)
+        self.assertNotIn("`moved.txt`", err)  # a rename counts as its new path
+        self.assertNotIn("target.txt", err)
+        self.assertNotIn("src/new.py`,", err)
+        good = self.report(Files="`src/new.py` (new)\n- `old.txt` (deleted)\n- renamed.txt (from moved.txt)")
+        self.assertEqual(self.in_repo(good, *flags), (0, "ok\n", ""))
+        self.assertEqual(self.in_repo(self.report("ISSUES", Files="None", Asked="none: the timebox ran out"), *flags)[0], 0)
+        self.assertEqual(self.in_repo(self.report(Files="None")), (0, "ok\n", ""))  # no --base: no check
+        self.assertEqual(self.in_repo(self.report(Files="None"), "--base", "no-such-ref")[0], 0)  # git cannot say: no check
+        self.assertEqual(base, self.git("merge-base", "task", "main"))
+
+    def test_a_directory_covers_its_files_only_over_twenty_changed_files(self):
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "pkg"))
+        os.makedirs(os.path.join(self.root, "other"))
+        for i in range(3):
+            self.commit_file(f"pkg/f{i}.py", "x\n")
+        code, _, err = self.in_repo(self.report(Files="`pkg/`"), "--base", "main")
+        self.assertEqual(code, 2)
+        self.assertIn("leaves out 3 files", err)
+        for i in range(3, 21):
+            self.commit_file(f"pkg/f{i}.py", "x\n")
+        self.assertEqual(self.in_repo(self.report(Files="`pkg/` (21 files)"), "--base", "main"), (0, "ok\n", ""))
+        self.assertEqual(self.in_repo(self.report(Files="pkg/**"), "--base", "main"), (0, "ok\n", ""))
+        self.commit_file("other/x.py", "x\n")
+        code, _, err = self.in_repo(self.report(Files="`pkg/`"), "--base", "main")
+        self.assertEqual(code, 2)
+        self.assertIn("`other/x.py`", err)
+
+    def test_the_worker_brief_gives_check_report_the_base_of_the_task(self):
+        base = self.git("rev-parse", "HEAD")
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(f" --base {base}", command)
 
     def test_a_worker_report_keeps_free_issue_lines(self):
         self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails", Asked="#4")), (0, "ok\n", ""))

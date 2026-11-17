@@ -262,6 +262,22 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.problems(config.load(self.root)),
                          ['scope.adjacent must be a list of adjacent-change kinds, not "own-lint"'])
 
+    def test_report_require_ran_is_a_table_of_verify_kind_to_prefixes(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["report"]["require_ran"], {})
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "report.require_ran", "--json")[:2],
+                         (0, '{"code": ["reuse:", "mutation:"], "design-doc": ["self-check:"]}\n'))
+        self.write(MINIMAL + '[report]\nrequire_ran = { "cod" = ["reuse:"] }\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'report.require_ran: "cod" is not a verify kind; the kinds are code, schema, design-doc (did you mean code?)'])
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = "reuse:" }\n')
+        self.assertIn("report.require_ran must be a table of verify kind = list of line prefixes",
+                      config.problems(config.load(self.root))[0])
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = [" reuse:"] }\n')
+        self.assertEqual(len(config.problems(config.load(self.root))), 1)
+
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
         found = config.problems(config.load(self.root))
