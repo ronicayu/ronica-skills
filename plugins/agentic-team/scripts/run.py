@@ -6074,14 +6074,16 @@ def request_body(run, task, head):
 
 
 def report_field(body, name):
-    """The text of the `<name>:` field of a report: the rest of its line and the lines up to the next label,
-    stripped. "" when the report has no such field."""
-    match = re.search(rf"(?m)^{re.escape(name)}:[ \t]*(.*)$", body or "")
-    if not match:
-        return ""
-    rest = body[match.end():]
-    following = REPORT_LABEL.search(rest)
-    return (match.group(1) + (rest[:following.start()] if following else rest)).strip()
+    """The text of the `<name>:` fields of a report: for each, the rest of its line and the lines up to the next label,
+    stripped; the fields of one name are joined by a line break. "" when the report has no such field. A verifier that
+    writes one `Issues:` line per finding gives several fields, and all of them count."""
+    body = body or ""
+    parts = []
+    for match in re.finditer(rf"(?m)^{re.escape(name)}:[ \t]*(.*)$", body):
+        rest = body[match.end():]
+        following = REPORT_LABEL.search(rest)
+        parts.append((match.group(1) + (rest[:following.start()] if following else rest)).strip())
+    return "\n".join(part for part in parts if part)
 
 
 def follow_ups(body):
@@ -7966,6 +7968,9 @@ def cmd_check_report(args):
     for row in waiting:
         problems.append(f"{mbx.unacked_text(row, rows)}: run the inbox command in MAILBOX, act on it and ack it, "
                         "then list it under Deviations")
+    if args.verifier and len(re.findall(r"(?m)^Issues:", strip_comments(body))) > 1:
+        print("run.py: warning: the report has more than one `Issues:` field; write a single `Issues:` field, one "
+              "finding per line", file=sys.stderr)
     if problems:
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)

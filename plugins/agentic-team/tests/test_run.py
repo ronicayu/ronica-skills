@@ -6393,6 +6393,27 @@ class Issue89Test(Base):
         self.assertEqual(code, 2)
         self.assertIn("a PASS report has no blocking finding", err)
 
+    def test_every_issues_block_of_a_verifier_report_is_read(self):
+        import run as runner
+        body = ("Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
+                "Issues: blocking: src/b.py:2: two\nFollow-ups: None\nCheckpoint: x\n")
+        self.assertEqual(runner.issue_lines(body), ["blocking: src/a.py:1: one", "blocking: src/b.py:2: two"])
+        mixed = ("Status: ISSUES\nIssues:\n- blocking: one\nFiles: None\nIssues: None\nIssues: blocking: two\n"
+                 "Checkpoint: x\n")
+        self.assertEqual(runner.issue_lines(mixed), ["blocking: one", "blocking: two"])
+        self.assertEqual(runner.report_field(body, "Issues").splitlines(), ["blocking: src/a.py:1: one", "blocking: src/b.py:2: two"])
+        self.assertEqual(runner.report_field(body, "Ran"), "")
+
+    def test_a_verifier_report_with_two_issues_blocks_warns_and_stays_valid(self):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: one\nIssues: blocking: two\n"
+                     f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        code, out, err = self.check(path, "--verifier")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertIn("warning: the report has more than one `Issues:` field; write a single `Issues:` field, one finding per line", err)
+        self.assertNotIn("warning", self.check(self.report("ISSUES", Issues="\nblocking: one\nblocking: two"), "--verifier")[2])
+
     def test_a_worker_report_keeps_free_issue_lines(self):
         self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails", Asked="#4")), (0, "ok\n", ""))
         self.assertEqual(self.check(self.report("ISSUES", Issues="None", Asked="none: the timebox ran out")), (0, "ok\n", ""))
@@ -12943,7 +12964,7 @@ class RevisionTest(Base):
         return (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:\n" + "".join(f"- blocking: {x}\n" for x in lines)
                 + f"Checkpoint: {CHECKPOINT}\n")
 
-    def failed(self, seat="task", lines=("src/a.py:1: a check fails",), config="", close=True, **meta):
+    def failed(self, seat="task", lines=("src/a.py:1: a check fails",), config="", close=True, body=None, **meta):
         """Attempt 1 of task 1, launched by run.py, passed; its verifier (seat task: in task-1; own: in verify-1-1) said
         verify-failed with blocking `lines`; both sessions are kept. With `close` the verdict is recorded."""
         self.write_config(f'[verify]\nseat = "{seat}"\n' + config)
@@ -12964,7 +12985,7 @@ class RevisionTest(Base):
         self.transcript("task-1", self.W)
         self.transcript(folder, self.V)
         self.kept(folder)
-        self.verify_row = self.add_result(task, "ISSUES", self.issues(lines), kind="verify", by="verify-1-1")["id"]
+        self.verify_row = self.add_result(task, "ISSUES", body or self.issues(lines), kind="verify", by="verify-1-1")["id"]
         events = self.events("close", str(task)) if close else None
         return task, wt, head, events
 
@@ -13042,6 +13063,14 @@ class RevisionTest(Base):
                 {"id": 60, "kind": "task", "attempt": 1}, {"id": 70, "kind": "task", "attempt": 2}]
         self.assertEqual([r["id"] for r in runner.current_rows(rows, 1)], [local + 2, 60])
         self.assertEqual([r["id"] for r in runner.current_rows(rows[:2], 1)], [40, local + 1])
+
+    def test_revise_relays_the_findings_of_two_issues_blocks(self):
+        body = (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
+                f"Issues: blocking: src/b.py:2: two\nCheckpoint: {CHECKPOINT}\n")
+        task, wt, head, events = self.revised(body=body)
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.assertIn("Steer: 2 blocking findings of verify", steer["body"])
+        self.assertTrue(steer["body"].endswith("\nF1: blocking: src/a.py:1: one\nF2: blocking: src/b.py:2: two\n"))
 
     def test_revise_of_one_blocking_line(self):
         task, wt, head, events = self.revised()
