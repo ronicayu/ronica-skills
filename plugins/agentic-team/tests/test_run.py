@@ -6552,7 +6552,8 @@ class Issue89Test(Base):
         out = self.run_cmd("status")
         self.assertEqual(out.returncode, 2)
         self.assertIn('scope.adjacent: "lower-ratchett" is not an adjacent-change kind; the kinds are lower-ratchet, '
-                      "stale-exemption, own-lint (did you mean lower-ratchet?)", out.stderr)
+                      "stale-exemption, own-lint, own-dependents, own-registry, convention-place, moved-path "
+                      "(did you mean lower-ratchet?)", out.stderr)
 
 
 class PrTest(Base):
