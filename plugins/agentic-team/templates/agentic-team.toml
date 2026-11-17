@@ -75,6 +75,9 @@ always_pause = []           # decisions that always need the operator
 #   "convention-place"      #   put new code in the file where the repository's conventions place it (a schema file, a facade) when that file is outside SCOPE
 #   "moved-path"            #   change the code that a SCOPE path meant, when that path is missing at the base and `git grep` finds that code in exactly one other place
 
+[report]
+# require_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }  # by verify kind: the line prefixes that a worker PASS report needs under Ran:; empty by default
+
 [roles]
 # default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (README: Roles)
 

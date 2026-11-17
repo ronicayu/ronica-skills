@@ -329,6 +329,12 @@ check that every path and command you quote in the report exists and is the one 
 `check-report` command looks up each backticked path under `Files:`, `Evidence:` and `Ran:`; a line
 that says the path was `deleted` or `removed` is exempt.
 
+`Files:` names every file that your commits changed, one per line: `check-report` computes them with
+`git diff --name-only <base>...HEAD` and refuses a `PASS` that leaves one out (a deleted file, and the new
+path of a renamed file, count). When more than 20 files changed, a directory entry such as `src/` names the
+files under it. When the project sets `[report] require_ran` for your task's verify kind, a `PASS` needs a
+`Ran:` line that starts with each prefix the check names (for example `reuse: ...`).
+
 Write one `Evidence:` line for each ACCEPTANCE line: the
 ACCEPTANCE line in short, then the command and its result, or the `path:line`, that
 proves it. A known gap means `ISSUES`, not `PASS`. A change outside SCOPE goes under
