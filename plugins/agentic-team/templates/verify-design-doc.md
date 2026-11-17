@@ -2,6 +2,9 @@ Then check the real document against its sources, not the worker's summary
 of it. Report every failure you can prove, not only the first. A miss is a
 `blocking:` finding under `Issues:`, or a `nonblocking:` line under Follow-ups
 when the non-blocking test in your brief holds.
+A category on a `blocking:` line is optional: `blocking[stale-ref]:` (a `file:line` reference that no longer
+points at what it names), `blocking[claim]:` (a statement about the code that is false), `blocking[test]:`,
+`blocking[scope]:`, `blocking[shots]:` or `blocking[behaviour]:`. Write one `Issues:` field, one finding per line.
 
 ### Method: design-doc
 

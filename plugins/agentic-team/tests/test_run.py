@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 import config  # noqa: E402
 import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
+with open(os.path.join(os.path.dirname(HERE), ".claude-plugin", "plugin.json")) as fh:
+    PLUGIN_VERSION = json.load(fh)["version"]
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, re, signal, subprocess, sys
@@ -494,13 +496,15 @@ class Base(unittest.TestCase):
         if kind == "verify":
             worktree = worktree or f"verify-{task}-{attempt}"
             return {"id": f"sess-{worktree}", "kind": kind, "attempt": attempt, "name": name or worktree,
-                    "worktree": worktree, "model": model or "opus"}
+                    "worktree": worktree, "model": model or "opus", "plugin": PLUGIN_VERSION}
         return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
-                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet"}
+                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet",
+                "plugin": PLUGIN_VERSION}
 
     def launched(self, task, attempt=1, **over):
         """The entry that `launch` records: the session entry, with the role, tier and verify kind it stores."""
-        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code", **over}
+        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code",
+                **({"cause": "first"} if attempt == 1 else {}), **over}
 
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
@@ -1363,7 +1367,7 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
         self.assertEqual(meta["sessions"], [self.launched(task)])
-        self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+        self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertNotIn("verdict", meta)
         self.assertNotIn("verdict_ref", meta)
 
@@ -1713,7 +1717,7 @@ class RunTest(Base):
         self.assertIn("It holds the commits of the earlier attempts of this task.", text)
         self.assertNotIn("Base commit:", text)
         meta = self.meta(task)
-        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2, cause="retry-issues")])
         self.assertEqual((meta["attempt"], meta["base"]), (2, first["base"]))
 
     def test_23_base_on_a_retry_is_refused_and_creates_nothing(self):
@@ -2129,8 +2133,9 @@ class RunTest(Base):
         task = self.unlabelled_failure()
         verified = self.one(self.events("record"), "verified")
         self.assertEqual(verified["next"], f"run.py verify {task} --again (the verifier's report has no blocking: line: "
-                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` and say why "
-                         "it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
+                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` (or "
+                         "`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour) "
+                         "and say why it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
                          "<why it does not block>`)")
 
     def test_30_close_refuses_an_unlabelled_verify_failed_report(self):
@@ -2611,7 +2616,7 @@ class RunTest(Base):
         self.assertIn("recorded merged_by=operator", merged["detail"])
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "operator")
-        self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+        self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
     def test_105_merged_into_accepts_a_rebased_commit(self):
         task = self.add_task(attempt=1)
@@ -3194,7 +3199,7 @@ class RunTest(Base):
         task = self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
         self.worktree("task-1")
         self.agents(self.row("task-1", 3), self.finished("task-1"))
-        events = self.events("abandon", str(task), "died")
+        events = self.events("abandon", str(task), "died", "--why", "tested")
         self.assertEqual(self.meta(task)["abandoned"], "died")
         self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
         detail = self.one(events, "abandoned")["detail"]
@@ -3203,10 +3208,20 @@ class RunTest(Base):
         self.assertEqual(len(filed), 1)
         self.assertIn("Session: sess-task-1-3", filed[0]["body"])
         self.assertIn("Worktree:", filed[0]["body"])
-        out = self.run_cmd("abandon", str(task), "gave-up")
+        self.assertEqual(self.meta(task)["abandoned_why"], "tested")
+        self.assertIn("Abandoned: died\nWhy: tested", filed[0]["body"])
+        self.assertIn("(died: tested)", detail)
+        out = self.run_cmd("abandon", str(task), "gave-up", "--why", "tested")
         self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid choice", out.stderr)
+        out = self.run_cmd("abandon", str(task), "unknown", "--why", "tested")  # no longer a reason code
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid choice", out.stderr)
+        out = self.run_cmd("abandon", str(task), "died")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("abandon needs --why", out.stderr)
         idle = self.add_task()
-        self.assertEqual(self.run_cmd("abandon", str(idle), "died").returncode, 2)
+        self.assertEqual(self.run_cmd("abandon", str(idle), "died", "--why", "tested").returncode, 2)
 
     # --- review fixes
 
@@ -3269,7 +3284,7 @@ class RunTest(Base):
         self.assertEqual((meta["attempt"], meta["session"]), (1, "task-1-1-smoke"))
         self.assertIn("started_at", meta)
         self.assertEqual(meta["sessions"], [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1-smoke",
-                                             "worktree": "task-1"}])
+                                             "worktree": "task-1", "plugin": PLUGIN_VERSION}])
         again = self.run_cmd("launch", str(task))
         self.assertEqual(again.returncode, 2)
         self.assertIn("has a live session", again.stderr)
@@ -3628,7 +3643,8 @@ class RunTest(Base):
         closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
         self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
-                                                        "tier": "implementation", "verify_kind": "code"}])
+                                                        "tier": "implementation", "verify_kind": "code",
+                                                        "plugin": PLUGIN_VERSION}])
         self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
@@ -3911,7 +3927,8 @@ class RunTest(Base):
         self.agents()
         detail = self.one(self.events("launch", str(silent), env=dict(self.env, FAKE_CLAUDE_BG_SAID="")), "launched")["detail"]
         self.assertEqual(sessions(silent), [{"kind": "task", "attempt": 1, "name": "task-4-1", "worktree": "task-4", "model": "sonnet",
-                                             "role": None, "tier": "implementation", "verify_kind": "code"}])  # no id, but the stored values
+                                             "role": None, "tier": "implementation", "verify_kind": "code", "plugin": PLUGIN_VERSION,
+                                             "cause": "first"}])  # no id, but the stored values
         self.assertIn("no session id printed; the row is matched by its folder", detail)
         self.assertNotIn("claude said", detail)
         text_only = self.add_task()  # no `backgrounded` line: a finished row in the folder is not the new session
@@ -4052,7 +4069,7 @@ class RunTest(Base):
         for name in ("died", "stuck", "running", "unknown"):
             self.assertEqual(self.named(events, name), [])
         self.assertEqual(len(self.results(task)), 1)
-        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died"),
+        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died", "--why", "tested"),
                         ("adopt", "--branch", "main", "--head", "abc1234")):
             out = self.run_cmd(command[0], str(task), *command[1:])
             self.assertEqual(out.returncode, 2, command)
@@ -5594,7 +5611,7 @@ class RunTest(Base):
         self.running_task(attempt=3)
         self.agents(self.row("task-1", 3, status="idle", state="working"))
         unknown = self.one(self.events("record"), "unknown")
-        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 unknown "
+        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 stuck "
                                           "(the cap is 3 attempts), or run.py stop 1, then run.py record and "
                                           "run.py launch 1 --attempt 4 to override")
 
@@ -5714,7 +5731,7 @@ class RunTest(Base):
         task = self.running_task(attempt=3, sessions=[self.entry(1, 3), self.entry(1, 3, kind="verify")])
         self.worktree("task-1")
         self.agents(self.row("task-1", 3), self.row("verify-1-3", status="idle", state="blocked"))
-        self.ok("abandon", str(task), "stuck")
+        self.ok("abandon", str(task), "stuck", "--why", "tested")
         self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
         self.assertIn(["stop", "sess-verify-1-3"], self.calls("stop"))
         filed = [r for r in self.results(task) if r["status"] == "ABANDONED"]
@@ -7312,7 +7329,7 @@ class PrTest(Base):
     def test_140_abandon_deletes_the_ci_ref(self):
         task, head, events = self.ci_ref_verified()
         self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)
-        self.assertEqual(self.one(self.events("abandon", str(task), "stuck"), "ci-ref-deleted")["detail"],
+        self.assertEqual(self.one(self.events("abandon", str(task), "stuck", "--why", "tested"), "ci-ref-deleted")["detail"],
                          f"origin/ci-{task}-1")
         self.assertIsNone(self.remote_sha(f"ci-{task}-1"))
         self.assertNotIn("ci_refs", self.meta(task))
@@ -7743,7 +7760,7 @@ class PrTest(Base):
     def test_abandon_names_the_request_that_stays_open(self):
         task, wt, head = self.pr_task()
         self.tg("edit", str(task), "--meta", "pr=1", "attempt=3")
-        detail = self.one(self.events("abandon", str(task), "died"), "abandoned")["detail"]
+        detail = self.one(self.events("abandon", str(task), "died", "--why", "tested"), "abandoned")["detail"]
         self.assertTrue(detail.endswith(f"; request {self.label()} stays open, close it on the host by hand"), detail)
 
     # --- review fixes
@@ -8757,7 +8774,8 @@ class ProfileTest(Base):
         entry = self.meta(task)["sessions"][0]
         self.assertEqual(entry, {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
                                  "worktree": "task-1", "model": "sonnet", "profile": "api", "role": None,
-                                 "tier": "implementation", "verify_kind": "code"})
+                                 "tier": "implementation", "verify_kind": "code", "plugin": PLUGIN_VERSION,
+                                 "cause": "first"})
         detail = self.one(events, "launched")["detail"]
         self.assertTrue(detail.startswith("sonnet profile api session task-1-1 "), detail)
         self.assertNotIn("does not list", detail)  # the id was checked against the api profile's own list
@@ -8775,7 +8793,7 @@ class ProfileTest(Base):
                 self.assertEqual(self.meta(task)["sessions"],
                                  [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
                                    "worktree": "task-1", "model": "sonnet", "role": None, "tier": "implementation",
-                                   "verify_kind": "code"}])
+                                   "verify_kind": "code", "plugin": PLUGIN_VERSION, "cause": "first"}])
                 self.assertEqual(self.one(events, "launched")["detail"].split(" session ")[0], "sonnet/high")
                 with open(self.log + ".dirs") as fh:
                     self.assertEqual({json.loads(line)["dir"] for line in fh}, {None})
@@ -9907,7 +9925,7 @@ class DeliveryTest(Base):
         task = self.worker(status="busy", state="working", pid=4242)
         text = self.text_file("x")
         commands = {"launch": [], "adopt": ["--branch", "none", "--head", "abcdef1"], "verify": [], "close": [], "merged": [],
-                    "stop": [], "abandon": ["died"], "answer": ["--file", text], "steer": ["--file", text]}
+                    "stop": [], "abandon": ["died", "--why", "tested"], "answer": ["--file", text], "steer": ["--file", text]}
         self.assertEqual(set(commands), set(("launch", "adopt", "verify", "close", "merged", "stop", "abandon", "answer", "steer")))
         for command, args in commands.items():
             with self.subTest(command):
@@ -10073,7 +10091,7 @@ class DeliveryTest(Base):
         self.ok("launch", str(task), "--profile", "c2")
         self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=3)
         self.c2_agents(*[self.finished("task-1", n) for n in (1, 2, 3)])
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertNotIn("mailbox", self.meta(task))
         self.assertNotIn("Open thread", self.brief(task, "--attempt", "4"))
 
@@ -10361,7 +10379,7 @@ class DeliveryTest(Base):
         self.assertEqual(self.meta(task)["mailbox_ids"], {"1": [steer["id"]]})
         self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n")
         self.c2_agents(self.finished("task-1", 1))
-        self.ok("abandon", str(task), "died")  # drops the delivery state; the listed ids stay
+        self.ok("abandon", str(task), "died", "--why", "tested")  # drops the delivery state; the listed ids stay
         self.assertNotIn("mailbox", self.meta(task))
         self.assertEqual(self.meta(task)["mailbox_ids"], {"1": [steer["id"]]})
         self.ok("launch", str(task), "--attempt", "2", "--profile", "c2")
@@ -10465,7 +10483,7 @@ class DeliveryTest(Base):
         task = self.worker(status=None, state="done")
         ask = self.ask()
         self.c2_agents()  # and its job is removed too
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("ABANDONED", "manager")])
         self.ok("launch", str(task), "--attempt", "2", "--profile", "c2")
         self.assertIn(f"Ask #{ask} (OPEN):", self.calls("--bg")[-1][-1])
@@ -10507,7 +10525,7 @@ class DeliveryTest(Base):
         self.fresh()
         task = self.worker(status=None, state="stopped")
         self.ask()
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "task"], ["ABANDONED"])
         self.assertTrue(ask)
 
@@ -10589,7 +10607,7 @@ class DeliveryTest(Base):
                     self.ok("merged", str(task))
                 else:
                     self.add_result(task, "DIED", "x")
-                    self.ok("abandon", str(task), "died")
+                    self.ok("abandon", str(task), "died", "--why", "tested")
                 self.assertNotIn("mailbox", self.meta(task))
                 left = sorted(os.listdir(os.path.dirname(self.inbox_file("x"))))
                 self.assertEqual(left, ["2-1.ctx.json"])  # only this task's files went
@@ -11076,10 +11094,10 @@ class PhaseTest(Base):
         self.assertEqual(self.one(self.events("record"), "pr-closed")["task"], task)
         self.assert_awaiting(task)
         self.assertNotIn(later, self.ready_ids())
-        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        abandoned = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
         self.assertIn(f"request {self.label()} stays open and record no longer follows it", abandoned["detail"])
         meta = self.meta(task)
-        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "unknown"))
+        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "failed"))
         self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
         self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
 
@@ -11093,7 +11111,7 @@ class PhaseTest(Base):
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
         self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", out.stderr)
-        self.ok("abandon", str(task), "unknown")  # the hint's commands work: abandon, then the next attempt
+        self.ok("abandon", str(task), "failed", "--why", "tested")  # the hint's commands work: abandon, then the next attempt
         self.ok("launch", str(task), "--attempt", "2", "--dry-run")
 
     def test_pr_blocked_on_a_task_closed_by_0_18_0_says_a_fix_is_a_new_task(self):
@@ -11103,7 +11121,7 @@ class PhaseTest(Base):
 
     def test_abandon_a_local_task_that_waits_for_its_merge(self):
         task, wt, head = self.closed_local()
-        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        abandoned = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
         self.assertIn(f"branch worktree-task-1 at {head[:7]} is not merged and stays", abandoned["detail"])
         self.assertEqual(self.git("rev-parse", "worktree-task-1"), head)
 
@@ -11341,7 +11359,7 @@ class PhaseTest(Base):
         hint = self.one(self.events("record"), "pr-closed")["next"]
         self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", hint)
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
-        self.ok("abandon", str(task), "unknown")
+        self.ok("abandon", str(task), "failed", "--why", "tested")
         self.one(self.events("launch", str(task), "--attempt", "2"), "launched")
 
     def test_adopt_with_an_awaiting_dependency_needs_its_commit(self):
@@ -11467,7 +11485,7 @@ class PhaseTest(Base):
                 self.fresh()
                 task = close()[0]
                 self.assertIsNotNone(self.gate(task))
-                self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+                self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
                 self.assertEqual((self.meta(task)["phase"], self.gate(task)), ("abandoned", None))
 
     def test_gate_crash_between_clear_and_done_heals(self):
@@ -12284,7 +12302,7 @@ class RepointTest(Base):
 
     def test_111_abandon_and_the_next_attempt_go_back_to_the_own_request(self):
         (task, head), = self.repointed(1)
-        detail = self.one(self.events("abandon", str(task), "unknown"), "abandoned")["detail"]
+        detail = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")["detail"]
         self.assertIn("record no longer follows PR #9, which another task merges", detail)
         self.assertIn("the next attempt goes back to the task's own request PR #1", detail)
         self.assertEqual(self.close_calls(9), [])
@@ -12463,7 +12481,7 @@ class RoundTest(Base):
         self.started(task)
         self.assertIn("is already in a rebase round (attempt 2); run.py round 1 --cancel ends it",
                       self.refused("round", str(task), "rebase"))
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertIn("is not in a round (abandoned: died)", self.refused("round", str(task), "--cancel"))
         self.assertIn("is abandoned (died)", self.refused("round", str(task), "rebase"))
 
@@ -12749,7 +12767,7 @@ class RoundTest(Base):
         self.started(task)
         for args in (("launch", str(task)), ("adopt", str(task), "--branch", "worktree-task-1", "--head", head[:7])):
             self.assertIn("is in a rebase round (attempt 2); run.py round 1 --cancel ends it", self.refused(*args))
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.ok("launch", str(task), "--attempt", "3")
         meta = self.meta(task)
         self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
@@ -12962,7 +12980,7 @@ class FolderFixTest(Base):
         self.assertEqual([f for f in self.worktree_state()[2] if f.startswith("verify-")], [])
         self.fresh()
         task, wt, head = self.failed_verdict()
-        events = self.events("abandon", str(task), "stuck")
+        events = self.events("abandon", str(task), "stuck", "--why", "tested")
         abandoned = self.one(events, "abandoned")
         self.assertNotIn("verify-1-1", abandoned["detail"])
         self.assertIn("task-1", abandoned["detail"])
@@ -14018,6 +14036,173 @@ class Issue130Test(Base):
             self.assertIn("./agents/dependency-check.md", json.load(fh)["agents"])
         with open(os.path.join(base, "playbooks", "run.md"), encoding="utf-8") as fh:
             self.assertIn("agentic-team:dependency-check", fh.read())
+
+
+class RetroTest(Base):
+    """agentic-team 0.28.0: what a retro needs, recorded: plugin and usage per session, the cause of an attempt, the
+    dependency check, the triage of a follow-up, the category of a blocking line, UTC times."""
+
+    def body_file(self, text, name="body.md"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_launch_records_the_plugin_version_and_the_cause_of_the_attempt(self):
+        task = self.add_task()
+        self.ok("launch", str(task))
+        entry = self.meta(task)["sessions"][0]
+        self.assertEqual((entry["plugin"], entry["cause"]), (PLUGIN_VERSION, "first"))
+        other = self.add_task("Second")
+        self.ok("launch", str(other), "--cause", "review-fix")  # the override wins over the derived cause
+        self.assertEqual(self.meta(other)["sessions"][0]["cause"], "review-fix")
+        self.assertIn("invalid choice", self.run_cmd("launch", str(self.add_task("Third")), "--cause", "whim").stderr)
+
+    def test_the_cause_of_an_attempt_comes_from_the_state_before_it(self):
+        import run as runner
+        def row(status, kind="task", author="worker", body=""):
+            return {"id": 1, "kind": kind, "status": status, "attempt": 1, "author": author, "body": body}
+        failed = "Status: ISSUES\nVerdict: verify-failed\nIssues: blocking: x\n"
+        cases = [
+            ("first", {}, [], 0),
+            ("retry-issues", {}, [row("ISSUES")], 1),
+            ("retry-issues", {}, [row("BLOCKED")], 1),
+            ("retry-stopped", {}, [row("STOPPED", author="manager")], 1),
+            ("retry-died", {}, [row("DIED", author="manager")], 1),
+            ("retry-died", {"abandoned": "died"}, [row("DIED", author="manager")], 1),
+            ("review-fix", {}, [row("PASS"), row("ISSUES", "verify", "verify-1-1", failed)], 1),
+            ("ci-fix", {}, [row("PASS"), row("ISSUES", "verify", "ci", failed)], 1),
+            (None, {}, [row("PASS")], 1),
+            (None, {}, [row("BLOCKED", author="manager")], 1),
+            (None, {"abandoned": "stuck"}, [row("DIED", author="manager")], 1),
+            (None, {}, [], 1),
+        ]
+        for want, meta, rows, current in cases:
+            with self.subTest(want=want, meta=meta, rows=[r["status"] for r in rows]):
+                self.assertEqual(runner.launch_cause({"meta": meta}, rows, current), want)
+
+    def test_record_writes_the_usage_of_an_ended_session_once(self):
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        self.agents(self.finished("task-1", sessionId="abc123-full"))
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        os.makedirs(folder)
+        with open(os.path.join(folder, "abc123-full.jsonl"), "w") as fh:
+            fh.write(transcript(11))
+        self.ok("record")
+        self.assertEqual(self.meta(task)["sessions"][0]["usage"], {"out": 11, "in": 3, "cache_read": 5, "cache_write": 7})
+        with open(os.path.join(folder, "abc123-full.jsonl"), "w") as fh:
+            fh.write(transcript(99))
+        self.ok("record")
+        self.assertEqual(self.meta(task)["sessions"][0]["usage"]["out"], 11)  # written once
+
+    def test_record_leaves_the_usage_of_a_live_session_and_of_one_with_no_transcript(self):
+        task = self.running_task()
+        self.agents(self.row("task-1", sessionId="abc123-full"))
+        self.ok("record")
+        self.assertNotIn("usage", self.meta(task)["sessions"][0])
+        self.agents(self.finished("task-1"))
+        self.ok("record")
+        self.assertNotIn("usage", self.meta(task)["sessions"][0])
+
+    def test_depcheck_files_a_check_row_for_the_next_attempt(self):
+        task = self.add_task()
+        events = self.events("depcheck", str(task), "--verdict", "missing", "--body-file",
+                             self.body_file("missing: src/a.py is in request #12\n"))
+        (row,) = [r for r in self.results(task) if r["kind"] == "check"]
+        self.assertEqual((row["status"], row["author"], row["attempt"]), ("MISSING", "manager", 1))
+        self.assertEqual(row["body"], "Check: dependency\nVerdict: missing\n\nmissing: src/a.py is in request #12\n")
+        self.assertIn("missing (result #", self.one(events, "depchecked")["detail"])
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n", "b.md"))
+        self.ok("depcheck", str(task), "--verdict", "not-checked", "--body-file", self.body_file("not checked: x\n", "c.md"))
+        self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "check"], ["MISSING", "OK", "NOT-CHECKED"])
+        self.assertEqual(self.status_of(task), "open")
+        self.assertIn("invalid choice", self.run_cmd("depcheck", str(task), "--verdict", "fine", "--body-file", self.body_file("x")).stderr)
+        self.assertIn("is empty", self.refused("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("", "e.md")))
+        self.ok("launch", str(task))  # a check row changes no state: the launch goes on
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n", "d.md"))
+        self.assertEqual(self.results(task)[-1]["attempt"], 2)
+
+    def refused(self, *args):
+        out = self.run_cmd(*args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return out.stderr
+
+    def follow_up_task(self):
+        task = self.add_task()
+        row = self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFollow-ups: caller: src/b.py: calls the old name\n"
+                              "- doc: README.md: names the old flag\nCheckpoint: x\n")
+        return task, row["id"]
+
+    def test_triage_files_a_row_that_names_the_result_and_the_line(self):
+        task, row = self.follow_up_task()
+        later = self.add_task("Follow-up work")
+        events = self.events("triage", str(task), "--row", f"{row}#2", "--to", "task", str(later))
+        (filed,) = [r for r in self.results(task) if r["kind"] == "triage"]
+        self.assertEqual((filed["status"], filed["author"], filed["attempt"]), ("TASK", "manager", 1))
+        self.assertEqual(filed["body"], f"Row: {row}#2\nLine: - doc: README.md: names the old flag\nTo: task {later}\n")
+        self.assertIn(f"result #{row} line 2 -> task {later}", self.one(events, "triaged")["detail"])
+        self.ok("triage", str(task), "--row", f"{row}#1", "--to", "issue", "57")
+        self.ok("triage", str(task), "--row", f"{row}#1", "--to", "dismissed", "--why", "the caller is gone")
+        rows = [r for r in self.results(task) if r["kind"] == "triage"]
+        self.assertEqual([r["status"] for r in rows], ["TASK", "ISSUE", "DISMISSED"])
+        self.assertTrue(rows[2]["body"].endswith("To: dismissed\nWhy: the caller is gone\n"))
+
+    def test_triage_refuses_what_it_cannot_join(self):
+        task, row = self.follow_up_task()
+        for args, word in ((("--row", "x", "--to", "dismissed", "--why", "y"), "<result id>#<line>"),
+                           ((f"--row", f"{row}#3", "--to", "issue", "5"), "has 2 Follow-ups lines"),
+                           (("--row", "99999#1", "--to", "issue", "5"), "has no result #99999"),
+                           (("--row", f"{row}#1", "--to", "dismissed"), "needs --why"),
+                           (("--row", f"{row}#1", "--to", "issue"), "--to takes"),
+                           (("--row", f"{row}#1", "--to", "issue", "abc"), "takes a number")):
+            with self.subTest(args=args):
+                self.assertIn(word, self.refused("triage", str(task), *args))
+        out = self.run_cmd("triage", str(task), "--row", f"{row}#1", "--to", "task", "99999")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("99999", out.stderr)
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "triage"], [])
+
+    def test_a_blocking_line_may_carry_a_category(self):
+        import run as runner
+        import mailbox as mbx
+        lines = ("blocking: plain", "blocking[stale-ref]: NOTES.md:12 moved", "- blocking[claim]: the route has two callers",
+                 "blocking[test]: x", "blocking[scope]: x", "blocking[shots]: x", "blocking[behaviour]: x")
+        issues = "\n" + "\n".join(lines)
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
+        row = {"id": 5, "author": "verify-1-1", "status": "ISSUES", "attempt": 1, "kind": "verify",
+               "body": f"Status: ISSUES\nVerdict: verify-failed\nIssues:{issues}\n"}
+        found = runner.revise_findings({"meta": {"attempt": 1}}, [{"id": 4, "kind": "task", "status": "PASS", "attempt": 1}, row])[1]
+        self.assertEqual(found, [line.lstrip("- ") for line in lines])
+        steer = runner.finding_steer(row, found, 1)
+        self.assertEqual(mbx.finding_ids(steer), ["F1", "F2", "F3", "F4", "F5", "F6", "F7"])
+        self.assertIn("F2: blocking[stale-ref]: NOTES.md:12 moved\n", steer)
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:\nblocking[nope]: x\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        out = self.run_cmd("check-report", path, "--verifier")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour", out.stderr)
+
+    def test_the_verifier_brief_and_templates_name_the_optional_category(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\n")
+        text = self.ok("verify", str(task), "--dry-run").stdout
+        self.assertIn("a category is optional: `blocking[stale-ref]:`", text)
+        self.assertIn("A category on a `blocking:` line is optional", text)
+
+    def test_times_that_run_py_writes_are_utc_iso_and_both_formats_show_in_the_project_zone(self):
+        self.write_config("", sessions="")
+        task = self.running_task(started_at='"2026-10-26T09:00:00Z"')
+        old = self.running_task(started_at='"2026-10-26 08:00 UTC"')
+        self.assertEqual((task, old), (1, 2))
+        section = self.status_sections()["In flight"]
+        self.assertIn("2026-10-26 09:00 UTC", section)
+        self.assertIn("2026-10-26 08:00 UTC", section)
+        import run as runner
+        self.assertRegex(runner.utc_stamp(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 class TransitionTest(unittest.TestCase):

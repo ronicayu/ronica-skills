@@ -27,7 +27,9 @@ Usage:
                    task); closes the task's own request unless --keep-old;
                    `record` marks it done once <n> is merged
     stop <id>      stop a worker for a pause and file a STOPPED result
-    abandon <id>   mark a task abandoned after attempt 3 failed
+    abandon <id> <reason> --why <text>
+                   mark a task abandoned after attempt 3 failed; the reason
+                   code and the words are recorded
     status         print the status report (tables), with the Follow-ups
                    lines of the worker reports counted by label and the mean
                    attempts of the tasks done in the period
@@ -48,6 +50,10 @@ Usage:
                    an answer row and rings the worker's doorbell
     steer <id>     send a running worker a steer; --interrupt stops and resumes it
     inbox <id>     show the task's messages and their delivery state; read only
+    depcheck <id>  record the verdict of the dependency check before a launch
+                   (ok, missing, not-checked) as a `check` row
+    triage <id>    record where a Follow-ups line of a result went (a task, an
+                   issue, or dismissed with a reason) as a `triage` row
 
 Run from the repository root. Taskgraph is the only source of task content;
 this script copies it and never invents it. Only `wait` and the host
@@ -127,7 +133,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
-                    profile_path, resolve_model, taskgraph_store, tier_profiles)
+                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -138,7 +144,7 @@ VERDICTS = ("artifact-verified", "test-verified", "check-only", "verify-blocked"
 CLOSING = ("artifact-verified", "test-verified")
 VERIFY_KINDS = ("code", "schema", "design-doc")
 PASSING = {"code": CLOSING, "schema": ("artifact-verified",), "design-doc": ("artifact-verified",)}
-ABANDON_MODES = ("died", "tool-error", "stuck", "unknown")
+ABANDON_MODES = ("died", "tool-error", "stuck", "failed", "scope-wrong", "superseded", "operator")  # why a task is dropped; --why adds the words
 TASK_WT = re.compile(r"^task-(\d+)$")
 VERIFY_WT = re.compile(r"^verify-(\d+)-(\d+)(?:-(\d+))?$")
 LEGACY_WT = re.compile(r"^task-(\d+)-(\d+)$")  # a worktree of agentic-team 0.6.0
@@ -193,7 +199,7 @@ OMIT_ROOM = 300  # bytes of a report that must fit before a report is cut to the
 COMMENT_FIELDS = ("Ran", "Issues", "Follow-ups", "Run", "Conclusion", "Overrides", "Reason")
 VERIFIER_FINDINGS = """### Findings
 
-Label every finding. Each line under `Issues:` starts with `blocking:` and says why it blocks. Blocking: a real defect \
+Label every finding. Write one `Issues:` field, one finding per line. Each line under `Issues:` starts with `blocking:` and says why it blocks; a category is optional: `blocking[stale-ref]:`, `blocking[claim]:`, `blocking[test]:`, `blocking[scope]:`, `blocking[shots]:` or `blocking[behaviour]:`. Blocking: a real defect \
 (behaviour, output, red test), a design gap (an undefined decision, a contradiction), an acceptance line not met, a \
 scope breach, an error that reaches product output or user-visible text, any security or data-correctness risk. A \
 non-blocking finding goes under `Follow-ups:` as `nonblocking: <finding>: <why it does not block>`. Non-blocking: a \
@@ -204,6 +210,8 @@ diagram edge that no later task depends on). A finding that fits neither list is
 non-blocking findings, report `PASS` and list them under `Follow-ups:`. `check-report --verifier` refuses an `ISSUES` \
 report whose `Issues:` lines do not all start with `blocking:`."""
 FOLLOW_UP_LABELS = ("caller", "doc", "test", "other", "found", "split", "flake", "decision", "nonblocking")  # decision, nonblocking: a verifier's lines
+BLOCKING_CATEGORIES = ("stale-ref", "claim", "test", "scope", "shots", "behaviour")  # the optional category of a `blocking[...]:` line
+BLOCKING_LINE = re.compile(r"blocking(?:\[(" + "|".join(BLOCKING_CATEGORIES) + r")\])?:")  # `blocking:` or `blocking[claim]:`, at the start of an Issues line
 FOLLOW_UP_BULLET = re.compile(r"^[-*]\s+")  # a list marker in front of a Follow-ups line
 FOLLOW_UP_LINE = re.compile(r"^([a-z]+):(?:\s|$)")  # the label of a Follow-ups line, after the list marker
 ASKED_IDS = re.compile(r"#\d+(?:\s*,?\s*#\d+)*(?:\s*[(:\u2014-].*)?", re.S)  # ids, then an optional note
@@ -577,17 +585,23 @@ class Run:
         return Orders(text or "None yet.", stop, merge)
 
     def now(self):
-        tz = self.config["sessions"]["timezone"]
-        label = self.config["sessions"]["timezone_label"] or tz
-        return f"{datetime.datetime.now(ZoneInfo(tz)):%Y-%m-%d %H:%M} {label}"
+        """The time that run.py writes into meta and rows: UTC, ISO 8601 (`2026-11-17T09:05:00Z`)."""
+        return utc_stamp()
 
     def zone_time(self, stamp):
+        """A stored time in the project's time zone for display. A time that an older run.py wrote as a local string
+        (`2026-11-17 17:05 SGT`) is shown as it is."""
         if not stamp:
             return None
         tz = self.config["sessions"]["timezone"]
         label = self.config["sessions"]["timezone_label"] or tz
-        moment = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(ZoneInfo(tz))
-        return f"{moment:%Y-%m-%d %H:%M} {label}"
+        try:
+            moment = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError:
+            return str(stamp)
+        if moment.tzinfo is None:
+            return str(stamp)
+        return f"{moment.astimezone(ZoneInfo(tz)):%Y-%m-%d %H:%M} {label}"
 
     # --- output
 
@@ -679,6 +693,13 @@ class Session:
     def describe(self):
         label = profile_label(self.profile)
         return f"{self.sid} ({self.name}, {self.status}/{self.state}{', ' + label if label else ''})"
+
+
+def plugin_field():
+    """The `plugin` key of a `sessions` entry: the agentic-team version of the run.py that started the session, so that a
+    retro can group sessions by version. Left out when plugin.json cannot be read."""
+    version = manager_version()
+    return {"plugin": version} if version else {}
 
 
 def profile_field(profile):
@@ -1260,7 +1281,7 @@ def revise_findings(task, rows):
     problem = unlabelled_failure(row)
     if problem:
         return None, f"result #{row['id']}: {problem}"
-    lines = [line for line in issue_lines(row.get("body") or "") if line.startswith("blocking:")]
+    lines = [line for line in issue_lines(row.get("body") or "") if BLOCKING_LINE.match(line)]
     if not lines:
         return None, f"result #{row['id']} has no blocking: line"
     return row, lines
@@ -2862,7 +2883,7 @@ def session_entry(run, tid, kind, attempt, name, worktree, said, model=None, pro
         return None, "no session id printed; the row is matched by its folder"
     full = next((s.row.get("sessionId") for s in rows if s.sid == sid), None)  # the id that --resume needs
     return {"id": sid, "kind": kind, "attempt": attempt, "name": name, "worktree": worktree, "model": model,
-            **profile_field(profile), **({"sessionId": full} if full else {})}, note
+            **profile_field(profile), **plugin_field(), **({"sessionId": full} if full else {})}, note
 
 
 def pinned_model(model):
@@ -2941,7 +2962,7 @@ def cmd_launch(run, args):
             sessions = recorded_sessions(task)
             if not any(e.get("id") == s.sid for e in sessions):
                 sessions.append({"id": s.sid, "kind": "task", "attempt": 1, "name": s.name or s.wtname,
-                                 "worktree": f"task-{tid}", **profile_field(s.profile)})
+                                 "worktree": f"task-{tid}", **profile_field(s.profile), **plugin_field()})
             run.tg("edit", str(tid), "--meta", meta_arg("session", s.name or s.wtname), meta_arg("attempt", s.attempt or 1),
                    meta_arg("started_at", run.now()), meta_arg("sessions", sessions), meta_arg("phase", phase))
         run.emit("repaired", tid, s.attempt or 1, s.sid, f"live session {s.sid} found for an open task; "
@@ -3101,8 +3122,11 @@ def cmd_launch(run, args):
     keep += [meta_arg("target", given_target)] if given_target and given_target != run.config["merge"]["base"] else []
     if not meta.get("base") and mode in ("first", "base", "head"):
         keep.append(meta_arg("base", base))
-    attempt_edit(run, task, nxt, session, model, {**entry, **picked.stored}, "launch", keep,
-                 ["verdict", "verdict_ref", "abandoned", "revision", *ROUND_FIELDS, *drop])
+    cause = args.cause or launch_cause(task, rows, current)
+    if cause is None:
+        notes.append("no cause recorded for this attempt (the state of the attempt before it does not say); run.py launch --cause sets one")
+    attempt_edit(run, task, nxt, session, model, {**entry, **picked.stored, **({"cause": cause} if cause else {})}, "launch", keep,
+                 ["verdict", "verdict_ref", "abandoned", "abandoned_why", "revision", *ROUND_FIELDS, *drop])
     where = f"base {base[:7]}" if mode in ("first", "base") else f"continues at {base[:7]}"
     notify = notify_target(run)
     detail = (f"{model}{'/' + effort if effort else ''}{' ' + profile_label(profile) if profile_label(profile) else ''} "
@@ -3111,6 +3135,31 @@ def cmd_launch(run, args):
               + (f"; claude said: {first_line(said)}" if said else "") + (f"; {id_note}" if id_note else "")
               + (f"; {drift}" if drift else "") + (f"; notify {notify}" if notify else ""))
     run.emit("launched", tid, nxt, session, detail)
+
+
+LAUNCH_CAUSES = ("first", "review-fix", "rebase", "ci-fix", "retry-issues", "retry-stopped", "retry-died")
+
+
+def launch_cause(task, rows, current):
+    """Why a new attempt starts, from the state of the attempt `current` before it, for the `cause` key of its `sessions`
+    entry: first, review-fix (a verifier's verify-failed verdict on a PASS), ci-fix (the same from a CI run), retry-issues
+    (the worker reported ISSUES or BLOCKED), retry-stopped, retry-died. None when the state does not say, as after an
+    abandon for another reason or a stuck session: the Manager passes --cause then."""
+    if not current:
+        return "first"
+    meta = task.get("meta") or {}
+    if meta.get("abandoned"):
+        return "retry-died" if meta["abandoned"] == "died" else None
+    latest = task_rows(rows, current)
+    if not latest:
+        return None
+    last = latest[-1]
+    if last["status"] == "PASS":
+        failed = [r for r in task_rows(rows, current, "verify", history=True) if verdict_of(r) == "verify-failed"]
+        return None if not failed else "ci-fix" if failed[-1].get("author") == "ci" else "review-fix"
+    if last["status"] == "BLOCKED" and last.get("author") == "manager":
+        return None
+    return {"ISSUES": "retry-issues", "BLOCKED": "retry-issues", "STOPPED": "retry-stopped", "DIED": "retry-died"}.get(last["status"])
 
 
 def worker_model(run, args, tier):
@@ -3159,7 +3208,7 @@ def start_worker(run, task, attempt, session, text, model, effort, profile, base
     entry, id_note = session_entry(run, tid, "task", attempt, session, worktree, said, model, profile)
     if entry is None:  # no session id is known; the attempt still keeps its role, tier and verify kind
         entry = {"kind": "task", "attempt": attempt, "name": session, "worktree": worktree, "model": model,
-                 **profile_field(profile)}
+                 **profile_field(profile), **plugin_field()}
     return path, said, drift, entry, id_note
 
 
@@ -3247,10 +3296,10 @@ def cmd_adopt(run, args):
     if task["status"] == "open":
         run.tg("start", str(tid))
     # No session ran, so the entry has no id; it holds the attempt's role, tier and verify kind for later commands.
-    sessions = recorded_sessions(task) + [{"kind": "task", "attempt": nxt, "name": "adopted", **chosen.stored}]
+    sessions = recorded_sessions(task) + [{"kind": "task", "attempt": nxt, "name": "adopted", **plugin_field(), **chosen.stored}]
     run.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in {"attempt": nxt, "session": "adopted", "started_at": now,
            "base": base, "sessions": sessions, "phase": phase, **extra}.items()],
-           "--unset-meta", "verdict", "verdict_ref", "abandoned")
+           "--unset-meta", "verdict", "verdict_ref", "abandoned", "abandoned_why")
     run.add_result(tid, "task", nxt, "manager", "PASS",
                    f"Task: {tid}\nStatus: PASS\nBranch: {branch}\nHead: {head}\nWorktree: None\nRan: not stated (adopted)\n"
                    f"Files: None\nIssues: None\nDeviations: adopted by the Manager at {now}; the work was done outside run.py\n"
@@ -4186,7 +4235,7 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         new = match.group(1)
         row_of_copy = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == new), None) or {}
         copy = {"id": new, "kind": "task", "attempt": attempt, "name": s.name or s.wtname, "worktree": s.wtname,
-                "model": session_model(task, s.sid), **profile_field(s.profile),
+                "model": session_model(task, s.sid), **profile_field(s.profile), **plugin_field(),
                 **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {}),
                 **({"revision": revision_of(task)} if revision_of(task) else {})}
         run.set_meta(task, sessions=recorded_sessions(task) + [copy])
@@ -4250,7 +4299,7 @@ def record_resumed(run, task, kind, attempt, s, new):
     found = next((r for r in run.agents(s.profile) if isinstance(r, dict) and r.get("id") == new), None) or {}
     old = next((e for e in recorded_sessions(task) if e.get("id") == s.sid), {})
     entry = {"id": new, "kind": kind, "attempt": attempt, "name": old.get("name") or s.label or s.name, "worktree": s.wtname,
-             "model": old.get("model") or session_model(task, s.sid), **profile_field(s.profile),
+             "model": old.get("model") or session_model(task, s.sid), **profile_field(s.profile), **plugin_field(),
              **({"sessionId": found["sessionId"]} if found.get("sessionId") else {}),
              "resumed_from": s.sid, "revision": revision_of(task)}
     run.set_meta(task, sessions=recorded_sessions(task) + [entry])
@@ -5044,7 +5093,7 @@ def record_in_progress(run, snap, task, unmanaged):
             s = unknown[0]
             run.emit("unknown", tid, attempt, s.sid, f"session {s.sid}{on_profile(s)} status={s.status} state={s.state}; not filed as DIED",
                      f"claude logs {s.sid}; if it has stopped working, "
-                     + retry_next(tid, attempt, "unknown", before=f"run.py stop {tid}, then run.py record and ", task=task))
+                     + retry_next(tid, attempt, "stuck", before=f"run.py stop {tid}, then run.py record and ", task=task))
         else:
             order = [e.get("id") for e in recorded_sessions(task)]
             s = sorted(mine, key=lambda x: order.index(x.sid) if x.sid in order else -1)[-1] if mine else None
@@ -5303,6 +5352,9 @@ def cmd_record(run, args):
                 continue
             task["status"], task["meta"] = node["status"], node.get("meta") or {}
             host_guard(run, task, record_closed, run, snap, task)
+    for task in sorted(snap.in_progress + snap.closed, key=lambda t: t["id"]):
+        if task["status"] != "done":
+            fill_usage(run, task)
     if run.marked_done:  # a merge recorded here makes its dependents ready
         snap.ready = run.tg("ready") or []
     for d in sorted(snap.decisions, key=lambda t: t["id"]):
@@ -7217,7 +7269,8 @@ def start_round(run, args):
         stop_kept(run, task, current, f"round attempt {nxt} starts")
     drop_verifier_folders(run, task)
     path, said, drift, entry, id_note = start_worker(run, view, nxt, session, text, model, effort, profile, start, asks, False)
-    attempt_edit(run, task, nxt, session, model, {**entry, **choice.stored, "round": kind}, "round",
+    attempt_edit(run, task, nxt, session, model, {**entry, **choice.stored, "round": kind,
+                                                  **({"cause": kind} if kind in LAUNCH_CAUSES else {})}, "round",
                  [meta_arg(k, v) for k, v in fields.items()], ["verdict", "verdict_ref", "host_rebase", "caught_up_from", "revision"])
     request = f" of {run.label(int(meta['pr']))}" if run.pr_mode else ""
     run.emit("round-started", tid, nxt, session,
@@ -7427,6 +7480,33 @@ def find_tokens(run, tid, sid, row, profile=None):
     """(out, in, cache-read, cache-write), or the reason there is none."""
     path, why = find_transcript(run, task_worktree(run, tid), sid, row, profile)
     return transcript_usage(path) if path else why
+
+
+def fill_usage(run, task):
+    """record: write `usage` ({"out", "in", "cache_read", "cache_write"}, summed over its transcript) into each `sessions`
+    entry that has none, once its session is no longer live. An entry with no readable transcript is left as it is; the
+    next record tries again. The entries are read again before the write, so a newer list is never replaced."""
+    tid = task["id"]
+    if not any(e.get("id") and not e.get("usage") for e in recorded_sessions(task)):
+        return
+    listed = {s.sid: s for s in run.sessions()}
+    entries = recorded_sessions(run.show(tid))
+    changed = False
+    for e in entries:
+        if not e.get("id") or e.get("usage") or (e["id"] in listed and listed[e["id"]].live):
+            continue
+        row = {"sessionId": e.get("sessionId") or (listed[e["id"]].row.get("sessionId") if e["id"] in listed else None)}
+        found = find_transcript(run, os.path.join(run.wt_dir, e.get("worktree") or f"task-{tid}"), e["id"], row,
+                                e.get("profile"))[0]
+        try:
+            out, uncached, read, write = transcript_usage(found) if found else (None,) * 4
+        except OSError:
+            continue
+        if out is not None:
+            e["usage"] = {"out": out, "in": uncached, "cache_read": read, "cache_write": write}
+            changed = True
+    if changed:
+        run.set_meta(task, sessions=entries)
 
 
 def find_transcript(run, worktree, sid, row, profile=None):
@@ -7884,8 +7964,64 @@ def cmd_stop(run, args):
     run.emit("stopped", tid, attempt, s.sid, f"session {s.sid} ({counts}); run.py record commits its WIP once it has exited")
 
 
+DEPCHECK_VERDICTS = ("ok", "missing", "not-checked")
+TRIAGE_TARGETS = ("task", "issue", "dismissed")
+TRIAGE_ROW = re.compile(r"(\d+)#(\d+)")
+
+
+def cmd_depcheck(run, args):
+    """Record the verdict of the dependency check before a launch as a `check` row of the attempt that the check is for.
+    The Manager runs it after the `agentic-team:dependency-check` subagent answers; a retro counts these rows against the
+    launches."""
+    task = run.show(args.id)
+    if task["type"] != "task":
+        raise Refused(f'#{args.id} is a {task["type"]}, not a task')
+    text = read_text(args.body_file)
+    attempt = (wanted_attempt(task) or 0) + 1
+    row = run.add_result(args.id, "check", attempt, "manager", args.verdict.upper(),
+                         f"Check: dependency\nVerdict: {args.verdict}\n\n{text}\n")
+    run.emit("depchecked", args.id, attempt, None, f"{args.verdict} (result #{row['id']})",
+             f"run.py launch {args.id}" if args.verdict != "missing" else None)
+
+
+def cmd_triage(run, args):
+    """Record where a Follow-ups line of a result went, as a `triage` row: a new task, a GitHub issue, or dismissed with
+    a reason. The row names the result and the line, so that a retro joins a follow-up to its outcome."""
+    match = TRIAGE_ROW.fullmatch(args.row)
+    if not match:
+        raise Refused(f"--row takes <result id>#<line>, for example 3352#2 (the second Follow-ups line of result 3352), not {args.row!r}")
+    result_id, number = int(match.group(1)), int(match.group(2))
+    kind, *rest = args.to
+    if kind not in TRIAGE_TARGETS or len(rest) != (kind != "dismissed"):
+        raise Refused("--to takes `task <id>`, `issue <n>` or `dismissed`")
+    if rest and not rest[0].isdigit():
+        raise Refused(f"--to {kind} takes a number, not {rest[0]!r}")
+    why = (args.why or "").strip()
+    if kind == "dismissed" and not why:
+        raise Refused('--to dismissed needs --why "<the reason>"')
+    source = next((r for r in run.results_for(args.id) if r["id"] == result_id), None)
+    if source is None:
+        raise Refused(f"#{args.id} has no result #{result_id}; run.py status or tg result ls {args.id} lists them")
+    lines = follow_ups(source.get("body"))
+    if not 1 <= number <= len(lines):
+        raise Refused(f"result #{result_id} has {len(lines)} Follow-ups line{'s' * (len(lines) != 1)}; --row {result_id}#{number} names none")
+    if kind == "task":
+        target = run.show(int(rest[0]))
+        if target["type"] != "task":
+            raise Refused(f'#{rest[0]} is a {target["type"]}, not a task')
+    row = run.add_result(args.id, "triage", source.get("attempt"), "manager", kind.upper(),
+                         f"Row: {result_id}#{number}\nLine: {lines[number - 1][1]}\nTo: {' '.join([kind, *rest])}\n"
+                         + (f"Why: {why}\n" if why else ""))
+    run.emit("triaged", args.id, source.get("attempt"), None,
+             f"result #{result_id} line {number} -> {' '.join([kind, *rest])} (result #{row['id']})")
+
+
 def cmd_abandon(run, args):
     tid = args.id
+    why = (args.why or "").strip()
+    if not why:
+        raise Refused(f"abandon needs --why \"<one line: what happened and why the task is dropped>\" besides the reason code "
+                      f"{args.mode}; the codes are {', '.join(ABANDON_MODES)}")
     task = run.show(tid)
     if task["status"] != "in_progress":
         raise Refused(f"#{tid} is not in progress")
@@ -7900,7 +8036,7 @@ def cmd_abandon(run, args):
         if s.live:
             stop_session(run, s.sid, profile=s.profile)
             run.add_result(tid, "task", attempt, "manager", "ABANDONED",
-                           f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nAbandoned: {args.mode}")
+                           f"Session: {s.sid}\nWorktree: {s.worktree(run.root)}\nAbandoned: {args.mode}\nWhy: {why}")
     for s in own_sessions(run, tid, "verify"):  # a verifier gets no row, only its session recorded
         if s.live:
             record_row(run, task, s, attempt)
@@ -7911,11 +8047,11 @@ def cmd_abandon(run, args):
         if not task_rows(rows, attempt) and Thread(rows, task, attempt).holds():
             # a parked asker (or a session whose row is gone) holds an open thread and has no live process: abandon ends
             # the attempt as stop does, so that `launch --attempt` is not refused for an ask nobody can answer
-            run.add_result(tid, "task", attempt, "manager", "ABANDONED", f"Worktree: {task_worktree(run, tid)}\nAbandoned: {args.mode}")
+            run.add_result(tid, "task", attempt, "manager", "ABANDONED", f"Worktree: {task_worktree(run, tid)}\nAbandoned: {args.mode}\nWhy: {why}")
         carry_thread(run, task, attempt)
     if closed or merge_gate(task):  # first: a crash before the abandoned write leaves a waiting task, and record gates it again
         clear_merge_gate(run, task)
-    run.edit_meta(tid, abandoned=args.mode, phase=phase)
+    run.edit_meta(tid, abandoned=args.mode, abandoned_why=why, phase=phase)
     drop_mailbox(run, task, history=False)
     removed = set(drop_verifier_folders(run, task))
     drop_ci_refs(run, task)
@@ -7935,7 +8071,7 @@ def cmd_abandon(run, args):
     if closed and not request:  # it was closed and waited for its merge
         request = f"; branch {task_branch(tid)} at {str(meta['verdict_ref'])[:7]} is not merged and stays"
     run.emit("abandoned", tid, attempt, None,
-             f"({args.mode}): worktrees kept: {', '.join(sorted(names)) or 'none'}; "
+             f"({args.mode}: {why}): worktrees kept: {', '.join(sorted(names)) or 'none'}; "
              "list them in the report for the operator to remove" + request)
 
 
@@ -8075,10 +8211,11 @@ def verifier_problems(body, status):
                      "does not block>`")
     if status in ("ISSUES", "PASS"):
         for line in issues:
-            if status == "PASS" or not line.startswith("blocking:"):
+            if status == "PASS" or not BLOCKING_LINE.match(line):
                 fix = ("a PASS report has no blocking finding; report ISSUES, or move a non-blocking finding to "
                        "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`" if status == "PASS" else
-                       "start it with `blocking:` and say why it blocks, or move a non-blocking finding to "
+                       "start it with `blocking:` (or `blocking[<category>]:`, the category one of "
+                       + ", ".join(BLOCKING_CATEGORIES) + ") and say why it blocks, or move a non-blocking finding to "
                        "`Follow-ups:` as `nonblocking: <finding>: <why it does not block>`")
                 found.append(f"Issues line `{line}` {'is not allowed' if status == 'PASS' else 'has no `blocking:` label'}; {fix}")
     return found
@@ -8165,7 +8302,7 @@ def cmd_status(run, args):
                 attempts.append(attempt)
             verifiers = task_rows(snap.rows(task["id"]), attempt, "verify")
             tokens = " / ".join(str(meta["tokens"]).split("/", 1)) if meta.get("tokens") else None
-            done.append((tid, task["title"], meta.get("started_at"), run.zone_time(task.get("done_at")), tokens,
+            done.append((tid, task["title"], run.zone_time(meta.get("started_at")), run.zone_time(task.get("done_at")), tokens,
                          meta.get("verdict"), verifiers[-1]["author"] if verifiers else None))
     for task in snap.closed:
         meta = task.get("meta") or {}
@@ -8187,7 +8324,7 @@ def cmd_status(run, args):
             failed.append((tid, task["title"], meta.get("abandoned"), attempt, last, checkpoint))
         elif verifier:
             in_flight.append((tid, task["title"], verifier.get("name"), verifier.get("model"), attempt,
-                              meta.get("started_at"), last, f"verifier {verifier.get('name')} has filed no result; "
+                              run.zone_time(meta.get("started_at")), last, f"verifier {verifier.get('name')} has filed no result; "
                               "run.py record checks it"))
             flight_profiles.append(verifier.get("profile") or DEFAULT_PROFILE)
         elif unclosed(task):
@@ -8198,7 +8335,7 @@ def cmd_status(run, args):
             session = meta.get("session") or ("not managed" if attempt is None else None)
             in_flight.append((tid, task["title"], f"{session} ({meta.get('round')} round)" if in_round(task) else session,
                               meta.get("model"), attempt,
-                              meta.get("started_at"), last, checkpoint))
+                              run.zone_time(meta.get("started_at")), last, checkpoint))
             named = [e for e in recorded_sessions(task) if e.get("name") == meta.get("session")]
             flight_profiles.append((named[-1].get("profile") if named else None) or DEFAULT_PROFILE)
     changes = summary.get("changes") or {}
@@ -8277,7 +8414,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -8289,6 +8426,8 @@ def build_parser():
     p.add_argument("--attempt", type=int, help="override the next attempt and lift the cap")
     p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
     p.add_argument("--base", help="start from this commit or branch instead of the default (a fix on an unmerged branch)")
+    p.add_argument("--cause", choices=LAUNCH_CAUSES, help="why this attempt starts, recorded in its sessions entry "
+                   "(default: derived from the state of the attempt before it)")
 
     p = sub.add_parser("adopt", help="bring a branch started outside run.py under the Manager")
     p.add_argument("id", type=int)
@@ -8352,7 +8491,20 @@ def build_parser():
 
     p = sub.add_parser("abandon", help="abandon a task after attempt 3 failed")
     p.add_argument("id", type=int)
-    p.add_argument("mode", choices=ABANDON_MODES)
+    p.add_argument("mode", choices=ABANDON_MODES, metavar="reason", help="the reason code: " + ", ".join(ABANDON_MODES))
+    p.add_argument("--why", help="one line of free text: what happened and why the task is dropped (required)")
+
+    p = sub.add_parser("depcheck", help="record the verdict of the dependency check before a launch as a `check` row")
+    p.add_argument("id", type=int)
+    p.add_argument("--verdict", required=True, choices=DEPCHECK_VERDICTS, help="the subagent's verdict: ok, missing (a "
+                   "`missing:` line) or not-checked (a `not checked:` or `ask:` line)")
+    p.add_argument("--body-file", required=True, help="the subagent's answer")
+
+    p = sub.add_parser("triage", help="record where a Follow-ups line of a result went, as a `triage` row")
+    p.add_argument("id", type=int)
+    p.add_argument("--row", required=True, metavar="RESULT#LINE", help="a result id and the number of one of its Follow-ups lines, 3352#2")
+    p.add_argument("--to", required=True, nargs="+", metavar="KIND [ID]", help="`task <id>`, `issue <n>` or `dismissed`")
+    p.add_argument("--why", help="the reason (required for dismissed)")
 
     p = sub.add_parser("status", help="print the status report")
     p.add_argument("--since", help="7d, 2w, or an ISO date (default: last --mark, else 7d)")
@@ -8418,7 +8570,7 @@ def build_parser():
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
             "merged": cmd_merged, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "roles": cmd_roles, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "round", "revise", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
