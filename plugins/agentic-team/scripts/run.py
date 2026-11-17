@@ -144,6 +144,7 @@ VERDICTS = ("artifact-verified", "test-verified", "check-only", "verify-blocked"
 CLOSING = ("artifact-verified", "test-verified")
 VERIFY_KINDS = ("code", "schema", "design-doc")
 PASSING = {"code": CLOSING, "schema": ("artifact-verified",), "design-doc": ("artifact-verified",)}
+ABANDON_HINT = "<{}>"  # the placeholder of an abandon hint, filled with the reason codes below
 ABANDON_MODES = ("died", "tool-error", "stuck", "failed", "scope-wrong", "superseded", "operator")  # why a task is dropped; --why adds the words
 TASK_WT = re.compile(r"^task-(\d+)$")
 VERIFY_WT = re.compile(r"^verify-(\d+)-(\d+)(?:-(\d+))?$")
@@ -841,6 +842,7 @@ def is_worker_result(r):
             and not (r["status"] == "BLOCKED" and r.get("author") == "manager"))
 
 
+RECORD_KINDS = ("check", "triage")  # rows that record a Manager's step; they are no work of the task, so status's "last" skips them
 REVISE = "revise"  # the row kind that run.py revise files: the rows of the attempt after it are its revision (#127)
 
 
@@ -966,7 +968,11 @@ def round_redo(task):
     return cancel_next(task) + f", then run.py round {task['id']} {task['meta'].get('round')} for a new round"
 
 
-def retry_next(tid, attempt, mode="<mode>", lead="", before="", task=None):
+def abandon_placeholder():
+    return ABANDON_HINT.format("|".join(ABANDON_MODES))
+
+
+def retry_next(tid, attempt, mode=None, lead="", before="", task=None):
     """The next step that retries task `tid` after `attempt`. Below MAX_ATTEMPTS it is `lead`, `before`, then
     run.py launch. From MAX_ATTEMPTS on, refuse_past_cap refuses that launch, so the step is abandon with `mode`,
     or `before` and the launch with the --attempt override. Every next: hint that retries a task uses it, except
@@ -976,7 +982,7 @@ def retry_next(tid, attempt, mode="<mode>", lead="", before="", task=None):
         return cancel_next(task, before)
     if attempt < MAX_ATTEMPTS:
         return f"{lead}{before}run.py launch {tid}"
-    return (f"run.py abandon {tid} {mode} (the cap is {MAX_ATTEMPTS} attempts), "
+    return (f"run.py abandon {tid} {mode or abandon_placeholder()} --why \"<one line>\" (the cap is {MAX_ATTEMPTS} attempts), "
             f"or {before}run.py launch {tid} --attempt {attempt + 1} to override")
 
 
@@ -2235,17 +2241,26 @@ def verified_report(rows, task):
     return found[-1] if found else latest_worker([r for r in rows if (r.get("attempt") or 0) < (attempt or 0)])
 
 
+def check_target(run, task):
+    """The branch that the worker's change merges into, as a ref its worktree can read, for check-report --target: the
+    fetched remote branch in pr mode, else the branch of the main checkout. "" when none is known (a detached main
+    checkout, a host that did not answer)."""
+    try:
+        if run.pr_mode:
+            return run.target_ref(task)
+    except (Refused, codehost.HostError):
+        return ""
+    return run.git("branch", "--show-current", check=False).stdout.strip()
+
+
 def task_own_base(run, task, base):
-    """The commit that the task's own change starts from, for check-report --base: the task's base meta when it is an
-    ancestor of the attempt's start `base`, else `base`. "" in a round (its commits are the verified change, replayed
-    onto the target) and when none is known."""
-    meta = task.get("meta") or {}
+    """The commit for check-report --base: the task's base meta, else the attempt's start `base`. check-report takes the
+    newer of it and the merge base of HEAD with the target, so a rebase onto the target moves the start forward and a
+    stacked base that is still unmerged keeps it. "" in a round (its commits are the verified change, replayed onto the
+    target) and when none is known."""
     if in_round(task):
         return ""
-    own = str(meta.get("base") or "")
-    if own and base and run.git("merge-base", "--is-ancestor", own, base, check=False).returncode == 0:
-        return commit_of(run, own) or ""
-    return base or ""
+    return str((task.get("meta") or {}).get("base") or base or "")
 
 
 def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None):
@@ -2283,10 +2298,12 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                    if kind != "verify" else "")
     verifier_arg = " --verifier" if kind == "verify" else ""
     if kind != "verify":
-        for prefix in config["report"]["require_ran"].get(verify_kind(run, task, strict=False), []):
+        for prefix in ([] if in_round(task) else config["report"]["require_ran"].get(verify_kind(run, task, strict=False), [])):
             worker_args += f" --require-ran {quote(prefix)}"
         if own_base := task_own_base(run, task, base):
             worker_args += f" --base {own_base}"
+            if target := check_target(run, task):
+                worker_args += f" --target {quote(target)}"
     values = {
         "TASK_ID": str(tid),
         "TASK_TITLE": task["title"],
@@ -3155,8 +3172,10 @@ def launch_cause(task, rows, current):
         return None
     last = latest[-1]
     if last["status"] == "PASS":
-        failed = [r for r in task_rows(rows, current, "verify", history=True) if verdict_of(r) == "verify-failed"]
-        return None if not failed else "ci-fix" if failed[-1].get("author") == "ci" else "review-fix"
+        judged = task_rows(rows, current, "verify", history=True)  # the newest verdict of the attempt decides
+        if not judged or verdict_of(judged[-1]) != "verify-failed":
+            return None
+        return "ci-fix" if judged[-1].get("author") == "ci" else "review-fix"
     if last["status"] == "BLOCKED" and last.get("author") == "manager":
         return None
     return {"ISSUES": "retry-issues", "BLOCKED": "retry-issues", "STOPPED": "retry-stopped", "DIED": "retry-died"}.get(last["status"])
@@ -3235,7 +3254,7 @@ def refuse_past_cap(tid, nxt, latest, override):
     paused = bool(latest) and latest[-1]["status"] == "STOPPED" and stop_reason(latest[-1]) == "pause"
     if not override and nxt > MAX_ATTEMPTS and not paused:
         raise Refused(f"#{tid}: attempt {MAX_ATTEMPTS} has failed; run run.py abandon {tid} "
-                      f"<died|tool-error|stuck|unknown>, or pass --attempt {nxt} to override")
+                      f"{abandon_placeholder()} --why \"<one line>\", or pass --attempt {nxt} to override")
 
 
 # ------------------------------------------------------------------- adopt
@@ -3319,7 +3338,7 @@ def refuse_closed(run, task):
         raise Refused(f"#{tid} is merged and not yet done; run.py record finishes it")
     rounds = round_next(run, task)
     raise Refused(f"#{tid} is closed and waits for the merge of its change; run.py record follows the merge, "
-                  f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} <mode> drops it; "
+                  f"run.py merged {tid} --by operator records one done by hand, run.py abandon {tid} {abandon_placeholder()} --why \"<one line>\" drops it; "
                   + (f"on a conflict: {rounds}; " if rounds else "") + redo_text(task))
 
 
@@ -6145,17 +6164,25 @@ def request_body(run, task, head):
             f"{how}\nOpened by agentic-team run.py.\n")
 
 
-def report_field(body, name):
-    """The text of the `<name>:` fields of a report: for each, the rest of its line and the lines up to the next label,
-    stripped; the fields of one name are joined by a line break. "" when the report has no such field. A verifier that
-    writes one `Issues:` line per finding gives several fields, and all of them count."""
+def report_fields(body, name):
+    """The texts of the `<name>:` fields of a report, in order: each is the rest of its line and the lines up to the next
+    label, stripped. The first field counts; a later one counts only when it follows a field of the same name at once,
+    as a verifier's `Issues:` line per finding does. A `Files:` line inside `Deviations:` is text of that field."""
     body = body or ""
-    parts = []
-    for match in re.finditer(rf"(?m)^{re.escape(name)}:[ \t]*(.*)$", body):
-        rest = body[match.end():]
-        following = REPORT_LABEL.search(rest)
-        parts.append((match.group(1) + (rest[:following.start()] if following else rest)).strip())
-    return "\n".join(part for part in parts if part)
+    own = re.compile(rf"(?m)^{re.escape(name)}:")
+    marks = sorted({(m.start(), m.end(), m.group(1) if m.re is REPORT_LABEL else name)
+                    for m in [*REPORT_LABEL.finditer(body), *own.finditer(body)]})
+    found, previous = [], None
+    for i, (start, end, label) in enumerate(marks):
+        if label == name and (not found or previous == name):
+            found.append(body[end:marks[i + 1][0] if i + 1 < len(marks) else len(body)].strip())
+        previous = label
+    return found
+
+
+def report_field(body, name):
+    """The text of the `<name>:` fields of a report joined by line breaks (see report_fields); "" when it has none."""
+    return "\n".join(part for part in report_fields(body, name) if part)
 
 
 def follow_ups(body):
@@ -6833,7 +6860,7 @@ def redo_text(task):
     tid = task["id"]
     if task["status"] == "done":
         return f"#{tid} is done (closed by 0.18.0), so a fix is a new task"
-    return f"to redo it, run.py abandon {tid} <mode>, then run.py launch {tid} --attempt {(wanted_attempt(task) or 1) + 1}"
+    return f"to redo it, run.py abandon {tid} {abandon_placeholder()} --why \"<one line>\", then run.py launch {tid} --attempt {(wanted_attempt(task) or 1) + 1}"
 
 
 def pr_status(run, snap, task, p):
@@ -8119,7 +8146,7 @@ def cmd_check_report(args):
     if not args.verifier and status and status.group(1) == "PASS":
         if args.require_ran:
             problems += ran_problems(body, args.require_ran)
-        changed = own_changed_files(args.base, os.getcwd()) if args.base else None
+        changed = own_changed_files(args.base, args.target, os.getcwd()) if args.base else None
         if changed:
             problems += files_problems(body, changed)
     if not args.verifier and status and status.group(1) != "BLOCKED":
@@ -8154,16 +8181,31 @@ def ran_problems(body, prefixes):
             + ". Run the step and paste its result as that line, or report ISSUES"]
 
 
-def own_changed_files(base, cwd):
-    """The files that `git diff --name-only <base>...HEAD` lists in `cwd`: the task's own changes (a rename counts as its
-    new path, a deletion as the deleted path), without what a rebase brought in from the target. None when git cannot
-    say (no repository, an unknown base)."""
+def git_ok(cwd, *cmd):
+    """The stdout of a git command in `cwd`, or None when it fails."""
     try:
-        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "diff", "--name-only", "-z", "--find-renames",
-                               f"{base}...HEAD"], cwd=cwd, check=False, capture_output=True, text=True, timeout=30)
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", *cmd], cwd=cwd, check=False, capture_output=True,
+                              text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
-    return [f for f in done.stdout.split("\0") if f] if done.returncode == 0 else None
+    return done.stdout if done.returncode == 0 else None
+
+
+def own_changed_files(base, target, cwd):
+    """The files that the task's own commits changed, in `cwd`: `git diff --name-only <start>...HEAD`, a rename counted
+    as its new path and a deletion as the deleted path. <start> is the merge base of HEAD with `target` (what a rebase onto
+    the target moved forward), or `base`, whichever is newer: a stacked base that is still unmerged is newer than the
+    merge base. None when git cannot say (no repository, an unknown base)."""
+    merge = (git_ok(cwd, "merge-base", "HEAD", target) or "").strip() if target else ""
+    known = (git_ok(cwd, "rev-parse", "--verify", "-q", f"{base}^{{commit}}") or "").strip()
+    if known and merge and git_ok(cwd, "merge-base", "--is-ancestor", merge, known) is not None:
+        start = known  # the base is newer than the merge base
+    else:
+        start = merge or known
+    if not start:
+        return None
+    out = git_ok(cwd, "diff", "--name-only", "-z", "--find-renames", f"{start}...HEAD")
+    return None if out is None else [f for f in out.split("\0") if f]
 
 
 def files_problems(body, changed):
@@ -8179,7 +8221,7 @@ def files_problems(body, changed):
     shown = ", ".join(f"`{f}`" for f in left[:10]) + (f", and {len(left) - 10} more" if len(left) > 10 else "")
     return [f"`Files:` leaves out {len(left)} file{'s' * (len(left) != 1)} that this task changed "
             f"(`git diff --name-only <base>...HEAD`): {shown}; list each"
-            + ("" if len(changed) > FILES_DIR_LIMIT else f", or, when more than {FILES_DIR_LIMIT} files changed, name a directory such as `src/`")]
+            + (f", or name a directory such as `src/` (more than {FILES_DIR_LIMIT} files changed)" if len(changed) > FILES_DIR_LIMIT else "")]
 
 
 def asked_problems(body, status):
@@ -8187,7 +8229,7 @@ def asked_problems(body, status):
     if status not in ("ISSUES", "BLOCKED"):
         return []
     text = strip_comments(body or "")
-    asked = report_field(text, "Asked")
+    asked = (report_fields(text, "Asked") or [""])[0]
     if ASKED_IDS.fullmatch(asked) or ASKED_NONE.match(asked):
         return []
     fix = ("add the line `Asked: #12, #15` (the ids of the asks it relied on) or `Asked: none: <one-line reason>` at "
@@ -8316,7 +8358,8 @@ def cmd_status(run, args):
         meta = task.get("meta") or {}
         tid = f"#{task['id']}"
         rows = snap.rows(task["id"])
-        last = result_label(rows[-1]) if rows else None
+        listed = [r for r in rows if r["kind"] not in RECORD_KINDS]
+        last = result_label(listed[-1]) if listed else None
         checkpoint = last_checkpoint(rows)
         attempt = meta.get("attempt")
         verifier = pending_verifier(task, rows)
@@ -8527,7 +8570,9 @@ def build_parser():
     p.add_argument("--require-ran", action="append", default=[], metavar="PREFIX", help="a worker PASS report needs "
                    "a `Ran:` line that starts with PREFIX (repeat it; the brief passes [report] require_ran)")
     p.add_argument("--base", metavar="SHA", help="the commit the task's own change starts from: a worker PASS report "
-                   "must name under `Files:` each file that `git diff --name-only SHA...HEAD` lists")
+                   "must name under `Files:` each file that `git diff --name-only <start>...HEAD` lists, <start> being "
+                   "the newer of SHA and the merge base of HEAD with --target")
+    p.add_argument("--target", metavar="REF", help="the branch the task merges into (with --base)")
 
     p = sub.add_parser("wait", help="poll until something in flight changes, or a time limit; writes nothing")
     p.add_argument("--timeout", type=float, default=WAIT_TIMEOUT,

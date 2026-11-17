@@ -329,7 +329,7 @@ check that every path and command you quote in the report exists and is the one 
 `check-report` command looks up each backticked path under `Files:`, `Evidence:` and `Ran:`; a line
 that says the path was `deleted` or `removed` is exempt.
 
-`Files:` names every file that your commits changed, one per line: `check-report` computes them with
+`Files:` names every file that the task's commits changed, one per line: `check-report` computes them with
 `git diff --name-only <base>...HEAD` and refuses a `PASS` that leaves one out (a deleted file, and the new
 path of a renamed file, count). When more than 20 files changed, a directory entry such as `src/` names the
 files under it. When the project sets `[report] require_ran` for your task's verify kind, a `PASS` needs a

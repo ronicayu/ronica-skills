@@ -133,7 +133,7 @@ RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
 }
-LOCAL_RESULT_KINDS = ("ack", "steer")  # the recommended [projects."<name>".results] local list (#133)
+LOCAL_RESULT_KINDS = ("ack", "steer", "check")  # the recommended [projects."<name>".results] local list (#133)
 
 
 def system_timezone():

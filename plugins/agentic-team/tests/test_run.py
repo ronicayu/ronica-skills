@@ -5576,18 +5576,18 @@ class RunTest(Base):
                     self.assertTrue(hint[stuck].endswith(" Then run.py launch 7."), hint[stuck])
                     continue
                 cap = "(the cap is 3 attempts), or "
-                self.assertEqual(hint[issues], f"run.py abandon 1 <mode> {cap}run.py launch 1 --attempt 4 to override")
-                self.assertEqual(hint[blocked], f"run.py abandon 2 <mode> {cap}answer it and run.py launch 2 --attempt 4 "
+                self.assertEqual(hint[issues], f"run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}run.py launch 1 --attempt 4 to override")
+                self.assertEqual(hint[blocked], f"run.py abandon 2 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}answer it and run.py launch 2 --attempt 4 "
                                                 'to override, or tg add "<question>" --type decision '
                                                 "--meta decider=operator --blocks 2")
-                self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <mode> {cap}"
+                self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}"
                                                  "run.py launch 3 --attempt 4 to override")
-                self.assertTrue(hint[filed].endswith(f" Then run.py abandon 4 stuck {cap}run.py launch 4 --attempt 4 "
+                self.assertTrue(hint[filed].endswith(f" Then run.py abandon 4 stuck --why \"<one line>\" {cap}run.py launch 4 --attempt 4 "
                                                      "to override."), hint[filed])
-                self.assertEqual(hint[failed], f"run.py abandon 5 <mode> {cap}run.py launch 5 --attempt 4 to override")
+                self.assertEqual(hint[failed], f"run.py abandon 5 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}run.py launch 5 --attempt 4 to override")
                 self.assertEqual(closed, hint[failed])
-                self.assertEqual(hint[died], f"run.py abandon 6 died {cap}run.py launch 6 --attempt 4 to override")
-                self.assertTrue(hint[stuck].endswith(f" Then run.py abandon 7 stuck {cap}run.py launch 7 --attempt 4 "
+                self.assertEqual(hint[died], f"run.py abandon 6 died --why \"<one line>\" {cap}run.py launch 6 --attempt 4 to override")
+                self.assertTrue(hint[stuck].endswith(f" Then run.py abandon 7 stuck --why \"<one line>\" {cap}run.py launch 7 --attempt 4 "
                                                      "to override."), hint[stuck])
                 self.worktree("task-1")
                 refused = self.run_cmd("launch", str(issues), "--dry-run")
@@ -5611,7 +5611,7 @@ class RunTest(Base):
         self.running_task(attempt=3)
         self.agents(self.row("task-1", 3, status="idle", state="working"))
         unknown = self.one(self.events("record"), "unknown")
-        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 stuck "
+        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 stuck --why \"<one line>\" "
                                           "(the cap is 3 attempts), or run.py stop 1, then run.py record and "
                                           "run.py launch 1 --attempt 4 to override")
 
@@ -5640,7 +5640,7 @@ class RunTest(Base):
         self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
         self.agents()
         self.assertEqual(self.one(self.events("record"), "stopped")["next"],
-                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+                         "run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
         self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
         out = self.run_cmd("launch", str(task), "--dry-run")
         self.assertEqual(out.returncode, 2)
@@ -5656,7 +5656,7 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("attempt 3 has failed", out.stderr)
         self.assertEqual(self.one(self.events("record"), "stopped")["next"],
-                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+                         "run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
 
     def test_104_launch_stops_a_worker_on_a_prompt_after_its_result(self):
         task = self.running_task()
@@ -5826,7 +5826,7 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1 --base {self.git("rev-parse", "HEAD")}')  # 0.16.0: also its steers; 0.17.0: its evidence; 0.28.0: its base
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1 --base {self.git("rev-parse", "HEAD")} --target "main"')  # 0.16.0: also its steers; 0.17.0: its evidence; 0.28.0: its base
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
@@ -6513,6 +6513,66 @@ class Issue89Test(Base):
         code, _, err = self.in_repo(self.report(Files="`pkg/`"), "--base", "main")
         self.assertEqual(code, 2)
         self.assertIn("`other/x.py`", err)
+
+    def test_the_files_check_goes_from_the_merge_base_with_the_target(self):
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/own.py", "x\n")
+        self.git("checkout", "-q", "main")
+        self.commit_file("target.txt", "t\n")
+        self.git("checkout", "-q", "task")
+        self.git("rebase", "-q", "main")  # close's catch-up: base is an ancestor of HEAD, and the target's file came with the rebase
+        flags = ("--base", base, "--target", "main")
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        code, _, err = self.in_repo(self.report(Files="`src/own.py`"), "--base", base)  # without --target: the old start
+        self.assertEqual(code, 2)
+        self.assertIn("`target.txt`", err)
+        self.assertEqual(self.in_repo(self.report(Files="None"), *flags)[0], 2)
+
+    def test_the_files_check_after_a_restack_and_for_an_unmerged_stacked_base(self):
+        self.git("checkout", "-q", "-b", "dep")
+        self.commit_file("dep.txt", "d\n")
+        dep = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/own.py", "x\n")
+        flags = ("--base", dep, "--target", "main")  # the base is unmerged: it is newer than the merge base with main
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        self.git("checkout", "-q", "main")  # dep lands under another SHA, and the target moves on
+        self.commit_file("target.txt", "t\n")
+        self.git("cherry-pick", dep)
+        self.git("checkout", "-q", "task")
+        self.git("rebase", "-q", "--onto", "main", "dep")  # the restack: the old base is no ancestor of HEAD any more
+        self.assertNotEqual(self.git("merge-base", dep, "HEAD"), dep)
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        code, _, err = self.in_repo(self.report(Files="None"), *flags)
+        self.assertEqual(code, 2)
+        self.assertIn("leaves out 1 file that this task changed", err)
+        self.assertNotIn("dep.txt", err)
+        self.assertNotIn("target.txt", err)
+
+    def test_the_directory_hint_is_named_only_over_twenty_changed_files(self):
+        import run as runner
+        few = runner.files_problems("Files: None\n", ["a.py"])
+        self.assertNotIn("name a directory", few[0])
+        many = runner.files_problems("Files: None\n", [f"d/f{i}.py" for i in range(21)])
+        self.assertIn("name a directory such as `src/` (more than 20 files changed)", many[0])
+
+    def test_only_the_first_files_field_and_adjacent_repeats_count(self):
+        import run as runner
+        report = "Files: `a.py`\nDeviations: none\nFiles: `b.py`\nCheckpoint: x\n"  # a Files line after other fields is text
+        self.assertEqual(runner.report_field(report, "Files"), "`a.py`")
+        self.assertEqual(len(runner.files_problems(report, ["b.py"])), 1)  # b.py is named only in the stray line
+        issues = "Issues: blocking: one\nIssues: blocking: two\nFollow-ups: None\nIssues: blocking: stray\n"
+        self.assertEqual(runner.report_field(issues, "Issues"), "blocking: one\nblocking: two")
+        inside = "Files: `a.py`\nDeviations: moved things\nFiles: `b.py` is also mentioned\nFollow-ups: None\n"
+        self.assertEqual(runner.report_field(inside, "Files"), "`a.py`")
+
+    def test_asked_takes_the_first_asked_field(self):
+        import run as runner
+        self.assertEqual(runner.asked_problems("Asked: #12\nAsked: junk\n", "ISSUES"), [])
+        self.assertEqual(len(runner.asked_problems("Asked: junk\nAsked: #12\n", "ISSUES")), 1)
 
     def test_the_worker_brief_gives_check_report_the_base_of_the_task(self):
         base = self.git("rev-parse", "HEAD")
@@ -8728,7 +8788,7 @@ class PrTest(Base):
         self.ok("verify", str(task))
         self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
         verified = self.one(self.events("record"), "verified")
-        self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <mode> "
+        self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" "
                                            "(the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
 
 
@@ -11106,11 +11166,11 @@ class PhaseTest(Base):
         self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
         blocked = self.one(self.events("record"), "pr-blocked")
         self.assertEqual(blocked["next"], f"run.py record later; if a required check failed, to redo it, "
-                                          f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+                                          f"run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2")
         self.assertNotIn("fix task", blocked["next"])
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
-        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", out.stderr)
+        self.assertIn(f"to redo it, run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2", out.stderr)
         self.ok("abandon", str(task), "failed", "--why", "tested")  # the hint's commands work: abandon, then the next attempt
         self.ok("launch", str(task), "--attempt", "2", "--dry-run")
 
@@ -11357,7 +11417,7 @@ class PhaseTest(Base):
         task, head, _ = self.closed_pr()
         self.fake_host(head=head, state="CLOSED")
         hint = self.one(self.events("record"), "pr-closed")["next"]
-        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", hint)
+        self.assertIn(f"to redo it, run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2", hint)
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
         self.ok("abandon", str(task), "failed", "--why", "tested")
         self.one(self.events("launch", str(task), "--attempt", "2"), "launched")
@@ -12282,7 +12342,7 @@ class RepointTest(Base):
                       line["detail"])
         self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow another request, run.py merged {task} "
                                        "--by operator when the change is in main another way, or to redo it, "
-                                       f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+                                       f"run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2")
         self.assertEqual(self.tg("ls", "--type", "decision"), [])
         self.assert_awaiting(task)
 
@@ -12783,6 +12843,15 @@ class RoundTest(Base):
         task = self.add_task(role="vars")
         role = self.section(self.brief(task), "ROLE")
         self.assertIn(f"Task {task} (Sweep domains) of demo; {{{{ROUND_FROM}}}} and {{{{NOPE}}}} stay.", role)
+
+    def test_a_rebase_round_brief_has_neither_the_required_ran_prefixes_nor_the_files_base(self):
+        task, wt, head, onto = self.waiting()
+        with open(os.path.join(self.root, ".agentic-team.toml"), "a") as fh:
+            fh.write('\n[report]\nrequire_ran = { "code" = ["reuse:"] }\n')
+        command = self.section(self.ok("round", str(task), "rebase", "--dry-run").stdout, "REPORT")
+        self.assertIn("check-report", command)
+        self.assertNotIn("--require-ran", command)
+        self.assertNotIn("--base", command)
 
     def test_119_round_goal_comes_first_and_old_branch_lines_do_not_apply(self):
         task, wt, head, onto = self.waiting()
@@ -14081,6 +14150,17 @@ class RetroTest(Base):
             with self.subTest(want=want, meta=meta, rows=[r["status"] for r in rows]):
                 self.assertEqual(runner.launch_cause({"meta": meta}, rows, current), want)
 
+    def test_a_relaunch_after_a_passing_revision_records_no_review_fix(self):
+        import run as runner
+        def row(i, kind, status, author, body=""):
+            return {"id": i, "kind": kind, "status": status, "attempt": 1, "author": author, "body": body}
+        rows = [row(1, "task", "PASS", "w"),
+                row(2, "verify", "ISSUES", "verify-1-1", "Status: ISSUES\nVerdict: verify-failed\nIssues: blocking: x\n"),
+                row(3, "revise", "OPEN", "manager"), row(4, "task", "PASS", "w"),
+                row(5, "verify", "PASS", "verify-1-1", "Status: PASS\nVerdict: test-verified\n")]
+        self.assertIsNone(runner.launch_cause({"meta": {}}, rows, 1))
+        self.assertEqual(runner.launch_cause({"meta": {}}, rows[:3] + [row(4, "task", "PASS", "w")], 1), "review-fix")
+
     def test_record_writes_the_usage_of_an_ended_session_once(self):
         task = self.running_task()
         wt, head = self.pass_report(task)
@@ -14104,6 +14184,11 @@ class RetroTest(Base):
         self.agents(self.finished("task-1"))
         self.ok("record")
         self.assertNotIn("usage", self.meta(task)["sessions"][0])
+
+    def test_status_last_skips_check_and_triage_rows(self):
+        task = self.running_task()
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n"))
+        self.assertNotIn("check OK", self.status_sections()["In flight"])
 
     def test_depcheck_files_a_check_row_for_the_next_attempt(self):
         task = self.add_task()
