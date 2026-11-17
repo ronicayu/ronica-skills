@@ -253,11 +253,30 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[scope]\nadjacent = ["lower-ratchet", "raise-ratchet"]\n')
         self.assertEqual(config.problems(config.load(self.root)), [
             'scope.adjacent: "raise-ratchet" is not an adjacent-change kind; the kinds are '
-            "lower-ratchet, stale-exemption, own-lint (did you mean lower-ratchet?)"])
+            "lower-ratchet, stale-exemption, own-lint, own-dependents, own-registry, convention-place, moved-path "
+            "(did you mean lower-ratchet?)"])
         self.assertEqual(self.run_cli("check")[0], 2)
+        self.write(MINIMAL + '[scope]\nadjacent = ["own-dependents", "own-registry", "convention-place", "moved-path"]\n')
+        self.assertEqual(self.run_cli("check")[0], 0)
         self.write(MINIMAL + '[scope]\nadjacent = "own-lint"\n')
         self.assertEqual(config.problems(config.load(self.root)),
                          ['scope.adjacent must be a list of adjacent-change kinds, not "own-lint"'])
+
+    def test_report_require_ran_is_a_table_of_verify_kind_to_prefixes(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["report"]["require_ran"], {})
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "report.require_ran", "--json")[:2],
+                         (0, '{"code": ["reuse:", "mutation:"], "design-doc": ["self-check:"]}\n'))
+        self.write(MINIMAL + '[report]\nrequire_ran = { "cod" = ["reuse:"] }\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'report.require_ran: "cod" is not a verify kind; the kinds are code, schema, design-doc (did you mean code?)'])
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = "reuse:" }\n')
+        self.assertIn("report.require_ran must be a table of verify kind = list of line prefixes",
+                      config.problems(config.load(self.root))[0])
+        self.write(MINIMAL + '[report]\nrequire_ran = { "code" = [" reuse:"] }\n')
+        self.assertEqual(len(config.problems(config.load(self.root))), 1)
 
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
@@ -470,12 +489,12 @@ class ConfigTest(unittest.TestCase):
             f"config.py: warning: taskgraph: the GitHub backend posts each {kind!r} result row as an issue comment, and "
             f"comments share GitHub's rate limit on creating content; add {kind!r} to local under "
             f'[projects."demo".results] in {os.path.realpath(path)}' for kind in config.LOCAL_RESULT_KINDS] or err)
-        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["steer", "ask"]\n')
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["steer", "ask", "check"]\n')
         err = self.run_cli("check")[2]
         self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack"])
-        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "ask", "answer"]\n')
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "check", "ask", "answer"]\n')
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
-        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "ask", "answer"))
+        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "check", "ask", "answer"))
 
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)

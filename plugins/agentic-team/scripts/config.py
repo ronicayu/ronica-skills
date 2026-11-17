@@ -77,6 +77,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACKED = ".agentic-team.toml"
 LOCAL = ".agentic-team.local.toml"
 TODO = "TODO"
+VERIFY_KINDS = ("code", "schema", "design-doc")
 TIERS = ("mechanical", "implementation", "judgement", "verifier")
 PROFILES = "profiles"  # an optional table: profile name -> CLAUDE_CONFIG_DIR; the names are free, so it is not in SCHEMA
 DEFAULT_PROFILE = "default"  # the Manager's own environment; reserved, never defined in [profiles]
@@ -88,6 +89,14 @@ ADJACENT_KINDS = {
     "lower-ratchet": "only lower a baseline, ratchet or allow-list count; never raise it and never add an entry",
     "stale-exemption": "delete an exemption or baseline row that a scanner run in this attempt proves stale",
     "own-lint": "fix lint or format errors that this attempt's change caused in files outside SCOPE",
+    "own-dependents": "change a caller, test, fixture, generated file, doc or API sample of the code that this attempt "
+                      "changes, as far as an ACCEPTANCE line, a VERIFY command or a gate that the brief names needs it",
+    "own-registry": "add the entry that a check requires for a file this attempt adds, in a table that must list every "
+                    "file; never an exemption, a baseline row or an allow-list entry",
+    "convention-place": "put new code in the file where the repository's conventions place it, for example a schema "
+                        "file or a facade, when that file is outside SCOPE",
+    "moved-path": "change the code that a SCOPE path meant, when that path does not exist at the base and `git grep` "
+                  "finds that code in exactly one other place",
 }
 
 # Ignored paths that run.py may delete with a merged worktree: dependencies, environments, caches, build output
@@ -124,7 +133,7 @@ RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
 }
-LOCAL_RESULT_KINDS = ("ack", "steer")  # the recommended [projects."<name>".results] local list (#133)
+LOCAL_RESULT_KINDS = ("ack", "steer", "check")  # the recommended [projects."<name>".results] local list (#133)
 
 
 def system_timezone():
@@ -186,6 +195,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
+    "report": {"require_ran": ("ranmap", {})},
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),
         "ask_due_minutes": ("posint", 60),
@@ -211,6 +221,7 @@ TYPE_NAMES = {
     "list": "a list of strings",
     "patterns": "a list of path patterns",
     "adjacent": "a list of adjacent-change kinds",
+    "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
     "posint": "a positive integer",
     "nonneg": "an integer that is 0 or more",
     "bool": "true or false",
@@ -403,6 +414,10 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "adjacent":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "ranmap":
+        return isinstance(value, dict) and all(
+            isinstance(v, list) and all(isinstance(p, str) and p.strip() and p == p.strip() for p in v)
+            for v in value.values())
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "nonneg":
@@ -456,6 +471,9 @@ def problems(config):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
             if kind == "patterns":
                 found += pattern_problems(dotted, value)
+            if kind == "ranmap":
+                found += [f"{dotted}: {json.dumps(k)} is not a verify kind; the kinds are {', '.join(VERIFY_KINDS)}"
+                          f"{suggest(k, list(VERIFY_KINDS))}" for k in value if k not in VERIFY_KINDS]
             if kind == "adjacent":
                 found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
                           f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"

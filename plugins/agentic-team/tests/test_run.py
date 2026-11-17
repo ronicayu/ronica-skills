@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 import config  # noqa: E402
 import host as codehost  # noqa: E402
 TG = os.path.join(PLUGINS, "taskgraph", "skills", "taskgraph", "scripts", "tg.py")
+with open(os.path.join(os.path.dirname(HERE), ".claude-plugin", "plugin.json")) as fh:
+    PLUGIN_VERSION = json.load(fh)["version"]
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, re, signal, subprocess, sys
@@ -494,13 +496,15 @@ class Base(unittest.TestCase):
         if kind == "verify":
             worktree = worktree or f"verify-{task}-{attempt}"
             return {"id": f"sess-{worktree}", "kind": kind, "attempt": attempt, "name": name or worktree,
-                    "worktree": worktree, "model": model or "opus"}
+                    "worktree": worktree, "model": model or "opus", "plugin": PLUGIN_VERSION}
         return {"id": f"sess-task-{task}-{attempt}", "kind": "task", "attempt": attempt,
-                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet"}
+                "name": name or f"task-{task}-{attempt}", "worktree": f"task-{task}", "model": model or "sonnet",
+                "plugin": PLUGIN_VERSION}
 
     def launched(self, task, attempt=1, **over):
         """The entry that `launch` records: the session entry, with the role, tier and verify kind it stores."""
-        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code", **over}
+        return {**self.entry(task, attempt), "role": None, "tier": "implementation", "verify_kind": "code",
+                **({"cause": "first"} if attempt == 1 else {}), **over}
 
     def record_sessions(self, task, *entries):
         self.tg("edit", str(task), "--meta", "sessions=" + json.dumps(list(entries)))
@@ -1363,7 +1367,7 @@ class RunTest(Base):
         meta = self.meta(task)
         self.assertEqual((meta["session"], meta["model"], meta["attempt"]), ("task-1-1", "sonnet", 1))
         self.assertEqual(meta["sessions"], [self.launched(task)])
-        self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+        self.assertRegex(meta["started_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertNotIn("verdict", meta)
         self.assertNotIn("verdict_ref", meta)
 
@@ -1713,7 +1717,7 @@ class RunTest(Base):
         self.assertIn("It holds the commits of the earlier attempts of this task.", text)
         self.assertNotIn("Base commit:", text)
         meta = self.meta(task)
-        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2)])
+        self.assertEqual(meta["sessions"], [self.launched(task, 1), self.launched(task, 2, cause="retry-issues")])
         self.assertEqual((meta["attempt"], meta["base"]), (2, first["base"]))
 
     def test_23_base_on_a_retry_is_refused_and_creates_nothing(self):
@@ -2129,8 +2133,9 @@ class RunTest(Base):
         task = self.unlabelled_failure()
         verified = self.one(self.events("record"), "verified")
         self.assertEqual(verified["next"], f"run.py verify {task} --again (the verifier's report has no blocking: line: "
-                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` and say why "
-                         "it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
+                         "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` (or "
+                         "`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour) "
+                         "and say why it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
                          "<why it does not block>`)")
 
     def test_30_close_refuses_an_unlabelled_verify_failed_report(self):
@@ -2611,7 +2616,7 @@ class RunTest(Base):
         self.assertIn("recorded merged_by=operator", merged["detail"])
         meta = self.meta(task)
         self.assertEqual(meta["merged_by"], "operator")
-        self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
+        self.assertRegex(meta["merged_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
     def test_105_merged_into_accepts_a_rebased_commit(self):
         task = self.add_task(attempt=1)
@@ -3194,7 +3199,7 @@ class RunTest(Base):
         task = self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
         self.worktree("task-1")
         self.agents(self.row("task-1", 3), self.finished("task-1"))
-        events = self.events("abandon", str(task), "died")
+        events = self.events("abandon", str(task), "died", "--why", "tested")
         self.assertEqual(self.meta(task)["abandoned"], "died")
         self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
         detail = self.one(events, "abandoned")["detail"]
@@ -3203,10 +3208,20 @@ class RunTest(Base):
         self.assertEqual(len(filed), 1)
         self.assertIn("Session: sess-task-1-3", filed[0]["body"])
         self.assertIn("Worktree:", filed[0]["body"])
-        out = self.run_cmd("abandon", str(task), "gave-up")
+        self.assertEqual(self.meta(task)["abandoned_why"], "tested")
+        self.assertIn("Abandoned: died\nWhy: tested", filed[0]["body"])
+        self.assertIn("(died: tested)", detail)
+        out = self.run_cmd("abandon", str(task), "gave-up", "--why", "tested")
         self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid choice", out.stderr)
+        out = self.run_cmd("abandon", str(task), "unknown", "--why", "tested")  # no longer a reason code
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid choice", out.stderr)
+        out = self.run_cmd("abandon", str(task), "died")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("abandon needs --why", out.stderr)
         idle = self.add_task()
-        self.assertEqual(self.run_cmd("abandon", str(idle), "died").returncode, 2)
+        self.assertEqual(self.run_cmd("abandon", str(idle), "died", "--why", "tested").returncode, 2)
 
     # --- review fixes
 
@@ -3269,7 +3284,7 @@ class RunTest(Base):
         self.assertEqual((meta["attempt"], meta["session"]), (1, "task-1-1-smoke"))
         self.assertIn("started_at", meta)
         self.assertEqual(meta["sessions"], [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1-smoke",
-                                             "worktree": "task-1"}])
+                                             "worktree": "task-1", "plugin": PLUGIN_VERSION}])
         again = self.run_cmd("launch", str(task))
         self.assertEqual(again.returncode, 2)
         self.assertIn("has a live session", again.stderr)
@@ -3628,7 +3643,8 @@ class RunTest(Base):
         closed = self.events("close", str(task), "--verdict", "test-verified", "--ran", "x")
         self.assertEqual(self.one(closed, "tokens")["detail"], "no session recorded; none recorded")
         self.assertEqual(self.meta(task)["sessions"], [{"kind": "task", "attempt": 1, "name": "adopted", "role": None,
-                                                        "tier": "implementation", "verify_kind": "code"}])
+                                                        "tier": "implementation", "verify_kind": "code",
+                                                        "plugin": PLUGIN_VERSION}])
         self.assert_awaiting(task)
         self.assertEqual(self.meta(task)["verdict_ref"], tip)
 
@@ -3911,7 +3927,8 @@ class RunTest(Base):
         self.agents()
         detail = self.one(self.events("launch", str(silent), env=dict(self.env, FAKE_CLAUDE_BG_SAID="")), "launched")["detail"]
         self.assertEqual(sessions(silent), [{"kind": "task", "attempt": 1, "name": "task-4-1", "worktree": "task-4", "model": "sonnet",
-                                             "role": None, "tier": "implementation", "verify_kind": "code"}])  # no id, but the stored values
+                                             "role": None, "tier": "implementation", "verify_kind": "code", "plugin": PLUGIN_VERSION,
+                                             "cause": "first"}])  # no id, but the stored values
         self.assertIn("no session id printed; the row is matched by its folder", detail)
         self.assertNotIn("claude said", detail)
         text_only = self.add_task()  # no `backgrounded` line: a finished row in the folder is not the new session
@@ -4052,7 +4069,7 @@ class RunTest(Base):
         for name in ("died", "stuck", "running", "unknown"):
             self.assertEqual(self.named(events, name), [])
         self.assertEqual(len(self.results(task)), 1)
-        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died"),
+        for command in (("launch",), ("verify",), ("close", "--verdict", "test-verified"), ("stop",), ("abandon", "died", "--why", "tested"),
                         ("adopt", "--branch", "main", "--head", "abc1234")):
             out = self.run_cmd(command[0], str(task), *command[1:])
             self.assertEqual(out.returncode, 2, command)
@@ -5559,18 +5576,18 @@ class RunTest(Base):
                     self.assertTrue(hint[stuck].endswith(" Then run.py launch 7."), hint[stuck])
                     continue
                 cap = "(the cap is 3 attempts), or "
-                self.assertEqual(hint[issues], f"run.py abandon 1 <mode> {cap}run.py launch 1 --attempt 4 to override")
-                self.assertEqual(hint[blocked], f"run.py abandon 2 <mode> {cap}answer it and run.py launch 2 --attempt 4 "
+                self.assertEqual(hint[issues], f"run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}run.py launch 1 --attempt 4 to override")
+                self.assertEqual(hint[blocked], f"run.py abandon 2 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}answer it and run.py launch 2 --attempt 4 "
                                                 'to override, or tg add "<question>" --type decision '
                                                 "--meta decider=operator --blocks 2")
-                self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <mode> {cap}"
+                self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}"
                                                  "run.py launch 3 --attempt 4 to override")
-                self.assertTrue(hint[filed].endswith(f" Then run.py abandon 4 stuck {cap}run.py launch 4 --attempt 4 "
+                self.assertTrue(hint[filed].endswith(f" Then run.py abandon 4 stuck --why \"<one line>\" {cap}run.py launch 4 --attempt 4 "
                                                      "to override."), hint[filed])
-                self.assertEqual(hint[failed], f"run.py abandon 5 <mode> {cap}run.py launch 5 --attempt 4 to override")
+                self.assertEqual(hint[failed], f"run.py abandon 5 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}run.py launch 5 --attempt 4 to override")
                 self.assertEqual(closed, hint[failed])
-                self.assertEqual(hint[died], f"run.py abandon 6 died {cap}run.py launch 6 --attempt 4 to override")
-                self.assertTrue(hint[stuck].endswith(f" Then run.py abandon 7 stuck {cap}run.py launch 7 --attempt 4 "
+                self.assertEqual(hint[died], f"run.py abandon 6 died --why \"<one line>\" {cap}run.py launch 6 --attempt 4 to override")
+                self.assertTrue(hint[stuck].endswith(f" Then run.py abandon 7 stuck --why \"<one line>\" {cap}run.py launch 7 --attempt 4 "
                                                      "to override."), hint[stuck])
                 self.worktree("task-1")
                 refused = self.run_cmd("launch", str(issues), "--dry-run")
@@ -5594,7 +5611,7 @@ class RunTest(Base):
         self.running_task(attempt=3)
         self.agents(self.row("task-1", 3, status="idle", state="working"))
         unknown = self.one(self.events("record"), "unknown")
-        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 unknown "
+        self.assertEqual(unknown["next"], "claude logs sess-task-1-3; if it has stopped working, run.py abandon 1 stuck --why \"<one line>\" "
                                           "(the cap is 3 attempts), or run.py stop 1, then run.py record and "
                                           "run.py launch 1 --attempt 4 to override")
 
@@ -5623,7 +5640,7 @@ class RunTest(Base):
         self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
         self.agents()
         self.assertEqual(self.one(self.events("record"), "stopped")["next"],
-                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+                         "run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
         self.assertIn("\nReason: recover\n", self.results(task)[-1]["body"])
         out = self.run_cmd("launch", str(task), "--dry-run")
         self.assertEqual(out.returncode, 2)
@@ -5639,7 +5656,7 @@ class RunTest(Base):
         self.assertEqual(out.returncode, 2)
         self.assertIn("attempt 3 has failed", out.stderr)
         self.assertEqual(self.one(self.events("record"), "stopped")["next"],
-                         "run.py abandon 1 <mode> (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
+                         "run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" (the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
 
     def test_104_launch_stops_a_worker_on_a_prompt_after_its_result(self):
         task = self.running_task()
@@ -5714,7 +5731,7 @@ class RunTest(Base):
         task = self.running_task(attempt=3, sessions=[self.entry(1, 3), self.entry(1, 3, kind="verify")])
         self.worktree("task-1")
         self.agents(self.row("task-1", 3), self.row("verify-1-3", status="idle", state="blocked"))
-        self.ok("abandon", str(task), "stuck")
+        self.ok("abandon", str(task), "stuck", "--why", "tested")
         self.assertIn(["stop", "sess-task-1-3"], self.calls("stop"))
         self.assertIn(["stop", "sess-verify-1-3"], self.calls("stop"))
         filed = [r for r in self.results(task) if r["status"] == "ABANDONED"]
@@ -5809,7 +5826,7 @@ class RunTest(Base):
         report = self.section(self.brief(task), "REPORT")
         path = os.path.join(self.root, ".claude", "worktrees", "task-1", ".agentic-team", "report-task-1-1.md")
         command = (f'"{sys.executable}" "{RUN}" check-report "{path}" '
-                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1')  # 0.16.0: also its steers; 0.17.0: its evidence
+                   f'--mailbox "{self.inbox_file("1-1.ctx.json")}" --acceptance 1 --base {self.git("rev-parse", "HEAD")} --target "main"')  # 0.16.0: also its steers; 0.17.0: its evidence; 0.28.0: its base
         self.assertIn(f"\n`{command}`\n", report)
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
@@ -5872,7 +5889,7 @@ class RunTest(Base):
     def test_109_a_worker_brief_names_the_acceptance_count_and_a_verifier_brief_none(self):
         task = self.add_task(notes="Why: reason.\n- [ ] one\n- [ ] two\n- [ ] three")
         report = self.section(self.brief(task), "REPORT")
-        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3`', report)
+        self.assertIn('--mailbox "' + self.inbox_file("1-1.ctx.json") + '" --acceptance 3 --base ', report)
         other = self.running_task()
         self.add_result(other, "PASS", f"Task: {other}\nStatus: PASS\nHead: {SHA_A}\n")
         verify = self.section(self.ok("verify", str(other), "--dry-run").stdout, "REPORT")
@@ -6393,6 +6410,175 @@ class Issue89Test(Base):
         self.assertEqual(code, 2)
         self.assertIn("a PASS report has no blocking finding", err)
 
+    def test_every_issues_block_of_a_verifier_report_is_read(self):
+        import run as runner
+        body = ("Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
+                "Issues: blocking: src/b.py:2: two\nFollow-ups: None\nCheckpoint: x\n")
+        self.assertEqual(runner.issue_lines(body), ["blocking: src/a.py:1: one", "blocking: src/b.py:2: two"])
+        mixed = ("Status: ISSUES\nIssues:\n- blocking: one\nFiles: None\nIssues: None\nIssues: blocking: two\n"
+                 "Checkpoint: x\n")
+        self.assertEqual(runner.issue_lines(mixed), ["blocking: one", "blocking: two"])
+        self.assertEqual(runner.report_field(body, "Issues").splitlines(), ["blocking: src/a.py:1: one", "blocking: src/b.py:2: two"])
+        self.assertEqual(runner.report_field(body, "Ran"), "")
+
+    def test_a_verifier_report_with_two_issues_blocks_warns_and_stays_valid(self):
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: one\nIssues: blocking: two\n"
+                     f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        code, out, err = self.check(path, "--verifier")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertIn("warning: the report has more than one `Issues:` field; write a single `Issues:` field, one finding per line", err)
+        self.assertNotIn("warning", self.check(self.report("ISSUES", Issues="\nblocking: one\nblocking: two"), "--verifier")[2])
+
+    # --- [report] require_ran
+
+    def test_check_report_names_the_required_ran_lines_a_pass_report_lacks(self):
+        ran = "\n`make test`: ok\nreuse: searched src/: nothing to reuse"
+        flags = ("--require-ran", "reuse:", "--require-ran", "mutation:")
+        code, out, err = self.check(self.report(Ran=ran), *flags)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("missing: `mutation:`", err)
+        self.assertNotIn("missing: `reuse:`", err)
+        self.assertEqual(self.check(self.report(Ran=ran + "\n- mutation: deleted the guard, test_x failed"), *flags),
+                         (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report("ISSUES", Ran=ran, Asked="none: the timebox ran out"), *flags)[0], 0)
+        self.assertEqual(self.check(self.report(Ran=ran)), (0, "ok\n", ""))  # no [report] require_ran: as before
+
+    def test_the_worker_brief_passes_the_required_ran_prefixes_of_its_verify_kind(self):
+        self.write_config('[report]\nrequire_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }\n')
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(' --require-ran "reuse:" --require-ran "mutation:"', command)
+        self.assertNotIn("self-check:", command)
+        command = self.section(self.brief(self.add_task(verify_kind="design-doc")), "REPORT")
+        self.assertIn(' --require-ran "self-check:"', command)
+        self.assertNotIn("reuse:", command)
+        verify = self.verify_text(self.running_task())
+        self.assertNotIn("--require-ran", verify)
+
+    # --- Files: against git
+
+    def in_repo(self, path, *flags):
+        out = subprocess.run([sys.executable, RUN, "check-report", path, *flags], capture_output=True, text=True, cwd=self.root)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_check_report_refuses_a_pass_whose_files_leave_out_a_changed_file(self):
+        with open(os.path.join(self.root, "old.txt"), "w") as fh:
+            fh.write("old\n")
+        with open(os.path.join(self.root, "moved.txt"), "w") as fh:
+            fh.write("a long line to be detected as a rename\n" * 5)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "setup")
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/new.py", "x\n")
+        os.remove(os.path.join(self.root, "old.txt"))
+        self.git("mv", "moved.txt", "renamed.txt")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "own")
+        self.git("checkout", "-q", "main")  # the target moves on: its file is not the task's own
+        self.commit_file("target.txt", "t\n")
+        self.git("checkout", "-q", "task")
+        flags = ("--base", "main")
+        code, out, err = self.in_repo(self.report(Files="`src/new.py`"), *flags)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("`Files:` leaves out 2 files that this task changed", err)
+        self.assertIn("`old.txt`", err)
+        self.assertIn("`renamed.txt`", err)
+        self.assertNotIn("`moved.txt`", err)  # a rename counts as its new path
+        self.assertNotIn("target.txt", err)
+        self.assertNotIn("src/new.py`,", err)
+        good = self.report(Files="`src/new.py` (new)\n- `old.txt` (deleted)\n- renamed.txt (from moved.txt)")
+        self.assertEqual(self.in_repo(good, *flags), (0, "ok\n", ""))
+        self.assertEqual(self.in_repo(self.report("ISSUES", Files="None", Asked="none: the timebox ran out"), *flags)[0], 0)
+        self.assertEqual(self.in_repo(self.report(Files="None")), (0, "ok\n", ""))  # no --base: no check
+        self.assertEqual(self.in_repo(self.report(Files="None"), "--base", "no-such-ref")[0], 0)  # git cannot say: no check
+        self.assertEqual(base, self.git("merge-base", "task", "main"))
+
+    def test_a_directory_covers_its_files_only_over_twenty_changed_files(self):
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "pkg"))
+        os.makedirs(os.path.join(self.root, "other"))
+        for i in range(3):
+            self.commit_file(f"pkg/f{i}.py", "x\n")
+        code, _, err = self.in_repo(self.report(Files="`pkg/`"), "--base", "main")
+        self.assertEqual(code, 2)
+        self.assertIn("leaves out 3 files", err)
+        for i in range(3, 21):
+            self.commit_file(f"pkg/f{i}.py", "x\n")
+        self.assertEqual(self.in_repo(self.report(Files="`pkg/` (21 files)"), "--base", "main"), (0, "ok\n", ""))
+        self.assertEqual(self.in_repo(self.report(Files="pkg/**"), "--base", "main"), (0, "ok\n", ""))
+        self.commit_file("other/x.py", "x\n")
+        code, _, err = self.in_repo(self.report(Files="`pkg/`"), "--base", "main")
+        self.assertEqual(code, 2)
+        self.assertIn("`other/x.py`", err)
+
+    def test_the_files_check_goes_from_the_merge_base_with_the_target(self):
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/own.py", "x\n")
+        self.git("checkout", "-q", "main")
+        self.commit_file("target.txt", "t\n")
+        self.git("checkout", "-q", "task")
+        self.git("rebase", "-q", "main")  # close's catch-up: base is an ancestor of HEAD, and the target's file came with the rebase
+        flags = ("--base", base, "--target", "main")
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        code, _, err = self.in_repo(self.report(Files="`src/own.py`"), "--base", base)  # without --target: the old start
+        self.assertEqual(code, 2)
+        self.assertIn("`target.txt`", err)
+        self.assertEqual(self.in_repo(self.report(Files="None"), *flags)[0], 2)
+
+    def test_the_files_check_after_a_restack_and_for_an_unmerged_stacked_base(self):
+        self.git("checkout", "-q", "-b", "dep")
+        self.commit_file("dep.txt", "d\n")
+        dep = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "task")
+        os.makedirs(os.path.join(self.root, "src"))
+        self.commit_file("src/own.py", "x\n")
+        flags = ("--base", dep, "--target", "main")  # the base is unmerged: it is newer than the merge base with main
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        self.git("checkout", "-q", "main")  # dep lands under another SHA, and the target moves on
+        self.commit_file("target.txt", "t\n")
+        self.git("cherry-pick", dep)
+        self.git("checkout", "-q", "task")
+        self.git("rebase", "-q", "--onto", "main", "dep")  # the restack: the old base is no ancestor of HEAD any more
+        self.assertNotEqual(self.git("merge-base", dep, "HEAD"), dep)
+        self.assertEqual(self.in_repo(self.report(Files="`src/own.py`"), *flags), (0, "ok\n", ""))
+        code, _, err = self.in_repo(self.report(Files="None"), *flags)
+        self.assertEqual(code, 2)
+        self.assertIn("leaves out 1 file that this task changed", err)
+        self.assertNotIn("dep.txt", err)
+        self.assertNotIn("target.txt", err)
+
+    def test_the_directory_hint_is_named_only_over_twenty_changed_files(self):
+        import run as runner
+        few = runner.files_problems("Files: None\n", ["a.py"])
+        self.assertNotIn("name a directory", few[0])
+        many = runner.files_problems("Files: None\n", [f"d/f{i}.py" for i in range(21)])
+        self.assertIn("name a directory such as `src/` (more than 20 files changed)", many[0])
+
+    def test_only_the_first_files_field_and_adjacent_repeats_count(self):
+        import run as runner
+        report = "Files: `a.py`\nDeviations: none\nFiles: `b.py`\nCheckpoint: x\n"  # a Files line after other fields is text
+        self.assertEqual(runner.report_field(report, "Files"), "`a.py`")
+        self.assertEqual(len(runner.files_problems(report, ["b.py"])), 1)  # b.py is named only in the stray line
+        issues = "Issues: blocking: one\nIssues: blocking: two\nFollow-ups: None\nIssues: blocking: stray\n"
+        self.assertEqual(runner.report_field(issues, "Issues"), "blocking: one\nblocking: two")
+        inside = "Files: `a.py`\nDeviations: moved things\nFiles: `b.py` is also mentioned\nFollow-ups: None\n"
+        self.assertEqual(runner.report_field(inside, "Files"), "`a.py`")
+
+    def test_asked_takes_the_first_asked_field(self):
+        import run as runner
+        self.assertEqual(runner.asked_problems("Asked: #12\nAsked: junk\n", "ISSUES"), [])
+        self.assertEqual(len(runner.asked_problems("Asked: junk\nAsked: #12\n", "ISSUES")), 1)
+
+    def test_the_worker_brief_gives_check_report_the_base_of_the_task(self):
+        base = self.git("rev-parse", "HEAD")
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(f" --base {base}", command)
+
     def test_a_worker_report_keeps_free_issue_lines(self):
         self.assertEqual(self.check(self.report("ISSUES", Issues="the test fails", Asked="#4")), (0, "ok\n", ""))
         self.assertEqual(self.check(self.report("ISSUES", Issues="None", Asked="none: the timebox ran out")), (0, "ok\n", ""))
@@ -6512,12 +6698,27 @@ class Issue89Test(Base):
         self.assertIn("Check that each `adjacent: <kind>: <path>` line", text)
         self.assertNotIn("stale-exemption", text)
 
+    def test_the_four_scope_kinds_of_an_own_change_go_into_both_briefs(self):
+        self.write_config('[scope]\nadjacent = ["own-dependents", "own-registry", "convention-place", "moved-path"]\n')
+        scope = self.section(self.brief(self.add_task()), "SCOPE")
+        text = self.verify_text(self.running_task())
+        for kind, words in (("own-dependents", "change a caller, test, fixture, generated file, doc or API sample"),
+                            ("own-registry", "never an exemption, a baseline row or an allow-list entry"),
+                            ("convention-place", "put new code in the file where the repository's conventions place it"),
+                            ("moved-path", "`git grep` finds that code in exactly one other place")):
+            with self.subTest(kind=kind):
+                for brief in (scope, text):
+                    self.assertIn(f"`{kind}`: ", brief)
+                    self.assertIn(words, brief)
+        self.assertNotIn("lower-ratchet", scope)
+
     def test_an_unknown_adjacent_kind_is_refused_naming_the_kinds(self):
         self.write_config('[scope]\nadjacent = ["lower-ratchet", "lower-ratchett"]\n')
         out = self.run_cmd("status")
         self.assertEqual(out.returncode, 2)
         self.assertIn('scope.adjacent: "lower-ratchett" is not an adjacent-change kind; the kinds are lower-ratchet, '
-                      "stale-exemption, own-lint (did you mean lower-ratchet?)", out.stderr)
+                      "stale-exemption, own-lint, own-dependents, own-registry, convention-place, moved-path "
+                      "(did you mean lower-ratchet?)", out.stderr)
 
 
 class PrTest(Base):
@@ -7188,7 +7389,7 @@ class PrTest(Base):
     def test_140_abandon_deletes_the_ci_ref(self):
         task, head, events = self.ci_ref_verified()
         self.assertEqual(self.remote_sha(f"ci-{task}-1"), head)
-        self.assertEqual(self.one(self.events("abandon", str(task), "stuck"), "ci-ref-deleted")["detail"],
+        self.assertEqual(self.one(self.events("abandon", str(task), "stuck", "--why", "tested"), "ci-ref-deleted")["detail"],
                          f"origin/ci-{task}-1")
         self.assertIsNone(self.remote_sha(f"ci-{task}-1"))
         self.assertNotIn("ci_refs", self.meta(task))
@@ -7619,7 +7820,7 @@ class PrTest(Base):
     def test_abandon_names_the_request_that_stays_open(self):
         task, wt, head = self.pr_task()
         self.tg("edit", str(task), "--meta", "pr=1", "attempt=3")
-        detail = self.one(self.events("abandon", str(task), "died"), "abandoned")["detail"]
+        detail = self.one(self.events("abandon", str(task), "died", "--why", "tested"), "abandoned")["detail"]
         self.assertTrue(detail.endswith(f"; request {self.label()} stays open, close it on the host by hand"), detail)
 
     # --- review fixes
@@ -8587,7 +8788,7 @@ class PrTest(Base):
         self.ok("verify", str(task))
         self.fake_host(head=head, merge_state="UNKNOWN", runs=[{"id": 11, "state": "failure"}])
         verified = self.one(self.events("record"), "verified")
-        self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <mode> "
+        self.assertEqual(verified["next"], "run run.py close 1 (records verify-failed), then run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" "
                                            "(the cap is 3 attempts), or run.py launch 1 --attempt 4 to override")
 
 
@@ -8633,7 +8834,8 @@ class ProfileTest(Base):
         entry = self.meta(task)["sessions"][0]
         self.assertEqual(entry, {"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
                                  "worktree": "task-1", "model": "sonnet", "profile": "api", "role": None,
-                                 "tier": "implementation", "verify_kind": "code"})
+                                 "tier": "implementation", "verify_kind": "code", "plugin": PLUGIN_VERSION,
+                                 "cause": "first"})
         detail = self.one(events, "launched")["detail"]
         self.assertTrue(detail.startswith("sonnet profile api session task-1-1 "), detail)
         self.assertNotIn("does not list", detail)  # the id was checked against the api profile's own list
@@ -8651,7 +8853,7 @@ class ProfileTest(Base):
                 self.assertEqual(self.meta(task)["sessions"],
                                  [{"id": "sess-task-1-1", "kind": "task", "attempt": 1, "name": "task-1-1",
                                    "worktree": "task-1", "model": "sonnet", "role": None, "tier": "implementation",
-                                   "verify_kind": "code"}])
+                                   "verify_kind": "code", "plugin": PLUGIN_VERSION, "cause": "first"}])
                 self.assertEqual(self.one(events, "launched")["detail"].split(" session ")[0], "sonnet/high")
                 with open(self.log + ".dirs") as fh:
                     self.assertEqual({json.loads(line)["dir"] for line in fh}, {None})
@@ -9783,7 +9985,7 @@ class DeliveryTest(Base):
         task = self.worker(status="busy", state="working", pid=4242)
         text = self.text_file("x")
         commands = {"launch": [], "adopt": ["--branch", "none", "--head", "abcdef1"], "verify": [], "close": [], "merged": [],
-                    "stop": [], "abandon": ["died"], "answer": ["--file", text], "steer": ["--file", text]}
+                    "stop": [], "abandon": ["died", "--why", "tested"], "answer": ["--file", text], "steer": ["--file", text]}
         self.assertEqual(set(commands), set(("launch", "adopt", "verify", "close", "merged", "stop", "abandon", "answer", "steer")))
         for command, args in commands.items():
             with self.subTest(command):
@@ -9949,7 +10151,7 @@ class DeliveryTest(Base):
         self.ok("launch", str(task), "--profile", "c2")
         self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n", attempt=3)
         self.c2_agents(*[self.finished("task-1", n) for n in (1, 2, 3)])
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertNotIn("mailbox", self.meta(task))
         self.assertNotIn("Open thread", self.brief(task, "--attempt", "4"))
 
@@ -10237,7 +10439,7 @@ class DeliveryTest(Base):
         self.assertEqual(self.meta(task)["mailbox_ids"], {"1": [steer["id"]]})
         self.add_result(task, "ISSUES", "Task: 1\nStatus: ISSUES\nCheckpoint: x\n")
         self.c2_agents(self.finished("task-1", 1))
-        self.ok("abandon", str(task), "died")  # drops the delivery state; the listed ids stay
+        self.ok("abandon", str(task), "died", "--why", "tested")  # drops the delivery state; the listed ids stay
         self.assertNotIn("mailbox", self.meta(task))
         self.assertEqual(self.meta(task)["mailbox_ids"], {"1": [steer["id"]]})
         self.ok("launch", str(task), "--attempt", "2", "--profile", "c2")
@@ -10341,7 +10543,7 @@ class DeliveryTest(Base):
         task = self.worker(status=None, state="done")
         ask = self.ask()
         self.c2_agents()  # and its job is removed too
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertEqual([(r["status"], r["author"]) for r in self.results(task) if r["kind"] == "task"], [("ABANDONED", "manager")])
         self.ok("launch", str(task), "--attempt", "2", "--profile", "c2")
         self.assertIn(f"Ask #{ask} (OPEN):", self.calls("--bg")[-1][-1])
@@ -10383,7 +10585,7 @@ class DeliveryTest(Base):
         self.fresh()
         task = self.worker(status=None, state="stopped")
         self.ask()
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "task"], ["ABANDONED"])
         self.assertTrue(ask)
 
@@ -10465,7 +10667,7 @@ class DeliveryTest(Base):
                     self.ok("merged", str(task))
                 else:
                     self.add_result(task, "DIED", "x")
-                    self.ok("abandon", str(task), "died")
+                    self.ok("abandon", str(task), "died", "--why", "tested")
                 self.assertNotIn("mailbox", self.meta(task))
                 left = sorted(os.listdir(os.path.dirname(self.inbox_file("x"))))
                 self.assertEqual(left, ["2-1.ctx.json"])  # only this task's files went
@@ -10952,10 +11154,10 @@ class PhaseTest(Base):
         self.assertEqual(self.one(self.events("record"), "pr-closed")["task"], task)
         self.assert_awaiting(task)
         self.assertNotIn(later, self.ready_ids())
-        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        abandoned = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
         self.assertIn(f"request {self.label()} stays open and record no longer follows it", abandoned["detail"])
         meta = self.meta(task)
-        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "unknown"))
+        self.assertEqual((self.status_of(task), meta["phase"], meta["abandoned"]), ("in_progress", "abandoned", "failed"))
         self.assertEqual([e for e in self.events("record") if e["task"] == task], [])
         self.assertEqual(self.run_cmd("merged", str(task)).returncode, 2)
 
@@ -10964,12 +11166,12 @@ class PhaseTest(Base):
         self.fake_host(head=head, merge_state="BLOCKED", checks=("pass", "fail"))
         blocked = self.one(self.events("record"), "pr-blocked")
         self.assertEqual(blocked["next"], f"run.py record later; if a required check failed, to redo it, "
-                                          f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+                                          f"run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2")
         self.assertNotIn("fix task", blocked["next"])
         out = self.run_cmd("launch", str(task))
         self.assertEqual(out.returncode, 2)
-        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", out.stderr)
-        self.ok("abandon", str(task), "unknown")  # the hint's commands work: abandon, then the next attempt
+        self.assertIn(f"to redo it, run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2", out.stderr)
+        self.ok("abandon", str(task), "failed", "--why", "tested")  # the hint's commands work: abandon, then the next attempt
         self.ok("launch", str(task), "--attempt", "2", "--dry-run")
 
     def test_pr_blocked_on_a_task_closed_by_0_18_0_says_a_fix_is_a_new_task(self):
@@ -10979,7 +11181,7 @@ class PhaseTest(Base):
 
     def test_abandon_a_local_task_that_waits_for_its_merge(self):
         task, wt, head = self.closed_local()
-        abandoned = self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+        abandoned = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
         self.assertIn(f"branch worktree-task-1 at {head[:7]} is not merged and stays", abandoned["detail"])
         self.assertEqual(self.git("rev-parse", "worktree-task-1"), head)
 
@@ -11215,9 +11417,9 @@ class PhaseTest(Base):
         task, head, _ = self.closed_pr()
         self.fake_host(head=head, state="CLOSED")
         hint = self.one(self.events("record"), "pr-closed")["next"]
-        self.assertIn(f"to redo it, run.py abandon {task} <mode>, then run.py launch {task} --attempt 2", hint)
+        self.assertIn(f"to redo it, run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2", hint)
         self.assertEqual(self.run_cmd("launch", str(task)).returncode, 2)
-        self.ok("abandon", str(task), "unknown")
+        self.ok("abandon", str(task), "failed", "--why", "tested")
         self.one(self.events("launch", str(task), "--attempt", "2"), "launched")
 
     def test_adopt_with_an_awaiting_dependency_needs_its_commit(self):
@@ -11343,7 +11545,7 @@ class PhaseTest(Base):
                 self.fresh()
                 task = close()[0]
                 self.assertIsNotNone(self.gate(task))
-                self.one(self.events("abandon", str(task), "unknown"), "abandoned")
+                self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")
                 self.assertEqual((self.meta(task)["phase"], self.gate(task)), ("abandoned", None))
 
     def test_gate_crash_between_clear_and_done_heals(self):
@@ -12140,7 +12342,7 @@ class RepointTest(Base):
                       line["detail"])
         self.assertEqual(line["next"], f"run.py repoint {task} --pr <n> to follow another request, run.py merged {task} "
                                        "--by operator when the change is in main another way, or to redo it, "
-                                       f"run.py abandon {task} <mode>, then run.py launch {task} --attempt 2")
+                                       f"run.py abandon {task} <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\", then run.py launch {task} --attempt 2")
         self.assertEqual(self.tg("ls", "--type", "decision"), [])
         self.assert_awaiting(task)
 
@@ -12160,7 +12362,7 @@ class RepointTest(Base):
 
     def test_111_abandon_and_the_next_attempt_go_back_to_the_own_request(self):
         (task, head), = self.repointed(1)
-        detail = self.one(self.events("abandon", str(task), "unknown"), "abandoned")["detail"]
+        detail = self.one(self.events("abandon", str(task), "failed", "--why", "tested"), "abandoned")["detail"]
         self.assertIn("record no longer follows PR #9, which another task merges", detail)
         self.assertIn("the next attempt goes back to the task's own request PR #1", detail)
         self.assertEqual(self.close_calls(9), [])
@@ -12339,7 +12541,7 @@ class RoundTest(Base):
         self.started(task)
         self.assertIn("is already in a rebase round (attempt 2); run.py round 1 --cancel ends it",
                       self.refused("round", str(task), "rebase"))
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.assertIn("is not in a round (abandoned: died)", self.refused("round", str(task), "--cancel"))
         self.assertIn("is abandoned (died)", self.refused("round", str(task), "rebase"))
 
@@ -12625,7 +12827,7 @@ class RoundTest(Base):
         self.started(task)
         for args in (("launch", str(task)), ("adopt", str(task), "--branch", "worktree-task-1", "--head", head[:7])):
             self.assertIn("is in a rebase round (attempt 2); run.py round 1 --cancel ends it", self.refused(*args))
-        self.ok("abandon", str(task), "died")
+        self.ok("abandon", str(task), "died", "--why", "tested")
         self.ok("launch", str(task), "--attempt", "3")
         meta = self.meta(task)
         self.assertFalse(set(meta) & {"round", "round_from", "round_verdict", "round_onto"})
@@ -12641,6 +12843,15 @@ class RoundTest(Base):
         task = self.add_task(role="vars")
         role = self.section(self.brief(task), "ROLE")
         self.assertIn(f"Task {task} (Sweep domains) of demo; {{{{ROUND_FROM}}}} and {{{{NOPE}}}} stay.", role)
+
+    def test_a_rebase_round_brief_has_neither_the_required_ran_prefixes_nor_the_files_base(self):
+        task, wt, head, onto = self.waiting()
+        with open(os.path.join(self.root, ".agentic-team.toml"), "a") as fh:
+            fh.write('\n[report]\nrequire_ran = { "code" = ["reuse:"] }\n')
+        command = self.section(self.ok("round", str(task), "rebase", "--dry-run").stdout, "REPORT")
+        self.assertIn("check-report", command)
+        self.assertNotIn("--require-ran", command)
+        self.assertNotIn("--base", command)
 
     def test_119_round_goal_comes_first_and_old_branch_lines_do_not_apply(self):
         task, wt, head, onto = self.waiting()
@@ -12838,7 +13049,7 @@ class FolderFixTest(Base):
         self.assertEqual([f for f in self.worktree_state()[2] if f.startswith("verify-")], [])
         self.fresh()
         task, wt, head = self.failed_verdict()
-        events = self.events("abandon", str(task), "stuck")
+        events = self.events("abandon", str(task), "stuck", "--why", "tested")
         abandoned = self.one(events, "abandoned")
         self.assertNotIn("verify-1-1", abandoned["detail"])
         self.assertIn("task-1", abandoned["detail"])
@@ -12943,7 +13154,7 @@ class RevisionTest(Base):
         return (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:\n" + "".join(f"- blocking: {x}\n" for x in lines)
                 + f"Checkpoint: {CHECKPOINT}\n")
 
-    def failed(self, seat="task", lines=("src/a.py:1: a check fails",), config="", close=True, **meta):
+    def failed(self, seat="task", lines=("src/a.py:1: a check fails",), config="", close=True, body=None, **meta):
         """Attempt 1 of task 1, launched by run.py, passed; its verifier (seat task: in task-1; own: in verify-1-1) said
         verify-failed with blocking `lines`; both sessions are kept. With `close` the verdict is recorded."""
         self.write_config(f'[verify]\nseat = "{seat}"\n' + config)
@@ -12964,7 +13175,7 @@ class RevisionTest(Base):
         self.transcript("task-1", self.W)
         self.transcript(folder, self.V)
         self.kept(folder)
-        self.verify_row = self.add_result(task, "ISSUES", self.issues(lines), kind="verify", by="verify-1-1")["id"]
+        self.verify_row = self.add_result(task, "ISSUES", body or self.issues(lines), kind="verify", by="verify-1-1")["id"]
         events = self.events("close", str(task)) if close else None
         return task, wt, head, events
 
@@ -13042,6 +13253,14 @@ class RevisionTest(Base):
                 {"id": 60, "kind": "task", "attempt": 1}, {"id": 70, "kind": "task", "attempt": 2}]
         self.assertEqual([r["id"] for r in runner.current_rows(rows, 1)], [local + 2, 60])
         self.assertEqual([r["id"] for r in runner.current_rows(rows[:2], 1)], [40, local + 1])
+
+    def test_revise_relays_the_findings_of_two_issues_blocks(self):
+        body = (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
+                f"Issues: blocking: src/b.py:2: two\nCheckpoint: {CHECKPOINT}\n")
+        task, wt, head, events = self.revised(body=body)
+        (steer,) = [r for r in self.results(task) if r["kind"] == "steer"]
+        self.assertIn("Steer: 2 blocking findings of verify", steer["body"])
+        self.assertTrue(steer["body"].endswith("\nF1: blocking: src/a.py:1: one\nF2: blocking: src/b.py:2: two\n"))
 
     def test_revise_of_one_blocking_line(self):
         task, wt, head, events = self.revised()
@@ -13886,6 +14105,189 @@ class Issue130Test(Base):
             self.assertIn("./agents/dependency-check.md", json.load(fh)["agents"])
         with open(os.path.join(base, "playbooks", "run.md"), encoding="utf-8") as fh:
             self.assertIn("agentic-team:dependency-check", fh.read())
+
+
+class RetroTest(Base):
+    """agentic-team 0.28.0: what a retro needs, recorded: plugin and usage per session, the cause of an attempt, the
+    dependency check, the triage of a follow-up, the category of a blocking line, UTC times."""
+
+    def body_file(self, text, name="body.md"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_launch_records_the_plugin_version_and_the_cause_of_the_attempt(self):
+        task = self.add_task()
+        self.ok("launch", str(task))
+        entry = self.meta(task)["sessions"][0]
+        self.assertEqual((entry["plugin"], entry["cause"]), (PLUGIN_VERSION, "first"))
+        other = self.add_task("Second")
+        self.ok("launch", str(other), "--cause", "review-fix")  # the override wins over the derived cause
+        self.assertEqual(self.meta(other)["sessions"][0]["cause"], "review-fix")
+        self.assertIn("invalid choice", self.run_cmd("launch", str(self.add_task("Third")), "--cause", "whim").stderr)
+
+    def test_the_cause_of_an_attempt_comes_from_the_state_before_it(self):
+        import run as runner
+        def row(status, kind="task", author="worker", body=""):
+            return {"id": 1, "kind": kind, "status": status, "attempt": 1, "author": author, "body": body}
+        failed = "Status: ISSUES\nVerdict: verify-failed\nIssues: blocking: x\n"
+        cases = [
+            ("first", {}, [], 0),
+            ("retry-issues", {}, [row("ISSUES")], 1),
+            ("retry-issues", {}, [row("BLOCKED")], 1),
+            ("retry-stopped", {}, [row("STOPPED", author="manager")], 1),
+            ("retry-died", {}, [row("DIED", author="manager")], 1),
+            ("retry-died", {"abandoned": "died"}, [row("DIED", author="manager")], 1),
+            ("review-fix", {}, [row("PASS"), row("ISSUES", "verify", "verify-1-1", failed)], 1),
+            ("ci-fix", {}, [row("PASS"), row("ISSUES", "verify", "ci", failed)], 1),
+            (None, {}, [row("PASS")], 1),
+            (None, {}, [row("BLOCKED", author="manager")], 1),
+            (None, {"abandoned": "stuck"}, [row("DIED", author="manager")], 1),
+            (None, {}, [], 1),
+        ]
+        for want, meta, rows, current in cases:
+            with self.subTest(want=want, meta=meta, rows=[r["status"] for r in rows]):
+                self.assertEqual(runner.launch_cause({"meta": meta}, rows, current), want)
+
+    def test_a_relaunch_after_a_passing_revision_records_no_review_fix(self):
+        import run as runner
+        def row(i, kind, status, author, body=""):
+            return {"id": i, "kind": kind, "status": status, "attempt": 1, "author": author, "body": body}
+        rows = [row(1, "task", "PASS", "w"),
+                row(2, "verify", "ISSUES", "verify-1-1", "Status: ISSUES\nVerdict: verify-failed\nIssues: blocking: x\n"),
+                row(3, "revise", "OPEN", "manager"), row(4, "task", "PASS", "w"),
+                row(5, "verify", "PASS", "verify-1-1", "Status: PASS\nVerdict: test-verified\n")]
+        self.assertIsNone(runner.launch_cause({"meta": {}}, rows, 1))
+        self.assertEqual(runner.launch_cause({"meta": {}}, rows[:3] + [row(4, "task", "PASS", "w")], 1), "review-fix")
+
+    def test_record_writes_the_usage_of_an_ended_session_once(self):
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        self.agents(self.finished("task-1", sessionId="abc123-full"))
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        os.makedirs(folder)
+        with open(os.path.join(folder, "abc123-full.jsonl"), "w") as fh:
+            fh.write(transcript(11))
+        self.ok("record")
+        self.assertEqual(self.meta(task)["sessions"][0]["usage"], {"out": 11, "in": 3, "cache_read": 5, "cache_write": 7})
+        with open(os.path.join(folder, "abc123-full.jsonl"), "w") as fh:
+            fh.write(transcript(99))
+        self.ok("record")
+        self.assertEqual(self.meta(task)["sessions"][0]["usage"]["out"], 11)  # written once
+
+    def test_record_leaves_the_usage_of_a_live_session_and_of_one_with_no_transcript(self):
+        task = self.running_task()
+        self.agents(self.row("task-1", sessionId="abc123-full"))
+        self.ok("record")
+        self.assertNotIn("usage", self.meta(task)["sessions"][0])
+        self.agents(self.finished("task-1"))
+        self.ok("record")
+        self.assertNotIn("usage", self.meta(task)["sessions"][0])
+
+    def test_status_last_skips_check_and_triage_rows(self):
+        task = self.running_task()
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n"))
+        self.assertNotIn("check OK", self.status_sections()["In flight"])
+
+    def test_depcheck_files_a_check_row_for_the_next_attempt(self):
+        task = self.add_task()
+        events = self.events("depcheck", str(task), "--verdict", "missing", "--body-file",
+                             self.body_file("missing: src/a.py is in request #12\n"))
+        (row,) = [r for r in self.results(task) if r["kind"] == "check"]
+        self.assertEqual((row["status"], row["author"], row["attempt"]), ("MISSING", "manager", 1))
+        self.assertEqual(row["body"], "Check: dependency\nVerdict: missing\n\nmissing: src/a.py is in request #12\n")
+        self.assertIn("missing (result #", self.one(events, "depchecked")["detail"])
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n", "b.md"))
+        self.ok("depcheck", str(task), "--verdict", "not-checked", "--body-file", self.body_file("not checked: x\n", "c.md"))
+        self.assertEqual([r["status"] for r in self.results(task) if r["kind"] == "check"], ["MISSING", "OK", "NOT-CHECKED"])
+        self.assertEqual(self.status_of(task), "open")
+        self.assertIn("invalid choice", self.run_cmd("depcheck", str(task), "--verdict", "fine", "--body-file", self.body_file("x")).stderr)
+        self.assertIn("is empty", self.refused("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("", "e.md")))
+        self.ok("launch", str(task))  # a check row changes no state: the launch goes on
+        self.ok("depcheck", str(task), "--verdict", "ok", "--body-file", self.body_file("ok\n", "d.md"))
+        self.assertEqual(self.results(task)[-1]["attempt"], 2)
+
+    def refused(self, *args):
+        out = self.run_cmd(*args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return out.stderr
+
+    def follow_up_task(self):
+        task = self.add_task()
+        row = self.add_result(task, "PASS", "Task: 1\nStatus: PASS\nFollow-ups: caller: src/b.py: calls the old name\n"
+                              "- doc: README.md: names the old flag\nCheckpoint: x\n")
+        return task, row["id"]
+
+    def test_triage_files_a_row_that_names_the_result_and_the_line(self):
+        task, row = self.follow_up_task()
+        later = self.add_task("Follow-up work")
+        events = self.events("triage", str(task), "--row", f"{row}#2", "--to", "task", str(later))
+        (filed,) = [r for r in self.results(task) if r["kind"] == "triage"]
+        self.assertEqual((filed["status"], filed["author"], filed["attempt"]), ("TASK", "manager", 1))
+        self.assertEqual(filed["body"], f"Row: {row}#2\nLine: - doc: README.md: names the old flag\nTo: task {later}\n")
+        self.assertIn(f"result #{row} line 2 -> task {later}", self.one(events, "triaged")["detail"])
+        self.ok("triage", str(task), "--row", f"{row}#1", "--to", "issue", "57")
+        self.ok("triage", str(task), "--row", f"{row}#1", "--to", "dismissed", "--why", "the caller is gone")
+        rows = [r for r in self.results(task) if r["kind"] == "triage"]
+        self.assertEqual([r["status"] for r in rows], ["TASK", "ISSUE", "DISMISSED"])
+        self.assertTrue(rows[2]["body"].endswith("To: dismissed\nWhy: the caller is gone\n"))
+
+    def test_triage_refuses_what_it_cannot_join(self):
+        task, row = self.follow_up_task()
+        for args, word in ((("--row", "x", "--to", "dismissed", "--why", "y"), "<result id>#<line>"),
+                           ((f"--row", f"{row}#3", "--to", "issue", "5"), "has 2 Follow-ups lines"),
+                           (("--row", "99999#1", "--to", "issue", "5"), "has no result #99999"),
+                           (("--row", f"{row}#1", "--to", "dismissed"), "needs --why"),
+                           (("--row", f"{row}#1", "--to", "issue"), "--to takes"),
+                           (("--row", f"{row}#1", "--to", "issue", "abc"), "takes a number")):
+            with self.subTest(args=args):
+                self.assertIn(word, self.refused("triage", str(task), *args))
+        out = self.run_cmd("triage", str(task), "--row", f"{row}#1", "--to", "task", "99999")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("99999", out.stderr)
+        self.assertEqual([r for r in self.results(task) if r["kind"] == "triage"], [])
+
+    def test_a_blocking_line_may_carry_a_category(self):
+        import run as runner
+        import mailbox as mbx
+        lines = ("blocking: plain", "blocking[stale-ref]: NOTES.md:12 moved", "- blocking[claim]: the route has two callers",
+                 "blocking[test]: x", "blocking[scope]: x", "blocking[shots]: x", "blocking[behaviour]: x")
+        issues = "\n" + "\n".join(lines)
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
+        row = {"id": 5, "author": "verify-1-1", "status": "ISSUES", "attempt": 1, "kind": "verify",
+               "body": f"Status: ISSUES\nVerdict: verify-failed\nIssues:{issues}\n"}
+        found = runner.revise_findings({"meta": {"attempt": 1}}, [{"id": 4, "kind": "task", "status": "PASS", "attempt": 1}, row])[1]
+        self.assertEqual(found, [line.lstrip("- ") for line in lines])
+        steer = runner.finding_steer(row, found, 1)
+        self.assertEqual(mbx.finding_ids(steer), ["F1", "F2", "F3", "F4", "F5", "F6", "F7"])
+        self.assertIn("F2: blocking[stale-ref]: NOTES.md:12 moved\n", steer)
+        with open(path, "w") as fh:
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:\nblocking[nope]: x\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        out = self.run_cmd("check-report", path, "--verifier")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour", out.stderr)
+
+    def test_the_verifier_brief_and_templates_name_the_optional_category(self):
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {SHA_A}\n")
+        text = self.ok("verify", str(task), "--dry-run").stdout
+        self.assertIn("a category is optional: `blocking[stale-ref]:`", text)
+        self.assertIn("A category on a `blocking:` line is optional", text)
+
+    def test_times_that_run_py_writes_are_utc_iso_and_both_formats_show_in_the_project_zone(self):
+        self.write_config("", sessions="")
+        task = self.running_task(started_at='"2026-10-26T09:00:00Z"')
+        old = self.running_task(started_at='"2026-10-26 08:00 UTC"')
+        self.assertEqual((task, old), (1, 2))
+        section = self.status_sections()["In flight"]
+        self.assertIn("2026-10-26 09:00 UTC", section)
+        self.assertIn("2026-10-26 08:00 UTC", section)
+        import run as runner
+        self.assertRegex(runner.utc_stamp(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 class TransitionTest(unittest.TestCase):
