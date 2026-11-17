@@ -88,6 +88,14 @@ ADJACENT_KINDS = {
     "lower-ratchet": "only lower a baseline, ratchet or allow-list count; never raise it and never add an entry",
     "stale-exemption": "delete an exemption or baseline row that a scanner run in this attempt proves stale",
     "own-lint": "fix lint or format errors that this attempt's change caused in files outside SCOPE",
+    "own-dependents": "change a caller, test, fixture, generated file, doc or API sample of the code that this attempt "
+                      "changes, as far as an ACCEPTANCE line, a VERIFY command or a gate that the brief names needs it",
+    "own-registry": "add the entry that a check requires for a file this attempt adds, in a table that must list every "
+                    "file; never an exemption, a baseline row or an allow-list entry",
+    "convention-place": "put new code in the file where the repository's conventions place it, for example a schema "
+                        "file or a facade, when that file is outside SCOPE",
+    "moved-path": "change the code that a SCOPE path meant, when that path does not exist at the base and `git grep` "
+                  "finds that code in exactly one other place",
 }
 
 # Ignored paths that run.py may delete with a merged worktree: dependencies, environments, caches, build output

@@ -6533,6 +6533,20 @@ class Issue89Test(Base):
         self.assertIn("Check that each `adjacent: <kind>: <path>` line", text)
         self.assertNotIn("stale-exemption", text)
 
+    def test_the_four_scope_kinds_of_an_own_change_go_into_both_briefs(self):
+        self.write_config('[scope]\nadjacent = ["own-dependents", "own-registry", "convention-place", "moved-path"]\n')
+        scope = self.section(self.brief(self.add_task()), "SCOPE")
+        text = self.verify_text(self.running_task())
+        for kind, words in (("own-dependents", "change a caller, test, fixture, generated file, doc or API sample"),
+                            ("own-registry", "never an exemption, a baseline row or an allow-list entry"),
+                            ("convention-place", "put new code in the file where the repository's conventions place it"),
+                            ("moved-path", "`git grep` finds that code in exactly one other place")):
+            with self.subTest(kind=kind):
+                for brief in (scope, text):
+                    self.assertIn(f"`{kind}`: ", brief)
+                    self.assertIn(words, brief)
+        self.assertNotIn("lower-ratchet", scope)
+
     def test_an_unknown_adjacent_kind_is_refused_naming_the_kinds(self):
         self.write_config('[scope]\nadjacent = ["lower-ratchet", "lower-ratchett"]\n')
         out = self.run_cmd("status")

@@ -253,8 +253,11 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[scope]\nadjacent = ["lower-ratchet", "raise-ratchet"]\n')
         self.assertEqual(config.problems(config.load(self.root)), [
             'scope.adjacent: "raise-ratchet" is not an adjacent-change kind; the kinds are '
-            "lower-ratchet, stale-exemption, own-lint (did you mean lower-ratchet?)"])
+            "lower-ratchet, stale-exemption, own-lint, own-dependents, own-registry, convention-place, moved-path "
+            "(did you mean lower-ratchet?)"])
         self.assertEqual(self.run_cli("check")[0], 2)
+        self.write(MINIMAL + '[scope]\nadjacent = ["own-dependents", "own-registry", "convention-place", "moved-path"]\n')
+        self.assertEqual(self.run_cli("check")[0], 0)
         self.write(MINIMAL + '[scope]\nadjacent = "own-lint"\n')
         self.assertEqual(config.problems(config.load(self.root)),
                          ['scope.adjacent must be a list of adjacent-change kinds, not "own-lint"'])
