@@ -70,8 +70,8 @@ every report, and on every wake (step 6).
      `"${CLAUDE_PLUGIN_ROOT}/scripts/run" record`, then `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. This stop is a recovery
      stop: the attempt counts, and at attempt 3 the hint names `abandon` instead.
      A row with no status and no pid (a ghost) counts as ended after 30 quiet minutes; `run.py stop` does not clear it before that.
-   - A `next:` that names `abandon` (the cap is 3 attempts; the spent attempt cap): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <mode>`,
-     add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
+   - A `next:` that names `abandon` (the cap is 3 attempts; the spent attempt cap): run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" abandon <id> <reason> --why "<one line>"`
+     (`<reason>` is one of died, tool-error, stuck, failed, scope-wrong, superseded, operator), add a decision if the operator must decide, and re-plan around the task. Use the `--attempt` override
      in the same hint only when the operator says so. Do not add fix rounds past the cap. First classify
      what remains: undecided design → a design task that sets the spec; a tool problem or out-of-scope
      work → a separate task; open-ended acceptance → rewrite it as a closed checklist. Override the cap
@@ -154,7 +154,7 @@ every report, and on every wake (step 6).
      decision (see Escalation in the Manager index); it does not lower the verdict.
    - Before `close`, the operator must have confirmed every step that needs a
      person. A request a person must send is not done until they send it.
-   - Before you close a task, triage every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes: a new task, the tail of a later task's notes, or won't-fix with a one-line reason in the task's notes. Never leave one untriaged. A `flake:` line becomes a task to fix the flaky check, or won't-fix with a reason; it never opens a fix round of this task. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is triaged the same way and never opens a fix round.
+   - Before you close a task, triage every `Follow-ups:` line of its reports, and every verifier `Issues:` line that no new attempt fixes: a new task, the tail of a later task's notes, or won't-fix with a one-line reason in the task's notes. Never leave one untriaged. Record each `Follow-ups:` line's outcome as a row: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" triage <id> --row <result id>#<line> --to task <id> | issue <n> | dismissed --why "<reason>"` (`<line>` counts the report's `Follow-ups:` lines from 1). A `flake:` line becomes a task to fix the flaky check, or won't-fix with a reason; it never opens a fix round of this task. A `nonblocking:` follow-up (a verifier's finding that does not block; the verifier reports `PASS` with it) is triaged the same way and never opens a fix round.
    - `close` accepts a rebased branch when the change is the same, records the
      verdict and tokens, and then follows `merge.mode`. The task is done only
      when its change is merged; until then it stays in progress with
@@ -196,7 +196,16 @@ every report, and on every wake (step 6).
      request's task, an outside-dependency node, or a gate), and run the check again only
      when that request merged. A `not checked:` or `ask:` line: decide from the evidence you have, as
      the decision-forks principle says; never launch the check a second time for it.
-   - Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`.
+   - **Record the verdict.** Write the subagent's answer to a file, and run
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" depcheck <id> --verdict ok|missing|not-checked --body-file <file>`
+     (`missing` for a `missing:` line, `not-checked` for `not checked:` or `ask:`). It files a `check` row, so that a
+     retro can count the checks against the launches. Do it before you act on the verdict.
+     A subagent type that a plugin update added loads only after a Claude session restart: when
+     `agentic-team:dependency-check` is not listed, restart the Manager session; a general-purpose agent
+     is not a substitute, because its answers are not in the same form.
+   - Run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" launch <id>`. It records why the attempt starts (`cause`)
+     from the attempt before it. When you know the cause and the state does not show it (a stuck session, an
+     abandon for another reason), pass `--cause first|review-fix|rebase|ci-fix|retry-issues|retry-stopped|retry-died`.
    - Exit 2: fix what the message names (the task, the config, or the state),
      then rerun. Exit 3: `STOP`; launch nothing.
    - "Workspace not trusted": tell the operator to run `claude` once there and
