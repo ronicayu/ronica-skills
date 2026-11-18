@@ -9740,6 +9740,7 @@ class DeliveryTest(Base):
         self.assertEqual(self.meta(task)["sessions"][1]["profile"], "c2")
         self.assertEqual(self.meta(task)["sessions"][1]["sessionId"], "copy-" + UUID1)  # read from the copy's agents row
         self.assertEqual(self.meta(task)["sessions"][1]["name"], "task-1")  # the row's own name, kept
+        self.assertEqual(self.meta(task)["sessions"][1]["resumed_from"], "sess-task-1-1")  # so its usage skips the parent's
         self.assertEqual([a for a, _ in self.calls_in("stop", self.c2)], [["stop", "sess-task-1-1"], ["stop", "sess-task-1-1"]])
         self.assertIn("the resume started a copy (the original is stopped)", self.one(events, "answered")["detail"])
 
@@ -10080,6 +10081,15 @@ class DeliveryTest(Base):
             json.dump({"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": task, "attempt": attempt,
                        "by": f"task-{task}-{attempt}", "asks_cap": 3, "scope": "src/", "inbox_dir": os.path.dirname(self.inbox_file("x")),
                        "lock": os.path.join(self.dir, "task.lock")}, fh)
+
+    def test_a1_a_plain_wake_passes_no_compact_flag_for_the_saved_options_of_the_launch_carry_it(self):
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n',
+                          sessions="max_parallel = 3\ncompact_at = 300000\ncompact_at_tier = { implementation = 250000 }\n")
+        task = self.worker(status=None, state="done")
+        self.ask()
+        self.ok("answer", str(task), "--file", self.text_file("v2"))
+        (argv,) = [a for a, _ in self.calls_in("--bg", self.c2) if "--resume" in a]
+        self.assertEqual(argv[3:-1], [])  # a flag would start a copy; the woken session keeps its launch's --autocompact
 
     def test_a1_a_resume_passes_no_flag_so_the_same_session_wakes_in_place(self):
         task = self.worker(status=None, state="done")
@@ -13425,6 +13435,29 @@ class RevisionTest(Base):
         self.assertEqual(self.meta(task).get("risk"), None)
         self.assertEqual(self.one(self.events("record"), "arrived")["next"], "run.py verify 1")
 
+    def test_a_revision_resumes_the_worker_and_the_verifier_with_the_compact_size(self):
+        task, wt, head, _ = self.failed()
+        self.write_config('[verify]\nseat = "task"\n', sessions="compact_at = 300000\ncompact_at_tier = { verifier = 150000 }\n")
+        self.ok("revise", str(task))
+        self.second_pass(task, wt)
+        self.ok("verify", str(task))
+        worker, verifier = [c for c in self.calls("--bg") if "--resume" in c]
+        self.assertEqual(worker[:7], ["--bg", "--resume", self.W, "--name", "task-1-1-r1", "--autocompact", "300000"])
+        self.assertEqual(verifier[:7], ["--bg", "--resume", self.V, "--name", "verify-1-1-r1", "--autocompact", "150000"])
+
+    def test_the_dry_run_of_a_verifier_revision_shows_the_compact_flag(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.write_config('[verify]\nseat = "task"\n', sessions="compact_at_tier = { verifier = 150000 }\n")
+        out = self.run_cmd("verify", str(task), "--dry-run")
+        self.assertIn(f"--resume {self.V} --name verify-1-1-r1 --autocompact 150000 <pointer", out.stderr)
+
+    def test_a_revision_resume_carries_no_compact_flag_when_none_is_set(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        self.ok("verify", str(task))
+        self.assertFalse([c for c in self.calls("--bg") if "--resume" in c and "--autocompact" in c])
+
     def test_verify_resumes_same_verifier_session(self):
         task, wt, head, _ = self.revised()
         new = self.second_pass(task, wt)
@@ -14184,6 +14217,146 @@ class RetroTest(Base):
         self.agents(self.finished("task-1"))
         self.ok("record")
         self.assertNotIn("usage", self.meta(task)["sessions"][0])
+
+    @staticmethod
+    def lines(*messages):
+        """A transcript: one assistant record per (message id, output tokens, cache-read tokens)."""
+        return "".join(json.dumps({"type": "assistant", "message": {"id": mid, "usage": {
+            "output_tokens": out, "input_tokens": 1, "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": 2}}}) + "\n" for mid, out, read in messages)
+
+    def test_the_records_of_one_message_id_count_once_with_their_largest_usage(self):
+        import run as runner
+        path = os.path.join(self.dir, "streamed.jsonl")
+        with open(path, "w") as fh:  # a streamed message: one record per content block, the first with a partial count
+            fh.write(self.lines(("m1", 1, 5), ("m1", 9, 5), ("m1", 9, 5), ("m2", 4, 6)) + "not json\n[1]\n")
+        self.assertEqual(runner.transcript_usage(path), (13, 2, 11, 4))
+
+    def test_a_resumed_session_counts_only_the_messages_its_parent_does_not_hold(self):
+        import run as runner
+        parent, child = os.path.join(self.dir, "parent.jsonl"), os.path.join(self.dir, "child.jsonl")
+        with open(parent, "w") as fh:
+            fh.write(self.lines(("m1", 10, 100), ("m2", 20, 200)))
+        with open(child, "w") as fh:  # the child repeats the parent's history, then adds its own
+            fh.write(self.lines(("m1", 10, 100), ("m2", 20, 200), ("m3", 5, 50)))
+        held = set(runner.message_usage(parent))
+        self.assertEqual(runner.transcript_usage(child, held), (5, 1, 50, 2))
+        self.assertEqual(runner.transcript_usage(child), (35, 3, 350, 6))
+
+    def test_record_writes_the_usage_of_a_resumed_session_without_its_parents_messages(self):
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        parent = {**self.entry(task), "sessionId": "parent-full"}
+        child = {"id": "sess-copy", "kind": "task", "attempt": 1, "name": "task-1-1", "worktree": "task-1",
+                 "model": "sonnet", "sessionId": "child-full", "resumed_from": parent["id"], "revision": 1}
+        self.record_sessions(task, parent, child)
+        self.agents(self.finished("task-1", sessionId="parent-full"),
+                    self.finished("task-1", id="sess-copy", name="task-1-1", sessionId="child-full"))
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        os.makedirs(folder)
+        for name, body in (("parent-full", self.lines(("m1", 10, 100), ("m2", 20, 200))),
+                           ("child-full", self.lines(("m1", 10, 100), ("m2", 20, 200), ("m3", 5, 50)))):
+            with open(os.path.join(folder, name + ".jsonl"), "w") as fh:
+                fh.write(body)
+        self.ok("record")
+        usage = [e["usage"] for e in self.meta(task)["sessions"]]
+        self.assertEqual(usage, [{"out": 30, "in": 2, "cache_read": 300, "cache_write": 4},
+                                 {"out": 5, "in": 1, "cache_read": 50, "cache_write": 2}])
+
+    def test_close_reports_the_tokens_of_a_resumed_session_without_its_parents_messages(self):
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        parent = {**self.entry(task), "sessionId": "parent-full"}
+        child = {"id": "sess-copy", "kind": "task", "attempt": 1, "name": "task-1-1", "worktree": "task-1",
+                 "model": "sonnet", "sessionId": "child-full", "resumed_from": parent["id"], "revision": 1}
+        self.record_sessions(task, parent, child)
+        self.agents(self.finished("task-1", sessionId="parent-full"),
+                    self.finished("task-1", id="sess-copy", name="task-1-1", sessionId="child-full"))
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        os.makedirs(folder)
+        for name, body in (("parent-full", self.lines(("m1", 10, 100))),
+                           ("child-full", self.lines(("m1", 10, 100), ("m3", 5, 50)))):
+            with open(os.path.join(folder, name + ".jsonl"), "w") as fh:
+                fh.write(body)
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.one(events, "tokens")["detail"], "worker out 15 in 2 cache-read 150 cache-write 4")
+        self.assertEqual(self.meta(task)["tokens"], "15/2")  # both sessions of the attempt, each message once
+
+    def chain(self, parent_transcript=True, parent_entry=True, verifier=None):
+        """A task whose revision resumed its worker: the parent's transcript holds m1, the child's holds m1 and m3."""
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        parent = {**self.entry(task), "sessionId": "parent-full"}
+        child = {"id": "sess-copy", "kind": "task", "attempt": 1, "name": "task-1-1", "worktree": "task-1",
+                 "model": "sonnet", "sessionId": "child-full", "resumed_from": parent["id"], "revision": 1}
+        self.record_sessions(task, *([parent] if parent_entry else []), child, *([verifier] if verifier else []))
+        self.agents(self.finished("task-1", sessionId="parent-full"),
+                    self.finished("task-1", id="sess-copy", name="task-1-1", sessionId="child-full"))
+        folder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", wt))
+        os.makedirs(folder)
+        for name, body in (("parent-full", self.lines(("m1", 10, 100))),
+                           ("child-full", self.lines(("m1", 10, 100), ("m3", 5, 50)))):
+            if name != "parent-full" or parent_transcript:
+                with open(os.path.join(folder, name + ".jsonl"), "w") as fh:
+                    fh.write(body)
+        return task, folder
+
+    def test_record_waits_for_a_lost_ancestor_then_writes_the_usage_as_partial(self):
+        for lost in ("transcript", "entry"):
+            with self.subTest(lost=lost):
+                self.tearDown()
+                self.setUp()
+                task, _ = self.chain(parent_transcript=lost != "transcript", parent_entry=lost != "entry")
+                usage = lambda: self.meta(task)["sessions"][-1]  # noqa: E731
+                for tries in (1, 2):
+                    self.ok("record")
+                    self.assertNotIn("usage", usage())  # the parent's messages are unknown: not written yet
+                    self.assertEqual(usage()["usage_tries"], tries)
+                self.ok("record")
+                self.assertEqual(usage()["usage"], {"out": 15, "in": 2, "cache_read": 150, "cache_write": 4, "partial": True})
+
+    def test_close_says_partial_when_a_session_of_the_attempt_has_no_transcript(self):
+        task, _ = self.chain(parent_transcript=False)
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.one(events, "tokens")["detail"],
+                         "worker out 15 in 2 cache-read 150 cache-write 4 (partial: no transcript for sess-task-1-1)")
+
+    def test_close_shows_the_verifier_sessions_of_the_attempt_apart_from_the_worker(self):
+        verifier = {**self.entry(1, 1, "verify"), "sessionId": "verifier-full"}
+        task, folder = self.chain(verifier=verifier)
+        vfolder = os.path.join(self.home, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", self.wt_path("verify-1-1")))
+        os.makedirs(vfolder)
+        with open(os.path.join(vfolder, "verifier-full.jsonl"), "w") as fh:
+            fh.write(self.lines(("v1", 7, 70)))
+        with open(self.agents_file) as fh:
+            rows = json.load(fh)
+        self.agents(*rows, self.finished("verify-1-1", sessionId="verifier-full"))
+        events = self.events("close", str(task), "--verdict", "test-verified")
+        self.assertEqual(self.one(events, "tokens")["detail"],
+                         "worker out 15 in 2 cache-read 150 cache-write 4; verifier out 7 in 1 cache-read 70 cache-write 2")
+        self.assertEqual(self.meta(task)["tokens"], "15/2")
+
+    def test_launch_passes_the_compact_size_of_its_tier_and_nothing_when_unset(self):
+        self.write_config(sessions="compact_at = 300000\ncompact_at_tier = { judgement = 200000 }\n")
+        plain, judged = self.add_task(), self.add_task(tier="judgement")
+        self.ok("launch", str(plain))
+        self.ok("launch", str(judged))
+        argvs = self.calls("--bg")
+        self.assertEqual([a[a.index("--autocompact") + 1] for a in argvs], ["300000", "200000"])
+        self.assertIn("--autocompact 200000", self.run_cmd("launch", str(judged), "--dry-run").stderr)
+        self.write_config()
+        again = self.add_task()
+        self.ok("launch", str(again))
+        self.assertNotIn("--autocompact", self.calls("--bg")[-1])
+        self.assertNotIn("--autocompact", self.run_cmd("launch", str(again), "--dry-run").stderr)
+
+    def test_verify_passes_the_compact_size_of_the_verifier_tier(self):
+        self.write_config(sessions="compact_at = 300000\ncompact_at_tier = { verifier = 150000 }\n")
+        task = self.running_task(session="task-1-1", model="sonnet")
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.ok("verify", str(task))
+        argv = self.calls("--bg")[0]
+        self.assertEqual(argv[argv.index("--autocompact") + 1], "150000")
 
     def test_status_last_skips_check_and_triage_rows(self):
         task = self.running_task()

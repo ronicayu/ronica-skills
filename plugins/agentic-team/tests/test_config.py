@@ -65,7 +65,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["sessions"]["max_parallel"], 2)
         self.assertEqual(cfg["sessions"]["permission_mode"], "auto")
         self.assertEqual(set(cfg["sessions"]),
-                         {"max_parallel", "permission_mode", "timezone", "timezone_label"})
+                         {"max_parallel", "permission_mode", "compact_at", "compact_at_tier", "timezone",
+                          "timezone_label"})
         self.assertTrue(cfg["sessions"]["timezone"])
         self.assertEqual(cfg["models"]["mechanical"], {"model": "haiku", "effort": None})
         self.assertEqual(cfg["models"]["implementation"], {"model": "sonnet", "effort": "high"})
@@ -300,6 +301,35 @@ class ConfigTest(unittest.TestCase):
             config.resolve_model(cfg, "poetry")
         code, out, _ = self.run_cli("model", "verifier")
         self.assertEqual((code, json.loads(out)), (0, {"model": None, "effort": None}))
+
+    def test_the_compact_size_is_zero_by_default_and_a_tier_may_set_its_own(self):
+        self.write(MINIMAL + """\
+            [models.overrides]
+            "data migration" = "opus"
+            [sessions]
+            compact_at = 300000
+            [sessions.compact_at_tier]
+            judgement = 200000
+            mechanical = 0
+            "Data Migration" = 150000
+        """)
+        cfg = config.load(self.root)
+        self.assertEqual(config.problems(cfg), [])
+        self.assertEqual([config.compact_window(cfg, t) for t in ("judgement", "implementation", "data migration", None, "mechanical")],
+                         [200000, 300000, 150000, 300000, 0])  # 0 for a tier: Claude Code's own default
+        self.write(MINIMAL)
+        cfg = config.load(self.root)
+        self.assertEqual((config.compact_window(cfg, "judgement"), config.problems(cfg)), (0, []))
+
+    def test_a_compact_size_outside_what_claude_accepts_is_refused(self):
+        for text, want in (("compact_at = 50000", "sessions.compact_at must be 0"),
+                           ("compact_at = 2000000", "sessions.compact_at must be 0"),
+                           ('compact_at = "200k"', "sessions.compact_at must be 0"),
+                           ("compact_at_tier = { judgement = 50000 }", "sessions.compact_at_tier must be a table"),
+                           ("compact_at_tier = { poetry = 200000 }", '"poetry" is not a tier or work type')):
+            with self.subTest(text=text):
+                self.write(MINIMAL + "[sessions]\n" + text + "\n")
+                self.assertTrue(any(want in p for p in config.problems(config.load(self.root))), text)
 
     def test_get(self):
         self.write(MINIMAL + 'constraints.forbidden = ["alpha"]\n')

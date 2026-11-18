@@ -148,6 +148,8 @@ def system_timezone():
     return "UTC"
 
 
+COMPACT_RANGE = (100_000, 1_000_000)  # what `claude --autocompact` accepts
+
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
 # A default of None means "unset"; callables are evaluated at load time.
@@ -163,6 +165,8 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     "sessions": {
         "max_parallel": ("posint", 2),
         "permission_mode": ("nonempty", "auto"),
+        "compact_at": ("compact", 0),
+        "compact_at_tier": ("compactmap", {}),
         "timezone": ("timezone", system_timezone),
         "timezone_label": ("str", ""),
     },
@@ -229,6 +233,8 @@ TYPE_NAMES = {
     "model": 'a model id or { model = "...", effort = "...", profile = "..." }',
     "model?": 'a model id or { model = "...", effort = "...", profile = "..." }',
     "overrides": 'a table of "work type" = model',
+    "compact": "0 (Claude Code's own default) or a token count from 100000 to 1000000",
+    "compactmap": 'a table of tier or work type = 0 or a token count from 100000 to 1000000, for example { judgement = 200000 }',
 }
 
 
@@ -432,6 +438,10 @@ def type_ok(kind, value):
         return value is None or normalize_model(value) == value
     if kind == "overrides":
         return isinstance(value, dict) and all(normalize_model(v) == v for v in value.values())
+    if kind == "compact":
+        return isinstance(value, int) and not isinstance(value, bool) and (value == 0 or COMPACT_RANGE[0] <= value <= COMPACT_RANGE[1])
+    if kind == "compactmap":
+        return isinstance(value, dict) and all(type_ok("compact", v) for v in value.values())
     raise ValueError(kind)
 
 
@@ -474,6 +484,10 @@ def problems(config):
             if kind == "ranmap":
                 found += [f"{dotted}: {json.dumps(k)} is not a verify kind; the kinds are {', '.join(VERIFY_KINDS)}"
                           f"{suggest(k, list(VERIFY_KINDS))}" for k in value if k not in VERIFY_KINDS]
+            if kind == "compactmap":
+                known = [*TIERS, *(k.lower() for k in config["models"]["overrides"])]
+                found += [f"{dotted}: {json.dumps(k)} is not a tier or work type; use {', '.join(known)}{suggest(k.lower(), known)}"
+                          for k in value if k.lower() not in known]
             if kind == "adjacent":
                 found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
                           f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"
@@ -718,6 +732,15 @@ def lookup(config, dotted):
     return value
 
 
+def compact_window(config, tier):
+    """The context size in tokens at which a session of `tier` compacts, or 0 for Claude Code's own default."""
+    wanted = (tier or "").strip().lower()
+    for name, value in config["sessions"]["compact_at_tier"].items():
+        if name.strip().lower() == wanted:
+            return value
+    return config["sessions"]["compact_at"]
+
+
 def resolve_model(config, name):
     wanted = name.strip().lower()
     for work_type, value in config["models"]["overrides"].items():
@@ -764,7 +787,7 @@ def show_text(config):
         nested = []
         for key, (kind, _) in keys.items():
             value = config[section][key]
-            if kind == "overrides" and isinstance(value, dict):
+            if kind in ("overrides", "compactmap") and isinstance(value, dict):
                 nested.append((f"{section}.{key}", value))
             elif value is None:
                 lines.append(f"# {key} = (unset)")

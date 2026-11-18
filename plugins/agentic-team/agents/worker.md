@@ -166,6 +166,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   follow-up, not a `blocking:` finding.
 - **Timebox.** When the TIMEBOX runs out, stop. Report what is done and any partial
   findings. List what remains under Follow-ups as `split: timebox: <what remains>`.
+- **Context.** Your session compacts itself at the context size the operator set. Do not run `/compact`.
 
 ## Asking
 

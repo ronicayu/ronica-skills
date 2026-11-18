@@ -133,7 +133,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
-                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles)
+                    compact_window, manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles)
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -2505,11 +2505,16 @@ def write_brief(run, name, text):
     return path
 
 
-def session_args(run, worktree, name, model, effort, settings=None):
+def autocompact_flags(compact):
+    return ["--autocompact", str(compact)] if compact else []
+
+
+def session_args(run, worktree, name, model, effort, settings=None, compact=0):
     cmd = ["--bg", "--worktree", worktree, "--agent", "agentic-team:worker", "--model", model]
     if effort:
         cmd += ["--effort", effort]
     cmd += ["--permission-mode", run.config["sessions"]["permission_mode"], "--name", name]
+    cmd += autocompact_flags(compact)
     return cmd + (["--settings", settings] if settings else [])  # a verifier gets none: it has no hooks
 
 
@@ -2529,17 +2534,17 @@ def pick_profile(run, wanted, flag=None):
     return min(names, key=lambda name: (live.get(name, 0), names.index(name)))
 
 
-def claude_line(run, profile, worktree, name, model, effort, settings=None):
+def claude_line(run, profile, worktree, name, model, effort, settings=None, compact=0):
     """The command of a dry run: what start_session would run, with the profile's directory when it has one."""
     directory = run.profile_dir(profile)
-    args = session_args(run, worktree, name, model, effort, settings)
+    args = session_args(run, worktree, name, model, effort, settings, compact)
     return ((f"CLAUDE_CONFIG_DIR={shlex.quote(directory)} " if directory else "") + "claude "
             + " ".join(shlex.quote(a) if a.startswith("{") else a for a in args) + " <brief>")
 
 
-def start_session(run, worktree, name, model, effort, text, profile=None, settings=None):
+def start_session(run, worktree, name, model, effort, text, profile=None, settings=None, compact=0):
     """Run `claude --bg`. Returns what it printed."""
-    out = run.claude(*session_args(run, worktree, name, model, effort, settings), text, check=False, profile=profile)
+    out = run.claude(*session_args(run, worktree, name, model, effort, settings, compact), text, check=False, profile=profile)
     if out.returncode != 0:
         message = out.stderr.strip() or out.stdout.strip()
         if "not trusted" in message and run.profile_dir(profile):
@@ -3081,7 +3086,7 @@ def cmd_launch(run, args):
     model, effort, profile = worker_model(run, args, tier)
     worktree = f"task-{tid}"
     if args.dry_run:
-        dry_run(run, tid, nxt, session, profile, model, effort, text)
+        dry_run(run, tid, nxt, session, profile, model, effort, text, compact_window(run.config, tier))
         return
     if mode == "continue":
         # A dirty worktree never reaches a worker silently: commit what the last attempt left.
@@ -3128,7 +3133,8 @@ def cmd_launch(run, args):
         carry_thread(run, task, current)  # the earlier attempt is over: its open asks and unacked messages are carried
         stop_kept(run, task, current, f"attempt {nxt} starts")
         drop_verifier_folders(run, task)
-    path, said, drift, entry, id_note = start_worker(run, task, nxt, session, text, model, effort, profile, base, cap, created)
+    path, said, drift, entry, id_note = start_worker(run, task, nxt, session, text, model, effort, profile, base, cap, created,
+                                                         compact_window(run.config, tier))
     if task["status"] == "open":
         run.tg("start", str(tid))
     # Never unset pr, pr_branch, pushed or target: one request per task across attempts. A repointed task (run.py
@@ -3202,16 +3208,17 @@ def worker_model(run, args, tier):
     return model, effort, pick_profile(run, tier_profiles(chosen), args.profile)
 
 
-def dry_run(run, tid, attempt, session, profile, model, effort, text):
+def dry_run(run, tid, attempt, session, profile, model, effort, text, compact=0):
     """A worker start that writes nothing: the claude command on stderr, the brief on stdout (a dry-run event in --json)."""
-    print(claude_line(run, profile, f"task-{tid}", session, model, effort, worker_settings(run, tid, attempt)), file=sys.stderr)
+    print(claude_line(run, profile, f"task-{tid}", session, model, effort, worker_settings(run, tid, attempt), compact),
+          file=sys.stderr)
     if run.json:
         run.emit("dry-run", tid, attempt, session, text)
     else:
         print(text, end="")
 
 
-def start_worker(run, task, attempt, session, text, model, effort, profile, base, cap, created):
+def start_worker(run, task, attempt, session, text, model, effort, profile, base, cap, created, compact=0):
     """Start the worker of an attempt in the task worktree (launch, round): its brief, its context file, `claude --bg`.
     A failed start removes the worktree when this command `created` it and that is safe, then raises. Returns (brief
     path, what claude said, a drift warning or "", the sessions entry, a note on how the session id was found)."""
@@ -3220,7 +3227,7 @@ def start_worker(run, task, attempt, session, text, model, effort, profile, base
         clear_report(report_path(run, worktree, session))
         path = write_brief(run, f"task-{tid}-{attempt}.md", text)
         write_ctx(run, task, attempt, session, cap)
-        said = start_session(run, worktree, session, model, effort, text, profile, worker_settings(run, tid, attempt))
+        said = start_session(run, worktree, session, model, effort, text, profile, worker_settings(run, tid, attempt), compact)
     except Exception as exc:
         started_or_cleaned(run, worktree, base, exc, created)
     drift = drift_warning(run, worktree, base)
@@ -3465,7 +3472,8 @@ def cmd_verify(run, args):
         push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render(run, task, "verify", attempt, name, ref=ref, worker=worker, role=role, seat=folder)
     if args.dry_run:
-        print(claude_line(run, profile, folder, name, model, effort), file=sys.stderr)
+        print(claude_line(run, profile, folder, name, model, effort, compact=compact_window(run.config, "verifier")),
+              file=sys.stderr)
         if run.json:
             run.emit("dry-run", tid, attempt, name, text)
         else:
@@ -3481,7 +3489,7 @@ def cmd_verify(run, args):
         clear_report(report_path(run, folder, name))
         write_brief(run, f"task-{tid}-{attempt}{suffix}.md", text)
         called = time.time()
-        said = start_session(run, folder, name, model, effort, text, profile)
+        said = start_session(run, folder, name, model, effort, text, profile, compact=compact_window(run.config, "verifier"))
     except Exception as exc:
         if created:
             started_or_cleaned(run, name, ref, exc)
@@ -3635,7 +3643,8 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
-        print(f"claude --bg --resume {entry.get('sessionId')} --name {name}-r{revision} <pointer to {brief}>", file=sys.stderr)
+        flags = " ".join(["--name", f"{name}-r{revision}", *autocompact_flags(compact_window(run.config, "verifier"))])
+        print(f"claude --bg --resume {entry.get('sessionId')} {flags} <pointer to {brief}>", file=sys.stderr)
         if run.json:
             run.emit("dry-run", tid, attempt, name, text)
         else:
@@ -3650,7 +3659,8 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
             raise Refused(f"the verifier {s.describe()} did not exit after claude stop; run run.py verify {tid} again", 1)
     pointer = f"agentic-team: task {tid} attempt {attempt} revision {revision}: read {brief_path} and follow it."
     called = time.time()
-    out = run.claude("--bg", "--resume", entry["sessionId"], "--name", f"{name}-r{revision}", pointer, check=False,
+    out = run.claude("--bg", "--resume", entry["sessionId"], "--name", f"{name}-r{revision}",
+                     *autocompact_flags(compact_window(run.config, "verifier")), pointer, check=False,
                      profile=s.profile, cwd=path)
     if out.returncode != 0:
         raise Refused(f"claude --resume of the verifier failed: {first_line(out.stderr.strip() or out.stdout.strip())}; "
@@ -4177,9 +4187,19 @@ def deliver(run, task, row, interrupt=False, name=None):
     return resume_with(run, task, entry, row, s, text, settle, name)
 
 
+def resume_compact(run, task, s):
+    """The compact size of a session that resumes: its tier's, for a worker the tier its attempt was launched with."""
+    cfg = run.config["sessions"]
+    if not (cfg["compact_at"] or cfg["compact_at_tier"]):
+        return 0
+    if s.kind == "verify":
+        return compact_window(run.config, "verifier")
+    return compact_window(run.config, (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier)
+
+
 def rowless_flags(run, task, s):
     """The flags a launch passes, for a resume of a session whose job is gone: the job's saved options went with it. The same
-    --agent, --model, --effort, --permission-mode, --name and --settings, and no --bg or --worktree (the resume runs in
+    --agent, --model, --effort, --permission-mode, --name, --autocompact and --settings, and no --bg or --worktree (the resume runs in
     the worktree). With a job present a flag would start a copy, so this is only for a row that is not listed."""
     entry = recorded_entry(task, wanted_attempt(task)) or {}
     tier = (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier  # a --tier at launch survives
@@ -4190,7 +4210,7 @@ def rowless_flags(run, task, s):
     model = entry.get("model") or (chosen or {}).get("model") or "sonnet"
     effort = chosen.get("effort") if chosen and chosen.get("model") == model else None
     args = session_args(run, f"task-{task['id']}", s.name or entry.get("name") or f"task-{task['id']}", model, effort,
-                        worker_settings(run, task["id"], entry.get("attempt") or wanted_attempt(task)))
+                        worker_settings(run, task["id"], entry.get("attempt") or wanted_attempt(task)), resume_compact(run, task, s))
     return [a for i, a in enumerate(args) if a != "--bg" and a != "--worktree" and not (i and args[i - 1] == "--worktree")]
 
 
@@ -4226,14 +4246,18 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
         return "died"
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
-    # No flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
-    # flags the same command wakes the same session with its saved options, hooks included.
+    # A flag after --resume starts a copy under a new id (CLI 2.1.327 says so: "keeps its own saved options, so the flags you
+    # passed started a copy"); without flags the same command wakes the same session with its saved options, hooks and the
+    # --autocompact of its launch included. So a plain wake passes none; only a revision (--name, always a copy) and a
+    # rowless resume (no saved options) pass it.
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))  # its socket is the old process's: the wake's SessionStart writes a new one
     flags = rowless_flags(run, task, s) if getattr(s, "rowless", False) else []
     called = time.time()
     if name:  # a revision: CLI 2.1.325 renames a resumed session and gives it a new id, so name it and record the id
         flags = [f for i, f in enumerate(flags) if f != "--name" and not (i and flags[i - 1] == "--name")] + ["--name", name]
+        if "--autocompact" not in flags:  # the new job does not carry the launch's saved options
+            flags += autocompact_flags(resume_compact(run, task, s))
     out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile, cwd=wt)
     run._sessions = None
     if out.returncode != 0:
@@ -4256,7 +4280,7 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         copy = {"id": new, "kind": "task", "attempt": attempt, "name": s.name or s.wtname, "worktree": s.wtname,
                 "model": session_model(task, s.sid), **profile_field(s.profile), **plugin_field(),
                 **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {}),
-                **({"revision": revision_of(task)} if revision_of(task) else {})}
+                "resumed_from": s.sid, **({"revision": revision_of(task)} if revision_of(task) else {})}
         run.set_meta(task, sessions=recorded_sessions(task) + [copy])
         stop_session(run, s.sid, check=False, profile=s.profile)  # keep one live session
         run._sessions = None
@@ -7276,7 +7300,7 @@ def start_round(run, args):
     model, effort, profile = worker_model(run, args, tier)
     next_phase(task, "round")  # an event the table refuses stops the command before anything starts
     if args.dry_run:
-        dry_run(run, tid, nxt, session, profile, model, effort, text)
+        dry_run(run, tid, nxt, session, profile, model, effort, text, compact_window(run.config, tier))
         return
     notes = []
     if reattach:
@@ -7295,7 +7319,8 @@ def start_round(run, args):
         carry_thread(run, task, current)
         stop_kept(run, task, current, f"round attempt {nxt} starts")
     drop_verifier_folders(run, task)
-    path, said, drift, entry, id_note = start_worker(run, view, nxt, session, text, model, effort, profile, start, asks, False)
+    path, said, drift, entry, id_note = start_worker(run, view, nxt, session, text, model, effort, profile, start, asks, False,
+                                                         compact_window(run.config, tier))
     attempt_edit(run, task, nxt, session, model, {**entry, **choice.stored, "round": kind,
                                                   **({"cause": kind} if kind in LAUNCH_CAUSES else {})}, "round",
                  [meta_arg(k, v) for k, v in fields.items()], ["verdict", "verdict_ref", "host_rebase", "caught_up_from", "revision"])
@@ -7454,21 +7479,84 @@ def round_merged(run, task, p):
 
 # ------------------------------------------------------------------- close
 
-def transcript_usage(path):
-    """(out, in, cache-read, cache-write) summed over the transcript."""
-    usage = {}
+USAGE_KEYS = ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def message_usage(path):
+    """{message id: usage} of the assistant messages of a transcript. A streamed message has several records with the
+    same id; a record may carry only part of the usage, so each count is the largest any record of the id shows."""
+    found = {}
     with open(path) as fh:
         for line in fh:
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            message = record.get("message") or {}
-            # Streaming writes one record per content block; keep the last usage per message.
-            if record.get("type") == "assistant" and message.get("usage") and message.get("id"):
-                usage[message["id"]] = message["usage"]
-    return tuple(sum(u.get(key, 0) for u in usage.values()) for key in
-                 ("output_tokens", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if (record.get("type") == "assistant" and isinstance(message, dict) and message.get("id")
+                    and isinstance(message.get("usage"), dict)):
+                seen = found.setdefault(message["id"], {})
+                for key in USAGE_KEYS:
+                    seen[key] = max(seen.get(key, 0), message["usage"].get(key) or 0)
+    return found
+
+
+def transcript_usage(path, skip=frozenset()):
+    """(out, in, cache-read, cache-write) summed over the transcript, each message id once, minus the ids in `skip`
+    (a resumed session's transcript repeats the messages of the session it resumed)."""
+    usage = [u for mid, u in message_usage(path).items() if mid not in skip]
+    return tuple(sum(u[key] for u in usage) for key in USAGE_KEYS)
+
+
+def entry_transcript(run, task, e, listed=None):
+    """(path of the transcript of a `sessions` entry, None), or (None, the reason there is none). `listed` is the rows
+    of `claude agents` by id: its row knows the full session id and the profile when the entry does not."""
+    row = (listed or {}).get(e["id"])
+    return find_transcript(run, os.path.join(run.wt_dir, e.get("worktree") or f"task-{task['id']}"), e["id"],
+                           {"sessionId": e.get("sessionId") or (row.row.get("sessionId") if row else None)},
+                           row.profile if row else e.get("profile"))
+
+
+def earlier_message_ids(run, task, entry, listed=None, partial=False):
+    """The message ids in the transcripts of the sessions that `entry` resumed, the chain of `resumed_from`. Their usage
+    is in their own entries. None when an entry or a transcript of the chain cannot be found, so that the ids are not
+    all known; with `partial`, the ids found."""
+    entries, ids, seen, complete = recorded_sessions(task), set(), set(), True
+    while entry.get("resumed_from") and entry["resumed_from"] not in seen:
+        seen.add(entry["resumed_from"])
+        parent = next((e for e in entries if e.get("id") == entry["resumed_from"]), None)
+        if parent is None:
+            complete = False
+            break
+        found = entry_transcript(run, task, parent, listed)[0]
+        try:
+            ids |= set(message_usage(found)) if found else set()
+            complete = complete and bool(found)
+        except OSError:
+            complete = False
+        entry = parent
+    return ids if complete or partial else None
+
+
+def group_usage(run, task, entries, listed):
+    """(usage, ids with no transcript, reason): the usage of the sessions of `entries` together, each message id once.
+    usage is None when no entry has a transcript, and the reason is then that of the last one."""
+    seen, found, missing, why = set(), [], [], None
+    for e in entries:
+        path, why = entry_transcript(run, task, e, listed)
+        try:
+            usage = message_usage(path) if path else None
+        except OSError:
+            usage = None
+        if usage is None:
+            missing.append(e["id"])
+            continue
+        found += [u for mid, u in usage.items() if mid not in seen]
+        seen |= set(usage)
+    total = tuple(sum(u[key] for u in found) for key in USAGE_KEYS)
+    return (total if len(missing) < len(entries) else None), missing, why
 
 
 def stamp_of(text):
@@ -7509,29 +7597,69 @@ def find_tokens(run, tid, sid, row, profile=None):
     return transcript_usage(path) if path else why
 
 
+USAGE_TRIES = 3  # records that wait for the transcripts of a resume chain before an entry's usage is written as partial
+
+
+def tokens_text(usage, missing=()):
+    text = f"out {usage[0]} in {usage[1]} cache-read {usage[2]} cache-write {usage[3]}"
+    return text + (f" (partial: no transcript for {', '.join(missing)})" if missing else "")
+
+
+def emit_tokens(run, task, attempt, sid):
+    """The `tokens` event of close: the usage of the attempt's worker sessions together, each message id once (a revision
+    resumes the session before it), and, when it had verifiers, theirs after it. The `tokens` meta keeps the worker's out and in."""
+    tid, listed = task["id"], {s.sid: s for s in run.sessions()}
+    entries = recorded_sessions(task)
+    parts, saved = [], None
+    for label, kind in (("worker", "task"), ("verifier", "verify")):
+        group = [e for e in entries if e.get("kind") == kind and e.get("attempt") == attempt and e.get("id")]
+        if not group:
+            continue
+        usage, missing, why = group_usage(run, task, group, listed)
+        if usage is None:
+            if kind == "task":
+                run.emit("tokens", tid, None, sid or None, f"{why}; none recorded")
+                return
+            continue
+        parts.append(f"{label} {tokens_text(usage, missing)}")
+        if kind == "task":
+            saved = usage
+    if saved:
+        run.edit_meta(tid, tokens=f"{saved[0]}/{saved[1]}")
+    run.emit("tokens", tid, None, sid or None, "; ".join(parts))
+
+
 def fill_usage(run, task):
-    """record: write `usage` ({"out", "in", "cache_read", "cache_write"}, summed over its transcript) into each `sessions`
-    entry that has none, once its session is no longer live. An entry with no readable transcript is left as it is; the
-    next record tries again. The entries are read again before the write, so a newer list is never replaced."""
-    tid = task["id"]
+    """record: write `usage` ({"out", "in", "cache_read", "cache_write"}, summed over its transcript, each message id
+    once, minus the messages of the sessions it resumed) into each `sessions` entry that has none, once its session is no
+    longer live. An entry with no readable transcript is left as it is; the next record tries again. So does an entry
+    whose resume chain has a session with no entry or no transcript, its messages being unknown: `usage_tries` counts
+    those records, and at USAGE_TRIES the usage is written with `partial: true` (the messages of the lost sessions are
+    in it). The entries are read again before the write, so a newer list is never replaced."""
     if not any(e.get("id") and not e.get("usage") for e in recorded_sessions(task)):
         return
     listed = {s.sid: s for s in run.sessions()}
-    entries = recorded_sessions(run.show(tid))
+    entries = recorded_sessions(run.show(task["id"]))
     changed = False
     for e in entries:
         if not e.get("id") or e.get("usage") or (e["id"] in listed and listed[e["id"]].live):
             continue
-        row = {"sessionId": e.get("sessionId") or (listed[e["id"]].row.get("sessionId") if e["id"] in listed else None)}
-        found = find_transcript(run, os.path.join(run.wt_dir, e.get("worktree") or f"task-{tid}"), e["id"], row,
-                                e.get("profile"))[0]
+        found = entry_transcript(run, task, e, listed)[0]
+        if not found:
+            continue
+        skip = earlier_message_ids(run, task, e, listed=listed)
+        partial = skip is None
+        if partial:
+            e["usage_tries"], changed = e.get("usage_tries", 0) + 1, True
+            if e["usage_tries"] < USAGE_TRIES:
+                continue
+            skip = earlier_message_ids(run, task, e, listed=listed, partial=True)
         try:
-            out, uncached, read, write = transcript_usage(found) if found else (None,) * 4
+            out, uncached, read, write = transcript_usage(found, skip)
         except OSError:
             continue
-        if out is not None:
-            e["usage"] = {"out": out, "in": uncached, "cache_read": read, "cache_write": write}
-            changed = True
+        e["usage"] = {"out": out, "in": uncached, "cache_read": read, "cache_write": write, **({"partial": True} if partial else {})}
+        changed = True
     if changed:
         run.set_meta(task, sessions=entries)
 
@@ -7867,15 +7995,15 @@ def cmd_close(run, args):
         sid = row.sid if row else ""
     if not entry and not row:
         run.emit("tokens", tid, None, None, "no session recorded; none recorded")
-    else:
-        found = find_tokens(run, tid, sid, row.row if row else None,
-                            row.profile if row else (entry or {}).get("profile"))
+    elif not entry:
+        found = find_tokens(run, tid, sid, row.row, row.profile)
         if isinstance(found, str):
             run.emit("tokens", tid, None, sid or None, f"{found}; none recorded")
         else:
             run.edit_meta(tid, tokens=f"{found[0]}/{found[1]}")
-            run.emit("tokens", tid, None, sid or None,
-                     f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
+            run.emit("tokens", tid, None, sid or None, "worker " + tokens_text(found))
+    else:
+        emit_tokens(run, task, attempt, sid)
     if not passing:
         run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind, task, run))
         post_verdict(run, task, attempt, level, ref, kind)

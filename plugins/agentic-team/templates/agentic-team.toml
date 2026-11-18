@@ -17,6 +17,8 @@ always_pause = []           # decisions that always need the operator
 [sessions]
 # max_parallel = 2
 # permission_mode = "auto"
+# compact_at = 0           # context tokens (100000-1000000) at which a worker or verifier compacts; 0 = Claude Code's own default
+# compact_at_tier = { judgement = 200000 }   # per tier or work type; beats compact_at; 0 = the default for that tier
 # timezone = "Asia/Singapore"
 # timezone_label = "SGT"
 
