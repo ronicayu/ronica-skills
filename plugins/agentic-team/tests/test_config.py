@@ -310,12 +310,13 @@ class ConfigTest(unittest.TestCase):
             compact_at = 300000
             [sessions.compact_at_tier]
             judgement = 200000
+            mechanical = 0
             "Data Migration" = 150000
         """)
         cfg = config.load(self.root)
         self.assertEqual(config.problems(cfg), [])
-        self.assertEqual([config.compact_window(cfg, t) for t in ("judgement", "implementation", "data migration", None)],
-                         [200000, 300000, 150000, 300000])
+        self.assertEqual([config.compact_window(cfg, t) for t in ("judgement", "implementation", "data migration", None, "mechanical")],
+                         [200000, 300000, 150000, 300000, 0])  # 0 for a tier: Claude Code's own default
         self.write(MINIMAL)
         cfg = config.load(self.root)
         self.assertEqual((config.compact_window(cfg, "judgement"), config.problems(cfg)), (0, []))
@@ -324,7 +325,7 @@ class ConfigTest(unittest.TestCase):
         for text, want in (("compact_at = 50000", "sessions.compact_at must be 0"),
                            ("compact_at = 2000000", "sessions.compact_at must be 0"),
                            ('compact_at = "200k"', "sessions.compact_at must be 0"),
-                           ("compact_at_tier = { judgement = 0 }", "sessions.compact_at_tier must be a table"),
+                           ("compact_at_tier = { judgement = 50000 }", "sessions.compact_at_tier must be a table"),
                            ("compact_at_tier = { poetry = 200000 }", '"poetry" is not a tier or work type')):
             with self.subTest(text=text):
                 self.write(MINIMAL + "[sessions]\n" + text + "\n")

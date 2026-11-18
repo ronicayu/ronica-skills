@@ -234,7 +234,7 @@ TYPE_NAMES = {
     "model?": 'a model id or { model = "...", effort = "...", profile = "..." }',
     "overrides": 'a table of "work type" = model',
     "compact": "0 (Claude Code's own default) or a token count from 100000 to 1000000",
-    "compactmap": 'a table of tier or work type = token count from 100000 to 1000000, for example { judgement = 200000 }',
+    "compactmap": 'a table of tier or work type = 0 or a token count from 100000 to 1000000, for example { judgement = 200000 }',
 }
 
 
@@ -441,7 +441,7 @@ def type_ok(kind, value):
     if kind == "compact":
         return isinstance(value, int) and not isinstance(value, bool) and (value == 0 or COMPACT_RANGE[0] <= value <= COMPACT_RANGE[1])
     if kind == "compactmap":
-        return isinstance(value, dict) and all(type_ok("compact", v) and v for v in value.values())
+        return isinstance(value, dict) and all(type_ok("compact", v) for v in value.values())
     raise ValueError(kind)
 
 

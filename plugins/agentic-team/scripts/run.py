@@ -3643,7 +3643,8 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
-        print(f"claude --bg --resume {entry.get('sessionId')} --name {name}-r{revision} <pointer to {brief}>", file=sys.stderr)
+        flags = " ".join(["--name", f"{name}-r{revision}", *autocompact_flags(compact_window(run.config, "verifier"))])
+        print(f"claude --bg --resume {entry.get('sessionId')} {flags} <pointer to {brief}>", file=sys.stderr)
         if run.json:
             run.emit("dry-run", tid, attempt, name, text)
         else:
@@ -4245,16 +4246,18 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         file_died(run, task, attempt, s, "the conversation cannot be resumed: its worktree is gone")
         return "died"
     entry["tries"] = entry.get("tries", 0) + 1  # a resume is a try
-    # No other flag after --resume: on CLI 2.1.319 a flag (--settings, --name ...) starts a copy under a new id, and without
-    # flags the same command wakes the same session with its saved options, hooks included.
+    # A flag after --resume starts a copy under a new id (CLI 2.1.327 says so: "keeps its own saved options, so the flags you
+    # passed started a copy"); without flags the same command wakes the same session with its saved options, hooks and the
+    # --autocompact of its launch included. So a plain wake passes none; only a revision (--name, always a copy) and a
+    # rowless resume (no saved options) pass it.
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))  # its socket is the old process's: the wake's SessionStart writes a new one
-    # The saved options of a resumed job do not carry the --autocompact of its launch (CLI 2.1.327), so a resume passes it.
-    flags = (rowless_flags(run, task, s) if getattr(s, "rowless", False)
-             else autocompact_flags(resume_compact(run, task, s)))
+    flags = rowless_flags(run, task, s) if getattr(s, "rowless", False) else []
     called = time.time()
     if name:  # a revision: CLI 2.1.325 renames a resumed session and gives it a new id, so name it and record the id
         flags = [f for i, f in enumerate(flags) if f != "--name" and not (i and flags[i - 1] == "--name")] + ["--name", name]
+        if "--autocompact" not in flags:  # the new job does not carry the launch's saved options
+            flags += autocompact_flags(resume_compact(run, task, s))
     out = run.claude("--bg", "--resume", session_id, *flags, text, check=False, profile=s.profile, cwd=wt)
     run._sessions = None
     if out.returncode != 0:
@@ -4277,7 +4280,7 @@ def resume_with(run, task, entry, row, s, text, settle, name=None):
         copy = {"id": new, "kind": "task", "attempt": attempt, "name": s.name or s.wtname, "worktree": s.wtname,
                 "model": session_model(task, s.sid), **profile_field(s.profile), **plugin_field(),
                 **({"sessionId": row_of_copy["sessionId"]} if row_of_copy.get("sessionId") else {}),
-                **({"revision": revision_of(task)} if revision_of(task) else {})}
+                "resumed_from": s.sid, **({"revision": revision_of(task)} if revision_of(task) else {})}
         run.set_meta(task, sessions=recorded_sessions(task) + [copy])
         stop_session(run, s.sid, check=False, profile=s.profile)  # keep one live session
         run._sessions = None
@@ -7507,24 +7510,53 @@ def transcript_usage(path, skip=frozenset()):
     return tuple(sum(u[key] for u in usage) for key in USAGE_KEYS)
 
 
-def earlier_message_ids(run, task, entry):
-    """The message ids in the transcripts of the sessions that `entry` resumed, the chain of `resumed_from`, as far as
-    their transcripts are found. Their usage is in their own entries."""
-    tid, entries, ids, seen = task["id"], recorded_sessions(task), set(), set()
+def entry_transcript(run, task, e, listed=None):
+    """(path of the transcript of a `sessions` entry, None), or (None, the reason there is none). `listed` is the rows
+    of `claude agents` by id: its row knows the full session id and the profile when the entry does not."""
+    row = (listed or {}).get(e["id"])
+    return find_transcript(run, os.path.join(run.wt_dir, e.get("worktree") or f"task-{task['id']}"), e["id"],
+                           {"sessionId": e.get("sessionId") or (row.row.get("sessionId") if row else None)},
+                           row.profile if row else e.get("profile"))
+
+
+def earlier_message_ids(run, task, entry, listed=None, partial=False):
+    """The message ids in the transcripts of the sessions that `entry` resumed, the chain of `resumed_from`. Their usage
+    is in their own entries. None when an entry or a transcript of the chain cannot be found, so that the ids are not
+    all known; with `partial`, the ids found."""
+    entries, ids, seen, complete = recorded_sessions(task), set(), set(), True
     while entry.get("resumed_from") and entry["resumed_from"] not in seen:
         seen.add(entry["resumed_from"])
         parent = next((e for e in entries if e.get("id") == entry["resumed_from"]), None)
         if parent is None:
+            complete = False
             break
-        found = find_transcript(run, os.path.join(run.wt_dir, parent.get("worktree") or f"task-{tid}"), parent["id"],
-                                {"sessionId": parent.get("sessionId")}, parent.get("profile"))[0]
-        if found:
-            try:
-                ids |= set(message_usage(found))
-            except OSError:
-                pass
+        found = entry_transcript(run, task, parent, listed)[0]
+        try:
+            ids |= set(message_usage(found)) if found else set()
+            complete = complete and bool(found)
+        except OSError:
+            complete = False
         entry = parent
-    return ids
+    return ids if complete or partial else None
+
+
+def group_usage(run, task, entries, listed):
+    """(usage, ids with no transcript, reason): the usage of the sessions of `entries` together, each message id once.
+    usage is None when no entry has a transcript, and the reason is then that of the last one."""
+    seen, found, missing, why = set(), [], [], None
+    for e in entries:
+        path, why = entry_transcript(run, task, e, listed)
+        try:
+            usage = message_usage(path) if path else None
+        except OSError:
+            usage = None
+        if usage is None:
+            missing.append(e["id"])
+            continue
+        found += [u for mid, u in usage.items() if mid not in seen]
+        seen |= set(usage)
+    total = tuple(sum(u[key] for u in found) for key in USAGE_KEYS)
+    return (total if len(missing) < len(entries) else None), missing, why
 
 
 def stamp_of(text):
@@ -7559,36 +7591,75 @@ def transcript_texts(path, since=None):
     return ["\n".join(parts) for parts in texts.values()]
 
 
-def find_tokens(run, tid, sid, row, profile=None, skip=frozenset()):
+def find_tokens(run, tid, sid, row, profile=None):
     """(out, in, cache-read, cache-write), or the reason there is none."""
     path, why = find_transcript(run, task_worktree(run, tid), sid, row, profile)
-    return transcript_usage(path, skip) if path else why
+    return transcript_usage(path) if path else why
+
+
+USAGE_TRIES = 3  # records that wait for the transcripts of a resume chain before an entry's usage is written as partial
+
+
+def tokens_text(usage, missing=()):
+    text = f"out {usage[0]} in {usage[1]} cache-read {usage[2]} cache-write {usage[3]}"
+    return text + (f" (partial: no transcript for {', '.join(missing)})" if missing else "")
+
+
+def emit_tokens(run, task, attempt, sid):
+    """The `tokens` event of close: the usage of the attempt's worker sessions together, each message id once (a revision
+    resumes the session before it), and, when it had verifiers, theirs after it. The `tokens` meta keeps the worker's out and in."""
+    tid, listed = task["id"], {s.sid: s for s in run.sessions()}
+    entries = recorded_sessions(task)
+    parts, saved = [], None
+    for label, kind in (("worker", "task"), ("verifier", "verify")):
+        group = [e for e in entries if e.get("kind") == kind and e.get("attempt") == attempt and e.get("id")]
+        if not group:
+            continue
+        usage, missing, why = group_usage(run, task, group, listed)
+        if usage is None:
+            if kind == "task":
+                run.emit("tokens", tid, None, sid or None, f"{why}; none recorded")
+                return
+            continue
+        parts.append(f"{label} {tokens_text(usage, missing)}")
+        if kind == "task":
+            saved = usage
+    if saved:
+        run.edit_meta(tid, tokens=f"{saved[0]}/{saved[1]}")
+    run.emit("tokens", tid, None, sid or None, "; ".join(parts))
 
 
 def fill_usage(run, task):
-    """record: write `usage` ({"out", "in", "cache_read", "cache_write"}, summed over its transcript, each message id once, minus the messages of the sessions it resumed) into each `sessions`
-    entry that has none, once its session is no longer live. An entry with no readable transcript is left as it is; the
-    next record tries again. The entries are read again before the write, so a newer list is never replaced."""
-    tid = task["id"]
+    """record: write `usage` ({"out", "in", "cache_read", "cache_write"}, summed over its transcript, each message id
+    once, minus the messages of the sessions it resumed) into each `sessions` entry that has none, once its session is no
+    longer live. An entry with no readable transcript is left as it is; the next record tries again. So does an entry
+    whose resume chain has a session with no entry or no transcript, its messages being unknown: `usage_tries` counts
+    those records, and at USAGE_TRIES the usage is written with `partial: true` (the messages of the lost sessions are
+    in it). The entries are read again before the write, so a newer list is never replaced."""
     if not any(e.get("id") and not e.get("usage") for e in recorded_sessions(task)):
         return
     listed = {s.sid: s for s in run.sessions()}
-    entries = recorded_sessions(run.show(tid))
+    entries = recorded_sessions(run.show(task["id"]))
     changed = False
     for e in entries:
         if not e.get("id") or e.get("usage") or (e["id"] in listed and listed[e["id"]].live):
             continue
-        row = {"sessionId": e.get("sessionId") or (listed[e["id"]].row.get("sessionId") if e["id"] in listed else None)}
-        found = find_transcript(run, os.path.join(run.wt_dir, e.get("worktree") or f"task-{tid}"), e["id"], row,
-                                e.get("profile"))[0]
+        found = entry_transcript(run, task, e, listed)[0]
+        if not found:
+            continue
+        skip = earlier_message_ids(run, task, e, listed=listed)
+        partial = skip is None
+        if partial:
+            e["usage_tries"], changed = e.get("usage_tries", 0) + 1, True
+            if e["usage_tries"] < USAGE_TRIES:
+                continue
+            skip = earlier_message_ids(run, task, e, listed=listed, partial=True)
         try:
-            out, uncached, read, write = (transcript_usage(found, earlier_message_ids(run, task, e)) if found
-                                          else (None,) * 4)
+            out, uncached, read, write = transcript_usage(found, skip)
         except OSError:
             continue
-        if out is not None:
-            e["usage"] = {"out": out, "in": uncached, "cache_read": read, "cache_write": write}
-            changed = True
+        e["usage"] = {"out": out, "in": uncached, "cache_read": read, "cache_write": write, **({"partial": True} if partial else {})}
+        changed = True
     if changed:
         run.set_meta(task, sessions=entries)
 
@@ -7924,16 +7995,15 @@ def cmd_close(run, args):
         sid = row.sid if row else ""
     if not entry and not row:
         run.emit("tokens", tid, None, None, "no session recorded; none recorded")
-    else:
-        found = find_tokens(run, tid, sid, row.row if row else None,
-                            row.profile if row else (entry or {}).get("profile"),
-                            earlier_message_ids(run, task, entry) if entry else frozenset())
+    elif not entry:
+        found = find_tokens(run, tid, sid, row.row, row.profile)
         if isinstance(found, str):
             run.emit("tokens", tid, None, sid or None, f"{found}; none recorded")
         else:
             run.edit_meta(tid, tokens=f"{found[0]}/{found[1]}")
-            run.emit("tokens", tid, None, sid or None,
-                     f"out {found[0]} in {found[1]} cache-read {found[2]} cache-write {found[3]}")
+            run.emit("tokens", tid, None, sid or None, "worker " + tokens_text(found))
+    else:
+        emit_tokens(run, task, attempt, sid)
     if not passing:
         run.emit("verdict", tid, attempt, None, f"{level}; not closed", unclosed_next(tid, level, attempt, kind, task, run))
         post_verdict(run, task, attempt, level, ref, kind)
