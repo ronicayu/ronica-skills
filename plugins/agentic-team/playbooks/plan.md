@@ -49,7 +49,8 @@ adds what Taskgraph cannot decide.
    (`"${CLAUDE_PLUGIN_ROOT}/scripts/run" add`): it takes the options of `tg add`,
    needs `--depends`, `--blocks` or `--independent "<reason>"`, and lists the open
    tasks that may be related, with the reason (same SCOPE path, same issue or
-   request, similar title). Read the list; a candidate shown as `not linked` is
+   request, similar title). Write the paths a task must not change after `;` in
+   its SCOPE: only the paths before it count as write paths. Read the list; a candidate shown as `not linked` is
    one you may have missed. Never create a task with `tg add`.
 4. **Relay context through dependencies.** A task that needs an upstream
    result depends on that task. The brief pastes the upstream result.
