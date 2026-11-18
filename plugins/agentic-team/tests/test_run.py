@@ -14107,6 +14107,123 @@ class Issue130Test(Base):
             self.assertIn("agentic-team:dependency-check", fh.read())
 
 
+class AddTest(Base):
+    """agentic-team 0.28.1: `run.py add` settles the dependencies of a new task when it creates the task."""
+
+    def tasks(self):
+        return {t["id"]: t for t in self.tg("ls", "--status", "open", "in_progress")}
+
+    def deps(self, tid):
+        return [d["id"] for d in self.tg("show", str(tid))["depends_on"]]
+
+    def refused(self, *args):
+        out = self.run_cmd(*args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return out.stderr
+
+    def refused_add(self, *args):
+        out = self.run_cmd("--json", "add", *args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return json.loads(out.stdout), out.stderr
+
+    def added(self, *args):
+        events = self.events("add", *args)
+        return self.one(events, "added")["task"], events
+
+    def test_refuses_a_task_with_no_dependencies_and_lists_the_candidates(self):
+        near = self.add_task("Rework the parser module", scope="src/parser/; docs/")
+        events, err = self.refused_add("Fix the parser", "--meta", "scope=src/parser/lexer.py; not docs/")
+        self.assertEqual(len(self.tasks()), 1)
+        self.assertIn("--independent", err)
+        (candidate,) = events
+        self.assertEqual((candidate["event"], candidate["task"]), ("candidate", near))
+        self.assertIn("Rework the parser module [open]: SCOPE overlap: src/parser/lexer.py", candidate["detail"])
+        self.assertNotIn("linked", candidate["detail"])
+        text = self.run_cmd("add", "Fix the parser", "--meta", "scope=src/parser/lexer.py")
+        self.assertEqual(text.returncode, 2)
+        self.assertTrue(text.stdout.startswith(f"candidate #{near}: Rework the parser module"), text.stdout)
+
+    def test_depends_and_blocks_create_the_edges(self):
+        first, later = self.add_task("First", scope="a/"), self.add_task("Later", scope="b/")
+        new, events = self.added("Middle", "--depends", str(first), "--blocks", str(later))
+        self.assertEqual(self.deps(new), [first])
+        self.assertEqual(self.deps(later), [new])
+        self.assertEqual(self.one(events, "added")["detail"], f"Middle (depends on #{first}; blocks #{later})")
+        again, _ = self.added("Two ids", "--depends", str(first), str(later))
+        self.assertEqual(sorted(self.deps(again)), [first, later])
+
+    def test_independent_records_the_reason_in_meta(self):
+        new, _ = self.added("Standalone", "--independent", "touches no other task")
+        self.assertEqual(self.meta(new)["independent"], "touches no other task")
+        self.assertEqual(self.deps(new), [])
+        self.assertIn("--independent takes the reason", self.refused("add", "x", "--independent", " "))
+        self.assertIn("not both", self.refused("add", "x", "--independent", "r", "--depends", "1"))
+
+    def test_candidates_by_scope_issue_and_title(self):
+        by_scope = self.add_task("Unrelated words here", scope="pkg/")
+        by_dir_prefix = self.add_task("Another one entirely", scope="pkg/sub/deep.py; not x/")
+        by_issue = self.add_task("Plain", notes="See gh issue view 42 and #7", scope="other/")
+        by_title = self.add_task("Rework billing invoice export", scope="billing/")
+        far = self.add_task("Nothing alike", scope="zzz/")
+        new, events = self.added("Cache the billing invoice export", "--notes", "Closes #42", "--meta", "scope=pkg/a.py pkg/sub/; not zzz/",
+                                 "--independent", "checked")
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertEqual(set(found), {by_scope, by_dir_prefix, by_issue, by_title})
+        self.assertIn("SCOPE overlap: pkg/a.py, pkg/sub", found[by_scope])
+        self.assertIn("SCOPE overlap: pkg/sub", found[by_dir_prefix])
+        self.assertIn("same GitHub issue or PR: #42", found[by_issue])
+        self.assertIn("title words: billing, export, invoice", found[by_title])
+        self.assertNotIn(far, found)
+        order = [e["task"] for e in self.named(events, "candidate")]
+        self.assertEqual(order[-2:], [by_issue, by_title])
+        self.assertTrue(set(order[:2]) == {by_scope, by_dir_prefix})
+
+    def test_one_shared_title_word_and_common_words_are_not_a_match(self):
+        self.add_task("Update the billing page", scope="x/")
+        _, events = self.added("Rewrite billing totals", "--independent", "alone")
+        self.assertEqual(self.named(events, "candidate"), [])
+
+    def test_at_most_ten_candidates(self):
+        for n in range(12):
+            self.add_task(f"Task {n}", scope="shared/")
+        _, events = self.added("Another", "--meta", "scope=shared/x.py", "--independent", "alone")
+        self.assertEqual(len(self.named(events, "candidate")), 10)
+
+    def test_a_candidate_that_is_not_linked_is_shown_as_such(self):
+        linked, missed = self.add_task("One", scope="src/"), self.add_task("Two", scope="src/a/")
+        _, events = self.added("Three", "--meta", "scope=src/a/b.py", "--depends", str(linked))
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertTrue(found[linked].endswith("; linked"), found)
+        self.assertTrue(found[missed].endswith("; not linked"), found)
+
+    def test_a_candidate_shows_its_phase(self):
+        running = self.add_task("Running", scope="src/", start=True, phase="working")
+        _, events = self.added("New", "--meta", "scope=src/x.py", "--independent", "alone")
+        self.assertIn("[in_progress, working]", self.one(events, "candidate")["detail"])
+        self.assertEqual(self.one(events, "candidate")["task"], running)
+
+    def test_a_decision_needs_blocks_and_no_independent_or_candidates(self):
+        waiting = self.add_task("Waits", scope="src/")
+        err = self.refused("add", "Which way?", "--type", "decision", "--meta", "decider=operator")
+        self.assertIn("a decision needs --blocks", err)
+        self.assertIn("a decision needs --blocks", self.refused("add", "Which way?", "--type", "decision", "--independent", "x"))
+        new, events = self.added("Which way?", "--type", "decision", "--meta", "decider=operator", "--blocks", str(waiting),
+                                 "--meta", "scope=src/x.py")
+        self.assertEqual(self.named(events, "candidate"), [])
+        self.assertEqual(self.tg("show", str(new))["type"], "decision")
+        self.assertEqual(self.deps(waiting), [new])
+
+    def test_notes_meta_priority_and_the_other_options_reach_tg(self):
+        parent = self.add_task("Parent", scope="p/")
+        new, _ = self.added("Full", "--notes", "Why.\n- [ ] ok", "--meta", "scope=q/", 'verify=make "test"', "estimate=2",
+                            "--priority", "P1", "--parent", str(parent), "--due", "2027-01-15", "--independent", "alone")
+        task = self.tg("show", str(new))
+        self.assertEqual(task["notes"], "Why.\n- [ ] ok")
+        self.assertEqual((task["meta"]["scope"], task["meta"]["verify"], task["meta"]["estimate"]), ("q/", 'make "test"', 2))
+        self.assertEqual((task["priority"], task["parent"], task["due"]), ("P1", parent, "2027-01-15"))
+        self.assertEqual(task["meta"]["independent"], "alone")
+
+
 class RetroTest(Base):
     """agentic-team 0.28.0: what a retro needs, recorded: plugin and usage per session, the cause of an attempt, the
     dependency check, the triage of a follow-up, the category of a blocking line, UTC times."""
