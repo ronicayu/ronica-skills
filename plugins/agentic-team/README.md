@@ -925,6 +925,8 @@ See the [decision-forks principle](skills/principle-decision-forks/SKILL.md).
 |-----|------|---------|---------|
 | `max_parallel` | positive integer | `2` | Cap on in-flight sessions, workers and verifiers. Start with 1 or 2. The Manager refills as sessions finish. |
 | `permission_mode` | string | `"auto"` | `--permission-mode` for worker sessions. |
+| `compact_at` | integer | `0` | Context size in tokens at which a worker or verifier session compacts its context: `100000` to `1000000`. `0` leaves Claude Code's own default (the model's context limit). `run.py` passes it as `--autocompact <tokens>` on launch and on every resume. `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, if set in the environment of the session, wins over the flag. |
+| `compact_at_tier` | table | `{}` | `[sessions.compact_at_tier]` sets `compact_at` per tier or work type (`mechanical`, `implementation`, `judgement`, `verifier`, or a `[models.overrides]` key), for example `judgement = 200000`. A listed tier beats `compact_at`. |
 | `timezone` | string | System zone (`/etc/localtime`), else `"UTC"` | IANA zone name, for example `"Asia/Singapore"`. Used for the times that `status` shows and the TIMEZONE of the brief. `run.py` records its own times (`started_at`, `merged_at`, `Stopped:`) in UTC, ISO 8601, as `2026-11-17T09:05:00Z`; `status` reads an older local string (`2026-11-17 17:05 SGT`) too and shows it as it is. |
 | `timezone_label` | string | Derived from `timezone` | Label written after times, for example `"SGT"`. Set it when the derived label is an offset such as `+08`. |
 
@@ -1733,6 +1735,13 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.28.0
+
+Version 0.28.2 fixes the usage of resumed sessions and adds a context size at which a session compacts. No lifecycle, phase or model change; no migration.
+
+- **Usage of resumed sessions.** A revision resumed with `claude --resume` has the messages of its parent session in its own transcript, with the same message ids. 0.28.0 counted them again: the `usage` of the `sessions` entry and the `tokens #N` line of `close` were too high for every resumed session (one real revision read out 94,501 and cache-read 34,268,834 where its own messages are out 22,875 and cache-read 10,966,453). Now each message id counts once in a transcript, with the largest count that any of its records shows, and a message that an earlier entry of the same `resumed_from` chain already holds is skipped. Entries that `record` already wrote keep their old `usage`.
+- **`[sessions] compact_at`.** A worker or verifier session grows until the model's context limit. Set `compact_at = 200000` (100000 to 1000000 tokens) and `run.py` starts and resumes the sessions with `claude --autocompact 200000`; `[sessions.compact_at_tier]` sets it per tier. The default `0` changes nothing. `claude --bg --resume` does not keep the flag of the launch, so `run.py` passes it again on every resume. A session that was running before the upgrade keeps its old setting until its next resume.
 
 ### Upgrading from 0.27.2
 
