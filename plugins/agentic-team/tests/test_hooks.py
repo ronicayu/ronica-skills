@@ -9,6 +9,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 import unittest.mock
@@ -217,7 +218,7 @@ class Layered(unittest.TestCase):
                      "AssertionError: expected 110 to be 120 // Object.is equality", " ❯ src/cart.test.ts:12:21",
                      "      Tests  1 failed | 4 passed (5)"):
             self.assertIn(line + "\n", out)
-        self.assertNotIn("src/a.test.ts (3 tests)", out)
+        self.assertLess(out.count("src/a.test.ts (3 tests)"), 2)
 
     def test_playwright_failure(self):
         self.tool("playwright", PLAYWRIGHT_FAIL, 1)
@@ -226,12 +227,13 @@ class Layered(unittest.TestCase):
         for line in ("  1) [chromium] › e2e/cart.spec.ts:10:5 › checkout shows the total ──────────",
                      "    Expected string: \"$12\"", "    Received string: \"$10\"", "      at e2e/cart.spec.ts:14:35"):
             self.assertIn(line + "\n", out)
-        self.assertNotIn("home loads", out)
+        self.assertLess(out.count("home loads"), 2)
 
     def test_output_under_the_pass_through_size_is_unchanged_and_leaves_no_file(self):
         self.tool("pytest", "short output\n1 passed", 0)
         out, code = self.run_wrapped("pytest", passthrough_chars=10000)
-        self.assertEqual((out, code), ("short output\n1 passed\n", 0))
+        self.assertEqual((out.splitlines()[1:], code), (["short output", "1 passed"], 0))
+        self.assertIn(os.path.join(self.dir, "out", "toolu_01.txt"), out.splitlines()[0])
         self.assertEqual(os.listdir(os.path.join(self.dir, "out")), [])
 
     def test_exit_codes_are_kept(self):
@@ -245,7 +247,7 @@ class Layered(unittest.TestCase):
             fh.write("#!/bin/sh\npwd\necho \"$MODE\"\nexit 3\n")
         os.chmod(os.path.join(self.bin, "pytest"), 0o755)
         out, code = self.run_wrapped("cd sub && MODE=fast pytest", passthrough_chars=1000)
-        self.assertEqual((out, code), (f"{self.dir}/sub\nfast\n", 3))
+        self.assertEqual((out.splitlines()[1:], code), ([f"{self.dir}/sub", "fast"], 3))
 
     def test_a_failing_reducer_prints_the_full_output(self):
         self.tool("pytest", PYTEST_FAIL, 1)
@@ -254,13 +256,15 @@ class Layered(unittest.TestCase):
         os.makedirs(cfg["saved_dir"], exist_ok=True)
         done = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True,
                               env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
-        self.assertEqual((done.returncode, done.stdout.strip()), (1, PYTEST_FAIL.strip()))
+        self.assertEqual((done.returncode, done.stdout.strip().split("\n", 1)[1]), (1, PYTEST_FAIL.strip()))
 
     # --- the policy, on text
 
-    def reduce(self, text, rc, **over):
+    def reduce(self, text, rc, log=False, **over):
         cfg = config(self.dir, **over)
-        return layered.reduce_output(text, rc, cfg, "make test", os.path.join(self.dir, "full.txt"))
+        lines = text.splitlines()
+        out, how = layered.reduce_output(lines, len(text), rc, cfg, "make test", os.path.join(self.dir, "full.txt"), log)
+        return (text if out is None else out), how
 
     def test_failure_with_no_matching_line_is_unchanged_when_the_fallback_is_off(self):
         text = "noise line\n" * 200
@@ -293,6 +297,154 @@ class Layered(unittest.TestCase):
             self.assertEqual(layered.summarize("x" * 100, "make test"), "summary")
         argv = run.call_args.args[0]
         self.assertEqual(argv[:5], ["claude", "-p", "--model", "haiku", "--no-session-persistence"])
+
+    # --- review fixes (0.29.0)
+
+    NOISE = "\n".join(f"tests/test_m.py::test_{i} PASSED" for i in range(80)) + "\n"
+    WARN = "\n".join(f"src/lib.py:{i}: DeprecationWarning: x is old" for i in range(100)) + "\n"
+
+    def kept(self, text, rc=1, **kw):
+        out, how = self.reduce(text, rc, passthrough_chars=500, **kw)
+        return out
+
+    def test_the_key_line_survives_a_flood_of_file_line_noise(self):
+        frames = "".join(f"src/x.py:{i}: in f{i}\n    call()\n" for i in range(90))
+        out = self.kept(frames + "E   KeyError: 'secret'\nFAILED tests/test_k.py::test_key - KeyError\n=== 1 failed in 1s ===\n")
+        self.assertIn("E   KeyError: 'secret'\n", out)
+        self.assertIn("FAILED tests/test_k.py::test_key - KeyError\n", out)
+        self.assertIn("matching lines omitted", out)
+        self.assertNotIn("verbatim", out)
+        self.assertIn("=== 1 failed in 1s ===", out)
+
+    def test_compiler_make_linker_and_crash_lines_are_key_lines(self):
+        for line in ("src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+                     "make: *** [typecheck] Error 2", "ld: symbol(s) not found for architecture arm64",
+                     "clang: error: linker command failed with exit code 1", "foo.c:10:5: error: use of undeclared identifier 'bar'",
+                     "Segmentation fault (core dumped)", "Fatal Python error: Segmentation fault", "Killed", "Aborted (core dumped)",
+                     "build/main.o: undefined reference to `foo'", "/r/src/a.ts:3:14: ERROR: Expected \";\" but found \"x\"",
+                     "Error: page.click: Test timeout of 30000ms exceeded."):
+            for before in (self.WARN, self.NOISE):
+                text = before + line + "\n" + "tail line\n" * 40
+                self.assertIn(line + "\n", self.kept(text), line)
+
+    def test_the_last_lines_are_always_kept_and_an_exact_list_says_verbatim(self):
+        text = self.NOISE + "FAILED tests/t.py::t - boom\n" + "".join(f"last {i}\n" for i in range(20))
+        out = self.kept(text)
+        self.assertIn("last 19\n", out)
+        self.assertIn("last 5\n", out)
+        self.assertNotIn("last 4\n", out)
+        self.assertNotIn("omitted", out)
+        self.assertIn("verbatim", out)
+
+    def test_a_failure_with_only_an_error_line_in_a_pile_of_passes(self):
+        out = self.kept(self.NOISE + "Segmentation fault (core dumped)\n")
+        self.assertIn("Segmentation fault", out)
+
+    def test_exit_0_with_a_failed_or_error_line_uses_the_failure_rules(self):
+        out, how = self.reduce(self.NOISE + "ERROR something broke\n" + "tail\n" * 3, 0, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        self.assertIn("ERROR something broke", out)
+        self.assertEqual(self.reduce(PYTEST_PASS, 0, passthrough_chars=500)[1], "pass")
+
+    def test_a_log_command_with_exit_0_uses_the_failure_rules(self):
+        gh = ("\n".join(f"build\tstep\tline {i}" for i in range(100)) + "\nbuild\tRun tests\tE   assert 1 == 2\n"
+              "build\tRun tests\tFAILED tests/test_z.py::test_z\n" + "\n".join(f"build\tPost\tcleanup {i}" for i in range(30)) + "\n")
+        out, how = self.reduce(gh, 0, log=True, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        self.assertIn("FAILED tests/test_z.py::test_z", out)
+        self.assertIn("exit 0", out)
+        wrapped = layered.wrap("gh run view 9 --log", config(self.dir), "t")
+        self.assertIn("--log", wrapped.split("reduce", 1)[1])
+        self.assertNotIn("--log", layered.wrap("pytest", config(self.dir), "t").split("reduce", 1)[1])
+
+    def test_one_huge_line_does_not_hang_the_reducer(self):
+        self.tool("pytest", "ok", 1)
+        for line in ("a b " * 250000, "_" * 1000000, "E " * 500000, "= " * 500000):
+            with open(os.path.join(self.dir, "big.txt"), "w") as fh:
+                fh.write("x.py:1: Error: y\n" + line + "\nFAILED t::t\n")
+            cfg = config(self.dir)
+            started = time.time()
+            done = subprocess.run([sys.executable, "-S", os.path.join(HOOKS, "layered.py"), "reduce", "--config", cfg["config_file"],
+                                   "--file", os.path.join(self.dir, "big.txt"), "--rc", "1", "--cmd-b64", "eA=="],
+                                  capture_output=True, text=True)
+            self.assertLess(time.time() - started, 4)
+            self.assertEqual(done.returncode, 0)
+            self.assertIn("FAILED t::t", done.stdout)
+            self.assertIn("[line cut]", done.stdout)
+
+    def test_a_reducer_that_runs_too_long_exits_1_and_the_wrapper_prints_the_file(self):
+        self.tool("pytest", PYTEST_FAIL, 1)
+        cfg = config(self.dir)
+        wrapped = layered.wrap("pytest", cfg, "toolu_01")
+        os.makedirs(cfg["saved_dir"], exist_ok=True)
+        slow = os.path.join(self.dir, "slow.py")
+        with open(slow, "w") as fh:
+            fh.write("import sys, time\nsys.path.insert(0, %r)\nimport layered\nlayered.REDUCE_SECONDS = 1\n"
+                     "layered.extract = lambda lines: time.sleep(30)\nsys.exit(layered.main())\n" % HOOKS)
+        wrapped = wrapped.replace(os.path.join(HOOKS, "layered.py"), slow)
+        started = time.time()
+        done = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True,
+                              env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
+        self.assertLess(time.time() - started, 10)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(PYTEST_FAIL.strip(), done.stdout)
+
+    def test_errexit_in_the_shell_does_not_hide_the_output_or_the_code(self):
+        self.tool("pytest", PYTEST_FAIL, 4)
+        cfg = config(self.dir)
+        wrapped = layered.wrap("pytest", cfg, "toolu_01")
+        os.makedirs(cfg["saved_dir"], exist_ok=True)
+        done = subprocess.run(["bash", "-c", "set -e; set -o pipefail; " + wrapped], capture_output=True, text=True,
+                              env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(done.returncode, 4)
+        self.assertIn("FAILED tests/test_mod.py::test_total_is_right", done.stdout)
+
+    def test_watch_and_follow_commands_are_not_wrapped(self):
+        for cmd in ("vitest --watch", "vitest -w", "pnpm test --watch", "docker logs -f web", "docker logs --follow web",
+                    "playwright test --ui", "npx playwright show-report", "playwright test --debug", "make test --watchAll"):
+            self.assertIsNone(self.wrapped(cmd), cmd)
+        self.assertFalse(layered.never_ends("make -f Makefile test"))
+        self.assertIsNotNone(self.wrapped("make test-fast"))
+
+    def test_the_wrapper_names_the_output_file_before_the_command_runs(self):
+        with open(os.path.join(self.bin, "pytest"), "w") as fh:
+            fh.write("#!/bin/sh\nsleep 30\n")
+        os.chmod(os.path.join(self.bin, "pytest"), 0o755)
+        cfg = config(self.dir)
+        wrapped = layered.wrap("pytest", cfg, "toolu_01")
+        os.makedirs(cfg["saved_dir"], exist_ok=True)
+        proc = subprocess.Popen(["bash", "-c", wrapped], stdout=subprocess.PIPE, text=True,
+                                env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
+        first = proc.stdout.readline()
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+        self.assertIn(os.path.join(cfg["saved_dir"], "toolu_01.txt"), first)
+
+    def test_every_default_pattern_matches_a_realistic_command(self):
+        defaults = ["make test*", "pytest", "python* -m pytest*", "uv run pytest", "vitest", "npx vitest", "pnpm test*",
+                    "playwright", "npx playwright", "gh run view --log", "docker logs"]
+        real = {"make test*": "make test-unit", "pytest": "pytest -x tests/", "python* -m pytest*": "python3 -m pytest -q tests",
+                "uv run pytest": "uv run pytest -q", "vitest": "vitest run", "npx vitest": "npx vitest run src",
+                "pnpm test*": "pnpm test --run", "playwright": "playwright test e2e", "npx playwright": "npx playwright test",
+                "gh run view --log": "gh run view 123 --log", "docker logs": "docker logs --tail 100 web"}
+        for pattern in defaults:
+            self.assertIsNotNone(layered.wrap(real[pattern], config(self.dir, commands=[pattern]), "t"), pattern)
+        self.assertIsNotNone(layered.wrap("python -m pytest", config(self.dir, commands=["python -m pytest"]), "t"))
+
+    def test_a_pass_line_is_dropped_but_a_failure_that_names_passed_is_not(self):
+        out = self.kept(self.NOISE + "FAILED tests/t.py::t - AssertionError: 2 PASSED expected\n")
+        self.assertIn("FAILED tests/t.py::t - AssertionError: 2 PASSED expected", out)
+
+    def test_a_saved_output_over_the_cap_is_cut_to_head_and_tail(self):
+        path = os.path.join(self.dir, "huge.txt")
+        with open(path, "w") as fh:
+            fh.write("first\n" + "middle line\n" * 5000 + "FAILED t::t\nlast\n")
+        with unittest.mock.patch.object(layered, "FILE_CAP", 20000):
+            lines = layered.read_lines(path)
+        self.assertEqual((lines[0], lines[-1]), ("first", "last"))
+        self.assertTrue(any("cut from the middle" in ln for ln in lines))
+        self.assertLessEqual(os.path.getsize(path), 20200)
 
     def test_old_saved_files_are_pruned(self):
         out = os.path.join(self.dir, "out")
@@ -432,6 +584,42 @@ class Compact(unittest.TestCase):
             for part in ("## GOAL", "## SCOPE", "## ACCEPTANCE", "## VERIFY", "OPEN FINDINGS", f"Head: {self.head}", "[cut:"):
                 self.assertIn(part, text)
         self.assertIn("Make the cart total include tax.", pre)
+
+    def test_git_runs_in_the_worktree_of_the_config_not_in_the_hook_cwd(self):
+        elsewhere = os.path.join(self.dir, "elsewhere")
+        os.makedirs(elsewhere)
+        self.cfg["worktree"] = self.wt
+        self.save_cfg()
+        data = {"hook_event_name": "PreCompact", "cwd": elsewhere}
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdin", io.StringIO(json.dumps(data))), unittest.mock.patch("sys.stdout", out):
+            compact.main(["--config", self.cfg_file])
+        self.assertIn(f"Head: {self.head}", out.getvalue())
+
+    def test_no_git_block_when_there_is_no_head(self):
+        self.cfg["worktree"] = os.path.join(self.dir, "not-a-repo")
+        os.makedirs(self.cfg["worktree"])
+        self.save_cfg()
+        out = self.hook("PreCompact")
+        self.assertNotIn("Head:", out)
+        self.assertNotIn("Uncommitted", out)
+        self.assertIn("## GOAL", out)
+
+    def test_a_long_title_is_counted_and_the_output_stays_under_10000(self):
+        big = "# Task 7 — " + "T" * 3000 + BRIEF[BRIEF.index("\n"):]
+        big = big.replace("make test", "make test\n" + "verify line\n" * 2000)
+        self.write_brief(big)
+        for text in (self.hook("PreCompact"), json.loads(self.hook("SessionStart", source="compact"))["hookSpecificOutput"]["additionalContext"]):
+            self.assertLessEqual(len(text), compact.LIMIT)
+            self.assertIn("Task id 7, attempt 2", text)
+
+    def test_a_cut_findings_block_points_to_the_mailbox_inbox(self):
+        block = "steer #31:\n" + "\n".join(f"F{i}: " + "y" * 300 for i in range(1, 40))
+        with unittest.mock.patch.object(compact, "finding_lines", return_value=[block]):
+            self.cfg["ctx"] = "/x/1-1.ctx.json"
+            self.save_cfg()
+            out = self.hook("PreCompact")
+        self.assertRegex(out, r"\[cut: run .*mailbox\.py.* --ctx /x/1-1\.ctx\.json inbox for the rest\]")
 
     def test_a_missing_brief_still_pins_the_head(self):
         self.cfg["brief"] = os.path.join(self.dir, "none.md")

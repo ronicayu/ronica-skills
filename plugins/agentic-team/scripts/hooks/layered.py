@@ -13,10 +13,12 @@ PostToolUseFailure, which cannot replace the output. The command runs in the ses
 its environment, functions and `cd` stay as they are.
 
 Policy: output below passthrough_chars is left unchanged. A pass (exit 0) keeps the result lines. A failure keeps the
-failing test names, assert and error lines, file:line references and FAILED lines of the full output, verbatim. When
-no rule matches and the output is above large_chars, summarize_fallback (default off) asks Haiku. The full output stays
-in a file whose path the reduced text names. `pre` fails safe: any error prints nothing and exits 0. `reduce` prints
-nothing and exits 1 on an error, and the wrapper then prints the file.
+FAILED lines and the assert, error, crash and linker lines first, then file:line references, then the last lines, all
+copied from the full output; a count says how many matching lines were left out. The same rules run at exit 0 when a
+FAILED or error line matches, and always for log commands (`gh run view --log`, `docker logs`), which exit 0 whatever the
+log says. When no rule matches and the output is above large_chars, summarize_fallback (default off) asks Haiku. The full
+output stays in a file whose path the reduced text names. `pre` fails safe: any error prints nothing and exits 0.
+`reduce` prints nothing and exits 1 on an error or after REDUCE_SECONDS, and the wrapper then prints the file.
 """
 
 import argparse
@@ -26,6 +28,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -34,18 +38,27 @@ ENV_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 WRAPPERS = ("with-slot.sh", "env", "time")  # words that start a command and leave its output as it is
 GLOB_CHARS = "*?["
 KEEP_DAYS = 3
-LINE_CAP = 1000
-MAX_LINES = 80
+LINE_CAP = 2000  # a line is read, matched and shown up to this length: no pattern runs on more
+KEY_MAX = 60  # the FAILED and error lines kept (the first half and the last half when there are more)
+MAX_LINES = 90  # all matching lines kept; the rest of the room goes to file:line references
+TAIL_LINES = 15
 RESULT_LINES = 5
+REDUCE_SECONDS = 5
+FILE_CAP = 20 * 1024 * 1024  # the saved output is cut to its head and tail above this size
+LOG_COMMANDS = (("gh", "run", "view"), ("docker", "logs"), ("kubectl", "logs"), ("journalctl",))
+FOLLOWING = ("--watch", "--follow", "--ui", "show-report", "--debug", "--watchAll")  # never end, or wait for a person
 
 RESULT = re.compile(
     r"\d+ (passed|failed|skipped|errors?|passing|failing)\b|^\s*Tests?:? +\d|Test Files|Test Suites|Ran \d+ tests?|"
     r"^(OK|PASS|ok)\b|BUILD (SUCCESS|FAIL)|^Done in|^\s*Finished\b|\d+ (flaky|did not run)")
 FAILED = re.compile(
-    r"^\s*(FAILED|FAIL|ERROR)\b|^\s*(✘|×|✗|✖)|^\s*\d+\) .*›|^=+ (FAILURES|ERRORS) =+|^_{3,} .* _{3,}$")
-ASSERT = re.compile(
-    r"^E\s|AssertionError|\b[A-Za-z]*(Error|Exception)\b[:(]|^\s*(Expected|Received)\b|\bexpect\(|panicked at|^error(\[\w+\])?:")
-PASSED_LINE = re.compile(r"^\s*(✓|✔|√)|\bPASSED\b")
+    r"^\s*(FAILED|FAIL|ERROR)\b|^\s*(✘|×|✗|✖)|^\s*\d+\) .*›|^=+ (FAILURES|ERRORS) =+|^_{3,} [^_]+ _{3,}$")
+ERROR = re.compile(
+    r"^E\s|AssertionError|\b[A-Za-z]*(Error|Exception)\b[:(]|^\s*(Expected|Received)\b|\bexpect\(|panicked at|"
+    r"^error(\[\w+\])?:|\berror TS\d+|^make[^:\n]*: \*\*\*|: (fatal )?error:|: ERROR:|\bld: |linker command failed|"
+    r"undefined reference|symbol\(s\) not found|Segmentation fault|Fatal Python error|\bKilled\b|\bAborted\b|core dumped|"
+    r"##\[error\]|Test timeout of")
+PASSED_LINE = re.compile(r"^\s*(✓|✔|√)|^\S+::\S+ PASSED\b")
 FILE_LINE = re.compile(r"[\w./\\-]+\.(py|js|jsx|ts|tsx|mjs|cjs|rs|go|java|kt|rb|c|cc|cpp|h|swift):\d+")
 
 
@@ -146,49 +159,100 @@ def target_of(cmd):
 
 
 def matches(target, patterns):
-    """A pattern with * ? or [ is a glob over the whole command. Any other pattern is a prefix: its words that do not
-    start with `-` must begin the command, and each word that starts with `-` must be one of the command's words, so
-    `gh run view --log` matches `gh run view 123 --log`."""
+    """A pattern with * ? or [ is a glob over the whole command. Any other pattern is a prefix: its words up to the last
+    one that does not start with `-` must begin the command, and each later word (a flag) must be one of the command's
+    words, so `gh run view --log` matches `gh run view 123 --log` and `python -m pytest` matches `python -m pytest -x`."""
     words_of = target.split()
     for pattern in patterns:
         if any(ch in pattern for ch in GLOB_CHARS):
             if fnmatch.fnmatchcase(target, pattern):
                 return True
             continue
-        plain = [w for w in pattern.split() if not w.startswith("-")]
-        flags = [w for w in pattern.split() if w.startswith("-")]
-        if plain and words_of[:len(plain)] == plain and all(f in words_of for f in flags):
+        parts = pattern.split()
+        last = max((i for i, w in enumerate(parts) if not w.startswith("-")), default=-1)
+        if last >= 0 and words_of[:last + 1] == parts[:last + 1] and all(f in words_of for f in parts[last + 1:]):
             return True
     return False
+
+
+def never_ends(target):
+    """A command that follows or watches, or that waits for a person: its output would stay hidden until a timeout."""
+    words_of = target.split()
+    if any(w in FOLLOWING or w.startswith(("--watch=", "--follow=")) for w in words_of):
+        return True
+    if "vitest" in words_of and "-w" in words_of:
+        return True
+    return "-f" in words_of and "logs" in words_of[:3]
+
+
+def is_log(target):
+    words_of = tuple(target.split())
+    return any(words_of[:len(c)] == c for c in LOG_COMMANDS)
 
 
 def wrap(cmd, cfg, tool_use_id):
     """The wrapped command, or None when it must run as it is."""
     target = target_of(cmd)
-    if not target or not matches(target, cfg.get("commands") or []):
+    if not target or not matches(target, cfg.get("commands") or []) or never_ends(target):
         return None
     out = os.path.join(cfg["saved_dir"], re.sub(r"[^A-Za-z0-9_-]", "_", tool_use_id) + ".txt")
     q = shlex.quote
     reduce = (f"{q(sys.executable)} -S {q(os.path.abspath(__file__))} reduce --config {q(cfg['config_file'])} "
-              f"--file {q(out)} --rc \"$__at_rc\" --cmd-b64 {base64.b64encode(cmd.encode()).decode()}")
-    return f"{{ {cmd}\n}} > {q(out)} 2>&1; __at_rc=$?; {reduce} || cat {q(out)}; (exit \"$__at_rc\")"
+              f"--file {q(out)} --rc \"$__at_rc\" --cmd-b64 {base64.b64encode(cmd.encode()).decode()}"
+              + (" --log" if is_log(target) else ""))
+    notice = q(f"[agentic-team hook: the full output goes to {out}]")
+    return (f"printf '%s\\n' {notice}; __at_rc=0; {{ {cmd}\n}} > {q(out)} 2>&1 || __at_rc=$?; "
+            f"{reduce} || cat {q(out)}; (exit \"$__at_rc\")")
 
 
-def pick(lines, rx, limit, skip=None):
-    found, seen = [], set()
-    for line in lines:
-        if rx.search(line) and line not in seen and not (skip and skip.search(line)):
-            seen.add(line)
-            found.append(line if len(line) <= LINE_CAP else line[:LINE_CAP] + " [line cut]")
-    return found[:limit]
+def read_lines(path):
+    """The lines of the saved output, each cut to LINE_CAP. A file over FILE_CAP is first cut in place to its head and
+    tail with a marker line, and only those are read."""
+    size = os.path.getsize(path)
+    if size > FILE_CAP:
+        half = FILE_CAP // 2
+        with open(path, "rb") as fh:
+            head = fh.read(half)
+            fh.seek(size - half)
+            tail = fh.read(half)
+        marker = f"\n[agentic-team hook: {size - 2 * half} bytes cut from the middle of the output]\n".encode()
+        with open(path, "wb") as fh:
+            fh.write(head + marker + tail)
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return [ln if len(ln) <= LINE_CAP else ln[:LINE_CAP] + " [line cut]" for ln in fh.read().splitlines()]
 
 
-def extract(lines):
-    """(useful, summary): the failure lines of the full output in their order, and the result lines at its end."""
-    rx = re.compile("|".join(r.pattern for r in (FAILED, ASSERT, FILE_LINE)))
-    useful = pick(lines, rx, MAX_LINES, PASSED_LINE)
-    summary = pick(lines[::-1], RESULT, RESULT_LINES)[::-1]
-    return useful, [s for s in summary if s not in useful]
+LOG_PREFIX = re.compile(r"^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?")
+
+
+def extract(lines, log=False):
+    """(kept, omitted, key, useful, summary). `kept` is the lines to show in their order: the FAILED and error lines first (at
+    most KEY_MAX), then file:line references up to MAX_LINES, then the last TAIL_LINES lines. `omitted` counts the
+    matching lines left out; `key` is the number of FAILED and error lines kept, `useful` those and the references.
+    `summary` holds the result lines at the end."""
+    keys, refs = [], []
+    for i, line in enumerate(lines):
+        head = line[:LINE_CAP]
+        if log:  # `gh run view --log` puts job and step columns and a timestamp before the text
+            head = head[LOG_PREFIX.match(head).end():]
+        if PASSED_LINE.search(head):
+            continue
+        if FAILED.search(head) or ERROR.search(head):
+            keys.append(i)
+        elif FILE_LINE.search(head):
+            refs.append(i)
+    total = len(keys) + len(refs)
+    if len(keys) > KEY_MAX:
+        keys = keys[:KEY_MAX // 2] + keys[-(KEY_MAX // 2):]
+    refs = refs[:max(MAX_LINES - len(keys), 0)]
+    chosen = sorted(set(keys + refs) | set(range(max(len(lines) - TAIL_LINES, 0), len(lines))))
+    seen, kept = set(), []
+    for i in chosen:
+        if lines[i] not in seen:
+            seen.add(lines[i])
+            kept.append(lines[i])
+    useful = len(set(keys + refs))
+    return kept, total - useful, len(keys), useful, [ln for ln in lines[::-1] if RESULT.search(ln)][:RESULT_LINES][::-1]
 
 
 def summarize(text, cmd):
@@ -200,27 +264,31 @@ def summarize(text, cmd):
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def reduce_output(text, rc, cfg, cmd, path):
-    """(the text the session sees, what was done). `path` holds the full output; it stays when the text is reduced."""
-    if len(text) < cfg["passthrough_chars"]:
-        return text, "pass-through"
-    lines = text.splitlines()
-    pointer = f"[full output, {len(lines)} lines, {len(text)} characters: {path}; read it with Read or sed -n if you need more]"
-    useful, summary = extract(lines)
-    if rc == 0:
-        kept = summary or lines[-3:]
-        return "[agentic-team hook: exit 0; result lines only]\n" + "\n".join(kept) + "\n" + pointer, "pass"
-    if useful:
-        head = f"[agentic-team hook: exit {rc}; lines below are verbatim from the full output]\n"
-        return head + "\n".join(useful + summary) + "\n" + pointer, "fail-rules"
-    if cfg.get("summarize_fallback") and len(text) > cfg["large_chars"]:
+def reduce_output(lines, size, rc, cfg, cmd, path, log=False):
+    """(the text the session sees, what was done). `lines` and `size` describe the full output, which is in `path` and
+    stays there when the text is reduced; the other outcome is the full text, which the caller prints as it is."""
+    if size < cfg["passthrough_chars"]:
+        return None, "pass-through"
+    pointer = f"[full output, {len(lines)} lines, {size} characters: {path}; read it with Read or sed -n if you need more]"
+    kept, omitted, key, useful, summary = extract(lines, log)
+    if rc == 0 and not key and not log:
+        shown = summary or lines[-3:]
+        return "[agentic-team hook: exit 0; result lines only]\n" + "\n".join(shown) + "\n" + pointer, "pass"
+    if rc == 0 and not key:
+        return None, "pass-through"
+    if useful and (key or rc != 0):
+        copied = "lines below are verbatim from the full output" if not omitted else (
+            f"lines below are copied from the full output; {omitted} matching lines omitted")
+        shown = kept + [s for s in summary if s not in kept]
+        return f"[agentic-team hook: exit {rc}; {copied}]\n" + "\n".join(shown) + "\n" + pointer, "fail-rules"
+    if cfg.get("summarize_fallback") and size > cfg["large_chars"]:
         try:
-            said = summarize(text, cmd)
+            said = summarize("\n".join(lines), cmd)
         except (OSError, subprocess.SubprocessError):
             said = ""
         if said:
             return f"[agentic-team hook: exit {rc}; Haiku summary, it can miss lines]\n{said}\n{pointer}", "fail-summary"
-    return text, "fail-unchanged"
+    return None, "fail-unchanged"
 
 
 def prune(directory):
@@ -259,15 +327,29 @@ def cmd_pre(args):
                                              "updatedInput": {**tool_input, "command": wrapped}}}))
 
 
+def too_slow(signum, frame):
+    raise TimeoutError("reduce took too long")
+
+
 def cmd_reduce(args):
+    signal.signal(signal.SIGALRM, too_slow)
+    signal.alarm(REDUCE_SECONDS)
     cfg = load_config(args.config)
-    with open(args.file, encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
     cmd = base64.b64decode(args.cmd_b64).decode()
-    out, how = reduce_output(text, args.rc, cfg, cmd, args.file)
-    sys.stdout.write(out if out.endswith("\n") else out + "\n")
-    if how in ("pass-through", "fail-unchanged"):
+    if os.path.getsize(args.file) < cfg["passthrough_chars"]:  # small: print it as it is, and keep no file
+        with open(args.file, encoding="utf-8", errors="replace") as fh:
+            sys.stdout.write(fh.read())
         os.remove(args.file)
+        return
+    lines = read_lines(args.file)
+    out, _ = reduce_output(lines, os.path.getsize(args.file), args.rc, cfg, cmd, args.file, args.log)
+    signal.alarm(0)
+    if out is None:
+        with open(args.file, encoding="utf-8", errors="replace") as fh:
+            shutil.copyfileobj(fh, sys.stdout)
+        os.remove(args.file)
+        return
+    sys.stdout.write(out if out.endswith("\n") else out + "\n")
 
 
 def main(argv=None):
@@ -280,6 +362,7 @@ def main(argv=None):
     p.add_argument("--file", required=True)
     p.add_argument("--rc", type=int, required=True)
     p.add_argument("--cmd-b64", required=True)
+    p.add_argument("--log", action="store_true")
     args = parser.parse_args(argv)
     try:
         (cmd_pre if args.cmd == "pre" else cmd_reduce)(args)

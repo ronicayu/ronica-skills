@@ -92,7 +92,7 @@ always_pause = []           # decisions that always need the operator
 # summarize_fallback = false    # when enabled: summarize a failed output over large_chars with `claude -p --model haiku` when no rule matches (7-12 s, uses the subscription)
 # passthrough_chars = 20000     # output below this size is left unchanged
 # large_chars = 100000          # the Haiku fallback runs only above this size; at least passthrough_chars
-# commands = ["make test*", "pytest", "python -m pytest", "uv run pytest", "vitest", "npx vitest", "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]  # a prefix, or a glob when it holds * ? [
+# commands = ["make test*", "pytest", "python* -m pytest*", "uv run pytest", "vitest", "npx vitest", "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]  # a prefix, or a glob when it holds * ? [
 
 [rounds]
 # cap = 3                   # rounds (run.py round) a task may have without --attempt; a round does not count toward the attempt cap

@@ -16,12 +16,15 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
 LIMIT = 9000
 SECTIONS = ("GOAL", "SCOPE", "ACCEPTANCE", "VERIFY")
 CUT = "\n[cut: the brief has the rest]"
+TITLE_MAX = 300
+FRAME = 1200  # room for the instruction around the facts and the section titles
 STATUS_LINES = 40
 
 
@@ -36,6 +39,11 @@ def sections(brief):
         elif name:
             found[name].append(line)
     return {k: "\n".join(v).strip() for k, v in found.items()}
+
+
+def inbox_command(ctx_path):
+    mailbox = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mailbox.py")
+    return f"{shlex.quote(sys.executable)} {shlex.quote(mailbox)} --ctx {shlex.quote(ctx_path)} inbox"
 
 
 def finding_lines(ctx_path):
@@ -61,27 +69,30 @@ def git(cwd, *args):
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def fit(blocks, room):
-    """Cut the longest blocks until all fit in `room` characters; a block that fits is never cut."""
-    texts = dict(blocks)
+def fit(blocks, room, cuts=None):
+    """Cut the longest blocks until all fit in `room` characters; a block that fits is never cut. `cuts` maps a block
+    name to the line that ends it when it is cut (default CUT)."""
+    texts, cuts = dict(blocks), cuts or {}
     while sum(len(t) for t in texts.values()) > room:
         name = max(texts, key=lambda k: len(texts[k]))
         over = sum(len(t) for t in texts.values()) - room
-        keep = max(len(texts[name]) - over - len(CUT), 200)
+        cut = cuts.get(name, CUT)
+        keep = max(len(texts[name]) - over - len(cut), 200)
         if keep >= len(texts[name]):
             break
-        texts[name] = texts[name][:keep].rstrip() + CUT
+        texts[name] = texts[name][:keep].rstrip() + cut
     return texts
 
 
 def pins(cfg, cwd):
-    """The pinned facts as text, at most LIMIT - 800 characters (the callers add a short frame)."""
+    """The pinned facts as text, at most LIMIT - FRAME characters, title included (the callers add a short frame)."""
     try:
         with open(cfg["brief"], encoding="utf-8") as fh:
             brief = fh.read()
     except OSError:
         brief = ""
-    title = brief.splitlines()[0] if brief.startswith("# ") else ""
+    title = brief.splitlines()[0][:TITLE_MAX] if brief.startswith("# ") else ""
+    where = cfg.get("worktree") or cwd
     parts = sections(brief)
     blocks = [(n, parts[n]) for n in SECTIONS if parts.get(n)]
     findings = finding_lines(cfg["ctx"]) if cfg.get("ctx") else []
@@ -89,17 +100,20 @@ def pins(cfg, cwd):
         blocks.append(("OPEN FINDINGS (ack each F<n> before you report)", "\n".join(findings)))
     status = ""
     try:
-        head, branch = git(cwd, "rev-parse", "HEAD"), git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
-        changed = git(cwd, "status", "--porcelain").splitlines()
-        status = f"Head: {head} (branch {branch})\nUncommitted changes: " + (
-            "none" if not changed else f"{len(changed)}\n" + "\n".join(changed[:STATUS_LINES])
-            + (f"\n... and {len(changed) - STATUS_LINES} more" if len(changed) > STATUS_LINES else ""))
+        head, branch = git(where, "rev-parse", "HEAD"), git(where, "rev-parse", "--abbrev-ref", "HEAD")
+        changed = git(where, "status", "--porcelain").splitlines()
+        if head:
+            status = f"Head: {head} (branch {branch})\nUncommitted changes: " + (
+                "none" if not changed else f"{len(changed)}\n" + "\n".join(changed[:STATUS_LINES])
+                + (f"\n... and {len(changed) - STATUS_LINES} more" if len(changed) > STATUS_LINES else ""))
     except (OSError, subprocess.SubprocessError):
         pass
     if status:
         blocks.append(("GIT", status))
-    texts = fit(blocks, LIMIT - 800 - 120)
     head = f"{title}\nTask id {cfg['task']}, attempt {cfg['attempt']}".strip()
+    cuts = {n: f"\n[cut: run {inbox_command(cfg['ctx'])} for the rest]" for n, _ in blocks if n.startswith("OPEN FINDINGS")
+            } if cfg.get("ctx") else {}
+    texts = fit(blocks, LIMIT - FRAME - len(head), cuts)
     return head + "\n\n" + "\n\n".join(f"{n}\n{texts[n]}" if n == "GIT" else f"## {n}\n{texts[n]}" for n, _ in blocks)
 
 

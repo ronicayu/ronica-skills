@@ -69,6 +69,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
         self.assertEqual(config.load(self.root)["hooks"]["commands"], ["cargo test", "just *-test*"])
 
+    def test_hooks_need_a_permission_mode_where_the_rewrite_is_not_asked_about(self):
+        for mode, ok in (("auto", True), ("bypassPermissions", True), ("default", False), ("acceptEdits", False)):
+            for enabled in (True, False):
+                with self.subTest(mode=mode, enabled=enabled):
+                    self.write(MINIMAL + f'[sessions]\npermission_mode = "{mode}"\ntimezone = "UTC"\n[hooks]\nenabled = {str(enabled).lower()}\n')
+                    code, out, err = self.run_cli("check")
+                    self.assertEqual(code, 0 if ok or not enabled else 2)
+                    if enabled and not ok:
+                        self.assertIn("hooks.enabled needs sessions.permission_mode", out + err)
+
     def test_hooks_bad_values_are_named(self):
         for text, expect in (
                 ('enabled = "yes"', "hooks.enabled must be true or false"),

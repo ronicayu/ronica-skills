@@ -215,7 +215,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "summarize_fallback": ("bool", False),
         "passthrough_chars": ("posint", 20000),
         "large_chars": ("posint", 100000),
-        "commands": ("commands", ["make test*", "pytest", "python -m pytest", "uv run pytest", "vitest", "npx vitest",
+        "commands": ("commands", ["make test*", "pytest", "python* -m pytest*", "uv run pytest", "vitest", "npx vitest",
                                   "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]),
     },
     "rounds": {
@@ -499,6 +499,10 @@ def problems(config):
     if (type_ok("posint", hooks["passthrough_chars"]) and type_ok("posint", hooks["large_chars"])
             and hooks["large_chars"] < hooks["passthrough_chars"]):
         found.append("hooks.large_chars must be at least hooks.passthrough_chars")
+    mode = config["sessions"]["permission_mode"]
+    if hooks["enabled"] is True and isinstance(mode, str) and mode not in ("auto", "bypassPermissions"):
+        found.append(f'hooks.enabled needs sessions.permission_mode "auto" or "bypassPermissions", not "{mode}": the layered '
+                     "hook rewrites the Bash command, so an allow rule such as Bash(pytest:*) no longer matches it")
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")
