@@ -1046,6 +1046,20 @@ pattern.
 |-----|------|---------|---------|
 | `skill` | string | `""` | Skill for messages when all work is complete or the Manager is blocked, for example `"telegram-send:telegram-send"`. With `""`, the Manager reports only in the conversation. |
 
+### `[hooks]`
+
+Worker hooks (see Worker hooks). All off until `enabled` is `true`.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | boolean | `false` | The master switch. With `false`, nothing here has an effect and the launch line is as in 0.28.2. |
+| `layered` | boolean | `true` | When enabled: reduce the output of the commands in `commands`. |
+| `compact_pins` | boolean | `true` | When enabled: keep the task's essentials through a compaction. |
+| `summarize_fallback` | boolean | `false` | When enabled: when a failed command's output is above `large_chars` and no extraction rule matched, ask Haiku (`claude -p --model haiku`) for a summary. It takes 7 to 12 seconds a call and uses the subscription. |
+| `passthrough_chars` | positive integer | `20000` | Output below this size is left unchanged. |
+| `large_chars` | positive integer | `100000` | The Haiku fallback runs only above this size. At least `passthrough_chars`. |
+| `commands` | list of strings | `["make test*", "pytest", "python -m pytest", "uv run pytest", "vitest", "npx vitest", "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]` | The commands whose output is reduced. A string with `*`, `?` or `[` is a glob over the whole command (`make test*` matches `make test-unit FOO=1`). Any other string is a prefix: its words that do not start with `-` must begin the command, and each word that starts with `-` must be one of the command's words (`gh run view --log` matches `gh run view 123 --log`; `pytest` matches `pytest -x tests/` and not `cat pytest.ini`). A setting replaces the list; it does not add to it. |
+
 ### `[messaging]`
 
 | Key | Type | Default | Meaning |
@@ -1086,6 +1100,52 @@ no network call. `get` and `model`
 refuse to answer while `check` fails. Exit codes: 0 OK, 2 config problem, 1
 unexpected error. It needs Python 3.11 or later; the `config` wrapper finds
 one through `scripts/python-path.sh`.
+
+## Worker hooks
+
+With `hooks.enabled = true`, `run.py launch` (and `round`) start each worker with `--settings` that carry three more
+hooks. They belong to that one session: run.py writes them into the `--settings` of the start, there is no plugin-level
+`hooks/hooks.json` for them, and no other session on the machine sees them. Their scripts are in
+[scripts/hooks/](scripts/hooks/) (Python 3, standard library only, about 20 ms a call), and each reads its settings from
+`.agentic-team/hooks/task-<id>-<attempt>.json`, which run.py writes at the start. A hook that fails for any reason exits 0
+and changes nothing.
+
+| Hook | What it does |
+|------|--------------|
+| `PreToolUse` on `Bash` (`layered`) | Rewrites a command that is one of `commands` so that the command's own output and exit code reach a reducer. Output under `passthrough_chars` is left as it is. At exit 0 only the result lines stay (`60 passed in 1.20s`). At a failure the failing test names, assert and error lines, `file:line` references and `FAILED` lines of the full output stay, word for word, and the text names the file that holds the full output. When no rule matches, the output stays as it is, unless `summarize_fallback` is on and the output is above `large_chars`. The command's exit code is kept, so the session still sees the failure. The full output is in `.agentic-team-scratch/hook-output/<tool call>.txt` of the worker's worktree; files older than three days go. |
+| `PreCompact` (`compact_pins`) | Its output becomes part of the compaction instructions: the summary keeps the task id and attempt, GOAL, SCOPE, ACCEPTANCE, VERIFY, the open `finding` steers (`F1`..`Fn`), the Head and the uncommitted changes, word for word, in a section PINNED FACTS. The facts come from the attempt's brief file, the task's mailbox rows and `git` in the worktree. At most 9,000 characters (Claude Code caps this output at 10,000); the longest section is cut first, and a cut says so. |
+| `SessionStart`, matcher `compact` (`compact_pins`) | After a compaction, it gives the same facts back as `additionalContext`, with the same limit. |
+
+What the layered hook wraps. It looks through `cd <dir> &&`, `;` and newline, leading `NAME=value`, `export`, `env`, `time`
+and `scripts/with-slot.sh`, and tests the rest against `commands`. It wraps only when every earlier part is a `cd` or an
+assignment. When it is not sure it does not wrap: a pipe (`pytest | tail`), `||`, a later command (`pytest && make lint`), a
+background `&`, a redirect other than `2>&1` and `2>/dev/null`, a substitution, a group or subshell, a comment, a
+here-document, a trailing backslash, an unclosed quote, `run_in_background`. Read, Edit, Grep and every other tool are never
+touched. The wrapped command runs in the session's own shell, inside braces, so `cd`, the environment and shell functions
+behave as before; stdout and stderr are merged, as the session shows them. If the reducer itself fails, the wrapper prints the
+full output.
+
+A verifier gets no worker hooks. It judges raw evidence, its session is short, and it runs the tests itself, so a reduced
+output would be a different thing from the one it reports. A resume (`answer`, `steer`, a revision) uses the full session id
+(`sessionId`), which wakes the session with the settings it was started with, hooks included; the saved options are replayed
+only for a full id, and a short id makes a copy. When the job is gone and `run.py` resumes the conversation with the launch
+flags, it passes the hooks again and writes the config file again if it is missing.
+
+Risks. The layered hook rewrites the command the session runs, so the command shown in the transcript is the wrapper. It
+was tested in `auto` permission mode only; another mode may ask for permission on the rewritten command. A command that reads
+standard input, or that is interactive, is not a case it handles. The Haiku fallback can miss lines; it is off by default.
+Extraction rules are patterns for pytest, vitest, Playwright and common error lines; a tool with another format falls
+through to the unchanged output. In a measured spike, reduced output cut the cost of a failing test task by about 40% and
+kept every answer right; ordinary reads and passing output of other commands gain little.
+
+To turn it on, put this in `.agentic-team.toml` or `.agentic-team.local.toml`:
+
+```toml
+[hooks]
+enabled = true
+```
+
+It applies to the workers started after the change; a running worker keeps its saved settings.
 
 ## Workers on more than one Claude profile
 
@@ -1486,6 +1546,7 @@ The Manager keeps run state in the gitignored `.agentic-team/`:
 | `notify-to` | The Manager's session name, one line, from `run.py notify-to`. Each brief rendered while it is set has a notify step. The Manager sets it at Start. |
 | `manager.addr` | The Manager's inbox socket, as JSON, from `$CLAUDE_CODE_MESSAGING_SOCKET`; `run.py` refreshes it on every call that has the variable. Each brief's notify step names it as `uds:<path>`. |
 | `inbox/` | Per attempt: `<task>-<attempt>.ctx.json` (the context that `mailbox.py` reads), `<task>-<attempt>.addr` (written by the worker's `SessionStart` hook); `task-<id>-<attempt>.flag` (the pointer line that the `PostToolUse` hook shows while a message waits). Removed with the task's worktree. |
+| `hooks/task-<id>-<attempt>.json` | Per attempt, with `hooks.enabled`: the settings of the worker hooks (see Worker hooks): the commands and sizes, and the paths of the brief and the context file. Rewritten at each start of the attempt. |
 | `locks/task-<id>.lock` | The task's lock file (see Messaging). It is never removed. |
 | `sweep-cache.json` | The last `git status` result of each folder `record`'s sweep checked, with the folder's modification times and when it was checked (see Cleanup). Safe to delete: the next `record` checks every folder again. A damaged file reads as empty. |
 | `stopped-sessions` | The session ids that `run.py` stopped, one per line. `claude stop` keeps a row's state and removes its status and pid, so a stopped `working` row looks like a dead one; a row listed here counts as ended at once. |
@@ -1734,6 +1795,10 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.28.2
+
+Version 0.29.0 adds worker hooks. No lifecycle, phase or model change (`model/Lifecycle.tla` is unchanged: the hooks add no state, event or guard to the attempt lifecycle); no migration. A new `[hooks]` table in `.agentic-team.toml`, all off: `enabled = false` (the master switch), `layered = true`, `compact_pins = true`, `summarize_fallback = false`, `passthrough_chars = 20000`, `large_chars = 100000` and `commands`. With `enabled = false` the launch line, the settings and every file are as in 0.28.2. With `enabled = true`, a worker started afterwards gets a reducer for the output of test, build and log commands, and pinned facts that survive a compaction (see Worker hooks). Read the risks there first: the reducer rewrites the Bash commands of the worker, and it was tested in `auto` permission mode only. Turn it on for one project and read a few transcripts before you keep it. A worker that is already running keeps its saved settings. `run.py` adds `.agentic-team/hooks/` to the run directory; no other file changes.
 
 ### Upgrading from 0.28.1
 

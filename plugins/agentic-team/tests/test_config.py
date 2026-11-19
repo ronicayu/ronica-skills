@@ -57,6 +57,38 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("verify.seat", out + err)
 
+    def test_hooks_defaults_and_valid_values(self):
+        self.write(MINIMAL)
+        hooks = config.load(self.root)["hooks"]
+        self.assertEqual((hooks["enabled"], hooks["layered"], hooks["compact_pins"], hooks["summarize_fallback"],
+                          hooks["passthrough_chars"], hooks["large_chars"]), (False, True, True, False, 20000, 100000))
+        self.assertIn("make test*", hooks["commands"])
+        self.assertIn("gh run view --log", hooks["commands"])
+        self.write(MINIMAL + '[hooks]\nenabled = true\nsummarize_fallback = true\npassthrough_chars = 5000\n'
+                   'large_chars = 5000\ncommands = ["cargo test", "just *-test*"]\n')
+        self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
+        self.assertEqual(config.load(self.root)["hooks"]["commands"], ["cargo test", "just *-test*"])
+
+    def test_hooks_bad_values_are_named(self):
+        for text, expect in (
+                ('enabled = "yes"', "hooks.enabled must be true or false"),
+                ('layered = 1', "hooks.layered must be true or false"),
+                ('compact_pins = "on"', "hooks.compact_pins must be true or false"),
+                ('summarize_fallback = "no"', "hooks.summarize_fallback must be true or false"),
+                ('passthrough_chars = 0', "hooks.passthrough_chars must be a positive integer"),
+                ('large_chars = -5', "hooks.large_chars must be a positive integer"),
+                ('commands = "pytest"', "hooks.commands must be a list of command prefixes or globs"),
+                ('commands = [""]', "hooks.commands must be a list"),
+                ('commands = [" pytest"]', "hooks.commands must be a list"),
+                ('commands = [3]', "hooks.commands must be a list"),
+                ('passthrough_chars = 9000\nlarge_chars = 100', "hooks.large_chars must be at least hooks.passthrough_chars"),
+                ('enable = true', "hooks.enable")):
+            with self.subTest(text):
+                self.write(MINIMAL + "[hooks]\n" + text + "\n")
+                code, out, err = self.run_cli("check")
+                self.assertEqual(code, 2)
+                self.assertIn(expect, out + err)
+
     def test_defaults_from_minimal_file(self):
         self.write(MINIMAL)
         cfg = config.load(self.root)

@@ -85,6 +85,15 @@ always_pause = []           # decisions that always need the operator
 # carried_report_bytes = 3000   # most UTF-8 bytes of one carried report (previous attempt, upstream, worker report in a verify brief)
 # carried_total_bytes = 12000   # most UTF-8 bytes of all carried reports of one brief; at least carried_report_bytes
 
+[hooks]
+# enabled = false               # master switch: worker sessions get per-session hooks (README: Worker hooks); off by default
+# layered = true                # when enabled: reduce the output of the test, build and log commands below
+# compact_pins = true           # when enabled: keep task id, GOAL, SCOPE, ACCEPTANCE, VERIFY, findings, Head and uncommitted changes through a compaction
+# summarize_fallback = false    # when enabled: summarize a failed output over large_chars with `claude -p --model haiku` when no rule matches (7-12 s, uses the subscription)
+# passthrough_chars = 20000     # output below this size is left unchanged
+# large_chars = 100000          # the Haiku fallback runs only above this size; at least passthrough_chars
+# commands = ["make test*", "pytest", "python -m pytest", "uv run pytest", "vitest", "npx vitest", "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]  # a prefix, or a glob when it holds * ? [
+
 [rounds]
 # cap = 3                   # rounds (run.py round) a task may have without --attempt; a round does not count toward the attempt cap
 # verify = "always"         # "always": a round's PASS goes to a verifier, whatever risk and kind; "by-risk": the rule of a plain attempt
