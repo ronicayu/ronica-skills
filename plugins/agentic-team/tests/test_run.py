@@ -5566,7 +5566,7 @@ class RunTest(Base):
                               "verdict")["next"]
                 if attempt == 2:
                     self.assertEqual(hint[issues], "fix round: run.py launch 1")
-                    self.assertEqual(hint[blocked], 'answer it and run.py launch 2, or tg add "<question>" --type decision '
+                    self.assertEqual(hint[blocked], 'answer it and run.py launch 2, or run.py add "<question>" --type decision '
                                                     "--meta decider=operator --blocks 2")
                     self.assertEqual(hint[answered], f"decision #{gate} answered; run.py launch 3")
                     self.assertTrue(hint[filed].endswith(" Then run.py launch 4."), hint[filed])
@@ -5578,7 +5578,7 @@ class RunTest(Base):
                 cap = "(the cap is 3 attempts), or "
                 self.assertEqual(hint[issues], f"run.py abandon 1 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}run.py launch 1 --attempt 4 to override")
                 self.assertEqual(hint[blocked], f"run.py abandon 2 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}answer it and run.py launch 2 --attempt 4 "
-                                                'to override, or tg add "<question>" --type decision '
+                                                'to override, or run.py add "<question>" --type decision '
                                                 "--meta decider=operator --blocks 2")
                 self.assertEqual(hint[answered], f"decision #{gate} answered; run.py abandon 3 <died|tool-error|stuck|failed|scope-wrong|superseded|operator> --why \"<one line>\" {cap}"
                                                  "run.py launch 3 --attempt 4 to override")
@@ -7064,7 +7064,7 @@ class PrTest(Base):
         self.fake_host(head=head, state="CLOSED")
         closed = self.one(self.events("record"), "pr-closed")
         self.assertEqual(closed["detail"], f"{self.label()} closed without a merge")
-        self.assertIn(f'tg add "{self.label()} for #1 was closed: redo or drop?" --type decision --meta decider=operator', closed["next"])
+        self.assertIn(f'run.py add "{self.label()} for #1 was closed: redo or drop?" --type decision --meta decider=operator', closed["next"])
         self.fake_host(head=head, merge_state="DRAFT")
         self.assertEqual(self.one(self.events("record"), "pr-draft")["detail"], f"{self.label()} is a draft")
         self.fake_host(head=head, merge_state="DIRTY")
@@ -8327,7 +8327,7 @@ class PrTest(Base):
         changed = self.one(self.events("close", str(task)), "changed")
         self.assertEqual(changed["detail"], f"the host rebased {self.label()} onto main at {new[:7]}, and the diff changed "
                                             f"(different diff); pushed stays {head[:7]}, so run.py does not merge it")
-        self.assertIn(f'tg add "Rebase worktree-task-1 onto main by hand for {self.label()}" --type decision', changed["next"])
+        self.assertIn(f'run.py add "Rebase worktree-task-1 onto main by hand for {self.label()}" --type decision', changed["next"])
         meta = self.meta(task)
         self.assertEqual((meta["verdict_ref"], meta["pushed"]), (head, head))
         self.assertNotIn("host_rebase", meta)
@@ -8351,7 +8351,7 @@ class PrTest(Base):
         self.fake_host(head=head, merge_state="BEHIND", extra=extra)
         conflict = self.one(self.events("close", str(task)), "conflict")
         self.assertEqual(conflict["detail"], f"the host could not rebase {self.label()} onto main: {why}")
-        self.assertIn(f'tg add "Rebase worktree-task-1 onto main for {self.label()}" --type decision', conflict["next"])
+        self.assertIn(f'run.py add "Rebase worktree-task-1 onto main for {self.label()}" --type decision', conflict["next"])
         meta = self.meta(task)
         self.assertEqual((meta["verdict_ref"], meta["pushed"]), (head, head))
         self.assertNotIn("host_rebase", meta)
@@ -12558,12 +12558,12 @@ class RoundTest(Base):
     def test_119_conflict_hints_name_round(self):
         task, wt, head, onto = self.waiting()
         conflict = self.one(self.events("record"), "conflict")
-        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or tg add "
+        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or run.py add "
                                                     f'"Resolve {self.label()} conflicts with main" --type decision'),
                         conflict["next"])
         self.tg("edit", str(task), "--meta", "rounds=3")
         conflict = self.one(self.events("record"), "conflict")
-        self.assertTrue(conflict["next"].startswith('tg add "Resolve'), conflict["next"])
+        self.assertTrue(conflict["next"].startswith('run.py add "Resolve'), conflict["next"])
         self.assertTrue(conflict["next"].endswith("; or run.py round 1 rebase --attempt 2 to override the cap of 3 rounds"))
 
     def test_119_a_host_rebase_conflict_names_round(self):
@@ -12571,7 +12571,7 @@ class RoundTest(Base):
         self.fake_host(head=head, merge_state="BEHIND",
                        extra={"pr update-branch": {"stderr": "X Cannot update PR branch due to conflicts\n", "exit": 1}})
         conflict = self.one(self.events("close", str(task)), "conflict")
-        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or tg add "
+        self.assertTrue(conflict["next"].startswith("run.py round 1 rebase (a new attempt on the same request), or run.py add "
                                                     '"Rebase worktree-task-1 onto main for PR #1"'), conflict["next"])
 
     def local_waiting(self):
@@ -12593,7 +12593,7 @@ class RoundTest(Base):
         conflict = self.one(events, "conflict")
         self.assertIn(f"branch worktree-task-1 at {head[:7]}: it conflicts with main at {onto[:7]} (git merge-tree)",
                       conflict["detail"])
-        self.assertTrue(conflict["next"].startswith('run.py round 1 rebase (a new attempt on the same request), or tg add '
+        self.assertTrue(conflict["next"].startswith('run.py round 1 rebase (a new attempt on the same request), or run.py add '
                                                     '"Resolve merge of worktree-task-1 into main"'), conflict["next"])
         self.assertIn(f"onto {onto[:7]}", self.started(task)["detail"])
         new = self.resolve(wt, onto)
@@ -14105,6 +14105,238 @@ class Issue130Test(Base):
             self.assertIn("./agents/dependency-check.md", json.load(fh)["agents"])
         with open(os.path.join(base, "playbooks", "run.md"), encoding="utf-8") as fh:
             self.assertIn("agentic-team:dependency-check", fh.read())
+
+
+class AddTest(Base):
+    """agentic-team 0.28.1: `run.py add` settles the dependencies of a new task when it creates the task."""
+
+    def tasks(self):
+        return {t["id"]: t for t in self.tg("ls", "--status", "open", "in_progress")}
+
+    def deps(self, tid):
+        return [d["id"] for d in self.tg("show", str(tid))["depends_on"]]
+
+    def refused(self, *args):
+        out = self.run_cmd(*args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return out.stderr
+
+    def refused_add(self, *args):
+        out = self.run_cmd("--json", "add", *args)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        return json.loads(out.stdout), out.stderr
+
+    def added(self, *args):
+        events = self.events("add", *args)
+        return self.one(events, "added")["task"], events
+
+    def test_refuses_a_task_with_no_dependencies_and_lists_the_candidates(self):
+        near = self.add_task("Rework the parser module", scope="src/app/parser/core/; docs/")
+        events, err = self.refused_add("Fix the parser", "--meta", "scope=src/app/parser/core/lexer.py; not docs/")
+        self.assertEqual(len(self.tasks()), 1)
+        self.assertIn("--independent", err)
+        (candidate,) = events
+        self.assertEqual((candidate["event"], candidate["task"]), ("candidate", near))
+        self.assertIn("Rework the parser module [open]: SCOPE overlap: src/app/parser/core", candidate["detail"])
+        self.assertNotIn("linked", candidate["detail"])
+        text = self.run_cmd("add", "Fix the parser", "--meta", "scope=src/app/parser/core/lexer.py")
+        self.assertEqual(text.returncode, 2)
+        self.assertTrue(text.stdout.startswith(f"candidate #{near}: Rework the parser module"), text.stdout)
+
+    def test_depends_and_blocks_create_the_edges(self):
+        first, later = self.add_task("First", scope="a/"), self.add_task("Later", scope="b/")
+        new, events = self.added("Middle", "--depends", str(first), "--blocks", str(later))
+        self.assertEqual(self.deps(new), [first])
+        self.assertEqual(self.deps(later), [new])
+        self.assertEqual(self.one(events, "added")["detail"], f"Middle (depends on #{first}; blocks #{later})")
+        again, _ = self.added("Two ids", "--depends", str(first), str(later))
+        self.assertEqual(sorted(self.deps(again)), [first, later])
+
+    def test_independent_records_the_reason_in_meta(self):
+        new, _ = self.added("Standalone", "--independent", "touches no other task")
+        self.assertEqual(self.meta(new)["independent"], "touches no other task")
+        self.assertEqual(self.deps(new), [])
+        self.assertIn("--independent takes the reason", self.refused("add", "x", "--independent", " "))
+        self.assertIn("not both", self.refused("add", "x", "--independent", "r", "--depends", "1"))
+
+    def test_candidates_by_scope_issue_and_title(self):
+        by_scope = self.add_task("Unrelated words here", scope="pkg/core/api/v1/")
+        by_dir_prefix = self.add_task("Another one entirely", scope="pkg/sub/deep.py; not x/")
+        by_issue = self.add_task("Plain", notes="See gh issue view 42 and #7", scope="other/")
+        by_title = self.add_task("Rework billing invoice export", scope="billing/")
+        far = self.add_task("Nothing alike", scope="zzz/")
+        new, events = self.added("Cache the billing invoice export", "--notes", "Closes #42", "--meta", "scope=pkg/core/api/v1/a.py pkg/sub/deep.py; not zzz/",
+                                 "--independent", "checked")
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertEqual(set(found), {by_scope, by_dir_prefix, by_issue, by_title})
+        self.assertIn("SCOPE overlap: pkg/core/api/v1", found[by_scope])
+        self.assertIn("SCOPE overlap: pkg/sub/deep.py", found[by_dir_prefix])
+        self.assertIn("same #42 reference", found[by_issue])
+        self.assertIn("title words: billing, export, invoice", found[by_title])
+        self.assertNotIn(far, found)
+        order = [e["task"] for e in self.named(events, "candidate")]
+        self.assertEqual(order[-2:], [by_issue, by_title])
+        self.assertTrue(set(order[:2]) == {by_scope, by_dir_prefix})
+
+    def test_one_shared_title_word_and_common_words_are_not_a_match(self):
+        self.add_task("Update the billing page", scope="x/")
+        _, events = self.added("Rewrite billing totals", "--independent", "alone")
+        self.assertEqual(self.named(events, "candidate"), [])
+
+    def test_at_most_ten_candidates(self):
+        for n in range(12):
+            self.add_task(f"Task {n}", scope="shared/")
+        _, events = self.added("Another", "--meta", "scope=shared/x.py", "--independent", "alone")
+        self.assertEqual(len(self.named(events, "candidate")), 10)
+
+    def test_a_candidate_that_is_not_linked_is_shown_as_such(self):
+        linked, missed = self.add_task("One", scope="src/"), self.add_task("Two", scope="src/a/")
+        _, events = self.added("Three", "--meta", "scope=src/a/b.py", "--depends", str(linked))
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertTrue(found[linked].endswith("; linked"), found)
+        self.assertTrue(found[missed].endswith("; not linked"), found)
+
+    def test_a_candidate_shows_its_phase(self):
+        running = self.add_task("Running", scope="src/", start=True, phase="working")
+        _, events = self.added("New", "--meta", "scope=src/x.py", "--independent", "alone")
+        self.assertIn("[in_progress, working]", self.one(events, "candidate")["detail"])
+        self.assertEqual(self.one(events, "candidate")["task"], running)
+
+    def test_a_decision_needs_blocks_and_no_independent_or_candidates(self):
+        waiting = self.add_task("Waits", scope="src/")
+        err = self.refused("add", "Which way?", "--type", "decision", "--meta", "decider=operator")
+        self.assertIn("a decision needs --blocks", err)
+        self.assertIn("a decision needs --blocks", self.refused("add", "Which way?", "--type", "decision", "--independent", "x"))
+        new, events = self.added("Which way?", "--type", "decision", "--meta", "decider=operator", "--blocks", str(waiting),
+                                 "--meta", "scope=src/x.py")
+        self.assertEqual(self.named(events, "candidate"), [])
+        self.assertEqual(self.tg("show", str(new))["type"], "decision")
+        self.assertEqual(self.deps(waiting), [new])
+
+    def test_notes_meta_priority_and_the_other_options_reach_tg(self):
+        parent = self.add_task("Parent", scope="p/")
+        new, _ = self.added("Full", "--notes", "Why.\n- [ ] ok", "--meta", "scope=q/", 'verify=make "test"', "estimate=2",
+                            "--priority", "P1", "--parent", str(parent), "--due", "2027-01-15", "--independent", "alone")
+        task = self.tg("show", str(new))
+        self.assertEqual(task["notes"], "Why.\n- [ ] ok")
+        self.assertEqual((task["meta"]["scope"], task["meta"]["verify"], task["meta"]["estimate"]), ("q/", 'make "test"', 2))
+        self.assertEqual((task["priority"], task["parent"], task["due"]), ("P1", parent, "2027-01-15"))
+        self.assertEqual(task["meta"]["independent"], "alone")
+
+    def candidates(self, *args):
+        events = self.events("add", *args, "--independent", "alone")
+        return {e["task"]: e["detail"] for e in self.named(events, "candidate")}, [e["task"] for e in self.named(events, "candidate")]
+
+    def test_a_shared_reference_outranks_a_shallow_shared_directory(self):
+        crowd = [self.add_task(f"Backend {n}", scope="apps/api/tests/") for n in range(3)]
+        broad = [self.add_task(f"Wide {n}", scope="apps/") for n in range(2)]
+        partner = self.add_task("Partner", notes="Part of #962", scope="web/")
+        deep = self.add_task("Deep", scope="apps/api/tests/unit/")
+        found, order = self.candidates("New work", "--notes", "Part of #962", "--meta", "scope=apps/api/tests/ apps/api/tests/unit/z/")
+        self.assertEqual(order[:2], [deep, partner])
+        self.assertEqual(sorted(order[2:]), sorted(crowd + broad))
+        self.assertTrue(all("weak" in found[c] for c in crowd), found)
+        self.assertNotIn("weak", found[partner])
+        self.assertIn("shared directory only", found[broad[0]])
+        self.assertTrue(found[broad[0]].endswith("weak"), found[broad[0]])
+
+    def test_a_shallow_directory_is_not_weak_when_another_reason_matches(self):
+        both = self.add_task("Cache billing invoice export", scope="apps/")
+        found, _ = self.candidates("Rewrite billing invoice export", "--meta", "scope=apps/x.py")
+        self.assertIn("title words: billing, export, invoice", found[both])
+        self.assertNotIn("weak", found[both])
+
+    def test_the_text_after_a_not_change_marker_is_no_write_path(self):
+        for scope in ("src/a.py；不改 package.json", "src/a.py 不要改 package.json", "src/a.py. Do not touch package.json",
+                      "src/a.py, never package.json", "src/a.py NOT: package.json", "src/a.py; package.json"):
+            with self.subTest(scope=scope):
+                other = self.add_task("Elsewhere", scope="package.json")
+                found, _ = self.candidates("Mine", "--meta", f"scope={scope}")
+                self.assertNotIn(other, found)
+                self.tg("rm", str(other))
+        same = self.add_task("Same", scope="src/a.py")
+        found, _ = self.candidates("Mine", "--meta", "scope=src/a.py；不改 package.json")
+        self.assertIn("SCOPE overlap: src/a.py", found[same])
+
+    def test_scope_words_keep_a_leading_dot_and_lose_a_leading_dot_slash(self):
+        import run as runner
+        self.assertEqual(runner.scope_files("./src/x.py .github/ci.yml ./docs/"), {"src/x.py", ".github/ci.yml"})
+        self.assertEqual(runner.write_paths("./docs/ .github/"), {"docs", ".github"})
+        other = self.add_task("Other", scope=".github/ci.yml")
+        found, _ = self.candidates("Mine", "--meta", "scope=./.github/ci.yml")
+        self.assertIn(other, found)
+
+    def test_a_failed_tg_add_exits_1_and_leaves_no_task(self):
+        first = self.add_task("First", scope="a/")
+        for args in (("--depends", "999"), ("--blocks", "999"), ("--depends", str(first), "--blocks", str(first))):
+            with self.subTest(args=args):
+                out = self.run_cmd("add", "Broken", *args)
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertEqual([t["title"] for t in self.tg("ls")], ["First"])
+
+    def test_start_reaches_tg(self):
+        new, _ = self.added("Later", "--start", "2027-03-01", "--independent", "alone")
+        self.assertEqual(self.tg("show", str(new))["start"], "2027-03-01")
+
+    def test_an_external_and_a_milestone_are_created_with_their_options(self):
+        ext, _ = self.added("Vendor API", "--type", "external", "--promised", "2027-02-01", "--due", "2027-03-01", "--independent", "outside")
+        self.assertEqual(self.tg("show", str(ext))["type"], "external")
+        self.assertEqual(self.meta(ext)["promised"], "2027-02-01")
+        mile, _ = self.added("Launch", "--type", "milestone", "--due", "2027-04-01", "--depends", str(ext))
+        self.assertEqual(self.tg("show", str(mile))["type"], "milestone")
+
+    def test_an_open_external_decision_or_milestone_is_a_candidate_by_shared_reference_only(self):
+        external = self.tg("add", "Vendor reply", "--type", "external", "--promised", "2027-02-01", "--notes", "Waits on #20",
+                           "--meta", "scope=src/x.py")["id"]
+        decision = self.tg("add", "Which way?", "--type", "decision", "--notes", "About #20")["id"]
+        milestone = self.tg("add", "Launch", "--type", "milestone", "--due", "2027-04-01", "--notes", "Needs #20")["id"]
+        unrelated = self.tg("add", "Other vendor", "--type", "external", "--promised", "2027-02-01", "--notes", "#21 only")["id"]
+        found, order = self.candidates("Use vendor feed", "--notes", "Follow-up of #20", "--meta", "scope=src/x.py")
+        self.assertEqual(set(order), {external, decision, milestone})
+        self.assertIn("[external, open]: same #20 reference", found[external])
+        self.assertIn("[decision, open]", found[decision])
+        self.assertIn("[milestone, open]", found[milestone])
+        self.assertNotIn("SCOPE", found[external])
+        self.assertNotIn(unrelated, found)
+
+    def test_chinese_titles_match_on_three_shared_character_pairs(self):
+        near = self.add_task("修复账单导出的缓存失效问题", scope="x/")
+        some = self.add_task("修复账单页面样式", scope="y/")
+        common = self.add_task("任务修复支持改为", scope="z/")
+        found, _ = self.candidates("缓存账单导出的结果", "--meta", "scope=w/")
+        self.assertIn(near, found)
+        self.assertIn("title words: ", found[near])
+        self.assertNotIn(some, found)
+        self.assertNotIn(common, found)
+
+    def test_a_candidate_reachable_through_the_given_ids_is_linked_via_them(self):
+        base = self.add_task("Base", scope="src/core/a/b/")
+        middle = self.add_task("Middle", scope="src/core/a/b/", depends=[base])
+        after = self.add_task("After", scope="src/core/a/b/")
+        self.tg("dep", "add", str(after), str(middle))
+        stray = self.add_task("Stray", scope="src/core/a/b/")
+        _, events = self.added("New", "--meta", "scope=src/core/a/b/x.py", "--depends", str(middle), "--blocks", str(after))
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertTrue(found[middle].endswith("; linked"), found)
+        self.assertTrue(found[after].endswith("; linked"), found)
+        self.assertTrue(found[base].endswith(f"; linked (via #{middle})"), found)
+        self.assertTrue(found[stray].endswith("; not linked"), found)
+        _, events = self.added("Newer", "--meta", "scope=src/core/a/b/x.py", "--depends", str(after))
+        found = {e["task"]: e["detail"] for e in self.named(events, "candidate")}
+        self.assertTrue(found[base].endswith(f"; linked (via #{after})"), found)
+        self.assertTrue(found[middle].endswith(f"; linked (via #{after})"), found)
+
+    def test_a_decision_with_blocks_and_independent_is_refused(self):
+        waiting = self.add_task("Waits", scope="src/")
+        self.assertIn("not both", self.refused("add", "Q?", "--type", "decision", "--blocks", str(waiting), "--independent", "x"))
+        self.assertEqual(len(self.tasks()), 1)
+
+    def test_a_decision_hint_names_run_add_with_blocks(self):
+        import run as runner
+        task = {"id": 7, "blocks": []}
+        self.assertEqual(runner.decision_text("Q", task),
+                         'run.py add "Q" --type decision --meta decider=operator --blocks 7')
+        self.assertTrue(runner.decision_text("Q", {"id": 7, "blocks": [{"id": 8, "derived_status": "open"}]}).endswith("--blocks 8"))
 
 
 class RetroTest(Base):
