@@ -4,6 +4,9 @@
 Usage:
     run.py [--root DIR] [--tg PATH] [--run-dir DIR] [--json] <command> ...
 
+    add "<title>"  create a task and settle its dependencies in the same call:
+                   --depends/--blocks, or --independent "<reason>"; lists the
+                   open tasks that may be related
     launch <id>    render the brief, create the task worktree at the base (or
                    continue in it), start the worker, record the start
     adopt <id>     bring a branch started outside run.py under the Manager
@@ -1826,9 +1829,15 @@ def carried_body(body, pointers, cap, keep=(), only=None, always=False, hard=Non
     return "\n".join(out + tail)
 
 
+def strip_dot_slash(word):
+    """`word` without a leading `./` or comma; a leading dot stays (`.github/x.yml`)."""
+    word = word.lstrip(",")
+    return word[2:] if word.startswith("./") else word
+
+
 def scope_files(text):
     """The path-like words of `text`, without a trailing slash or dot."""
-    return {t for t in (w.strip(".,").rstrip("/") for w in SCOPE_TOKEN.findall(text or ""))
+    return {t for t in (strip_dot_slash(w).rstrip(".,").rstrip("/") for w in SCOPE_TOKEN.findall(text or ""))
             if t and ("/" in t or t.rsplit(".", 1)[-1] in PATH_EXTENSIONS)}
 
 
@@ -2864,8 +2873,8 @@ def open_blocks(task, snap=None):
 
 
 def decision_text(text, task, snap=None, extra=""):
-    blocks = open_blocks(task, snap)
-    return f'tg add "{text}" --type decision --meta decider=operator{extra}' + (f" --blocks {' '.join(map(str, blocks))}" if blocks else "")
+    blocks = open_blocks(task, snap) or [task["id"]]
+    return f'run.py add "{text}" --type decision --meta decider=operator{extra} --blocks {" ".join(map(str, blocks))}'
 
 
 # ------------------------------------------------------------------ launch
@@ -4386,7 +4395,7 @@ def mailbox_events(run, task, attempt, th, deliver_ok=True):
                      f"#{ask['id']} by {ask.get('author')}: {question}"
                      + ("" if blocking else " (does not block; the worker goes on with its Default)"),
                      f"run.py answer {tid} --ask {ask['id']} --file <answer.md>; or, when only the operator can answer, "
-                     f'tg add "<question>" --type decision --meta decider=operator --meta ask={ask["id"]} --blocks {tid}, '
+                     f'run.py add "<question>" --type decision --meta decider=operator --meta ask={ask["id"]} --blocks {tid}, '
                      f"then run.py answer {tid} --ask {ask['id']} --decision <id>")
         elif blocking:
             run.emit("asking", tid, attempt, None, f"#{ask['id']} waits for an answer: {question}")
@@ -4761,7 +4770,7 @@ def record_arrived(run, snap, task, attempt, result):
     elif status == "ISSUES":
         nxt = retry_next(tid, attempt, lead="fix round: ", task=task)
     else:
-        nxt = (retry_next(tid, attempt, before="answer it and ", task=task) + ', or tg add "<question>" --type decision '
+        nxt = (retry_next(tid, attempt, before="answer it and ", task=task) + ', or run.py add "<question>" --type decision '
                f"--meta decider=operator --blocks {tid}")
     run.emit("arrived", tid, attempt, None, detail, nxt)
 
@@ -8146,6 +8155,179 @@ def cmd_triage(run, args):
              f"result #{result_id} line {number} -> {' '.join([kind, *rest])} (result #{row['id']})")
 
 
+TITLE_COMMON = frozenset("""with from that this into when then than also have will must should only each their there
+about after before task tasks make adds add fix fixes update updates support using used uses new more less over under
+between same other some none work""".split())
+CJK_COMMON = frozenset("任务 修复 改为 支持 实现 添加 增加 更新 优化 相关 功能 处理 调整 新增 删除 使用 进行 需要".split())
+CJK_RUN = re.compile(r"[㐀-䶿一-鿿]+")
+ISSUE_REF = re.compile(r"(?:gh\s+(?:issue|pr)\s+view\s+|#)(\d+)")
+NOT_WRITE = re.compile(r"[;；]|不改|不要改|\bdo not\b|\bnever\b|\bnot:", re.I)  # what follows names paths the task must not change
+MAX_CANDIDATES = 10
+STRONG_SEGMENTS = 4  # a shared directory this deep names one area; a shallower one (apps/api/tests) names a layer of the repository
+
+
+def meta_pairs(pairs):
+    """The `key=value` pairs of `--meta`, read as tg reads them: a JSON value, else the text."""
+    meta = {}
+    for pair in pairs:
+        key, _, raw = pair.partition("=")
+        try:
+            meta[key] = json.loads(raw)
+        except ValueError:
+            meta[key] = raw
+    return meta
+
+
+def write_paths(scope):
+    """The paths a SCOPE value lets the task write: the text before the first `;`, `；` or "do not change" marker, a
+    directory with its slash included."""
+    head = NOT_WRITE.split(str(scope or ""), maxsplit=1)[0]
+    dirs = {strip_dot_slash(w).rstrip(".,").rstrip("/") for w in SCOPE_TOKEN.findall(head) if w.endswith("/")}
+    return scope_files(head) | (dirs - {""})
+
+
+def shared_path(a, b):
+    """The path that two write paths share (the shallower, when one lies inside the other), or None."""
+    if a == b or a.startswith(b + "/"):
+        return b
+    return a if b.startswith(a + "/") else None
+
+
+def is_file_path(path):
+    return path.rsplit("/", 1)[-1].rsplit(".", 1)[-1] in PATH_EXTENSIONS and "." in path.rsplit("/", 1)[-1]
+
+
+def scope_overlaps(mine, theirs):
+    """(strong, shallow): the shared paths of two scopes. Strong: the same file, or a shared directory of 4 or more
+    segments."""
+    strong, shallow = set(), set()
+    for a in mine:
+        for b in theirs:
+            if (shared := shared_path(a, b)) is None:
+                continue
+            (strong if (a == b and is_file_path(a)) or shared.count("/") + 1 >= STRONG_SEGMENTS else shallow).add(shared)
+    return sorted(strong), sorted(shallow)
+
+
+def title_words(title):
+    return {w for w in re.findall(r"[a-z]{4,}", title.lower()) if w not in TITLE_COMMON}
+
+
+def title_bigrams(title):
+    return {run[i:i + 2] for run in CJK_RUN.findall(title) for i in range(len(run) - 1)} - CJK_COMMON
+
+
+def title_overlap(a, b):
+    """The words (two or more of 4+ letters) or the CJK bigrams (three or more) that two titles share."""
+    words, bigrams = sorted(title_words(a) & title_words(b)), sorted(title_bigrams(a) & title_bigrams(b))
+    return words if len(words) >= 2 else bigrams if len(bigrams) >= 3 else []
+
+
+def add_candidates(tasks, title, notes, scope):
+    """(strength, task, reasons, weak) for each open or in-progress node that may be related to the new task, the
+    strongest first. Strength: a shared file or a directory of 4 or more segments 4, a shared #n reference 3, a shallow shared directory 2,
+    title words 1. A node that is not a task (an external, a decision) matches by a shared reference only."""
+    mine, refs = write_paths(scope), set(ISSUE_REF.findall(notes or ""))
+    found = []
+    for task in tasks:
+        if task["status"] not in ("open", "in_progress"):
+            continue
+        reasons, strength, shallow_only = [], 0, False
+        if task.get("type", "task") == "task":
+            strong, shallow = scope_overlaps(mine, write_paths((task.get("meta") or {}).get("scope")))
+            if strong:
+                reasons.append("SCOPE overlap: " + ", ".join(strong[:3]))
+                strength = 4
+            if shallow:
+                reasons.append("SCOPE overlap (shared directory only): " + ", ".join(shallow[:3]))
+                strength, shallow_only = strength or 2, not strong
+        if same := sorted(refs & set(ISSUE_REF.findall(task.get("notes") or "")), key=int):
+            reasons.append(f"same {', '.join('#' + n for n in same)} reference")
+            strength, shallow_only = max(strength, 3), False
+        if task.get("type", "task") == "task" and (shared := title_overlap(title, task["title"])):
+            reasons.append("title words: " + ", ".join(shared[:4]))
+            strength, shallow_only = strength or 1, False
+        if reasons:
+            found.append((strength, task, reasons, shallow_only))
+    found.sort(key=lambda c: (-c[0], -len(c[2]), c[1]["id"]))
+    return found[:MAX_CANDIDATES]
+
+
+def link_paths(tasks, depends, blocks):
+    """task id -> the given id it is reached through: along `depends_on` from each --depends id (what that task needs),
+    and against it from each --blocks id (what needs that task), at any depth."""
+    ids = lambda rows: [r["id"] if isinstance(r, dict) else r for r in rows or []]
+    needs = {t["id"]: ids(t.get("depends_on")) for t in tasks}
+    needed_by = {}
+    for tid, deps in needs.items():
+        for dep in deps:
+            needed_by.setdefault(dep, []).append(tid)
+    reached = {}
+    for start, graph in [(d, needs) for d in depends] + [(b, needed_by) for b in blocks]:
+        todo = list(graph.get(start, []))
+        while todo:
+            tid = todo.pop()
+            if tid not in reached:
+                reached[tid] = start
+                todo += graph.get(tid, [])
+    return reached
+
+
+def candidate_detail(task, reasons, weak, link):
+    phase = (task.get("meta") or {}).get("phase")
+    kind = task.get("type", "task")
+    where = (kind + ", " if kind != "task" else "") + task["status"] + (f", {phase}" if phase else "")
+    mark = {None: "", True: "; linked", False: "; not linked"}.get(link, f"; linked (via #{link})")
+    return f"{task['title']} [{where}]: {'; '.join(reasons)}{'; weak' if weak else ''}{mark}"
+
+
+def cmd_add(run, args):
+    """Create a task with its dependencies settled: `--depends` and `--blocks`, or `--independent "<reason>"`. Without
+    them it refuses and lists the open tasks that may be related, so the Manager chooses at the moment of creation."""
+    is_decision = args.type == "decision"
+    linked = set(args.depends) | set(args.blocks)
+    independent = args.independent.strip() if args.independent is not None else None
+    if is_decision and not args.blocks:
+        raise Refused('a decision needs --blocks <ids>, the tasks that wait for the answer: run.py add "<question>" '
+                      "--type decision --meta decider=operator --blocks <ids>")
+    if independent == "":
+        raise Refused('--independent takes the reason: --independent "<why no task is related>"')
+    if independent is not None and linked:
+        raise Refused("give --depends/--blocks or --independent, not both")
+    everything = run.tg("ls") or []  # not --status: a milestone or a parent has a computed status that the filter skips
+    found = [] if is_decision else add_candidates(everything, args.title, args.notes, meta_pairs(args.meta).get("scope"))
+    reached = link_paths(everything, args.depends, args.blocks)
+
+    def link_of(task):
+        if independent is not None or not linked:
+            return None
+        return True if task["id"] in linked else reached.get(task["id"], False)
+
+    if not (is_decision or linked or independent is not None):
+        for _, task, reasons, weak in found:
+            run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, None))
+        raise Refused('settle the dependencies of the new task: --depends <ids> (it needs their result or code), --blocks <ids> '
+                      '(they need it), or --independent "<why no task is related>"; the candidates above may be related')
+    cmd = ["add", args.title]
+    for flag, value in (("--notes", args.notes), ("--type", args.type), ("--parent", args.parent), ("--start", args.start),
+                        ("--due", args.due), ("--promised", args.promised), ("--priority", args.priority)):
+        if value is not None:
+            cmd += [flag, str(value)]
+    meta = list(args.meta) + ([meta_arg("independent", independent)] if independent is not None else [])
+    if meta:
+        cmd += ["--meta", *meta]
+    for flag, ids in (("--depends", args.depends), ("--blocks", args.blocks)):
+        if ids:
+            cmd += [flag, *map(str, ids)]
+    tid = run.tg(*cmd)["id"]
+    links = [f"depends on {', '.join('#%d' % i for i in args.depends)}" if args.depends else "",
+             f"blocks {', '.join('#%d' % i for i in args.blocks)}" if args.blocks else "",
+             f"independent: {independent}" if independent is not None else ""]
+    run.emit("added", tid, None, None, f"{args.title} ({'; '.join(l for l in links if l) or 'no links'})")
+    for _, task, reasons, weak in found:
+        run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
+
+
 def cmd_abandon(run, args):
     tid = args.id
     why = (args.why or "").strip()
@@ -8560,7 +8742,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox,depcheck,triage}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -8631,6 +8813,16 @@ def build_parser():
     p.add_argument("--pr", type=int, required=True, help="the number of the request to follow (another task's)")
     p.add_argument("--keep-old", action="store_true", help="leave the task's own request open (default: close it with "
                    "a comment that names the new one)")
+
+    p = sub.add_parser("add", help="create a task with its dependencies settled: --depends/--blocks or --independent")
+    p.add_argument("title")
+    p.add_argument("--depends", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks this one needs first")
+    p.add_argument("--blocks", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks that need this one first")
+    p.add_argument("--independent", metavar="REASON", help="no task is related; recorded as meta independent=<reason>")
+    p.add_argument("--notes", default="")
+    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE")
+    for flag in ("type", "parent", "start", "due", "promised", "priority"):
+        p.add_argument("--" + flag, type=int if flag == "parent" else None)
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
     p.add_argument("id", type=int)
@@ -8717,7 +8909,7 @@ def build_parser():
 
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
-            "merged": cmd_merged, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
+            "merged": cmd_merged, "add": cmd_add, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
             "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 

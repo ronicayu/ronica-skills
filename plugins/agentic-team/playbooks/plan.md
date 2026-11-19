@@ -45,10 +45,19 @@ adds what Taskgraph cannot decide.
    tasks must write the same file or area, record the order as a dependency.
    Record only a dependency that is real, and split a task that is too large to
    finish in one attempt (every slot busy: the run playbook, step 4).
+   Settle both when you create the task, with `run.py add "<title>" ...`
+   (`"${CLAUDE_PLUGIN_ROOT}/scripts/run" add`): it takes the options of `tg add`,
+   needs `--depends`, `--blocks` or `--independent "<reason>"`, and lists the open
+   tasks that may be related, with the reason (same SCOPE path, same issue or
+   request, similar title). Write the paths a task must not change after `;` in
+   its SCOPE: only the paths before it count as write paths. Read the list; a candidate shown as `not linked` is
+   one you may have missed. Never create a task with `tg add`.
 4. **Relay context through dependencies.** A task that needs an upstream
    result depends on that task. The brief pastes the upstream result.
    A task that builds on code in an open request or another task's branch
-   depends on that task too. The dependency check before each launch (the run
+   depends on that task too. Look the other way as well: which existing tasks
+   must come after the new one (they read its output or write after it)? Name
+   them with `--blocks`. The dependency check before each launch (the run
    playbook, step 4) finds one that you missed; it does not replace this step.
 5. **Ask through decisions.** A question only the operator can answer is a
    `decision` node, written as Escalation in the Manager index says.
