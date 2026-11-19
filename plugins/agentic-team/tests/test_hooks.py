@@ -27,6 +27,7 @@ def load(name):
 
 layered, compact = load("layered"), load("compact")
 
+NOTICE = "[agentic-team hook: the full output is saved to "
 COMMANDS = ["make test*", "pytest", "vitest", "pnpm test*", "playwright", "gh run view --log", "docker logs"]
 
 PYTEST_PASS = "\n".join(
@@ -232,6 +233,7 @@ class Layered(unittest.TestCase):
     def test_output_under_the_pass_through_size_is_unchanged_and_leaves_no_file(self):
         self.tool("pytest", "short output\n1 passed", 0)
         out, code = self.run_wrapped("pytest", passthrough_chars=10000)
+        self.assertTrue(out.splitlines()[0].startswith(NOTICE))
         self.assertEqual((out.splitlines()[1:], code), (["short output", "1 passed"], 0))
         self.assertIn(os.path.join(self.dir, "out", "toolu_01.txt"), out.splitlines()[0])
         self.assertEqual(os.listdir(os.path.join(self.dir, "out")), [])
@@ -247,6 +249,7 @@ class Layered(unittest.TestCase):
             fh.write("#!/bin/sh\npwd\necho \"$MODE\"\nexit 3\n")
         os.chmod(os.path.join(self.bin, "pytest"), 0o755)
         out, code = self.run_wrapped("cd sub && MODE=fast pytest", passthrough_chars=1000)
+        self.assertTrue(out.splitlines()[0].startswith(NOTICE))
         self.assertEqual((out.splitlines()[1:], code), ([f"{self.dir}/sub", "fast"], 3))
 
     def test_a_failing_reducer_prints_the_full_output(self):
@@ -256,6 +259,7 @@ class Layered(unittest.TestCase):
         os.makedirs(cfg["saved_dir"], exist_ok=True)
         done = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True,
                               env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
+        self.assertTrue(done.stdout.startswith(NOTICE))
         self.assertEqual((done.returncode, done.stdout.strip().split("\n", 1)[1]), (1, PYTEST_FAIL.strip()))
 
     # --- the policy, on text
@@ -286,10 +290,13 @@ class Layered(unittest.TestCase):
             self.assertEqual(self.reduce(text, 0, summarize_fallback=True, large_chars=100)[1], "pass")
             summarize.assert_not_called()
 
-    def test_an_empty_summary_falls_back_to_the_unchanged_output(self):
+    def test_an_empty_summary_shows_the_last_lines_and_the_path(self):
         text = "noise line\n" * 200
         with unittest.mock.patch.object(layered, "summarize", return_value=""):
-            self.assertEqual(self.reduce(text, 1, summarize_fallback=True, large_chars=100), (text, "fail-unchanged"))
+            out, how = self.reduce(text, 1, summarize_fallback=True, large_chars=100)
+        self.assertEqual(how, "fail-tail")
+        self.assertIn("no summary; the last lines", out)
+        self.assertIn("full.txt", out)
 
     def test_summarize_calls_haiku_through_claude_p(self):
         done = subprocess.CompletedProcess([], 0, stdout="  summary \n", stderr="")
@@ -445,6 +452,63 @@ class Layered(unittest.TestCase):
         self.assertEqual((lines[0], lines[-1]), ("first", "last"))
         self.assertTrue(any("cut from the middle" in ln for ln in lines))
         self.assertLessEqual(os.path.getsize(path), 20200)
+
+    def test_more_watch_and_endless_forms_are_not_wrapped(self):
+        for cmd in ("vitest watch", "make test-watch", "pytest -f", "pytest --looponfail", "pytest --pdb tests/",
+                    "python -m pytest --trace", "pnpm test:watch", "npx vitest watch src"):
+            self.assertIsNone(self.wrapped(cmd), cmd)
+        self.assertIsNotNone(self.wrapped("pytest -x tests/"))
+
+    def test_the_haiku_fallback_is_not_killed_by_the_alarm_and_a_timeout_shows_the_last_lines(self):
+        text = "noise line\n" * 300
+        cfg = config(self.dir, summarize_fallback=True, large_chars=100, summarize_seconds=1)
+        with open(os.path.join(self.dir, "o.txt"), "w") as fh:
+            fh.write(text)
+        stub = os.path.join(self.dir, "run.py")
+        with open(stub, "w") as fh:
+            fh.write("import sys, time, subprocess\nsys.path.insert(0, %r)\nimport layered\nlayered.REDUCE_SECONDS = 1\n"
+                     "def fake(argv, **kw):\n    time.sleep(2.5)\n    if kw['timeout'] < 2:\n        raise subprocess.TimeoutExpired(argv, kw['timeout'])\n"
+                     "    return subprocess.CompletedProcess(argv, 0, stdout='slow summary', stderr='')\n"
+                     "layered.subprocess.run = fake\nsys.exit(layered.main())\n" % HOOKS)
+        def run(seconds):
+            config(self.dir, summarize_fallback=True, large_chars=100, summarize_seconds=seconds)
+            return subprocess.run([sys.executable, stub, "reduce", "--config", cfg["config_file"], "--file", os.path.join(self.dir, "o.txt"),
+                                   "--rc", "1", "--cmd-b64", "eA=="], capture_output=True, text=True)
+        done = run(5)  # slower than the 1 s alarm: the alarm is off while Haiku runs
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("slow summary", done.stdout)
+        with open(os.path.join(self.dir, "o.txt"), "w") as fh:
+            fh.write(text)
+        done = run(1)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("no summary; the last lines", done.stdout)
+        self.assertIn("o.txt", done.stdout)
+
+    def test_repeated_key_lines_collapse_and_a_root_cause_in_the_middle_survives(self):
+        flood = "".join(f"ERROR tests/t_{i}.py::t_{i} fixture failed\n" for i in range(45))
+        text = flood + "Caused by: ConnectionRefusedError: db is down\n" + flood.replace("ERROR", "ERROR  ") + "=== 90 errors ===\n"
+        text += "".join(f"ERROR other {i}\n" for i in range(0, 0))
+        out = self.kept(text)
+        self.assertIn("Caused by: ConnectionRefusedError: db is down", out)
+        self.assertIn("(×45)", out)
+        self.assertLessEqual(out.count("fixture failed"), 17)  # one per group, and the 15 last lines
+
+    def test_the_first_root_cause_line_is_kept_even_when_unique_keys_exceed_the_budget(self):
+        text = "".join(f"ERROR unique failure {chr(97 + i % 26)}{'x' * i}\n" for i in range(30))
+        text += "E   KeyError: 'root'\n" + "".join(f"FAILED t::{chr(97 + i % 26)}{'y' * i}\n" for i in range(100))
+        self.assertIn("E   KeyError: 'root'", self.kept(text))
+
+    def test_the_notice_never_names_a_file_that_is_unexplained(self):
+        self.assertIn("when the output is reduced", layered.wrap("pytest", config(self.dir), "t"))
+
+    def test_cutting_a_big_file_replaces_it_whole(self):
+        path = os.path.join(self.dir, "huge2.txt")
+        with open(path, "w") as fh:
+            fh.write("x\n" * 20000)
+        with unittest.mock.patch.object(layered, "FILE_CAP", 10000), unittest.mock.patch.object(layered.os, "replace", wraps=os.replace) as rep:
+            layered.read_lines(path)
+        rep.assert_called_once_with(path + ".cut", path)
+        self.assertFalse(os.path.exists(path + ".cut"))
 
     def test_old_saved_files_are_pruned(self):
         out = os.path.join(self.dir, "out")

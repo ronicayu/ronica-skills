@@ -178,9 +178,11 @@ def matches(target, patterns):
 def never_ends(target):
     """A command that follows or watches, or that waits for a person: its output would stay hidden until a timeout."""
     words_of = target.split()
-    if any(w in FOLLOWING or w.startswith(("--watch=", "--follow=")) for w in words_of):
+    if any(w in FOLLOWING or w.startswith("--follow=") or "watch" in w.lower() for w in words_of):
         return True
     if "vitest" in words_of and "-w" in words_of:
+        return True
+    if "pytest" in words_of and any(w in ("-f", "--looponfail", "--pdb", "--trace") for w in words_of):
         return True
     return "-f" in words_of and "logs" in words_of[:3]
 
@@ -200,7 +202,7 @@ def wrap(cmd, cfg, tool_use_id):
     reduce = (f"{q(sys.executable)} -S {q(os.path.abspath(__file__))} reduce --config {q(cfg['config_file'])} "
               f"--file {q(out)} --rc \"$__at_rc\" --cmd-b64 {base64.b64encode(cmd.encode()).decode()}"
               + (" --log" if is_log(target) else ""))
-    notice = q(f"[agentic-team hook: the full output goes to {out}]")
+    notice = q(f"[agentic-team hook: the full output is saved to {out} when the output is reduced]")
     return (f"printf '%s\\n' {notice}; __at_rc=0; {{ {cmd}\n}} > {q(out)} 2>&1 || __at_rc=$?; "
             f"{reduce} || cat {q(out)}; (exit \"$__at_rc\")")
 
@@ -216,8 +218,9 @@ def read_lines(path):
             fh.seek(size - half)
             tail = fh.read(half)
         marker = f"\n[agentic-team hook: {size - 2 * half} bytes cut from the middle of the output]\n".encode()
-        with open(path, "wb") as fh:
+        with open(path + ".cut", "wb") as fh:
             fh.write(head + marker + tail)
+        os.replace(path + ".cut", path)
     with open(path, encoding="utf-8", errors="replace") as fh:
         return [ln if len(ln) <= LINE_CAP else ln[:LINE_CAP] + " [line cut]" for ln in fh.read().splitlines()]
 
@@ -225,12 +228,16 @@ def read_lines(path):
 LOG_PREFIX = re.compile(r"^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?")
 
 
+ROOT = re.compile(r"^E\s|Error:|Traceback|Caused by")
+SAME = re.compile(r"\d+|(?:[\w.-]*/)+[\w.-]*")
+
+
 def extract(lines, log=False):
     """(kept, omitted, key, useful, summary). `kept` is the lines to show in their order: the FAILED and error lines first (at
     most KEY_MAX), then file:line references up to MAX_LINES, then the last TAIL_LINES lines. `omitted` counts the
     matching lines left out; `key` is the number of FAILED and error lines kept, `useful` those and the references.
     `summary` holds the result lines at the end."""
-    keys, refs = [], []
+    keys, refs, root = [], [], None
     for i, line in enumerate(lines):
         head = line[:LINE_CAP]
         if log:  # `gh run view --log` puts job and step columns and a timestamp before the text
@@ -239,28 +246,38 @@ def extract(lines, log=False):
             continue
         if FAILED.search(head) or ERROR.search(head):
             keys.append(i)
+            if root is None and ROOT.search(head):
+                root = i
         elif FILE_LINE.search(head):
             refs.append(i)
     total = len(keys) + len(refs)
+    first, counts = {}, {}  # near-duplicate key lines (digits and paths normalised) count once, with their number
+    for i in keys:
+        same = SAME.sub("#", lines[i][:LINE_CAP])
+        first.setdefault(same, i)
+        counts[first[same]] = counts.get(first[same], 0) + 1
+    keys = sorted(counts)
     if len(keys) > KEY_MAX:
-        keys = keys[:KEY_MAX // 2] + keys[-(KEY_MAX // 2):]
+        keep = keys[:KEY_MAX // 2] + keys[-(KEY_MAX // 2):] + ([root] if root in counts else [])
+        keys = sorted(set(keep))
     refs = refs[:max(MAX_LINES - len(keys), 0)]
     chosen = sorted(set(keys + refs) | set(range(max(len(lines) - TAIL_LINES, 0), len(lines))))
     seen, kept = set(), []
     for i in chosen:
         if lines[i] not in seen:
             seen.add(lines[i])
-            kept.append(lines[i])
+            kept.append(lines[i] + (f" (×{counts[i]})" if counts.get(i, 1) > 1 else ""))
     useful = len(set(keys + refs))
-    return kept, total - useful, len(keys), useful, [ln for ln in lines[::-1] if RESULT.search(ln)][:RESULT_LINES][::-1]
+    shown = sum(counts.get(i, 1) for i in keys) + len(refs)
+    return kept, total - shown, len(keys), useful, [ln for ln in lines[::-1] if RESULT.search(ln)][:RESULT_LINES][::-1]
 
 
-def summarize(text, cmd):
+def summarize(text, cmd, seconds=30):
     prompt = ("A coding agent ran a command that failed. The output is long and no rule found an error line. Summarize "
               "what failed in at most 10 lines. Do not invent lines.\n"
               f"Command: {cmd}\n--- OUTPUT (head and tail) ---\n{text[:30000]}\n...\n{text[-30000:]}")
     done = subprocess.run(["claude", "-p", "--model", "haiku", "--no-session-persistence", "--tools=", prompt],
-                          capture_output=True, text=True, timeout=90, cwd=os.path.expanduser("~"))
+                          capture_output=True, text=True, timeout=seconds, cwd=os.path.expanduser("~"))
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
@@ -282,12 +299,14 @@ def reduce_output(lines, size, rc, cfg, cmd, path, log=False):
         shown = kept + [s for s in summary if s not in kept]
         return f"[agentic-team hook: exit {rc}; {copied}]\n" + "\n".join(shown) + "\n" + pointer, "fail-rules"
     if cfg.get("summarize_fallback") and size > cfg["large_chars"]:
+        signal.alarm(0)  # the fallback has its own timeout
         try:
-            said = summarize("\n".join(lines), cmd)
+            said = summarize("\n".join(lines), cmd, cfg.get("summarize_seconds", 30))
         except (OSError, subprocess.SubprocessError):
             said = ""
         if said:
             return f"[agentic-team hook: exit {rc}; Haiku summary, it can miss lines]\n{said}\n{pointer}", "fail-summary"
+        return "[agentic-team hook: exit " + f"{rc}; no summary; the last lines]\n" + "\n".join(kept) + "\n" + pointer, "fail-tail"
     return None, "fail-unchanged"
 
 

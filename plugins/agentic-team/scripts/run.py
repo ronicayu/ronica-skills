@@ -2143,7 +2143,7 @@ def write_hooks_config(run, tid, attempt):
     path = hooks_config_file(run, tid, attempt)
     os.makedirs(hooks_dir(run), exist_ok=True)
     data = {"layered": cfg["layered"], "compact_pins": cfg["compact_pins"], "summarize_fallback": cfg["summarize_fallback"],
-            "passthrough_chars": cfg["passthrough_chars"], "large_chars": cfg["large_chars"], "commands": cfg["commands"],
+            "passthrough_chars": cfg["passthrough_chars"], "large_chars": cfg["large_chars"], "summarize_seconds": cfg["summarize_seconds"], "commands": cfg["commands"],
             "task": tid, "attempt": attempt, "worktree": os.path.join(run.wt_dir, f"task-{tid}"), "brief": os.path.join(run.run_dir, "briefs", f"task-{tid}-{attempt}.md"),
             "ctx": attempt_file(run, tid, attempt, "ctx.json"), "saved_dir": os.path.join(run.wt_dir, f"task-{tid}", SCRATCH_DIR, "hook-output")}
     with open(path, "w", encoding="utf-8") as fh:
