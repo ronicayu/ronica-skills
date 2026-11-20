@@ -17,6 +17,9 @@ EVENTS: dict[str, str] = {
     "warn": "A warning that does not stop the command, for example a role file that is too long.",
     "role": "One task role, as `run.py roles` lists it.",
     "role-broken": "A role file with an error, as `run.py roles` lists it; the command exits 1.",
+    "workflow": "One workflow, as `run.py workflows` lists it: its source, description and stages.",
+    "workflow-broken": "A workflow file or a stage library file with an error, as `run.py workflows` lists it; the command exits 1.",
+    "workflows-checked": "`run.py workflows --check` found no problem.",
     "sessions-restored": "The local Taskgraph cache had no `sessions` meta; run.py rebuilt it from `claude agents`.",
     "sessions-lost": "A task in progress has no `sessions` meta and no matching session row; its worker may run on another machine.",
     # verify

@@ -329,6 +329,16 @@ COMMAND_DOCS: dict[str, str] = {
      "or `project, extends plugin:<name>`), what it fits, its tier, verify kind and skills. `--json` prints one "
      "object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it "
      "before a `launch` fails. See [Roles](roles-and-briefs.md#roles)."),
+    "workflows": ("Lists every workflow, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, "
+     "or `project, extends plugin:<name>`), its description and its stages, in file order, as `prd → ux? → spec → impl* → "
+     "test` (`?` marks an optional stage, `*` a stage that may be split). `--json` prints one object per workflow, with each "
+     "stage's resolved role, verify kind, approval, estimate and `after`. Read only. A broken file is listed with its "
+     "problems, each as `<file>:<line>: <problem>`, and the command exits 1; a problem of `stages.toml` is listed the same "
+     "way. `--check` prints only the problems, or one `workflows-checked` line; it is the same check that `config.py check` "
+     "runs when `[workflow_policy] enabled` is true or the project has workflow files. `--pick-prompt` prints the prompt that "
+     "asks which workflow fits a piece of work (`--title`, `--notes-file`, `--scope`): the task text and the workflows as "
+     "`A. <name>: <description>`, with `unsure` among them, in an order that `--seed` fixes; the same seed gives the same "
+     "order. See [Workflows](roles-and-briefs.md#workflows)."),
     "check-report": ("Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a "
      "`Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and "
      "`leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines "

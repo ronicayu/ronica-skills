@@ -173,6 +173,68 @@ The `launched` line says where the tier came from, for example `tier judgement (
 
 A role's `skills` are loaded by the worker with the Skill tool, as its brief tells it. Skills belong to a Claude profile, so a worker on another profile may not have them. The brief tells the worker to say so under `Deviations:` when a skill does not load, and to follow the Method text instead. The Method must therefore work without the skills. `run.py` does not check that a profile has them.
 
+## Workflows
+
+A workflow is a markdown playbook for one kind of work: a frontmatter that lists its stages (prd, spec, impl, test, ...) with their roles, verify kinds, approval levels and order, and a prose body that tells the Manager when to use it. The design is in [docs/design/workflow-templates.md](design/workflow-templates.md). Workflows are off by default (`[workflow_policy] enabled = false`).
+
+Five workflows ship with the plugin, in [templates/workflows/](../templates/workflows/): `hotfix` (`impl → test`), `fix` (`spec? → impl → test`), `change` (`prd → impl → test`), `feature` (`prd → ux? → spec → impl* → test`) and `figure-it-out` (`investigate`, which decides the rest). `?` marks an optional stage and `*` a stage that may be split. `run.py workflows` lists the workflows a project has.
+
+### Where workflow files are found
+
+| What | Plugin default | Project override (track it in git) |
+|---|---|---|
+| Workflows | `templates/workflows/<name>.md` | `.claude/agentic-team/workflows/<name>.md` |
+| Stage library | `templates/workflows/stages.toml` | `.claude/agentic-team/workflows/stages.toml` |
+
+The project folder is the one that holds the project's roles. The workflows a project has are the union of both folders, and a project file replaces a plugin file of the same name, unless it sets `extends`. A project `stages.toml` adds stage types or overrides fields of a shipped type.
+
+### The stage library
+
+`stages.toml` has one table per stage type, `[stage.<type>]`, read with `tomllib`. Keys: `role`, `verify` (`code`, `schema` or `design-doc`), `approval` (`auto`, `manager` or `human`), `estimate` (hours), `scope` (`"instance"`, or a path template with `{design_dir}` and `{slug}`), `verify_cmd` and `acceptance` (a list of lines). A new type needs `role`, `verify` and `approval`. The shipped types are `investigate`, `prd`, `ux`, `spec`, `impl` and `test`; `{design_dir}` is `[workflow_policy] design_dir`.
+
+### The file format
+
+```markdown
+---
+name: feature                 # the file name, without .md
+description: One or two sentences, at most 300 characters. The Manager reads it to pick a workflow.
+extends: other                # optional; project files only
+stages:
+  - {id: prd}
+  - {id: ux, optional: true, after: [prd]}
+  - {id: spec, after: [prd, ux]}
+  - {id: impl, after: [spec], split: true, estimate: 4}
+---
+
+## When to use
+...
+
+## Steps
+...
+```
+
+There is no YAML library. The frontmatter is flat `key: value` lines (split at the first colon) and one `stages:` key whose items are flow maps, one per line. A stage takes these fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | Required. Lowercase letters, digits and `-`, unique in the workflow. It names a library type unless `type` is given |
+| `type` | A library type, so that one type can appear twice (`impl-api`, `impl-web`) |
+| `role`, `verify`, `approval`, `estimate` | Override the library values. The role must exist and not be broken |
+| `after` | A list of stage ids that come before, `[]` for a root stage. The graph must have no cycle |
+| `optional` | `true` or `false` (default). A workflow needs at least one required stage |
+| `split` | `true` lets the Manager split the stage into parts. Only for a stage whose verify kind is `code` |
+| `decides` | `true` on the only stage of a workflow, a root stage whose result names the remaining stages |
+
+A project workflow with `extends: <name>` takes the stages of that workflow (with `extends: <its own name>`, the plugin's), then lays its own over them: a stage with the same `id` overrides the parent's fields, a new `id` is appended. It cannot remove a stage or make a required stage optional, and the parent may not extend another workflow. To remove a stage, replace the file.
+
+A file with an unknown key, a missing `name` or `description`, a `name` that is not the file name, a stage with an unknown field or an id that is not a library type, a `role`, `verify` or `approval` that is not valid, an `after` that names no stage, or a cycle is broken. Each problem is one line, `<file>:<line>: <problem>`. `run.py workflows` lists a broken file with its problems and exits 1, and so does a broken `stages.toml`. `run.py workflows --check` prints only the problems, or `ok`. `config.py check` runs the same check when `[workflow_policy] enabled` is true or the project has a workflow file. It also needs the stage type `spec` in the library and one workflow that has it, because a hard rule forces a spec stage.
+
+The body is prose for the Manager: `## When to use`, `## Steps` and an optional `## Stage notes` with one `### <id>` subsection per stage. It is not checked, except that a body over 600 words gets a `warn` line.
+
+### Picking a workflow
+
+`run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` fixes the order of the options; the same seed gives the same order, and another seed gives another.
+
 ## Judgement-tier brief
 
 The ROLE section of a worker brief for a task on the `judgement` tier ends with one line: for reading or searching code,

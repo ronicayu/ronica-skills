@@ -2,6 +2,14 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## Unreleased
+
+Workflow templates, phase W1: the workflow files, their checks and the commands that read them. No lifecycle, phase or model change; `run.py add` is unchanged. See [Workflows](docs/roles-and-briefs.md#workflows).
+
+- **Workflow files.** A workflow is a markdown playbook with a restricted YAML frontmatter that lists its stages. The plugin ships `hotfix`, `fix`, `change`, `feature` and `figure-it-out` and a stage library, `stages.toml`, in `templates/workflows/`. A project adds or replaces files in `.claude/agentic-team/workflows/`, and may extend a workflow by one level.
+- **`run.py workflows`.** Lists the workflows with their descriptions and stages and exits 1 when a file is broken. `--check` prints only the problems. `--pick-prompt` prints the prompt that picks a workflow, with the options in an order that `--seed` fixes.
+- **`[workflow_policy]`.** New optional section with `enabled` (default `false`) and `design_dir` (default `docs/design`). With `enabled = true`, or with workflow files in the project, `config.py check` also validates the workflow files and the stage library.
+
 ## 0.30.0
 
 Upgrading from 0.29.0.

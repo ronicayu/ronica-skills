@@ -47,6 +47,7 @@ and the Manager runs `record` when a session's message or the end of `wait` wake
 | [`triage`](#runpy-triage) | record where a Follow-ups line of a result went, as a `triage` row |
 | [`status`](#runpy-status) | print the status report |
 | [`roles`](#runpy-roles) | list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken |
+| [`workflows`](#runpy-workflows) | list the workflows: the plugin's and the project's, with their stages; exit 1 when a file is broken |
 | [`check-report`](#runpy-check-report) | check a report file before a session files it; needs no config, Taskgraph or repository |
 | [`wait`](#runpy-wait) | poll until something in flight changes, or a time limit; writes nothing |
 | [`answer`](#runpy-answer) | answer a worker's ask: the answer is a Taskgraph row, and a doorbell wakes the worker |
@@ -297,6 +298,23 @@ run.py roles
 
 Lists every task role, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, or `project, extends plugin:<name>`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](roles-and-briefs.md#roles).
 
+#### `run.py workflows`
+
+```text
+run.py workflows [--check] [--pick-prompt] [--seed SEED] [--title TITLE] [--notes-file FILE] [--scope SCOPE]
+```
+
+Lists every workflow, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, or `project, extends plugin:<name>`), its description and its stages, in file order, as `prd → ux? → spec → impl* → test` (`?` marks an optional stage, `*` a stage that may be split). `--json` prints one object per workflow, with each stage's resolved role, verify kind, approval, estimate and `after`. Read only. A broken file is listed with its problems, each as `<file>:<line>: <problem>`, and the command exits 1; a problem of `stages.toml` is listed the same way. `--check` prints only the problems, or one `workflows-checked` line; it is the same check that `config.py check` runs when `[workflow_policy] enabled` is true or the project has workflow files. `--pick-prompt` prints the prompt that asks which workflow fits a piece of work (`--title`, `--notes-file`, `--scope`): the task text and the workflows as `A. <name>: <description>`, with `unsure` among them, in an order that `--seed` fixes; the same seed gives the same order. See [Workflows](roles-and-briefs.md#workflows).
+
+| Option | Argument | Default | Meaning |
+|---|---|---|---|
+| `--check` |  |  | print only the problems of the workflow files and the stage library, or ok |
+| `--pick-prompt` |  |  | print the prompt that picks a workflow for a piece of work |
+| `--seed` | `SEED` |  | with --pick-prompt: the seed that shuffles the options (default 0) |
+| `--title` | `TITLE` |  | with --pick-prompt: the title of the work |
+| `--notes-file` | `FILE` |  | with --pick-prompt: a file that holds the notes of the work |
+| `--scope` | `SCOPE` |  | with --pick-prompt: the SCOPE paths or areas of the work |
+
 #### `run.py check-report`
 
 ```text
@@ -426,7 +444,7 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 
 ### Events
 
-`run.py` prints 108 events. A name that is not in `scripts/events.py` is refused.
+`run.py` prints 111 events. A name that is not in `scripts/events.py` is refused.
 
 | Event | Meaning |
 |---|---|
@@ -441,6 +459,9 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 | `warn` | A warning that does not stop the command, for example a role file that is too long. |
 | `role` | One task role, as `run.py roles` lists it. |
 | `role-broken` | A role file with an error, as `run.py roles` lists it; the command exits 1. |
+| `workflow` | One workflow, as `run.py workflows` lists it: its source, description and stages. |
+| `workflow-broken` | A workflow file or a stage library file with an error, as `run.py workflows` lists it; the command exits 1. |
+| `workflows-checked` | `run.py workflows --check` found no problem. |
 | `sessions-restored` | The local Taskgraph cache had no `sessions` meta; run.py rebuilt it from `claude agents`. |
 | `sessions-lost` | A task in progress has no `sessions` meta and no matching session row; its worker may run on another machine. |
 | `verifying` | A verifier started for a PASS result: model, session, ref, verify kind and seat. |
@@ -567,7 +588,7 @@ Model values are either a model id (`"opus"`) or a table (`{ model = "sonnet", e
 `[profiles]`, has names of your own and is not in the list below. How agents read the config, and what `check`
 reports, is in [Configuration](configuration.md).
 
-The config has 15 sections and 57 keys.
+The config has 16 sections and 59 keys.
 
 ### `[taskgraph]`
 
@@ -643,6 +664,13 @@ Any tier or override table may also set `profile = "<name>"` or `profile = ["<na
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `default` | a string | `""` | The role of a task with no `role` meta: `"architect"`, `"software-engineer"`, or a project role. `""` means no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See [Roles](roles-and-briefs.md#roles). |
+
+### `[workflow_policy]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | true or false | `false` | `true` turns workflows on: `config.py check` then validates the workflow files and the stage library, and a broken file is reported like a broken role file. `false` (the default) leaves workflows off. See [Workflows](roles-and-briefs.md#workflows). |
+| `design_dir` | a string | `"docs/design"` | The folder of design documents: the `{design_dir}` in the scope template of a stage type of the stage library (`stages.toml`). A path relative to the repository root, without a trailing `/`. |
 
 ### `[scope]`
 

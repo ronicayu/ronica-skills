@@ -198,6 +198,10 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "ci_ref_prefix": ("refprefix", "ci-"),
     },
     "roles": {"default": ("str", "")},
+    "workflow_policy": {
+        "enabled": ("bool", False),
+        "design_dir": ("str", "docs/design"),
+    },
     "scope": {"adjacent": ("adjacent", [])},
     "report": {
         "require_ran": ("ranmap", {}),
@@ -367,6 +371,13 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "default": ("The role of a task with no `role` meta: `\"architect\"`, `\"software-engineer\"`, or a project role. `\"\"` means "
          "no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See "
          "[Roles](roles-and-briefs.md#roles)."),
+    },
+    "workflow_policy": {
+        "enabled": ("`true` turns workflows on: `config.py check` then validates the workflow files and the stage library, and "
+         "a broken file is reported like a broken role file. `false` (the default) leaves workflows off. See "
+         "[Workflows](roles-and-briefs.md#workflows)."),
+        "design_dir": ("The folder of design documents: the `{design_dir}` in the scope template of a stage type of the stage library "
+         "(`stages.toml`). A path relative to the repository root, without a trailing `/`."),
     },
     "scope": {
         "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
@@ -1075,6 +1086,19 @@ def refuse_if_broken(config):
         fail("config has problems; run `config.py check`, or /agentic-team:setup:\n  " + "\n  ".join(found))
 
 
+def workflow_check(config, root):
+    """The problems of the workflow files and the stage library, when workflows are configured: `workflow_policy.enabled`, or
+    a workflow file in the project. Empty otherwise, or while the config itself is broken."""
+    if getattr(config, "missing", False) or problems(config):
+        return []
+    folder = os.path.join(root, ".claude", "agentic-team", "workflows")
+    if config["workflow_policy"]["enabled"] is not True and not (os.path.isdir(folder) and os.listdir(folder)):
+        return []
+    import run  # noqa: PLC0415 - run.py imports this module, so it is imported here, not at the top
+    import types  # noqa: PLC0415
+    return run.workflow_problems(types.SimpleNamespace(root=os.path.abspath(root), config=config))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default=".", help="repository root holding .agentic-team.toml (default: .)")
@@ -1100,6 +1124,7 @@ def main(argv=None):
                 warnings += extra
             for warning in warnings:
                 print(f"config.py: warning: {warning}", file=sys.stderr)
+            found += workflow_check(config, args.root)
             if found:
                 print("\n".join(found))
                 sys.exit(2)

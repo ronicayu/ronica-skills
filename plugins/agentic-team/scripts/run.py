@@ -39,6 +39,10 @@ Usage:
     roles          list the task roles (the plugin's and the project's) with
                    their tier, verify kind and skills; read only; exit 1 when
                    a role file is broken
+    workflows      list the workflows (the plugin's and the project's) with
+                   their stages; `--check` validates every file and the stage
+                   library; `--pick-prompt` prints the prompt that picks one;
+                   read only; exit 1 when a file is broken
     check-report <file>
                    check a report file before a session files it: Status,
                    Checkpoint, a label on each Follow-ups line, the paths
@@ -138,6 +142,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
+import workflows as wfl  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from events import EVENTS  # noqa: E402
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
@@ -1767,6 +1772,70 @@ def cmd_roles(run, args):
         run.payload = rows
     if broken:
         raise Refused(f"{broken} role file{'s' * (broken != 1)} broken; fix {'them' if broken != 1 else 'it'} before a launch", 1)
+
+
+# --------------------------------------------------------------- workflows
+
+def role_status(run):
+    """{name: the problem of the role file, or None} for every role: what the workflow checks need to know about roles."""
+    found = role_files(run)
+    for role in found.values():
+        read_role(run, role, found)
+    return {name: role.error for name, role in found.items()}
+
+
+def load_workflows(run):
+    return wfl.load(PLUGIN_ROOT, run.root, role_status(run))
+
+
+def workflow_problems(run):
+    """Every problem of the stage library and the workflow files, for `config.py check`."""
+    return load_workflows(run).problems
+
+
+def cmd_workflows(run, args):
+    """List every workflow with its source, description and stages. Read only. Exits 1 when a file is broken. With --check
+    only the problems are printed; with --pick-prompt, the pick prompt."""
+    catalog = load_workflows(run)
+    problems = catalog.problems
+    if args.pick_prompt:
+        if problems:
+            raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(problems), 1)
+        notes = ""
+        if args.notes_file:
+            try:
+                with open(args.notes_file, encoding="utf-8") as fh:
+                    notes = fh.read()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise Refused(f"cannot read --notes-file {args.notes_file}: {exc}")
+        prompt, order = wfl.pick_prompt(catalog, args.seed, args.title or "", notes, args.scope or "")
+        if run.json:
+            run.payload = {"seed": args.seed, "options": order, "prompt": prompt}
+        else:
+            run.text = prompt
+        return
+    rows = []
+    for name in sorted(catalog.workflows):
+        wf = catalog.workflows[name]
+        rows.append({"name": name, "source": wf.where, "path": wf.path, "description": wf.description,
+                     "stages": [s.as_dict() for s in wf.stages], "chain": wf.chain, "words": None if wf.errors else wf.words,
+                     "errors": wf.errors, "warnings": wf.warnings})
+        for warning in wf.warnings:
+            run.emit("warn", None, None, None, warning)
+        if wf.errors:
+            for error in wf.errors:
+                run.emit("workflow-broken", None, None, None, f"{name} ({wf.where}): {error}")
+        elif not args.check:
+            run.emit("workflow", None, None, None, f"{name} ({wf.where}); {wf.description}; stages: {wf.chain}")
+    for error in catalog.library.errors + catalog.errors:
+        run.emit("workflow-broken", None, None, None, error)
+    if args.check and not problems:
+        run.emit("workflows-checked", None, None, None, f"{len(rows)} workflows and {len(catalog.library.types)} stage types: ok")
+    if run.json:
+        run.payload = rows
+    if problems:
+        raise Refused(f"{len(problems)} workflow problem{'s' * (len(problems) != 1)}; fix {'them' if len(problems) != 1 else 'it'} "
+                      "before a workflow runs", 1)
 
 
 # ------------------------------------------------------------------- brief
@@ -9322,7 +9391,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,workflows,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int, help="the task id")
@@ -9434,6 +9503,14 @@ def build_parser():
 
     sub.add_parser("roles", help="list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken")
 
+    p = sub.add_parser("workflows", help="list the workflows: the plugin's and the project's, with their stages; exit 1 when a file is broken")
+    p.add_argument("--check", action="store_true", help="print only the problems of the workflow files and the stage library, or ok")
+    p.add_argument("--pick-prompt", action="store_true", help="print the prompt that picks a workflow for a piece of work")
+    p.add_argument("--seed", type=int, default=0, help="with --pick-prompt: the seed that shuffles the options (default 0)")
+    p.add_argument("--title", help="with --pick-prompt: the title of the work")
+    p.add_argument("--notes-file", metavar="FILE", help="with --pick-prompt: a file that holds the notes of the work")
+    p.add_argument("--scope", help="with --pick-prompt: the SCOPE paths or areas of the work")
+
     p = sub.add_parser("check-report", help="check a report file before a session files it; needs no config, "
                                             "Taskgraph or repository")
     p.add_argument("file", help="the report file that the brief's REPORT section names")
@@ -9506,7 +9583,7 @@ def build_parser():
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
             "merged": cmd_merged, "add": cmd_add, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "workflows": cmd_workflows, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "round", "revise", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and
