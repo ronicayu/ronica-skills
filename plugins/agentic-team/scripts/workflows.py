@@ -804,22 +804,29 @@ def glob_regex(pattern: str) -> "re.Pattern[str]":
 
 def rule_matches(rule: dict[str, Any], paths: set[str], area: Any) -> bool:
     """A `[[workflow_rule]]` matches when a write path of the SCOPE (a directory counts as every path under it) fits one of its
-    `match_paths` globs, or the task's `area` is one of its `match_area` names. Title words never match."""
+    `match_paths` globs, or lies above a glob (the glob's literal text before its first wildcard is under that directory), or the task's `area` is one of its `match_area` names. Title words never match."""
     areas = rule.get("match_area") or []
     if areas and str(area or "").strip().lower() in {a.strip().lower() for a in areas}:
         return True
     for pattern in rule.get("match_paths") or []:
         regex = glob_regex(pattern)
-        if any(regex.fullmatch(p) or regex.fullmatch(p.rstrip("/") + "/x") for p in paths):
-            return True
+        prefix = re.split(r"[*?\[]", pattern, maxsplit=1)[0]  # the literal text before the first wildcard
+        for p in paths:
+            if regex.fullmatch(p) or regex.fullmatch(p.rstrip("/") + "/x"):
+                return True
+            if prefix and prefix.startswith(p.rstrip("/") + "/"):  # a SCOPE directory above the glob holds paths that fit it
+                return True
     return False
 
 
 # ------------------------------------------------------------------- the pick
 
-def weight(wf: Workflow) -> tuple[int, int, str]:
-    """The order of the workflows from light to heavy: required stages, then stages whose approval is not `auto`, then name."""
-    return (sum(1 for s in wf.stages if not s.optional), sum(1 for s in wf.stages if s.approval != "auto"), wf.name)
+def weight(wf: Workflow, with_ids: list[str] | None = None) -> tuple[int, int, str]:
+    """The order of the workflows from light to heavy, in one definition: the number of stages in the plan that would be
+    created (every required stage and each optional stage in `with_ids`), then the number of those whose approval is not
+    `auto`, then the name."""
+    plan = build_plan(wf, list(with_ids or []), [])
+    return (len(plan.stages), sum(1 for s in plan.stages if s.approval != "auto"), wf.name)
 
 
 def usable(workflows: dict[str, Workflow]) -> dict[str, Workflow]:
@@ -893,7 +900,7 @@ def rule_kind(wf: Workflow, kind: str) -> Stage | None:
 
 def lightest_with(workflows: dict[str, Workflow], kinds: list[str]) -> Workflow | None:
     """The lightest workflow that has a stage for every kind in `kinds` (the stage is forced on when optional): fewest stages
-    in the plan, then fewest approvals, then name. A deciding workflow never qualifies."""
+    in the plan, then fewest approvals, then name (`weight`). A deciding workflow never qualifies."""
     best: tuple[tuple[int, int, str], Workflow] | None = None
     for name, wf in usable(workflows).items():
         if any(s.decides for s in wf.stages):
@@ -901,8 +908,7 @@ def lightest_with(workflows: dict[str, Workflow], kinds: list[str]) -> Workflow 
         found = [rule_kind(wf, k) for k in kinds]
         if any(s is None for s in found):
             continue
-        plan = build_plan(wf, [s.id for s in found if s and s.optional], [])
-        key = (len(plan.stages), sum(1 for s in plan.stages if s.approval != "auto"), name)
+        key = weight(wf, [s.id for s in found if s and s.optional])
         if best is None or key < best[0]:
             best = (key, wf)
     return best[1] if best else None

@@ -56,13 +56,14 @@ adds what Taskgraph cannot decide.
       answer, your reasons or the workflow you favour. With several items, send all
       their prompts in one call, each under its own heading, and read one answer for
       each. The agent type exists already, so no restart is needed.
-   4. Resolve and add: `run.py add "<title>" --pick "<yours>,<subagent's>" --seed <n>
-      --notes ... --meta scope=... verify=... (--depends ... | --independent ...)`.
-      Do not pass `--workflow`: the same name wins, two names take the one with fewer
-      stages, a name beside `unsure` takes the name, two `unsure` take `figure-it-out`
-      (`run.py workflows --resolve "<a>,<b>"` shows the result without adding). Pass
-      `--with <stage>` or `--skip <stage>` for an optional stage as the workflow's
-      "Steps" say.
+   4. Resolve, then add. First run `run.py workflows --resolve "<yours>,<subagent's>"`:
+      it shows the workflow that the two answers give and adds nothing (the same name
+      wins, two names take the one with fewer stages, a name beside `unsure` takes the
+      name, two `unsure` take `figure-it-out`). Read that workflow's "Steps" and choose
+      `--with <stage>` or `--skip <stage>` for its optional stages. Then add:
+      `run.py add "<title>" --pick "<yours>,<subagent's>" --seed <n> [--with ...]
+      [--skip ...] --notes ... --meta scope=... verify=... (--depends ... | --independent ...)`.
+      Do not pass `--workflow`: `--pick` replaces it.
    Never ask the owner which workflow to use. A `[[workflow_rule]]` that matches the
    SCOPE paths or the `area` forces its stage on, or moves the work to the lightest
    workflow that has it, and a stage that a rule requires cannot be skipped. The

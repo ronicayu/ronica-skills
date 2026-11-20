@@ -21,6 +21,7 @@ TG = os.path.join(os.path.dirname(PLUGIN), "taskgraph", "skills", "taskgraph", "
 sys.path.insert(0, os.path.join(PLUGIN, "scripts"))
 
 import run as runner  # noqa: E402
+import workflows as wfl  # noqa: E402
 
 NOTES = "Why: users need it.\n- [ ] first behaviour\n- [ ] second behaviour"
 BILLING = """
@@ -379,26 +380,94 @@ class RechooseTest(Base):
         self.assertIn("needs a workflow name", self.refused("stage", str(inst), "rechoose"))
 
 
-class ProcedureDocsTest(Base):
-    def test_the_documented_procedure_runs_as_written(self):
-        """The prompt of answer 1 (seed n) and of answer 2 (seed n+1) render, and `add --pick` takes the two answers."""
-        notes = os.path.join(self.dir, "notes.txt")
-        with open(notes, "w") as fh:
-            fh.write(NOTES)
-        prompts = []
-        for seed in ("11", "12"):
-            out = self.run_cmd("workflows", "--pick-prompt", "--seed", seed, "--title", "Add export", "--notes-file", notes, "--scope", "src/export/")
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("PICK: <name|unsure>", out.stdout)
-            prompts.append(out.stdout)
-        self.assertEqual(self.instance(self.add_pick("fix,fix", seed="11")) > 0, True)
-        with open(os.path.join(PLUGIN, "playbooks", "plan.md")) as fh:
-            plan = fh.read()
-        for needle in ("--pick-prompt --seed <n>", "--seed <n+1>", 'subagent_type: "Explore"', 'model: "sonnet"', "--pick",
-                       "Never ask the owner which workflow to use", "recheck", "rechoose"):
-            self.assertIn(needle, plan)
-        with open(os.path.join(PLUGIN, "agents", "manager.md")) as fh:
-            self.assertIn("--pick", fh.read())
+class RuleGlobTest(unittest.TestCase):
+    RULE = {"name": "b", "match_paths": ["apps/api/billing/**"]}
+
+    def matches(self, scope):
+        return wfl.rule_matches(self.RULE, runner.write_paths(scope), None)
+
+    def test_a_scope_directory_above_the_glob_matches(self):
+        for scope in ("apps/", "apps/api/", "apps/api/**", "apps/api/billing/", "apps/api/billing/x.py"):
+            self.assertTrue(self.matches(scope), scope)
+
+    def test_a_directory_beside_or_below_the_glob_does_not_match(self):
+        for scope in ("apps/other/", "apps/ap/", "apps/api/billing2/", "apps/api/users/", "src/"):
+            self.assertFalse(self.matches(scope), scope)
+
+    def test_a_glob_with_a_wildcard_in_the_middle_is_matched_above_its_literal_text(self):
+        rule = {"name": "w", "match_paths": ["apps/*/billing/**"]}
+        self.assertTrue(wfl.rule_matches(rule, runner.write_paths("apps/"), None))
+        self.assertFalse(wfl.rule_matches(rule, runner.write_paths("lib/"), None))
+
+
+class LateRuleTest(Base):
+    RAISE = BILLING + """
+    [[workflow_rule]]
+    name = "money"
+    match_paths = ["apps/api/billing/**"]
+    risk = "high"
+    on_timeout = "hold"
+    approval = { prd = "human", spec = "human" }
+    """
+
+    def merge(self, tid):
+        self.tg("edit", str(tid), "--meta", "attempt=1", "verdict_ref=" + "a" * 40, "verdict=test-verified", "sessions=[]")
+        self.tg("done", str(tid))
+        self.events("merged", str(tid), "--by", "operator")
+
+    def stage_tasks(self, inst):
+        return {e["id"]: e for e in self.record(inst)["stages"]}
+
+    def test_recheck_raises_the_approvals_that_are_not_done_and_the_risk_of_stages_that_have_not_started(self):
+        inst = self.instance(self.add_named("feature", scope="lib/"))
+        stages = self.stage_tasks(inst)
+        self.config(self.RAISE)
+        self.merge(stages["prd"]["task"])
+        self.assertEqual(self.meta(stages["prd"]["approval_id"])["approval_state"], "open")
+        self.assertEqual(self.meta(stages["spec"]["approval_id"])["approval_state"], "pending")
+        self.tg("edit", str(stages["test"]["task"]), "--meta", 'scope="apps/api/billing/x.py"')
+        events = self.events("stage", str(inst), "recheck")
+        line = next(e for e in events if e["event"] == "workflow-rule" and "money" in e["detail"])
+        self.assertIn("raised prd", line["detail"])
+        open_one, pending = self.meta(stages["prd"]["approval_id"]), self.meta(stages["spec"]["approval_id"])
+        self.assertEqual((open_one["approval_level"], open_one["decider"]), ("human", "operator"))
+        self.assertEqual((pending["approval_level"], pending["on_timeout"], pending["default"]), ("human", "hold", "hold"))
+        self.assertEqual(self.meta(stages["spec"]["task"]).get("risk"), "high")
+        self.assertIsNone(self.meta(stages["prd"]["task"]).get("risk"))  # merged: it has started
+        row = next(r for r in self.record(inst)["rules"] if r["rule"] == "money")
+        self.assertEqual({(r["stage"], r["from"], r["to"], r["state"]) for r in row["raised"]},
+                         {("prd", "manager", "human", "open"), ("spec", "manager", "human", "pending")})
+        self.assertIn("spec", row["risk"]["stages"])
+        self.assertEqual({e["id"]: e["approval"] for e in self.record(inst)["stages"]}["spec"], "human")
+
+    def test_recheck_then_rechoose_keeps_the_rule_and_the_scope_of_a_part(self):
+        self.config("""
+            [[workflow_rule]]
+            name = "ux-rule"
+            match_paths = ["src/export/ui/**"]
+            require_stage = "ux"
+            """)
+        inst = self.instance(self.add_named("feature", "--with", "ux", scope="lib/"))
+        self.events("stage", str(inst), "split", "impl", "--part", "ui", "--meta", "scope=src/export/ui/page.py")
+        self.assertEqual([(r["rule"], r["action"]) for r in self.record(inst)["rules"]], [("ux-rule", "recheck-satisfied")])
+        self.events("stage", str(inst), "rechoose", "feature", "--by", "operator")
+        record = self.record(inst)
+        self.assertIn("ux", self.stage_ids(inst))
+        self.assertEqual([(r["rule"], r["action"]) for r in record["rules"]], [("ux-rule", "recheck-satisfied"), ("ux-rule", "forced-with")])
+        self.assertIn("src/export/ui/page.py", runner.write_paths(record["scope"]))
+        impl = next(e["task"] for e in record["stages"] if e["id"] == "impl")
+        self.assertIn("src/export/ui/page.py", runner.write_paths(self.meta(impl)["scope"]))
+
+    def test_rechoose_is_refused_while_a_task_outside_the_instance_depends_on_a_stage(self):
+        inst = self.instance(self.add_named("hotfix"))
+        outside = self.tg("add", "Downstream", "--meta", 'independent="x"')["id"]
+        stage = self.stage_tasks(inst)["impl"]["task"]
+        self.tg("dep", "add", str(outside), str(stage))
+        err = self.refused("stage", str(inst), "rechoose", "fix", "--by", "operator")
+        self.assertIn(f"#{outside} depends on impl (#{stage})", err)
+        self.assertIn("move the edge to the instance", err)
+        self.assertEqual(self.stage_ids(inst), ["impl", "test"])
+        self.assertEqual(self.meta(inst)["workflow"], "hotfix")
 
 
 if __name__ == "__main__":

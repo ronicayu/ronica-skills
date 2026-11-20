@@ -231,7 +231,7 @@ your report with:
 ### 5.1 Command
 
 ```
-run.py add "<title>" --workflow <name> --pick <manager answer>,<re-ask answer>
+run.py add "<title>" --pick <manager answer>,<re-ask answer> --seed <n>
            [--with <stage>]... [--skip <stage>]...
            --notes "..." --meta scope=... verify=... [--meta area=billing]
            (--depends ids | --blocks ids | --independent "<reason>")
@@ -292,11 +292,13 @@ This adds parts of a stage whose frontmatter has `split: true`. It is allowed on
 | Answers | Result | `unsure` recorded |
 |---|---|---|
 | a = b, a name | a | no |
-| two different names | the lighter: fewer required stages, then fewer non-auto approvals, then name | yes |
-| one name and `unsure` | the name | yes |
-| both `unsure` | apply `when_unsure` (default: figure-it-out) | yes |
+| two different names | the lighter: fewer stages in the plan that would be created, then fewer non-auto approvals in it, then name | yes |
+| one name and `unsure` | the name (a lone figure-it-out name beside `unsure` wins too) | yes |
+| both `unsure` | figure-it-out; with `when_unsure = "heavier"`, the heaviest workflow | yes |
 
-A workflow with a `decides` stage (figure-it-out) is outside the lighter/heavier order. It is chosen only when both answers name it, or both are `unsure`. When it disagrees with a named workflow, the named workflow wins.
+`--pick` replaces `--workflow`: `add` takes one of the two, never both.
+
+A workflow with a `decides` stage (figure-it-out) is outside the lighter/heavier order. It is chosen when both answers name it, when both are `unsure`, or when one names it and the other is `unsure`. When it disagrees with another named workflow, the other workflow wins.
 
 `[workflow_policy] when_unsure` is one of:
 - `lighter` (the default) for disagreements;
@@ -328,7 +330,7 @@ Shipped default rules: none. The setup skill offers billing, migrations and secu
 
 ### 6.3 Reporting, not asking
 
-The pick, the rule and any default are written to the instance's `workflow_record`. The `added` line shows them: `added #41 feature (pick feature/change, unsure → lighter=change, rule billing → feature)`. The Manager's normal reply or digest lists the picks made since the last report. The owner overrides with `run.py stage <inst> rechoose <workflow> --by operator`. That works like an escalation or downgrade, outside the limits in section 8, and is recorded as `overridden`.
+The pick, the rule and any default are written to the instance's `workflow_record`. The `added` line shows them: `added #41 feature (pick feature/change, unsure → lighter=change, rule billing → feature)`. The Manager's normal reply or digest lists the picks made since the last report. The owner overrides with `run.py stage <inst> rechoose <workflow> --by operator`. That works like an escalation or downgrade, outside the limits in section 8, and is recorded as `overridden`. `rechoose` matches the rules again against the paths of the whole instance (the record SCOPE and every stage and part SCOPE), keeps every rule that the record holds, and appends the new application rows to `rules` (`record.rule` stays for compatibility; `rules` is authoritative). The write paths that only a removed stage or part held are merged into the record SCOPE. It makes the new stages before it removes the old ones, and it is refused while a task outside the instance depends on a stage of it. `recheck` raises the approvals that are not done to the level of a rule that matched late, and sets its risk on the stages that have not started.
 
 ## 7. Approval
 

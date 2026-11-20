@@ -9058,7 +9058,11 @@ def resolve_choice(run, catalog, args):
 
 def matching_rules(run, scope, area):
     """The `[[workflow_rule]]` tables whose `match_paths` fit a write path of the SCOPE, or whose `match_area` names the area."""
-    return [r for r in run.config.get("workflow_rule") or [] if wfl.rule_matches(r, write_paths(scope), area)]
+    return matching_rules_for_paths(run, write_paths(scope), area)
+
+
+def matching_rules_for_paths(run, paths, area):
+    return [r for r in run.config.get("workflow_rule") or [] if wfl.rule_matches(r, paths, area)]
 
 
 def plan_with_rules(catalog, wf, rules, with_ids, skip_ids):
@@ -9416,10 +9420,55 @@ def instance_scope_paths(node, record, found):
     return paths
 
 
+def raise_for_rule(run, rule, record, found):
+    """Apply what a rule that matched late asks of the stages the instance has: raise each approval that is not done to the
+    rule's level, and set the rule's `risk` on each stage that has not started. Returns (raised, risked) for the record: one
+    dict for each approval raised, and the stage ids that got the risk."""
+    raised, risked, no_node = [], [], []
+    by_id = {e["id"]: e for e in record.get("stages") or []}
+    for entry in by_id.values():
+        asked = (rule.get("approval") or {}).get(entry["id"]) or (rule.get("approval") or {}).get(entry.get("type"))
+        if not asked or LEVEL[asked] <= LEVEL.get(entry.get("approval"), 0):
+            continue
+        if not entry.get("approval_id"):
+            no_node.append(entry["id"])  # an `auto` stage has no approval decision to raise
+            continue
+        node = run.show(entry["approval_id"])
+        nmeta = node.get("meta") or {}
+        state = nmeta.get("approval_state")
+        if node["status"] == "done" or state not in ("pending", "open"):
+            continue
+        hold = asked == "human" and rule.get("on_timeout") == "hold"
+        fields = {"approval_level": asked}
+        if state == "open":
+            if asked == "human":
+                fields["decider"] = "operator"
+        else:
+            fields.update(on_timeout="hold" if hold else nmeta.get("on_timeout") or "approve", default="hold" if hold else nmeta.get("default") or "approve")
+            run.tg("edit", str(node["id"]), "--notes", approval_notes(entry["id"], asked, hold))
+        run.write_meta(node, **fields)
+        if state == "open" and asked == "human":
+            queue_notice(run, "decision", node["id"], None, f"Decision #{node['id']} needs you: {node['title']}",
+                         f"answer it with run.py stage {node.get('parent')} approve {entry['id']} --by operator (rule {rule['name']} raised it to human)",
+                         nmeta.get("default") or "approve", nmeta.get("due_at"))
+        raised.append({"stage": entry["id"], "from": entry.get("approval"), "to": asked, "state": state})
+        entry["approval"] = asked
+    if rule.get("risk"):
+        for sid, tasks in found.items():
+            for task in tasks:
+                held = (task.get("meta") or {}).get("risk")
+                if wanted_attempt(task) is None and task["status"] == "open" and (held is None or RISK_RANK[rule["risk"]] > RISK_RANK.get(held, 0)):
+                    run.edit_meta(task["id"], risk=rule["risk"])
+                    if sid not in risked:
+                        risked.append(sid)
+    return raised, risked, no_node
+
+
 def recheck_rules(run, tid):
     """Match the hard rules again against the paths and the `area` of a running instance. A rule that matches and is not in the
     record is written to it, with a `workflow-rule` line. A rule whose stage the instance lacks is reported with the way
-    out. Returns the new applications."""
+    out. A rule that asks a higher approval or sets a risk is applied to the approvals that are not done and the stages that
+    have not started (`raise_for_rule`). Returns the new applications."""
     node, record, found = instance_stages(run, argparse.Namespace(id=tid))
     paths = instance_scope_paths(node, record, found)
     area = (node.get("meta") or {}).get("area")
@@ -9437,16 +9486,24 @@ def recheck_rules(run, tid):
             present = next((e["id"] for e in have if e["id"] == kind or e.get("type") == kind), None)
             app.update(stage=present or kind, action="recheck-satisfied" if present else "recheck-missing")
             if not present:
-                hint = ("no stage has started: run.py stage %d rechoose <workflow> --by manager re-expands it with the stage" % tid
+                hint = ("no stage has started: run.py stage %d rechoose <workflow> --by operator re-expands it with the stage" % tid
                         if not started else
                         f"a stage has started, so no stage can be put in front of it by rechoose; hold the next launch and put the "
                         f"missing {kind} stage in the report (the escalation command comes with phase W4)")
+        raised, risked, no_node = raise_for_rule(run, rule, record, found)
+        if raised:
+            app["raised"] = raised
+        if risked:
+            app["risk"] = {"to": rule["risk"], "stages": risked}
         new.append(app)
         record.setdefault("rules", []).append(app)
+        done = ("; raised " + ", ".join(f"{r['stage']} {r['from']} -> {r['to']}" for r in raised) if raised else "") + \
+               (f"; risk {rule['risk']} on {', '.join(risked)}" if risked else "") + \
+               (f"; {', '.join(no_node)} has no approval decision to raise (auto)" if no_node else "")
         run.emit("workflow-rule", tid, None, None,
                  f"{rule['name']}: newly matches the SCOPE or area of #{tid}; " +
                  (f"stage {app['stage']} {'is there' if app['action'] == 'recheck-satisfied' else 'is missing'}" if kind else
-                  "it asks no stage"), hint)
+                  "it asks no stage") + done, hint)
     if new:
         run.edit_meta(tid, workflow_record=record)
     return new
@@ -9457,9 +9514,27 @@ def stage_recheck(run, args):
         run.emit("workflow-rule", args.id, None, None, "no hard rule matches that the record does not hold")
 
 
+def merge_scope(scope, extra):
+    """`scope` with the write paths `extra` added to the part before the first `;` or "do not change" marker."""
+    extra = sorted(extra - write_paths(scope))
+    if not extra:
+        return scope
+    cut = NOT_WRITE.search(scope)
+    head, tail = (scope[:cut.start()], scope[cut.start():]) if cut else (scope, "")
+    added = " ".join(p if is_file_path(p) else p + "/" for p in extra)
+    return (head.rstrip() + " " + added).strip() + ((" " if not tail.startswith((";", "；")) else "") + tail if tail else "")
+
+
 def stage_rechoose(run, args):
-    """The owner's override: replace the stages with those of another workflow. Only while no stage has started. The rules
-    apply again, so a rule's stage stays. It is recorded as an override and does not count as an adjustment."""
+    """The owner's override: replace the stages with those of another workflow. Only while no stage has started. It is recorded
+    as an override and does not count as an adjustment.
+
+    The rules apply again to the paths of the whole instance now: the record SCOPE and the SCOPE of every stage and part. Every
+    rule the record holds stays, and the new application rows are appended to `rules`, never written over them. The stages and
+    parts are removed, so the write paths that they held alone (a part's SCOPE, a stage SCOPE that the Manager changed) are
+    merged into the SCOPE of the instance record, and the new stages that write the instance SCOPE get them. The new stages
+    are made first; only when every one exists are the old ones removed. A stage task outside the instance that depends on a
+    stage of it is refused: the edge has to move to the instance first."""
     node, record, found = instance_stages(run, args)
     policy = run.config["workflow_policy"]
     catalog = load_workflows(run)
@@ -9476,6 +9551,13 @@ def stage_rechoose(run, args):
     child_ids = {c["id"] for c in children}
     stage_tasks = [t for ts in found.values() for t in ts]
     external, independent = [], None
+    for child in children:
+        full = run.show(child["id"])
+        for later in [b["id"] if isinstance(b, dict) else b for b in full.get("blocks") or []]:
+            if later not in child_ids:
+                raise Refused(f"#{later} depends on {(full.get('meta') or {}).get('stage') or 'a stage'} (#{child['id']}) of #{args.id}, "
+                              f"and rechoose removes it: move the edge to the instance first (tg dep rm {later} {child['id']}; "
+                              f"tg dep add {later} {args.id})")
     for task in stage_tasks:
         full = run.show(task["id"])
         outside = [d["id"] if isinstance(d, dict) else d for d in full.get("depends_on") or []]
@@ -9485,7 +9567,18 @@ def stage_rechoose(run, args):
     why, acceptance = parse_notes(node.get("notes"))
     meta_node = node.get("meta") or {}
     scope, verify = str(record.get("scope") or ""), str(record.get("verify") or "")
-    rules = matching_rules(run, scope, meta_node.get("area"))
+    paths = instance_scope_paths(node, record, found)
+    area = meta_node.get("area")
+    recorded = {a["rule"] for a in record.get("rules") or []}
+    rules = [r for r in run.config.get("workflow_rule") or [] if r["name"] in recorded or wfl.rule_matches(r, paths, area)]
+    old_wf = catalog.workflows.get(record.get("workflow"))
+    own = {s.id for s in old_wf.stages if s.scope != "instance"} if old_wf else set()
+    lost = set()
+    for sid, tasks in found.items():
+        for task in tasks:
+            if sid not in own or (task.get("meta") or {}).get("stage_part"):
+                lost |= write_paths((task.get("meta") or {}).get("scope"))
+    scope = merge_scope(scope, lost)
     wf, plan, applied = plan_with_rules(catalog, wf, rules, args.with_, args.skip)
     if any(s.decides for s in plan.stages) and len(plan.stages) > 1:
         raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
@@ -9495,17 +9588,46 @@ def stage_rechoose(run, args):
     risk = max((r["risk"] for r in rules if r.get("risk")), key=lambda v: RISK_RANK[v], default=None)
     passed = [meta_arg(k, v) for k, v in meta_node.items() if k not in ("workflow", "workflow_record", "risk", "independent", "stage")]
     old = record.get("workflow")
-    for task in sorted(children, key=lambda c: -c["id"]):
-        run.tg("rm", str(task["id"]))
     created, decisions, entries = {}, {}, []
     root_note = independent if independent is not None and not external else f"root stage of workflow instance #{args.id}"
     maker = argparse.Namespace(title=node["title"], depends=external, priority=node.get("priority"))
-    for stage in plan.stages:
-        created[stage.id] = create_stage(run, maker, wf, stage, plan, args.id, created, decisions, entries, passed, risk, rules, scope,
-                                         verify, why, acceptance, policy["design_dir"], wfl.slug(node["title"]), root_note)
+    mark = len(run.events)
+    try:
+        for stage in plan.stages:
+            created[stage.id] = create_stage(run, maker, wf, stage, plan, args.id, created, decisions, entries, passed, risk, rules, scope,
+                                             verify, why, acceptance, policy["design_dir"], wfl.slug(node["title"]), root_note)
+    except BaseException:
+        del run.events[mark:]
+        fresh = [c["id"] for c in run.tg("ls", "--parent", str(args.id)) or [] if c["id"] not in child_ids]
+        removed, failed = [], []
+        for tid in sorted(fresh, reverse=True):
+            try:
+                run.tg("rm", str(tid))
+                removed.append(tid)
+            except Refused as exc:
+                failed.append(f"#{tid} ({exc})")
+        run.emit("workflow-rollback", args.id, None, None,
+                 f"rechoose to {wf.name} failed; the old stages of #{args.id} are untouched; removed the new "
+                 + (", ".join(f"#{t}" for t in removed) or "nothing") + (f"; could not remove {', '.join(failed)}" if failed else ""),
+                 "remove them by hand: tg rm <id>" if failed else None)
+        raise
+    stuck = []
+    for task in sorted(children, key=lambda c: -c["id"]):
+        try:
+            run.tg("rm", str(task["id"]))
+        except Refused as exc:
+            stuck.append(f"#{task['id']} ({exc})")
+    if stuck:
+        run.emit("workflow-rollback", args.id, None, None,
+                 f"rechoose to {wf.name} made the new stages " + ", ".join(f"#{e['task']}" for e in entries)
+                 + f", and could not remove the old ones: {', '.join(stuck)}; the record still names the old stages",
+                 "remove the old stages by hand (tg rm <id>), or the new ones, then run rechoose again")
+        raise Refused("rechoose stopped: some old stages could not be removed")
+    now = run.now()
+    rows = [dict(app, at=now, via="rechoose") for app in applied]
     record.update(workflow=wf.name, version=wfl.file_version(wf.path), optional=plan.optional, rule=rules[0]["name"] if rules else None,
-                  rules=applied, stages=entries)
-    record.setdefault("overrides", []).append({"from": old, "to": wf.name, "by": args.by, "why": (args.note or "").strip(), "at": run.now()})
+                  rules=[*(record.get("rules") or []), *rows], stages=entries, scope=scope)
+    record.setdefault("overrides", []).append({"from": old, "to": wf.name, "by": args.by, "why": (args.note or "").strip(), "at": now})
     run.tg("edit", str(args.id), "--meta", meta_arg("workflow", wf.name))
     run.edit_meta(args.id, workflow_record=record)
     run.emit("workflow-rechosen", args.id, None, None,
@@ -9567,19 +9689,21 @@ def stage_split(run, args):
 
 
 def orphan_note(run, task):
-    """(detail, next) for an abandoned stage task whose dependents wait for it forever, or None. The commands that replace the
-    stage or cancel the instance come with a later phase; until then the Manager reports it."""
+    """(detail, next) for an abandoned stage task of an instance that is not done, or None. The instance cannot finish while
+    a stage is abandoned, whether or not another task waits for it; the dependents that wait are named too. The commands that
+    replace the stage or cancel the instance come with a later phase; until then the Manager reports it."""
     meta = task.get("meta") or {}
     if not (meta.get("abandoned") and meta.get("stage") and task.get("parent") is not None):
+        return None
+    if run.show(task["parent"])["status"] == "done":
         return None
     waiting = []
     for b in run.show(task["id"]).get("blocks") or []:
         node = run.show(b["id"] if isinstance(b, dict) else b)
         if node["status"] != "done":
             waiting.append(f"#{node['id']} ({(node.get('meta') or {}).get('stage') or 'approval of ' + str((node.get('meta') or {}).get('approval_stage'))})")
-    if not waiting:
-        return None
-    return (f"stage {meta['stage']} of #{task['parent']} (#{task['id']}) was abandoned; {', '.join(waiting)} wait for it and never start",
+    return (f"stage {meta['stage']} of #{task['parent']} (#{task['id']}) was abandoned; instance #{task['parent']} cannot finish"
+            + (f", and {', '.join(waiting)} wait for it and never start" if waiting else ""),
             f"put it in the report; run.py stage replace and cancel come with a later phase: until then create the stage again "
             f"(run.py add --parent {task['parent']}), move the dependents with tg dep add and tg dep rm, or remove the instance with tg rm {task['parent']} --recursive")
 
@@ -10006,11 +10130,12 @@ def shown_decisions(decisions):
     return [d for d in decisions if (d.get("meta") or {}).get("approval_state") != "pending"]
 
 
-def workflow_picks(run, since):
+def workflow_picks(run, since, snap):
     """Rows (instance, workflow, how it was chosen) of the workflow instances picked since `since` whose pick was unsure, whose
     rule changed the work, or that the owner overrode: what the operator reads after the fact."""
     rows = []
-    for task in sorted(run.tg("ls") or [], key=lambda t: t["id"]):  # not --status: a parent has a computed status that the filter skips
+    parents = sorted({t["parent"] for t in snap.by_id.values() if (t.get("meta") or {}).get("stage") and t.get("parent") is not None})
+    for task in (run.show(pid) for pid in parents):  # the instances of the stage tasks that the snapshot holds; a parent has a computed status, so it is not in the snapshot itself
         record = (task.get("meta") or {}).get("workflow_record")
         if not (is_instance(task) and isinstance(record, dict) and record.get("picked_at")):
             continue
@@ -10121,7 +10246,7 @@ def cmd_status(run, args):
         done = [(*row, costs.get(row[0])) for row in done]
         flight_headers.append("Est. cost")
         in_flight = [(*row, costs.get(row[0])) for row in in_flight]
-    picks = [] if args.brief else workflow_picks(run, since)
+    picks = [] if args.brief else workflow_picks(run, since, snap)
     sections = [
         ("done", "Done since last report", done_headers, done),
         ("in_flight", "In flight", flight_headers, in_flight),

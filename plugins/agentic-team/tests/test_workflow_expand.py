@@ -713,6 +713,37 @@ class ReviewFixTest(Base):
         again = [e for e in self.events("record") if e["event"] == "stage-orphaned"]
         self.assertEqual(len(again), 1)
 
+    def test_an_abandoned_last_stage_gives_the_hint_although_nothing_waits_for_it(self):
+        inst = self.instance(self.add("change"))
+        test = self.stages(inst)["test"]
+        self.assertEqual(self.node(test)["blocks"], [])
+        self.tg("edit", str(test), "--meta", "attempt=1", "sessions=[]")
+        self.tg("start", str(test))
+        events = self.events("abandon", str(test), "superseded", "--why", "dropped")
+        line = next(e for e in events if e["event"] == "stage-orphaned")
+        self.assertIn(f"stage test of #{inst} (#{test}) was abandoned", line["detail"])
+        self.assertIn(f"instance #{inst} cannot finish", line["detail"])
+        self.assertNotIn("wait for it", line["detail"])
+        self.assertIn("replace and cancel", line["next"])
+        self.assertEqual(len([e for e in self.events("record") if e["event"] == "stage-orphaned"]), 1)
+
+    def test_a_rechoose_that_fails_midway_leaves_the_old_stages_and_says_so(self):
+        inst = self.instance(self.add("change"))
+        old = sorted(self.stages(inst).values())
+        wrap = os.path.join(self.dir, "tgwrap.py")
+        with open(wrap, "w") as fh:
+            fh.write(WRAPPER)
+        self.env.update(WRAP_COUNT=os.path.join(self.dir, "count"), WRAP_TG=TG, WRAP_FAIL_ADD="2")
+        out = subprocess.run([sys.executable, RUN, "--root", self.root, "--tg", wrap, "stage", str(inst), "rechoose", "fix", "--by", "operator"],
+                             capture_output=True, text=True, cwd=self.dir, env=self.env)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("rechoose to fix failed; the old stages", out.stdout)
+        self.assertEqual(sorted(self.stages(inst).values()), old)
+        self.assertEqual(self.meta(inst)["workflow"], "change")
+        kids = {t["id"] for t in self.tg("ls", "--parent", str(inst))}
+        self.assertTrue(set(old) <= kids)
+        self.assertEqual(len([t for t in self.tg("ls", "--parent", str(inst)) if (t.get("meta") or {}).get("stage")]), len(old))
+
     def test_decide_by_is_the_date_in_the_project_time_zone(self):
         self.config("", timezone="Pacific/Kiritimati")
         inst = self.instance(self.add("change"))
