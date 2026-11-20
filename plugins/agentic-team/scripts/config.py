@@ -208,6 +208,17 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "carried_total_bytes": ("posint", 12000),
     },
     "notifications": {"skill": ("str", "")},
+    "hooks": {
+        "enabled": ("bool", False),
+        "layered": ("bool", True),
+        "compact_pins": ("bool", True),
+        "summarize_fallback": ("bool", False),
+        "passthrough_chars": ("posint", 20000),
+        "large_chars": ("posint", 100000),
+        "summarize_seconds": ("posint", 30),
+        "commands": ("commands", ["make test*", "pytest", "python* -m pytest*", "uv run pytest", "vitest", "npx vitest",
+                                  "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]),
+    },
     "rounds": {
         "cap": ("posint", 3),
         "verify": ("choice:always,by-risk", "always"),
@@ -220,6 +231,7 @@ TYPE_NAMES = {
     "refprefix": "a branch name prefix that ends with - or /",
     "list": "a list of strings",
     "patterns": "a list of path patterns",
+    "commands": "a list of command prefixes or globs, none empty",
     "adjacent": "a list of adjacent-change kinds",
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
     "posint": "a positive integer",
@@ -414,6 +426,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "adjacent":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "commands":
+        return isinstance(value, list) and all(isinstance(v, str) and v.strip() and v == v.strip() for v in value)
     if kind == "ranmap":
         return isinstance(value, dict) and all(
             isinstance(v, list) and all(isinstance(p, str) and p.strip() and p == p.strip() for p in v)
@@ -482,6 +496,14 @@ def problems(config):
     if (type_ok("posint", brief["carried_report_bytes"]) and type_ok("posint", brief["carried_total_bytes"])
             and brief["carried_total_bytes"] < brief["carried_report_bytes"]):
         found.append("brief.carried_total_bytes must be at least brief.carried_report_bytes")
+    hooks = config["hooks"]
+    if (type_ok("posint", hooks["passthrough_chars"]) and type_ok("posint", hooks["large_chars"])
+            and hooks["large_chars"] < hooks["passthrough_chars"]):
+        found.append("hooks.large_chars must be at least hooks.passthrough_chars")
+    mode = config["sessions"]["permission_mode"]
+    if hooks["enabled"] is True and isinstance(mode, str) and mode not in ("auto", "bypassPermissions"):
+        found.append(f'hooks.enabled needs sessions.permission_mode "auto" or "bypassPermissions", not "{mode}": the layered '
+                     "hook rewrites the Bash command, so an allow rule such as Bash(pytest:*) no longer matches it")
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")

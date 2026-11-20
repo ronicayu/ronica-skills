@@ -10708,10 +10708,10 @@ class DeliveryTest(Base):
 
     # --- 0.17.0: a rowless resume keeps the tier that launch stored
 
-    def rowless_resume(self, *launch_flags, role_files=(), **meta):
+    def rowless_resume(self, *launch_flags, role_files=(), hooks="", **meta):
         """Launch on c2, lose the job (`claude rm`; the transcript stays), answer an ask: the resume passes the launch flags.
         Returns the argv of that resume. The judgement tier is opus at max effort, so the effort shows which tier ran."""
-        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[models]\njudgement = {{ model = "opus", effort = "max" }}\n',
+        self.write_config(f'[profiles]\nc2 = "{self.c2}"\n[models]\njudgement = {{ model = "opus", effort = "max" }}\n' + hooks,
                           sessions="max_parallel = 3\n")
         for name, tier in role_files:
             folder = os.path.join(self.root, ".claude", "agentic-team", "roles")
@@ -10748,6 +10748,92 @@ class DeliveryTest(Base):
     def test_r17_a_task_with_no_role_or_tier_resumes_as_before(self):
         argv = self.rowless_resume()
         self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("sonnet", "high"))
+
+    # --- 0.29.0: worker hooks
+
+    HOOKS_ON = "[hooks]\nenabled = true\n"
+
+    def settings_of(self, argv):
+        return json.loads(argv[argv.index("--settings") + 1])
+
+    def test_h1_hooks_off_by_default_the_settings_hold_only_the_mailbox_hooks(self):
+        self.ok("launch", str(self.add_task()))
+        settings = self.settings_of(self.calls("--bg")[0])
+        self.assertEqual(set(settings["hooks"]), {"SessionStart", "PostToolUse"})
+        self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".agentic-team", "hooks")))
+
+    def test_h2_hooks_on_a_launch_passes_the_worker_hooks_and_writes_their_config(self):
+        self.write_config(self.HOOKS_ON + 'commands = ["make test*"]\npassthrough_chars = 500\n')
+        self.ok("launch", str(self.add_task()))
+        settings = self.settings_of(self.calls("--bg")[0])
+        hooks_dir = os.path.join(os.path.dirname(HERE), "scripts", "hooks")
+        cfg_file = os.path.join(self.root, ".agentic-team", "hooks", "task-1-1.json")
+        (pre,) = settings["hooks"]["PreToolUse"]
+        self.assertEqual(pre["matcher"], "Bash")
+        self.assertEqual(pre["hooks"][0]["command"], sys.executable)
+        self.assertEqual(pre["hooks"][0]["args"], ["-S", os.path.join(hooks_dir, "layered.py"), "pre", "--config", cfg_file])
+        (precompact,) = settings["hooks"]["PreCompact"]
+        self.assertEqual(precompact["hooks"][0]["args"], ["-S", os.path.join(hooks_dir, "compact.py"), "--config", cfg_file])
+        self.assertEqual([e.get("matcher") for e in settings["hooks"]["SessionStart"]], ["startup|resume", "compact"])
+        self.assertEqual(settings["hooks"]["SessionStart"][1]["hooks"][0]["args"][1], os.path.join(hooks_dir, "compact.py"))
+        for entry in (pre, precompact, settings["hooks"]["SessionStart"][1]):
+            self.assertTrue(os.path.isfile(entry["hooks"][0]["args"][1]))
+        self.assertIn("PostToolUse", settings["hooks"])  # the mailbox pointer hook stays
+        with open(cfg_file) as fh:
+            cfg = json.load(fh)
+        self.assertEqual((cfg["task"], cfg["attempt"], cfg["commands"], cfg["passthrough_chars"], cfg["layered"],
+                          cfg["compact_pins"], cfg["summarize_fallback"]), (1, 1, ["make test*"], 500, True, True, False))
+        self.assertEqual(cfg["brief"], os.path.join(self.root, ".agentic-team", "briefs", "task-1-1.md"))
+        self.assertEqual(cfg["ctx"], os.path.join(self.root, ".agentic-team", "inbox", "1-1.ctx.json"))
+        self.assertEqual(cfg["saved_dir"], os.path.join(self.wt_path("task-1"), ".agentic-team-scratch", "hook-output"))
+        self.assertTrue(os.path.isfile(cfg["brief"]))
+
+    def test_h3_each_hook_has_its_own_switch(self):
+        self.write_config(self.HOOKS_ON + "layered = false\n")
+        self.ok("launch", str(self.add_task()))
+        self.assertEqual(set(self.settings_of(self.calls("--bg")[0])["hooks"]), {"SessionStart", "PostToolUse", "PreCompact"})
+        self.fresh()
+        self.write_config(self.HOOKS_ON + "compact_pins = false\n")
+        self.ok("launch", str(self.add_task()))
+        settings = self.settings_of(self.calls("--bg")[0])
+        self.assertEqual(set(settings["hooks"]), {"SessionStart", "PostToolUse", "PreToolUse"})
+        self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
+
+    def test_h4_a_dry_run_shows_the_settings_and_writes_nothing(self):
+        self.write_config(self.HOOKS_ON)
+        out = self.ok("launch", str(self.add_task()), "--dry-run")
+        self.assertIn("PreCompact", out.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".agentic-team", "hooks")))
+
+    def test_h5_a_verifier_gets_no_hooks(self):
+        self.write_config(self.HOOKS_ON)
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: 1\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.agents(self.finished("task-1"))
+        self.ok("verify", str(task))
+        self.assertNotIn("--settings", self.calls("--bg")[0])
+
+    def test_h6_a_resume_with_the_full_session_id_passes_no_flag_and_the_saved_settings_keep_the_hooks(self):
+        self.write_config(self.HOOKS_ON + f'[profiles]\nc2 = "{self.c2}"\n', sessions="max_parallel = 3\n")
+        task = self.worker(status="idle", state="blocked", pid=4242)
+        self.ask()
+        self.events("answer", str(task), "--file", self.text_file("v2"))
+        (argv,) = [a for a, _ in self.calls_in("--bg", self.c2) if "--resume" in a]
+        self.assertEqual(argv[:3], ["--bg", "--resume", UUID1])  # the full id, not the short one that makes a copy
+        self.assertNotIn("--settings", argv)
+
+    def test_h7_a_rowless_resume_passes_the_hooks_again(self):
+        argv = self.rowless_resume(hooks=self.HOOKS_ON)
+        settings = self.settings_of(argv)
+        self.assertEqual(set(settings["hooks"]), {"SessionStart", "PostToolUse", "PreToolUse", "PreCompact"})
+        cfg_file = os.path.join(self.root, ".agentic-team", "hooks", "task-1-1.json")
+        self.assertTrue(os.path.isfile(cfg_file))
+        self.assertEqual(argv[argv.index("--settings") + 1], json.dumps(settings, separators=(",", ":")))
+
+    def test_h8_a_rowless_resume_with_hooks_off_is_as_before(self):
+        settings = self.settings_of(self.rowless_resume())
+        self.assertEqual(set(settings["hooks"]), {"SessionStart", "PostToolUse"})
 
 
 def transcript_text(tokens):
