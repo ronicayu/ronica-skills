@@ -133,7 +133,7 @@ RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
 }
-LOCAL_RESULT_KINDS = ("ack", "steer", "check")  # the recommended [projects."<name>".results] local list (#133)
+LOCAL_RESULT_KINDS = ("ack", "steer", "revise", "check")  # the recommended [projects."<name>".results] local list (#133)
 
 
 def system_timezone():
@@ -201,6 +201,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "checks": ("cmdlist", []),
         "checks_by_kind": ("cmdmap", {}),
         "check_timeout_seconds": ("posint", 600),
+        "summary_lang": ("choice:en,zh", "en"),
     },
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),

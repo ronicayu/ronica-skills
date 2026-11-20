@@ -137,6 +137,7 @@ import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
                     manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
+from report_summary import summarize  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -460,8 +461,11 @@ class Run:
         task.setdefault("meta", {}).update(meta)
 
     def add_result(self, tid, kind, attempt, by, status, body):
+        """File a result row. A report, a revision mark or a long ask or answer also gets the short summary that
+        Taskgraph shows on the issue comment (report_summary.summarize)."""
+        summary = summarize(kind, status, body, self.config["report"]["summary_lang"])
         return self.tg("result", "add", str(tid), "--kind", kind, "--attempt", str(attempt), "--by", by,
-                       "--status", status, "--body-file", "-", input=body)
+                       "--status", status, *([f"--summary={summary}"] if summary else []), "--body-file", "-", input=body)
 
     def edit_meta(self, tid, **meta):
         self.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in meta.items()])
@@ -2129,6 +2133,7 @@ def write_ctx(run, task, attempt, session, cap):
     tid = task["id"]
     ctx = {"python": sys.executable, "tg": run.tg_path, "db": run.db, "project": run.project, "task": tid,
            "attempt": attempt, "by": session, "asks_cap": cap, "lock": lock_file(run, tid),
+           "summary_lang": run.config["report"]["summary_lang"],
            "scope": str((task.get("meta") or {}).get("scope", "")).strip(),
            "inbox_dir": os.path.join(run.run_dir, INBOX_DIR)}
     path = attempt_file(run, tid, attempt, "ctx.json")
@@ -2260,11 +2265,12 @@ def mailbox_section(run, tid, attempt, session, cap, to, revisions=False):
     return "\n".join(lines)
 
 
-def result_command(py, tg, db, project, task_id, kind, attempt, session, report):
-    """The command the session runs last. It fills in only the status; the body comes from the report file."""
-    return (f"{quote(py)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)} "
-            f"result add {task_id} --kind {kind} --attempt {attempt} --by {shlex.quote(session)} "
-            f"--status <STATUS> --body-file {quote(report)}")
+def result_command(py, tg, db, project, task_id, attempt, session, report, lang):
+    """The command the verifier runs last. It fills in only the status; the body comes from the report file. It
+    files the `tg result add` row with the report's summary (mailbox.py file-verify)."""
+    return (f"{quote(py)} {quote(mailbox_script())} file-verify --python {quote(py)} --tg {quote(tg)} --db {quote(db)} "
+            f"--project {shlex.quote(project)} --task {task_id} --attempt {attempt} --by {shlex.quote(session)} "
+            f"--lang {lang} --status <STATUS> --body-file {quote(report)}")
 
 
 def adjacent_text(config):
@@ -2399,8 +2405,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                        "requires, a `PASS` report while one of the project's report checks fails, and an `ISSUES` or `BLOCKED` "
                        "report with no `Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
-        "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
-                                          report) if kind == "verify" else
+        "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, session,
+                                          report, run.config["report"]["summary_lang"]) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
                            mailbox_command(run, tid, attempt, "report", "--status", "<STATUS>", "--body-file", quote(report))),
         "NOTIFY": notify_step(notify_target(run), tid, kind, attempt),
@@ -3779,7 +3785,8 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              "a `Verdict:` line after `Status:`. Check it with:", "",
              f"`{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} check-report {quote(report)} --verifier`",
              "", "Then run this one command, once, with `<STATUS>` replaced:", "", "```sh",
-             result_command(sys.executable, run.tg_path, run.db, run.project, tid, "verify", attempt, name, report), "```"]
+             result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, name, report,
+                            run.config["report"]["summary_lang"]), "```"]
     notify = notify_step(notify_target(run), tid, "verify", attempt)
     return "\n".join(lines) + (notify or "") + "\n"
 

@@ -338,6 +338,14 @@ class ConfigTest(unittest.TestCase):
                 self.write(MINIMAL + f"[report]\n{bad}\n")
                 self.assertEqual(len(config.problems(config.load(self.root))), 1)
 
+    def test_summary_lang_is_en_or_zh_and_defaults_to_en(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["report"]["summary_lang"], "en")
+        self.write(MINIMAL + '[report]\nsummary_lang = "zh"\n')
+        self.assertEqual((config.problems(config.load(self.root)), self.run_cli("get", "report.summary_lang")[:2]), ([], (0, "zh\n")))
+        self.write(MINIMAL + '[report]\nsummary_lang = "fr"\n')
+        self.assertIn('summary_lang must be one of "en", "zh"', " ".join(config.problems(config.load(self.root))))
+
     def test_verifier_by_tier_maps_tiers_and_override_keys_to_models(self):
         self.write(MINIMAL)
         self.assertEqual(config.load(self.root)["models"]["verifier_by_tier"], {})
@@ -578,10 +586,10 @@ class ConfigTest(unittest.TestCase):
             f'[projects."demo".results] in {os.path.realpath(path)}' for kind in config.LOCAL_RESULT_KINDS] or err)
         self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["steer", "ask", "check"]\n')
         err = self.run_cli("check")[2]
-        self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack"])
-        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "check", "ask", "answer"]\n')
+        self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack", "revise"])
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "revise", "check", "ask", "answer"]\n')
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
-        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "check", "ask", "answer"))
+        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "revise", "check", "ask", "answer"))
 
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)

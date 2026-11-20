@@ -86,6 +86,7 @@ always_pause = []           # decisions that always need the operator
 # require_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }  # by verify kind: the line prefixes that a worker PASS report needs under Ran:; empty by default
 # checks = ["make lint"]    # commands that check-report runs in the task worktree before it accepts a PASS; a non-zero exit refuses it, naming the command
 # check_timeout_seconds = 600   # the time each check may take
+# summary_lang = "en"       # "en" or "zh": the language of the short summary above a result's issue comment on the Taskgraph GitHub backend
 # [report.checks_by_kind]   # the same by verify kind, run after `checks`
 # design-doc = ["python docs/models/check_refs.py"]
 

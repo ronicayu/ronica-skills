@@ -10,9 +10,14 @@ Usage:
                                         `--action "F<n>: <what you will change>"` per finding
     mailbox.py --ctx FILE report --status S --body-file F
                                         file the worker's report; refused while a steer has no ack
+    mailbox.py file-verify --python P --tg T --db D --project N --task ID --attempt N --by NAME --lang en|zh
+                           --status S --body-file F
+                                        file a verifier's report, with no context file
     mailbox.py hook --flag FILE [--match PREFIX]
                                         a PostToolUse hook: print the flag file's pointer line, if the file exists
                                         and the line starts with PREFIX (this task and attempt)
+
+A worker or verifier report, and a long ask, is filed with a short summary that is built from its text (report_summary.py).
 
 Every message is a Taskgraph result row (kind ask, answer, steer or ack); the row id is the message id. A doorbell
 (a line posted to a socket, or the hook's pointer) only wakes the receiver: it carries no instructions. The receiver
@@ -185,6 +190,13 @@ def tg_json(ctx, *args, input=None):
     return json.loads(out.stdout or "null")
 
 
+def summary_args(ctx, kind, status, body):
+    """The `tg result add` option for the row's short summary, or nothing. The summary follows [report] summary_lang."""
+    from report_summary import summarize
+    summary = summarize(kind, status, body, ctx.get("summary_lang", "en"))
+    return [f"--summary={summary}"] if summary else []
+
+
 def read_ctx(path):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -342,7 +354,8 @@ def cmd_ask(ctx, args):
     if len(filed) >= cap:
         raise Fail(f"you have filed {len(filed)} of {cap} asks this attempt. Decide with your Defaults, or report BLOCKED.")
     row = tg_json(ctx, "result", "add", str(task), "--kind", ASK, "--attempt", str(attempt), "--by", ctx["by"],
-                  "--status", "OPEN", "--body-file", "-", input=text if text.endswith("\n") else text + "\n")
+                  "--status", "OPEN", *summary_args(ctx, ASK, "OPEN", text), "--body-file", "-",
+                  input=text if text.endswith("\n") else text + "\n")
     print(f"ask #{row['id']} filed ({len(filed) + 1} of {cap} asks this attempt).")
     if ask_blocking(text):
         print(f"End your turn now with one line: Waiting for answer to ask #{row['id']}. "
@@ -439,9 +452,29 @@ def cmd_report(ctx, args):
         if waiting:
             raise Fail("; ".join(unacked_text(r, rows) for r in waiting) + ": run the inbox command from "
                        "MAILBOX, act on it and ack it, then run this command again")
-        row = tg_json(ctx, "result", "add", str(ctx["task"]), "--kind", "task", "--attempt", str(ctx["attempt"]), "--by",
-                      ctx["by"], "--status", args.status, "--body-file", args.body_file)
+        row = file_report(ctx, "task", args.status, args.body_file)
     print(f"result #{row['id']} filed for task {ctx['task']} attempt {ctx['attempt']}: {args.status}")
+    return 0
+
+
+def file_report(ctx, kind, status, body_file):
+    """`tg result add` for a worker or verifier report, with the summary that is built from the report file. A file
+    that cannot be read gets no summary: tg reads it too and names the problem."""
+    try:
+        with open(body_file, encoding="utf-8") as fh:
+            summary = summary_args(ctx, kind, status, fh.read())
+    except (OSError, UnicodeDecodeError):
+        summary = []
+    return tg_json(ctx, "result", "add", str(ctx["task"]), "--kind", kind, "--attempt", str(ctx["attempt"]), "--by",
+                   ctx["by"], "--status", status, *summary, "--body-file", body_file)
+
+
+def cmd_file_verify(args):
+    """File a verifier's report. It has no context file: the brief's command carries every value."""
+    ctx = {"python": args.python, "tg": args.tg, "db": args.db, "project": args.project, "task": args.task,
+           "attempt": args.attempt, "by": args.by, "summary_lang": args.lang}
+    row = file_report(ctx, "verify", args.status, args.body_file)
+    print(f"result #{row['id']} filed for task {args.task} attempt {args.attempt}: {args.status}")
     return 0
 
 
@@ -453,7 +486,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="mailbox.py", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ctx", help="the context file that run.py wrote for the attempt")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{checkin,ask,inbox,ack,report,hook}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{checkin,ask,inbox,ack,report,file-verify,hook}")
     sub.add_parser("checkin", help="SessionStart hook: write the session's socket address")
     p = sub.add_parser("ask", help="file a question for the Manager")
     p.add_argument("--file", required=True, help="the question: Question, Options, Default, Blocking, Why")
@@ -465,9 +498,16 @@ def main(argv=None):
     p = sub.add_parser("report", help="file the report of the attempt; refused while a steer has no ack")
     p.add_argument("--status", required=True, help="PASS, ISSUES or BLOCKED")
     p.add_argument("--body-file", required=True, help="the report file")
+    p = sub.add_parser("file-verify", help="file the report of a verifier session (no context file)")
+    for name in ("python", "tg", "db", "project", "by", "lang", "status", "body-file"):
+        p.add_argument(f"--{name}", required=True)
+    p.add_argument("--task", type=int, required=True)
+    p.add_argument("--attempt", type=int, required=True)
     sub.add_parser("hook", help="PostToolUse hook: print the pointer line of --flag")
     args = parser.parse_args(argv)
     try:
+        if args.command == "file-verify":
+            return cmd_file_verify(args)
         if not args.ctx:
             raise Fail(f"{args.command} needs --ctx <the context file of your brief>")
         ctx = read_ctx(args.ctx)

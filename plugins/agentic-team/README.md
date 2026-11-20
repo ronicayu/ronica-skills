@@ -1086,6 +1086,7 @@ pattern.
 | `checks` | list of strings | `[]` | Project commands that the worker's `check-report` runs before it accepts a `PASS`, for every verify kind. See [Report checks](#report-checks). |
 | `checks_by_kind` | table of verify kind to list of strings | `{}` | The same, for one verify kind (`code`, `schema`, `design-doc`); they run after `checks`: `[report.checks_by_kind]` `design-doc = ["python docs/models/check_refs.py"]`. A key that is not a verify kind is a config error. |
 | `check_timeout_seconds` | positive integer | `600` | The time that each check may take. |
+| `summary_lang` | `"en"` or `"zh"` | `"en"` | The language of the short summary that heads an issue comment on the Taskgraph GitHub backend. See [Issue comment summaries](#issue-comment-summaries). |
 
 ### `[roles]`
 
@@ -1500,7 +1501,7 @@ The worker runs `mailbox.py report` and `run.py check-report` from its own sessi
 its permission mode must allow both. Allow only a `--body-file` path in the
 worktree's `.agentic-team/` folder if you write a permission rule for it. In `auto` mode nothing enforces that rule: the
 brief gives the worker the paths to `mailbox.py`, its context file, `tg.py` and the database, and only the
-worker's instructions keep it to the one report command. A verifier still files with `tg result add`.
+worker's instructions keep it to the one report command. A verifier files with `mailbox.py file-verify`, which takes every value on its command line and runs the same `tg result add`; it needs no context file.
 
 ## Roles
 
@@ -1842,10 +1843,10 @@ subagent's long answer, and a retro on this machine reads it from the cache. `tr
 
 ```toml
 [projects."<name>".results]
-local = ["ack", "steer", "check"]
+local = ["ack", "steer", "revise", "check"]
 ```
 
-A row of a `local` kind is never posted; `tg result add` and `tg result ls` work as before, and the worker's
+A `revise` row marks the start of a revision and only this machine's Manager reads it. A row of a `local` kind is never posted; `tg result add` and `tg result ls` work as before, and the worker's
 `mailbox.py`, which runs `tg` on the same machine, reads the same cache: tg finds the main checkout's
 `.taskgraph.toml` (or the worktree's committed copy) and reads a relative `cache` path from the main checkout's folder,
 so the default `~/.taskgraph/cache/...` path and a relative one are shared by every worktree; an absolute path must be
@@ -1854,6 +1855,26 @@ exits 0) for each of these kinds that the project's entry does not list. `ask` a
 default: they hold the worker's question and the Manager's decision, which a person or another machine may want to
 read. A project may add them to `local` too; then a lost cache also loses the questions and the answers, and an answer
 that came from a `decision` task stays in that task's notes.
+
+### Issue comment summaries
+
+On the GitHub backend an issue comment is the full machine body of a result row: for a worker `PASS` that is the `Status:`, `Head:` and `Ran:` fields and the command logs, often several thousand characters, and `run.py` needs all of it. With Taskgraph 1.22.0 or later, each worker report, verifier report and revision mark is also filed with a short summary that `tg result add --summary` puts above the full body. The comment shows the hidden meta line, the summary in Markdown, and the full report inside a collapsed `<details><summary>Full result</summary>` block. `tg result ls` still returns the exact body, and returns the summary as `summary`. A row with no summary is a comment as before.
+
+The summary is built from the parsed fields, with no model:
+
+| Row | Summary |
+|-----|---------|
+| Worker `PASS` | `✅ PASS · head c9c6c29 · 12 files changed · 21 commands ran`, then `Evidence: <first line>` |
+| Worker `ISSUES` or `BLOCKED` | `⚠️ ISSUES · <first issue line>`, then `Asked: <the ask ids or reason>` |
+| Verifier, `verify-failed` | `❌ verify-failed · 2 blocking findings`, then the first two findings, each cut to 120 characters |
+| Verifier, `verify-blocked` | `⚠️ verify-blocked · <first issue line>` |
+| Verifier, passing verdict | `✅ test-verified · head c9c6c29` |
+| `revise` | `🔁 revision 2 from verify #41` |
+| `ask`, `answer` | `❓ <question>` or `💬 <first line>`, only when the text is over 300 characters |
+
+Other rows (`ack`, `steer`, `check`, `STOPPED`, `DIED`) have no summary. `[report] summary_lang = "zh"` writes the same lines in Chinese (`✅ 通过 · 提交 c9c6c29 · 改了 12 个文件 · 跑了 21 条命令`); the verdict names stay as they are. A salvaged report (`run.py record`) and a manager-filed row get the summary from the same code as a row that the session files itself: `Run.add_result`, `mailbox.py report`, `mailbox.py ask` and `mailbox.py file-verify`. A report that you file by hand with `tg result add` has none, unless you pass `--summary`.
+
+A project on the GitHub backend that wants fewer comments, as in a project with many tasks, should put `ack`, `steer`, `revise` and `check` in `results.local` (see above): those rows are the most frequent and nobody reads them on the issue.
 
 When the cache is lost (see [When the local cache is lost](#when-the-local-cache-is-lost)), the local rows go with it:
 the handshake history, which `run.py inbox` showed, and the evidence behind the `steer-seen` and `answer-seen` lines.
@@ -1869,6 +1890,7 @@ may match a new steer.
 Version 0.30.0 adds the quality gate before verify and the cost defaults. No lifecycle, phase or model change (the TLA+ model under `model/` is unchanged); no migration. Every new key is optional, and the shipped defaults keep 0.28.2 behaviour except for the revision scope below.
 
 - **`[report] checks`, `checks_by_kind`, `check_timeout_seconds`.** New optional keys; empty keeps the old behaviour. See [Report checks](#report-checks).
+- **Issue comment summaries.** A worker report, a verifier report, a `revise` row and a long `ask` or `answer` is filed with a short summary, which Taskgraph 1.22.0 or later shows above the full body on the issue comment. New optional key `[report] summary_lang = "en" | "zh"` (default `"en"`). A verifier's brief now ends with `mailbox.py file-verify` where it ended with `tg result add`; the row is the same. With an older Taskgraph, `tg result add` refuses `--summary`, so update Taskgraph first. `revise` joins `ack`, `steer` and `check` in the recommended `results.local` list, and `config.py check` warns until a GitHub-backend project lists it; a project like DB-FAT should list all four to cut the comment noise. See [Issue comment summaries](#issue-comment-summaries).
 - **Self-review before PASS.** A worker brief for a `design-doc` or `code` task now carries a self-review step (a `self-check:` subagent pass, or `mutation:` guard runs); it is text only, and `check-report` does not require the lines unless `require_ran` does. See [Self-review before PASS](#self-review-before-pass).
 - **A revision verifier no longer runs the whole method again.** The revision brief (and `agents/worker.md`) now says: rerun every VERIFY command, check each fixed finding, and check the code that the revision diff touched. This changes what a verifier does on a revision; there is no setting for it.
 - **`[models.verifier_by_tier]`.** A new optional table. `verify` picks the model as: `--model`, then `verifier_by_tier[<the attempt's tier>]`, then `verifier`, then a model that differs from the worker's. The shipped default is an empty table, so a project that sets nothing keeps the 0.28.2 verifier. Recommended: `implementation = "sonnet"`, `judgement = "opus"`. See [Verifier model per tier](#verifier-model-per-tier).

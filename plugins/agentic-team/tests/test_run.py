@@ -1031,7 +1031,7 @@ class RunTest(Base):
         text = self.brief(task)
         command = self.section(text, "REPORT")
         # 0.16.0: the worker files its report through mailbox.py, which refuses while a steer has no ack and then runs
-        # the same `tg result add`; the verifier's command is still the bare `tg result add`
+        # the same `tg result add`; the verifier files through `mailbox.py file-verify`, which runs `tg result add`
         expected = (f'"{sys.executable}" "{self.MAILBOX_PY}" --ctx "{self.inbox_file("1-1.ctx.json")}" '
                     "report --status <STATUS> --body-file ")
         self.assertIn(expected, command)
@@ -1155,7 +1155,8 @@ class RunTest(Base):
         self.assertIn("### Project verify skill", self.section(text, "VERIFY"))
         self.assertIn("None: no", self.section(text, "VERIFY"))
         self.assertIn("A behaviour change you did not drive is `check-only`", " ".join(self.section(text, "VERIFY").split()))
-        self.assertIn("--kind verify --attempt 1 --by verify-1-1 --status <STATUS>", text)
+        self.assertIn("mailbox.py\" file-verify", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --lang en --status <STATUS>", text)
         self.assertIn("`Verdict:` line", self.section(text, "REPORT"))
         self.assertTrue(self.section(text, "AUTONOMY").startswith("- None."))
         self.assertEqual(self.calls("--bg"), [])
@@ -4975,6 +4976,18 @@ class RunTest(Base):
         self.assertEqual(self.meta(task)["phase"], "reported")
         self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
 
+    def test_101_a_salvaged_worker_report_gets_its_summary_in_the_configured_language(self):
+        self.write_config('\n[report]\nsummary_lang = "zh"\n')
+        task = self.running_task(session="task-1-1")
+        self.worktree("task-1")
+        report = (f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {SHA_A}\nIssues: the test fails\n"
+                  f"Asked: none: nothing to ask\nCheckpoint: {CHECKPOINT}\n")
+        self.write_report("task-1", "task-1-1", report)
+        self.agents(self.finished("task-1"))
+        self.ok("record")
+        [row] = [r for r in self.results(task) if r["kind"] == "task"]
+        self.assertEqual((row["body"], row["summary"]), (report, "⚠️ 有问题 · the test fails\n已提问: none: nothing to ask"))
+
     def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
         task = self.running_task(session="task-1-1")
         report = f"Task: 1\nStatus: BLOCKED\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n"
@@ -5016,7 +5029,7 @@ class RunTest(Base):
                          "files and folders in .agentic-team-scratch/; delete nothing there either.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
-        self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
+        self.assertIn(f'--task 1 --attempt 1 --by verify-1-1 --lang en --status <STATUS> --body-file "{path}"', report)
         self.assertIn("Add a `Verdict:` line after `Status:`", report)
 
     def test_101_a_verifier_that_ended_is_salvaged_from_its_report_file(self):
@@ -5034,6 +5047,13 @@ class RunTest(Base):
         self.assertEqual(len(self.verify_rows(task)), 1)
         closed = self.events("close", str(task), "--ref", "output.tar")  # no --verdict: the row is the verifier's
         self.assertIn("test-verified at output.tar", self.one(closed, "closed")["detail"])
+
+    def test_101_a_salvaged_verifier_report_gets_a_summary(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        self.write_report("verify-1-1", "verify-1-1", self.VERIFIER_REPORT)
+        self.ok("record")
+        [row] = self.verify_rows(task)
+        self.assertEqual(row["summary"], f"✅ test-verified · head {SHA_A[:7]}")
 
     def test_101_a_verifier_idle_after_its_turn_is_salvaged_and_stopped(self):
         for number, status in enumerate(("idle", None), 1):  # None: no process runs it
@@ -9234,7 +9254,8 @@ class MessagingTest(Base):
         ctx = self.ctx()
         self.assertEqual(ctx, {"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": 1, "attempt": 1,
                                "by": "task-1-1", "asks_cap": 3, "lock": os.path.join(self.root, ".agentic-team", "locks", "task-1.lock"),
-                               "scope": "src/", "inbox_dir": os.path.join(self.root, ".agentic-team", "inbox")})
+                               "scope": "src/", "inbox_dir": os.path.join(self.root, ".agentic-team", "inbox"),
+                               "summary_lang": "en"})
         argv = self.calls("--bg")[0]
         self.assertEqual(argv[argv.index("--settings") + 1], self.worker_settings(1, 1))
         self.assertEqual(argv.index("--settings"), argv.index("--name") + 2)  # right after --name, before the brief
@@ -13456,6 +13477,7 @@ class RevisionTest(Base):
         self.assertEqual((marks[0]["author"], marks[0]["status"], marks[0]["attempt"]), ("manager", "OPEN", 1))
         self.assertIn(f"Revision: 1\nFrom: verify #{self.verify_row}\nHead: {head}\nVerifier: verify-1-1\n", marks[0]["body"])
         self.assertIn("revision 1", self.one(events, "revised")["detail"])
+        self.assertEqual(marks[0]["summary"], f"🔁 revision 1 from verify #{self.verify_row}")
 
     def test_revise_files_one_finding_steer_with_every_blocking_line(self):
         lines = ("src/a.py:1: one", "src/b.py:2: two", "docs/c.md: three")
@@ -13688,7 +13710,7 @@ class RevisionTest(Base):
         self.assertNotIn("run the full method", text)
         self.assertIn("## VERIFY\n\nmake test", text)
         self.assertIn("- done", text)  # the ACCEPTANCE line
-        self.assertIn("--kind verify --attempt 1 --by verify-1-1", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --lang en", text)
 
     def test_140_a_revision_verify_moves_the_ci_ref_to_the_new_head(self):
         self.host = "github"
