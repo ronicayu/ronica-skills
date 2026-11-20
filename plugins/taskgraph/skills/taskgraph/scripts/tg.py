@@ -45,7 +45,7 @@ CHANGE_BUCKETS = {
 }
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
-RESULT_COLUMNS = ("id", "task_id", "at", "status", "kind", "attempt", "author", "body")
+RESULT_COLUMNS = ("id", "task_id", "at", "status", "kind", "attempt", "author", "body", "summary")
 
 
 class Fail(Exception):
@@ -757,7 +757,10 @@ def cmd_show(store, conn, args):
         out.extend(f"  #{r['id']} [{r['derived_status']}] {r['title']}" for r in (tasks[i] for i in task[key]))
     if found:
         out.append("results:")
-        out.extend(f"  {result_line(r, with_task=False)}" for r in found)
+        for r in found:
+            out.append(f"  {result_line(r, with_task=False)}")
+            if r["summary"]:
+                out.append("      summary: " + "\n               ".join(r["summary"].splitlines()))
     emit(args, data, "\n".join(out))
 
 
@@ -1324,17 +1327,18 @@ def result_word(name, value):
     return value
 
 
-def read_body(args):
-    if args.body is not None and args.body_file is not None:
-        raise Fail("--body and --body-file cannot be combined")
-    if args.body_file is None:
-        return args.body or ""
+def read_text_option(args, name):
+    text, path = getattr(args, name), getattr(args, name + "_file")
+    if text is not None and path is not None:
+        raise Fail(f"--{name} and --{name}-file cannot be combined")
+    if path is None:
+        return text or ""
     try:
-        if args.body_file == "-":
+        if path == "-":
             return sys.stdin.buffer.read().decode("utf-8")
-        return Path(args.body_file).expanduser().read_text(encoding="utf-8")
+        return Path(path).expanduser().read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
-        raise Fail(f"cannot read body from {args.body_file}: {e}")
+        raise Fail(f"cannot read {name} from {path}: {e}")
 
 
 def result_line(row, with_task=True):
@@ -1361,8 +1365,11 @@ def cmd_result_add(store, conn, args):
     kind = result_word("--kind", args.kind)
     if args.attempt is not None and args.attempt < 1:
         raise Fail(f"--attempt must be a positive integer: {args.attempt}")
-    body = read_body(args)
-    row = store.add_result(conn, args.id, ResultInput(status, kind, args.attempt, args.by, body))
+    if args.body_file == "-" and args.summary_file == "-":
+        raise Fail("--body-file and --summary-file cannot both read stdin")
+    body = read_text_option(args, "body")
+    summary = read_text_option(args, "summary").strip()
+    row = store.add_result(conn, args.id, ResultInput(status, kind, args.attempt, args.by, body, summary))
     suffix = f", attempt {row['attempt']}" if row["attempt"] is not None else ""
     emit(args, without_body(row) if args.brief else row, f"result #{row['id']} added to #{args.id} ({kind} {status}{suffix})")
 
@@ -1392,6 +1399,8 @@ def cmd_result_ls(store, conn, args):
     out = []
     for r in rows:
         out.append(result_line(r))
+        if r.get("summary"):
+            out.append("    summary: " + "\n             ".join(r["summary"].splitlines()))
         out.extend(f"    {l}" for l in r.get("body", "").splitlines())
     emit(args, rows, "\n".join(out) or "(no results)")
 
@@ -2079,6 +2088,8 @@ def build_parser():
     p.add_argument("--by")
     p.add_argument("--body")
     p.add_argument("--body-file")
+    p.add_argument("--summary")
+    p.add_argument("--summary-file")
     p = command("ls", res_sub)
     p.add_argument("id", type=int, nargs="?")
     p.add_argument("--kind")

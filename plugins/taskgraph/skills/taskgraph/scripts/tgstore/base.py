@@ -56,6 +56,7 @@ class ResultInput:
     attempt: int | None
     author: str | None
     body: str
+    summary: str = ""  # a short readable text; the GitHub comment shows it above the full body
 
 
 class Store(Protocol):

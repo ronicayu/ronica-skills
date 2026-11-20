@@ -36,16 +36,67 @@ def split_text(text, size):
     return parts
 
 
+MAX_FENCE = 16  # a body with a longer run of backticks goes into the details as it is, without a fenced block
+DETAILS_END = "</details>"
+
+
+def fence_for(body):
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    n = max(3, longest + 1)
+    return n if n <= MAX_FENCE else 0
+
+
+def details_label(part, parts):
+    return "Full result" if parts == 1 else f"Full result (part {part} of {parts})"
+
+
+def details_edges(summary, part, parts, fence):
+    """The text before and after a part's chunk when the result has a summary. fence is the backtick count, 0 for none."""
+    lead = f"{summary}\n\n" if part == 1 else ""
+    mark = "`" * fence
+    open_ = f"{lead}<details><summary>{details_label(part, parts)}</summary>\n\n" + (f"{mark}\n" if fence else "")
+    return open_, (f"\n{mark}" if fence else "") + f"\n\n{DETAILS_END}"
+
+
 def render_result(row, at, key=None):
-    """The comment bodies (parts) of one result. row has status, kind, attempt, author, body."""
+    """The comment bodies (parts) of one result. row has status, kind, attempt, author, body, summary.
+    With a summary, each part shows it (part 1 only) above the chunk in a <details> block; the meta keeps the summary
+    and the fence length, so parse_comment cuts the same text away."""
     key = key or uuid.uuid4().hex[:12]
+    summary = row.summary
+    fence = fence_for(row.body) if summary else 0
 
     def head(part, parts):
-        return marker("result", {"at": at, "attempt": row.attempt, "by": row.author, "key": key, "kind": row.kind, "part": part, "parts": parts, "status": row.status})
+        data = {"at": at, "attempt": row.attempt, "by": row.author, "key": key, "kind": row.kind, "part": part, "parts": parts, "status": row.status}
+        if summary:
+            data["fence"] = fence
+            if part == 1:
+                data["summary"] = summary
+        return marker("result", data)
 
-    room = LIMIT - len(head(999, 999).encode("utf-8")) - 1
+    room = LIMIT - len(head(1, 999).encode("utf-8")) - 1
+    if summary:
+        before, after = details_edges(summary, 1, 999, fence)
+        room -= len((before + after).encode("utf-8"))
     chunks = split_text(row.body, room)
-    return [f"{head(i, len(chunks))}\n{chunk}" for i, chunk in enumerate(chunks, 1)]
+    if not summary:
+        return [f"{head(i, len(chunks))}\n{chunk}" for i, chunk in enumerate(chunks, 1)]
+    out = []
+    for i, chunk in enumerate(chunks, 1):
+        before, after = details_edges(summary, i, len(chunks), fence)
+        out.append(f"{head(i, len(chunks))}\n{before}{chunk}{after}")
+    return out
+
+
+def unwrap(text, data):
+    # Undo details_edges; a comment somebody edited on GitHub no longer fits and is read as it stands.
+    fence = data.get("fence")
+    if not isinstance(fence, int) or fence < 0:
+        return text
+    before, after = details_edges(data.get("summary") or "", data["part"], data["parts"], fence)
+    if text.startswith(before) and text.endswith(after) and len(text) >= len(before) + len(after):
+        return text[len(before): len(text) - len(after)]
+    return text
 
 
 def render_claim(token, claimant, at, voids=()):
@@ -71,7 +122,7 @@ def parse_comment(comment):
     if m[1] == "result":
         if not isinstance(data.get("part"), int) or not isinstance(data.get("parts"), int) or not data.get("key") or not data.get("status"):
             return None
-        found["result"] = dict(data, text=rest)
+        found["result"] = dict(data, text=unwrap(rest, data))
         return found
     for line in body.split("\n"):
         m = MARKER.match(line)
@@ -102,5 +153,5 @@ def join_parts(parsed):
         if len(parts) != first["parts"]:
             body += f"\n[incomplete: {len(parts)} of {first['parts']} parts]"
         out.append({"id": parts[0]["id"], "at": parts[0]["at"], "status": first["status"], "kind": first.get("kind") or "task",
-                    "attempt": first.get("attempt"), "author": first.get("by"), "body": body})
+                    "attempt": first.get("attempt"), "author": first.get("by"), "body": body, "summary": first.get("summary") or ""})
     return sorted(out, key=lambda r: r["id"])
