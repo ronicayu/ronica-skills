@@ -626,7 +626,7 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 | Phases | `running`, `stopped`, `reported`, `verifying`, `verdict_failed`, `awaiting_merge`, `merged`, `abandoned` |
 | Verify kinds | `code`, `schema`, `design-doc` |
 | Model tiers | `mechanical`, `implementation`, `judgement`, `verifier` |
-| Notification events | `decision`, `abandon`, `push-failed`, `pr-closed`, `all-done`, `blocked`; also `workflow-pick` when listed in `notifications.events` |
+| Notification events | `decision`, `abandon`, `push-failed`, `pr-closed`, `all-done`, `blocked`; also `workflow-pick`, `workflow-cancelled` when listed in `notifications.events` |
 | Adjacent change kinds (`[scope] adjacent`) | `lower-ratchet`, `stale-exemption`, `own-lint`, `own-dependents`, `own-registry`, `convention-place`, `moved-path` |
 
 ## Configuration
@@ -774,7 +774,7 @@ Any tier or override table may also set `profile = "<name>"` or `profile = ["<na
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `skill` | a string | `""` | Skill for operator messages, for example `"telegram-send:telegram-send"`. With `""`, the Manager reports only in the conversation. |
-| `events` | a list of notification events: "decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked", "workflow-pick" | `["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]` | The events that queue a notice (see [Notifications](operations.md#notifications)). `[]` queues none. |
+| `events` | a list of notification events: "decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked", "workflow-pick", "workflow-cancelled" | `["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]` | The events that queue a notice (see [Notifications](operations.md#notifications)). `[]` queues none. |
 | `digest` | one of "off", "daily" | `"off"` | `"daily"`: `run.py notify-queue --digest` prints one digest a day: merged, in flight, decisions waiting. |
 
 ### `[hooks]`

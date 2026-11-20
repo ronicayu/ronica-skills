@@ -366,14 +366,15 @@ The due time is set when the stage merges, not at creation, so a long stage does
 | Worker census | worker report (any status) or ask | New Follow-ups label `design: <question>: <why>`. The software-engineer census ask (Method step 2) when the Manager judges it a design question | `escalation-hint #id: next: run.py stage <inst> escalate spec --before <stage> --from-row R` |
 | Verifier finding | verify row | New category `blocking[design]:` (a required design decision is absent or contradicts the code) | same |
 | Hard rule | SCOPE widened, or `expand` | A rule newly matches | same, with `--rule <name>` |
-| Investigation says it is smaller | a design stage's report | A `workflow-plan` naming a lighter workflow, or `downgrade: <stage>: <why>` | `downgrade-hint` |
+| Investigation says it is smaller | a design stage's report | A `workflow-plan` naming a lighter workflow, or `downgrade: <stage>: <why>` | Not built: no hint is printed. The Manager runs `downgrade` itself when it reads the report |
 | Manager | evidence in a row | Cites the row id | none |
 
 **Escalate**: `run.py stage <inst> escalate <type> --before <stage> --from-row R --why "..."`
 - Creates the new stage task. It depends on the target stage's current upstream dependencies, and gets an approval node at the library level.
 - Adds the new stage and its approval to the target's dependencies, and to its parts' dependencies.
+- `escalate` is refused when the attempt has a passing verdict (`close` it instead), and when the newest row of an attempt at the cap (3) is a failure that no `escalated` row exempts: the next launch would be refused and the stage stuck. The owner decides (`abandon`, or `launch --attempt 4`).
 - If the target has had an attempt, `escalate` refuses only a session that is busy (its turn is not over). A worker or verifier kept idle for a revision is stopped as `kept-session-stopped`, because no revision can follow once an upstream is inserted. The target's next launch waits for the new stage (launch refuses while it waits). The next attempt's brief carries the new stage's report.
-- If the new design changes the target's ACCEPTANCE (brief frozen at start), the Manager abandons the target as `superseded` and creates a fresh stage task with `stage escalate --replace`.
+- If the new design changes the target's ACCEPTANCE (brief frozen at start), the Manager abandons the target as `superseded` and creates a fresh stage task by hand. (`stage escalate --replace` is not built.)
 
 **Downgrade**: `run.py stage <inst> downgrade <stage> --from-row R --why "..."` drops a planned stage, or skips a created stage that has no attempt. Only a stage made by `--with` (never a required stage, a stage a rule requires, or one that an escalation added). First the stage's upstream edges, tasks and approval decisions, move to each stage that depends on it, as `add` contracts a stage it leaves out; then the task is marked `tg done` with `stage_state=skipped` and no phase, and its approval node is closed with it (`approval_state=skipped`). `run.py` treats a done task with attempt 0 and `stage_state=skipped` as terminal and never derives a merge for it. Marking the task done alone is not enough: a stage after it would start before the skipped stage's upstream was merged and approved (`regress-wf-downgrade-done-only.cfg`).
 

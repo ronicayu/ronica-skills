@@ -11,7 +11,6 @@
 \*
 \* W4 = FALSE is the code of W2 and W3 as it is: no escalate, downgrade, replace or cancel; an abandoned stage ends the
 \* run, and the run must then show the `stage-orphaned` hint (orphan_note). W4 = TRUE adds the planned commands.
-\* FIX_* = FALSE is the current code where the model found a break; TRUE is the fix (NOTES.md, "Workflow.tla").
 \* Each REGRESS_* constant, when TRUE, restores a bug or drops a guard, so its regress-wf-*.cfg must break.
 
 EXTENDS Naturals, FiniteSets
@@ -25,8 +24,8 @@ CONSTANTS WF,            \* "check", "feature" or "hotfix": which workflow (the 
           W4,            \* TRUE: escalate, downgrade, replace and cancel exist (planned, phase W4)
           OPERATOR_FAIR, \* TRUE: the owner answers an open human approval in the end
           LATE_RULES,    \* TRUE: a split part's SCOPE may match a rule that the instance SCOPE did not (recheck_rules)
-          FIX_SINK_ORPHAN,    \* TRUE: an abandoned stage that nothing depends on also gets a stage-orphaned hint
-          FIX_RECHOOSE_RULES, \* TRUE: rechoose keeps the rules that recheck_rules added to the record
+          REGRESS_SINK_ORPHAN,  \* an abandoned stage that nothing depends on gets no stage-orphaned hint (before the W3 fix)
+          REGRESS_RECHOOSE_RULES, \* rechoose drops the rules that recheck_rules added to the record (before the W3 fix)
           REGRESS_SPLIT_APPROVAL,      \* the approval of a split stage opens when part 1 merges (before the W2 review fix)
           REGRESS_SKIP_RULE,           \* downgrade may skip a stage that a rule requires
           REGRESS_ESCALATE_LOOP,       \* no adjustment bound: escalate and downgrade any number of times, the escalated stage too
@@ -127,7 +126,7 @@ Choices(rules) == {W \in SUBSET Optional : (rules \cap Optional) \subseteq W}
 \* orphan_note: an abandoned stage task gets `stage-orphaned` when a task in its `blocks` is not done: a dependent stage,
 \* or its own approval decision (which depends on it). A sink stage with an auto approval has nothing in `blocks`.
 Waiters(s) == {d \in Slots : st[d] = "created" /\ s \in deps[d] /\ ~StageDone(d)}
-OrphanHint(s) == FIX_SINK_ORPHAN \/ appr[s] \in {"pending", "open"} \/ Waiters(s) # {}
+OrphanHint(s) == ~REGRESS_SINK_ORPHAN \/ appr[s] \in {"pending", "open"} \/ Waiters(s) # {}
 Orphaned == {s \in Slots : st[s] = "created" /\ \E k \in Parts(s) : run[s][k] = "abandoned"}
 OrphanHinted == \E s \in Orphaned : OrphanHint(s)
 
@@ -206,11 +205,11 @@ Split(s) ==
 \* stage_rechoose: the owner's override, only while no stage has started; every child is removed and the plan is made
 \* again (here: the same workflow with another choice of optional stages). The rules are matched again by
 \* matching_rules on the record's SCOPE and the area, so a rule that only recheck_rules found is dropped (record.update
-\* rules=applied) unless FIX_RECHOOSE_RULES. An escalated stage goes with the rest (an override is outside the limits).
+\* rules=applied) when REGRESS_RECHOOSE_RULES. An escalated stage goes with the rest (an override is outside the limits).
 Rechoose ==
   /\ inst = "open" /\ rechosen < MaxRechoose
   /\ \A s \in Slots : ~Started(s)
-  /\ \E W \in Choices(IF FIX_RECHOOSE_RULES THEN ruleEver ELSE RuleRequired) :
+  /\ \E W \in Choices(IF REGRESS_RECHOOSE_RULES THEN RuleRequired ELSE ruleEver) :
        LET L == Layout(W) IN
        /\ st' = L.st /\ deps' = L.deps /\ parts' = L.parts /\ run' = L.run /\ appr' = L.appr /\ due' = L.due
   /\ rechosen' = rechosen + 1

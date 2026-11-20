@@ -132,6 +132,7 @@ The operator hears from the Manager on events, not on a schedule. `run.py` never
 | `pr-closed` | A request was closed without a merge (the `pr-closed` line, from `record`, `repoint` or a round). |
 | `all-done` | The Manager adds it with `notify-queue --add all-done "<line>"` when all work is complete. |
 | `blocked` | The Manager adds it with `notify-queue --add blocked "<line>"` when it is blocked. The same line notifies once; a new reason notifies again. |
+| `workflow-cancelled` | Not in the default list. `run.py stage <instance> cancel` ended an instance; the notice names the tasks that wait for it and never start. |
 | `workflow-pick` | Not in the default list. `run.py add --pick` or a hard rule chose an unsure workflow or changed the work (the `workflow-picked` and `workflow-rule` lines); the notice is for information, the owner is never asked. |
 
 A notice always carries the operator-facing text of its event as its `next:` (what the operator can do), never the Manager's command hint that the same event prints in the `run.py` output. The queue is guarded by a lock (`notify-queue.lock`): `--clear` clears exactly the notices it prints.

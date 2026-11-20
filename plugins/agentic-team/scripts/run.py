@@ -6033,6 +6033,19 @@ def queue_notice(run, event, task, attempt, line, do, default=None, due=None, on
     return True
 
 
+def drop_notices(run, event, tasks):
+    """Remove the queued notices of `event` about these tasks, unsent: what they ask is no longer true. Returns how many."""
+    if run.dry_run:
+        return 0
+    with notify_lock(run):
+        items = read_queue(run)
+        keep = [i for i in items if not (i["event"] == event and i.get("task") in tasks)]
+        if len(keep) != len(items):
+            with open(os.path.join(run.run_dir, NOTIFY_QUEUE), "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(i, ensure_ascii=False) + "\n" for i in keep)
+    return len(items) - len(keep)
+
+
 def notice_next(item):
     """What the operator can do, as the `next` of a printed notice; a decision adds its default and its deadline."""
     if item["event"] != "decision":
@@ -9487,7 +9500,7 @@ def untriaged_decisions(run, tid):
 
 
 NO_STAGE_ARG = ("recheck", "cancel", "expand")  # the actions whose command line has no stage, type or workflow name
-TASK_LOCKED = ("escalate", "replace", "cancel")  # the actions that stop or abandon sessions, or move a task's edges: each takes the task locks first
+TASK_LOCKED = ("escalate", "downgrade", "recheck", "replace", "cancel")  # the actions that stop or abandon sessions, or move a task's edges: each takes the task locks first
 
 
 def cmd_stage(run, args):
@@ -9502,9 +9515,14 @@ def cmd_stage(run, args):
         raise Refused(f"stage {args.action} needs {what}")
     with contextlib.ExitStack() as stack:
         if args.action in TASK_LOCKED:
-            for child in sorted(c["id"] for c in run.tg("ls", "--parent", str(args.id)) or []):
+            locked = sorted(c["id"] for c in run.tg("ls", "--parent", str(args.id)) or [])
+            for child in locked:
                 stack.enter_context(task_lock(run, child))
         stack.enter_context(workflow_lock(run))
+        if args.action in TASK_LOCKED:
+            now = sorted(c["id"] for c in run.tg("ls", "--parent", str(args.id)) or [])
+            if now != locked:  # a task came or went while the locks were taken: the checks below would read a set that is not locked
+                raise Refused(f"the tasks of #{args.id} changed while the locks were taken ({', '.join('#%d' % i for i in sorted(set(now) ^ set(locked)))}); run it again")
         action = {"approve": stage_approve, "split": stage_split, "recheck": stage_recheck, "rechoose": stage_rechoose,
                   "escalate": stage_escalate, "downgrade": stage_downgrade, "replace": stage_replace, "cancel": stage_cancel,
                   "expand": stage_expand}[args.action]
@@ -9587,11 +9605,12 @@ def instance_scope_paths(node, record, found):
     return paths
 
 
-def add_rule_approval(run, rule, entry, asked, found):
+def add_rule_approval(run, rule, entry, asked, found, started=None):
     """A rule raised the approval of a stage that had none (`auto`): create its decision as `create_stage` would, a decision under
     the instance that depends on every part of the stage, pending or, when every part has merged, open. The stages that wait
     for the stage and have not started wait for it too. Returns its state (`created-pending` or `created-open`), or None
-    when the stage has no task that counts."""
+    when the stage has no task that counts. A stage after it that has started gets no edge (it cannot wait for what it began
+    without); its id goes into `started` (stage id -> task ids) for the report."""
     tasks = sorted((t for t in found.get(entry["id"], []) if (t.get("meta") or {}).get("stage_state") != "skipped"), key=lambda t: t["id"])
     if not tasks:
         return None
@@ -9604,6 +9623,8 @@ def add_rule_approval(run, rule, entry, asked, found):
             follower = run.show(later) if later not in ids and later != node else None
             if follower and wanted_attempt(follower) is None and follower["status"] == "open":
                 run.tg("dep", "add", str(later), str(node))
+            elif follower and started is not None:
+                started.setdefault(entry["id"], []).append(later)
     if all(t["status"] == "done" for t in tasks):
         open_approval(run, run.show(ids[0]))
     state = (run.show(node).get("meta") or {}).get("approval_state")
@@ -9611,7 +9632,7 @@ def add_rule_approval(run, rule, entry, asked, found):
     return f"created-{state}"
 
 
-def raise_for_rule(run, rule, record, found):
+def raise_for_rule(run, rule, record, found, started=None):
     """Apply what a rule that matched late asks of the stages the instance has: raise each approval that is not done to the
     rule's level, and set the rule's `risk` on each stage that has not started. Returns (raised, risked) for the record: one
     dict for each approval raised, and the stage ids that got the risk."""
@@ -9622,7 +9643,7 @@ def raise_for_rule(run, rule, record, found):
         if not asked or LEVEL[asked] <= LEVEL.get(entry.get("approval"), 0):
             continue
         if not entry.get("approval_id"):
-            made = add_rule_approval(run, rule, entry, asked, found)  # an `auto` stage has no decision yet: a rule's approval takes effect
+            made = add_rule_approval(run, rule, entry, asked, found, started)  # an `auto` stage has no decision yet: a rule's approval takes effect
             if made is None:
                 no_node.append(entry["id"])
             else:
@@ -9682,22 +9703,29 @@ def recheck_rules(run, tid):
             present = next((e["id"] for e in have if e["id"] == kind or e.get("type") == kind), None)
             app.update(stage=present or kind, action="recheck-satisfied" if present else "recheck-missing")
             if not present:
-                target = next((e["id"] for e in have if any(t["status"] != "done" for t in found.get(e["id"], []))
-                               and not any((t.get("meta") or {}).get("stage_state") == "skipped" for t in found.get(e["id"], []))), None)
+                target = next((e["id"] for e in have if found.get(e["id"])
+                               and not any(t["status"] == "done" or (t.get("meta") or {}).get("merged_at") or task_phase(t) in CLOSED
+                                           or (t.get("meta") or {}).get("stage_state") == "skipped" or (t.get("meta") or {}).get("abandoned")
+                                           for t in found[e["id"]])), None)  # escalate refuses a merged, waiting, skipped or abandoned part
                 hint = ("no stage has started: run.py stage %d rechoose <workflow> --by operator re-expands it with the stage" % tid
                         if not started else
                         f"run.py stage {tid} escalate {kind} --before {target} --rule {rule['name']} --why \"<one line>\"" if target else
                         f"every stage is merged; put the missing {kind} stage in the report")
-        raised, risked, no_node = raise_for_rule(run, rule, record, found)
+        late = {}
+        raised, risked, no_node = raise_for_rule(run, rule, record, found, late)
         if raised:
             app["raised"] = raised
+        if late:
+            app["started_without"] = late
         if risked:
             app["risk"] = {"to": rule["risk"], "stages": risked}
         new.append(app)
         record.setdefault("rules", []).append(app)
         done = ("; raised " + ", ".join(f"{r['stage']} {r['from']} -> {r['to']}" for r in raised) if raised else "") + \
                (f"; risk {rule['risk']} on {', '.join(risked)}" if risked else "") + \
-               (f"; {', '.join(no_node)} has no approval decision to raise (auto)" if no_node else "")
+               (f"; {', '.join(no_node)} has no approval decision to raise (auto)" if no_node else "") + \
+               "".join(f"; {', '.join('#%d' % t for t in tasks)} already started and run without the new approval of {sid}"
+                       for sid, tasks in late.items())
         run.emit("workflow-rule", tid, None, None,
                  f"{rule['name']}: newly matches the SCOPE or area of #{tid}; " +
                  (f"stage {app['stage']} {'is there' if app['action'] == 'recheck-satisfied' else 'is missing'}" if kind else
@@ -9995,6 +10023,10 @@ def escalation_check(run, part):
     refuse_legacy(run, part)
     refuse_round(part)
     rows = run.results_for(tid)
+    judged = [v for v in (verdict_of(r) for r in task_rows(rows, attempt, "verify")) if v]
+    if meta.get("verdict") in CLOSING or (judged and judged[-1] in CLOSING):
+        raise Refused(f"stage {sid} (#{tid}) has a passing verdict ({meta.get('verdict') or judged[-1]}): the work passed verify, and an "
+                      f"escalation would throw it away; run.py close {tid}")
     for s in own_sessions(run, tid):
         if s.live and not (idle_kept(s, rows, attempt) or idle_and_filed(run, tid, attempt, rows, s)):
             raise Refused(f"#{tid} has a busy session {s.describe()}: a stage is not put in front of a session whose turn is not "
@@ -10009,6 +10041,11 @@ def escalation_check(run, part):
     if not latest:
         raise Refused(f"#{tid} attempt {attempt} has no result yet: wait for the worker's report (run.py record)")
     if not is_worker_result(latest[-1]):
+        if attempt >= MAX_ATTEMPTS and not (latest[-1]["status"] == "STOPPED" and stop_reason(latest[-1]) in ("pause", "escalated")):
+            # no worker report to stop, so no `escalated` row to exempt the next launch: it would pass the cap and the stage would be stuck
+            raise Refused(f"#{tid}: attempt {attempt} has already failed and is the last the cap allows ({MAX_ATTEMPTS}); a launch after "
+                          f"the escalation would be refused. Decide first: run.py abandon {tid} {abandon_placeholder()} --why \"<one line>\", "
+                          f"or run.py launch {tid} --attempt {attempt + 1}")
         return {"attempt": attempt, "row": False, "was": stored_phase(part)}  # stopped or died already: nothing to stop
     phase = stored_phase(part)
     if phase not in ("reported", "verifying", "verdict_failed"):
@@ -10083,6 +10120,9 @@ def stage_escalate(run, args):
         raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(catalog.problems))
     if kind not in catalog.library.types:
         raise Refused(f"no stage type {kind!r} in the stage library; the types are {', '.join(sorted(catalog.library.types))}")
+    if args.rule and args.rule not in {r["name"] for r in run.config.get("workflow_rule") or []}:
+        raise Refused(f"--rule {args.rule}: no [[workflow_rule]] of that name; the rules are "
+                      f"{', '.join(r['name'] for r in run.config.get('workflow_rule') or []) or 'none'}")
     refuse_past_limit(run, record, args.id, f"an escalation to {kind}")
     if any(a.get("kind") == "escalate" and a.get("type") == kind for a in record.get("adjustments") or []):
         raise Refused(f"instance #{args.id} escalated a {kind} stage already; a stage type is escalated once per instance: put the "
@@ -10338,6 +10378,10 @@ def stage_cancel(run, args):
                                                  "by": "manager", "trigger": "orphan"})
     run.edit_meta(args.id, workflow_record=record, abandoned=CANCELLED, abandoned_why=why)
     ids = lambda rows: ", ".join(f"#{i}" for i in rows) or "none"
+    drop_notices(run, "decision", set(approvals))
+    queue_notice(run, "workflow-cancelled", args.id, None, f"Workflow instance #{args.id} {node['title']} was cancelled: {why}"
+                 + (f"; {ids(waiting)} wait for it and never start" if waiting else ""),
+                 "nothing is waiting for it" if not waiting else f"decide for {ids(waiting)}: create the work again, or drop them")
     run.emit("workflow-cancelled", args.id, None, None,
              f"{why}: abandoned {ids(abandoned)} (still running or waiting for their merge), skipped {ids(skipped)} (not started), "
              f"closed the approvals {ids(approvals)}; already merged, skipped or abandoned: {ids(kept)}"
@@ -10397,7 +10441,9 @@ def stage_expand(run, args):
     scope = str(meta.get("scope") or record.get("scope") or "").strip()
     verify = str(meta.get("verify") or record.get("verify") or "").strip()
     area = (node.get("meta") or {}).get("area")
-    rules = matching_rules(run, scope, area)
+    deferred = {a["rule"] for a in record.get("rules") or [] if a.get("action") == "deferred-to-expand"}
+    rules = matching_rules_for_paths(run, write_paths(scope) | write_paths(record.get("scope")), area)  # the paths of the instance, new and old
+    rules += [r for r in run.config.get("workflow_rule") or [] if r["name"] in deferred and r not in rules]  # a deferred rule applies whatever the new SCOPE
     if named is not None:
         wf, plan, applied = plan_with_rules(catalog, wf, rules, args.with_, args.skip)
     else:
@@ -10438,6 +10484,10 @@ def stage_expand(run, args):
         raise
     now = run.now()
     record["stages"] = [*(record.get("stages") or []), *entries]
+    effect = {a["rule"]: a for a in applied}
+    for row in record.get("rules") or []:
+        if row.get("action") == "deferred-to-expand" and row["rule"] in effect:  # the deferred row names what it did at last
+            row["resolved"] = {"action": effect[row["rule"]]["action"], "stage": effect[row["rule"]].get("stage"), "at": now}
     record["rules"] = [*(record.get("rules") or []), *[dict(a, at=now, via="expand") for a in applied]]
     record["scope"], record["verify"] = scope, verify
     record["expanded"] = {"workflow": wf.name if named is not None else "adhoc", "from": base.name, "row": plan_row, "why": plan_why, "at": now,

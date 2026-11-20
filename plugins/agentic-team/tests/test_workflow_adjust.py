@@ -308,18 +308,15 @@ class EscalateTest(Base):
         self.assertEqual([e["event"] for e in seen], ["stopped"])
         self.assertIn("escalated; head", seen[0]["detail"])
 
-    def test_a_verifying_attempt_with_its_verdict_filed_goes_to_stopped_and_record_reads_the_row_first(self):
+    def test_a_verifying_attempt_with_a_passing_verdict_filed_is_refused_and_left_as_it_was(self):
         inst = self.add("fix")
         impl = self.stages(inst)["impl"]
         verifier = {"id": "sess-v", "kind": "verify", "attempt": 1, "name": f"verify-{impl}-1", "worktree": f"verify-{impl}-1"}
         self.start(impl, phase="verifying", sessions=[self.worker_entry(impl), verifier])
         self.result(impl, "PASS", "Status: PASS\nVerdict: test-verified\nSummary: fine\n", kind="verify", by=f"verify-{impl}-1")
-        self.events("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "x")
-        self.assertEqual(self.meta(impl)["phase"], "stopped")
-        row = self.rows(impl)[-1]
-        self.assertEqual((row["kind"], row["status"]), ("task", "STOPPED"))
-        seen = [e["event"] for e in self.events("record") if e["task"] == impl and e["event"] in ("stopped", "verified", "unclosed", "no-verdict")]
-        self.assertEqual(seen, ["stopped"])
+        self.assertIn("passing verdict", self.refused("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "x"))
+        self.assertEqual(self.meta(impl)["phase"], "verifying")
+        self.assertEqual((self.rows(impl)[-1]["kind"], self.rows(impl)[-1]["status"]), ("verify", "PASS"))
 
     def test_a_failed_verdict_keeps_its_phase_and_record_still_reads_the_escalated_row_first(self):
         inst = self.add("fix")
@@ -740,6 +737,23 @@ class ExpandTest(Base):
         self.events("stage", str(inst), "expand", "--workflow", "fix")
         self.assertEqual(list(self.stages(inst)), ["investigate", "spec", "impl", "test"])
 
+    def test_a_deferred_rule_applies_whatever_scope_expand_names(self):
+        self.config("""
+            [[workflow_rule]]
+            name = "billing"
+            match_paths = ["apps/api/billing/**"]
+            require_stage = "spec"
+            """)
+        inst, inv, row = self.investigated("stages: [{id: impl}, {id: test, after: [impl]}]", scope="apps/api/billing/")
+        err = self.refused("stage", str(inst), "expand", "--from-row", str(row), "--meta", "scope=src/other/")
+        self.assertIn("rule billing requires a spec stage", err)
+        self.assertEqual(list(self.stages(inst)), ["investigate"])
+        self.events("stage", str(inst), "expand", "--workflow", "fix", "--meta", "scope=src/other/")
+        self.assertEqual(list(self.stages(inst)), ["investigate", "spec", "impl", "test"])
+        rows = self.record(inst)["rules"]
+        self.assertEqual((rows[0]["action"], rows[0]["resolved"]["action"], rows[0]["resolved"]["stage"]), ("deferred-to-expand", "forced-with", "spec"))
+        self.assertEqual((rows[1]["rule"], rows[1]["via"]), ("billing", "expand"))
+
     def test_expand_refusals(self):
         inst = self.add("figure-it-out")
         inv = self.stages(inst)["investigate"]
@@ -761,6 +775,113 @@ class ExpandTest(Base):
         inst, inv, row = self.investigated("workflow: fix")
         self.events("stage", str(inst), "expand", "--from-row", str(row))
         self.assertIn("was expanded already", self.refused("stage", str(inst), "expand", "--workflow", "fix"))
+
+
+class ReviewFixTest(Base):
+    """The W4 review fixes: the passing verdict and the cap guard of escalate, started dependents of a late approval, the task locks
+    of downgrade and recheck, the notices of cancel, the target of a recheck hint and the check of --rule."""
+
+    def test_an_attempt_with_a_passing_verdict_is_not_escalated(self):
+        inst = self.add("fix")
+        impl = self.stages(inst)["impl"]
+        self.start(impl, phase="verifying", report=True)
+        self.result(impl, "PASS", "Status: PASS\nVerdict: test-verified\nSummary: ok\n", kind="verify", by="verify-1-1")
+        err = self.refused("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "x")
+        self.assertIn("passing verdict (test-verified)", err)
+        self.assertIn(f"run.py close {impl}", err)
+        self.assertEqual(self.record(inst)["adjustments"], [])
+
+    def test_an_attempt_at_the_cap_that_died_is_refused_and_one_below_it_is_not(self):
+        inst = self.add("fix")
+        impl = self.stages(inst)["impl"]
+        self.start(impl, phase="died", attempt=3, report=False, sessions=[], worktree=False)
+        self.result(impl, "DIED", "Session: s\nReason: died\n", by="manager", attempt=3)
+        err = self.refused("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "x")
+        self.assertIn("attempt 3 has already failed", err)
+        self.assertEqual(list(self.stages(inst)), ["impl", "test"])
+        other = self.add("fix", "Other")
+        impl2 = self.stages(other)["impl"]
+        self.start(impl2, phase="died", attempt=2, report=False, sessions=[], worktree=False)
+        self.result(impl2, "DIED", "Session: s\nReason: died\n", by="manager", attempt=2)
+        self.events("stage", str(other), "escalate", "spec", "--before", "impl", "--why", "x")
+        self.assertIn("spec", self.stages(other))
+
+    def test_a_rule_that_is_not_configured_is_refused(self):
+        inst = self.add("fix")
+        self.assertIn("no [[workflow_rule]] of that name", self.refused("stage", str(inst), "escalate", "spec", "--before", "impl", "--rule", "nope", "--why", "x"))
+
+    def test_recheck_names_the_started_stage_that_runs_without_the_new_approval(self):
+        inst = self.add("feature", scope="lib/")
+        stages = self.stages(inst)
+        self.start(stages["test"], phase="running", report=False, sessions=[], worktree=False)
+        self.config(RecheckApprovalTest.RULE)
+        self.tg("edit", str(stages["test"]), "--meta", 'scope="apps/api/billing/x.py"')
+        events = self.events("stage", str(inst), "recheck")
+        line = next(e for e in events if e["event"] == "workflow-rule" and "newly matches" in e["detail"])["detail"]
+        self.assertIn(f"#{stages['test']} already started and run without the new approval of impl", line)
+        row = next(r for r in self.record(inst)["rules"] if r["rule"] == "money")
+        self.assertEqual(row["started_without"], {"impl": [stages["test"]]})
+        self.assertNotIn(self.approval(inst, "impl"), self.deps(stages["test"]))
+
+    def test_the_recheck_hint_skips_a_stage_that_waits_for_its_merge(self):
+        self.config('[[workflow_rule]]\nname = "billing"\nmatch_paths = ["apps/api/billing/**"]\nrequire_stage = "spec"\n')
+        inst = self.add("hotfix", scope="lib/")
+        stages = self.stages(inst)
+        self.start(stages["impl"], phase="awaiting_merge", report=True)
+        self.tg("edit", str(stages["test"]), "--meta", 'scope="apps/api/billing/x.py"')
+        events = self.events("stage", str(inst), "recheck")
+        line = next(e for e in events if e["event"] == "workflow-rule" and "newly matches" in e["detail"])
+        self.assertIn("--before test", line["next"])
+
+    def hold(self, tid):
+        import fcntl
+        path = os.path.join(self.root, ".agentic-team", "locks", f"task-{tid}.lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "a+")
+        self.addCleanup(fh.close)
+        fcntl.flock(fh, fcntl.LOCK_EX)
+
+    def test_downgrade_and_recheck_wait_for_the_task_locks(self):
+        inst = self.add("feature", "Add export", "--with", "ux")
+        stages = self.stages(inst)
+        self.hold(stages["impl"])
+        env = dict(self.env, AGENTIC_TEAM_LOCK_SECONDS="1")
+        for args in (("downgrade", "ux", "--why", "x"), ("recheck",)):
+            out = subprocess.run([sys.executable, RUN, "--root", self.root, "--tg", TG, "stage", str(inst), *args], capture_output=True, text=True,
+                                 cwd=self.dir, env=env)
+            self.assertNotEqual(out.returncode, 0, args)
+            self.assertIn("holds", out.stderr + out.stdout)
+        self.assertNotIn("adjustments", {k for k, v in self.record(inst).items() if v})
+
+    def test_cancel_drops_the_decision_notices_it_closes_and_queues_one_notice_for_the_instance(self):
+        self.config('[notifications]\nevents = ["decision", "workflow-cancelled"]\n[[workflow_rule]]\nname = "money"\nmatch_paths = ["src/export/**"]\napproval = { prd = "human" }\n')
+        inst = self.add("change")
+        stages = self.stages(inst)
+        waiting = self.tg("add", "Later", "--meta", 'independent="x"')["id"]
+        self.tg("dep", "add", str(waiting), str(inst))
+        self.merge(stages["prd"])
+        before = json.loads(self.run_cmd("--json", "notify-queue").stdout)
+        self.assertTrue(any(i["event"] == "notify" and "[decision]" in i["detail"] for i in before), before)
+        self.tg("edit", str(stages["impl"]), "--meta", "attempt=1", "sessions=[]")
+        self.tg("start", str(stages["impl"]))
+        self.events("abandon", str(stages["impl"]), "superseded", "--why", "dropped")
+        self.events("stage", str(inst), "cancel", "--why", "dropped")
+        after = [i["detail"] for i in json.loads(self.run_cmd("--json", "notify-queue").stdout) if i["event"] == "notify"]
+        self.assertFalse([d for d in after if "[decision]" in d], after)
+        found = [d for d in after if "[workflow-cancelled]" in d]
+        self.assertEqual(len(found), 1, after)
+        self.assertIn(f"#{waiting}", found[0])
+
+    def test_the_escalation_hint_stops_after_the_escalation(self):
+        inst = self.add("fix")
+        impl = self.stages(inst)["impl"]
+        self.start(impl, phase="running", report=False, sessions=[])
+        self.result(impl, "ISSUES", "Status: ISSUES\nAsked: none: x\nSummary: s\nFollow-ups:\n- design: q: why\nCheckpoint: c\n")
+        first = [e for e in self.events("record") if e["event"] == "escalation-hint" and e["task"] == impl]
+        self.assertIn("escalate spec", first[0]["next"])
+        self.events("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "q")
+        later = [e for e in self.events("record") if e["event"] == "escalation-hint" and e["task"] == impl]
+        self.assertTrue(all("escalate spec" not in (e["next"] or "") for e in later), later)
 
 
 if __name__ == "__main__":

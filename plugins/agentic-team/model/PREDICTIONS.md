@@ -314,8 +314,8 @@ machine with one other TLC run.
 | wf-hold.cfg | As wf-check; fewer states (a held approval has no due time and no default). |
 | wf-overview.cfg | Every rule holds, under the chart budget of 500 states. |
 | wf-code-fixed.cfg | Every rule holds; far fewer states (no W4). |
-| wf-code-orphan.cfg | A dead end: the last stage (test, auto) is abandoned and no `stage-orphaned` hint is printed. |
-| wf-code-rechoose.cfg | RuleStagesKept in 2 steps: split (a late rule on ux), rechoose without ux. |
+| regress-wf-sink-orphan.cfg | A dead end: the last stage (test, auto) is abandoned and no `stage-orphaned` hint is printed. |
+| regress-wf-rechoose-rules.cfg | RuleStagesKept in 2 steps: split (a late rule on ux), rechoose without ux. |
 | regress-wf-split-approval.cfg | SplitApprovalAfterAllParts: part 1 of impl merges while part 2 has not. |
 | regress-wf-skip-rule.cfg | RuleStagesKept in 1 step: downgrade spec. |
 | regress-wf-escalate-loop.cfg | AdjBound in 3 steps: downgrade, escalate, downgrade the escalated stage. |
@@ -343,8 +343,8 @@ commits the WIP and needs `vfiled`; both are W4 requirements (NOTES.md). `Cancel
 | wf-hold.cfg | every rule holds | 925,912 | 59 | 23 s |
 | wf-overview.cfg | every rule holds | 298 (the chart: 27 states, 44 arrows) | 24 | 1 s |
 | wf-code-fixed.cfg | every rule holds | 8,894 | 34 | 1 s |
-| wf-code-orphan.cfg | **dead end**, 15 steps (prd, spec, impl merged and approved; test launched and abandoned) | 1,333 at the stop | 19 | 1 s |
-| wf-code-rechoose.cfg | **RuleStagesKept**, 2 steps (Split, Rechoose) | 53 | 7 | 1 s |
+| regress-wf-sink-orphan.cfg (was wf-code-orphan.cfg) | **dead end**, 15 steps (prd, spec, impl merged and approved; test launched and abandoned) | 1,333 at the stop | 19 | 1 s |
+| regress-wf-rechoose-rules.cfg (was wf-code-rechoose.cfg) | **RuleStagesKept**, 2 steps (Split, Rechoose) | 53 | 7 | 1 s |
 | regress-wf-split-approval.cfg | breaks SplitApprovalAfterAllParts, 14 steps (prd, spec approved; split impl; part 1 merges; the approval opens) | 3,397 | 15 | 1 s |
 | regress-wf-skip-rule.cfg | breaks RuleStagesKept, 1 step | 26 | 4 | 0 s |
 | regress-wf-escalate-loop.cfg | breaks AdjBound, 3 steps | 137 | 7 | 0 s |
@@ -352,7 +352,7 @@ commits the WIP and needs `vfiled`; both are W4 requirements (NOTES.md). `Cancel
 | regress-wf-downgrade-done-only.cfg | breaks NoBypass, 2 steps | 64 | 5 | 0 s |
 | regress-wf-insert-running.cfg | breaks NoBypass, 11 steps (escalate while impl runs); with NoBypass left out, NoInsertIntoBusy at the same step | 1,936 | 13 | 0 s |
 | regress-wf-no-default.cfg | breaks Liveness (the spec approval open and past due; stutter) | 176,601 at the stop | - | 3 s |
-| (scratch) wf-check with `FIX_SINK_ORPHAN = FALSE` | dead end, 15 steps, as wf-code-orphan: W4 does not help while the hint is missing | 7,263 | 17 | 1 s |
+| (scratch) wf-check with `REGRESS_SINK_ORPHAN = TRUE` | dead end, 15 steps, as regress-wf-sink-orphan: W4 does not help while the hint is missing | 7,263 | 17 | 1 s |
 
 Lifecycle, every config of 0.24.0 with `ESCALATIONS = FALSE`, compared with the same configs run on the committed model
 (HEAD 2d61d1e) the same day: every config that holds has the same distinct states (check 63,272; check-pr 333,260; pause

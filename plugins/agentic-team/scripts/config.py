@@ -155,7 +155,7 @@ def system_timezone():
 
 
 NOTIFY_EVENTS = ("decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked")  # the default of notifications.events
-NOTIFY_OPTIONAL = ("workflow-pick",)  # valid in notifications.events, not in its default: one notice for each unsure pick or rule change
+NOTIFY_OPTIONAL = ("workflow-pick", "workflow-cancelled")  # valid in notifications.events, not in its default: one notice for each unsure pick or rule change, and one for each cancelled workflow instance
 
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
