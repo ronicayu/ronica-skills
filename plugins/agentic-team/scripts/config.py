@@ -127,8 +127,8 @@ REF_PREFIX = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]*[-/]")
 TASKGRAPH_TOML = ".taskgraph.toml"
 # The meta keys that run.py writes as run-time state, by their class on the Taskgraph GitHub backend: "local" stays in
 # this machine's cache and is never sent, "deferred" is sent with the next write to the issue. Every other key that
-# run.py writes stays on the issue. The README's table "Meta keys on the Taskgraph GitHub backend" lists the same keys
-# (a test compares them).
+# run.py writes stays on the issue. docs/reference.md prints the class of every key from this table, and a test checks
+# that reference_data.META_WHY lists each key.
 RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
@@ -267,6 +267,197 @@ def type_name(kind):
         return "one of " + ", ".join(f'"{c}"' for c in kind[7:].split(","))
     return TYPE_NAMES[kind]
 
+
+# What each key means, as `docs/reference.md` prints it. A link is relative to `docs/`.
+DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "taskgraph": {
+        "project": "Taskgraph project name (`tg projects` lists them). Required: `config.py check` fails while it is empty.",
+    },
+    "constraints": {
+        "forbidden": ("One rule per item; they become FORBIDDEN in every brief. The template sets `[\"TODO\"]` until someone "
+         "confirms the list, even if it ends up empty."),
+    },
+    "autonomy": {
+        "grant": "Decisions and actions the Manager may take without asking. `\"\"` means no standing grant.",
+        "always_pause": "Decisions that always need the operator, even under the grant.",
+    },
+    "sessions": {
+        "max_parallel": ("Cap on in-flight sessions, workers and verifiers. Start with 1 or 2. The Manager refills as sessions "
+         "finish."),
+        "permission_mode": "`--permission-mode` for worker sessions.",
+        "timezone": ("IANA zone name, for example `\"Asia/Singapore\"`. Used for the times that `status` shows and the TIMEZONE of "
+         "the brief. `run.py` records its own times (`started_at`, `merged_at`, `Stopped:`) in UTC, ISO 8601, as "
+         "`2026-11-17T09:05:00Z`; `status` reads an older local string (`2026-11-17 17:05 SGT`) too and shows it as "
+         "it is."),
+        "timezone_label": "Label written after times, for example `\"SGT\"`. Set it when the derived label is an offset such as `+08`.",
+    },
+    "models": {
+        "mechanical": ("Sweeps, counts, diffs, summaries. Use an alias: an older pinned id such as `claude-haiku-4-5-20251001` "
+         "drops out of `auto` mode in a `--bg` worker and waits on a permission prompt."),
+        "implementation": "Well-scoped build or edit work with a known answer shape.",
+        "judgement": "Judgement, review, prose readers rely on, long unattended runs.",
+        "verifier": ("Verification sessions. Unset means a different model from the worker's: `opus`, or `sonnet` if the worker "
+         "ran on `opus`."),
+        "verifier_by_tier": ("`[models.verifier_by_tier]` maps a tier (`mechanical`, `implementation`, `judgement`) or a "
+         "`[models.overrides]` key to the verifier model of a task on that tier: a model id or a table with `effort` "
+         "and `profile`, as for a tier. See [Verifier model per tier](configuration.md#verifier-model-per-tier). "
+         "Empty: `verifier` decides, as before."),
+        "overrides": ("`[models.overrides]` maps a work type to a model, for example `\"data migration\" = { model = \"opus\", effort "
+         "= \"high\" }`. Matched case-insensitively before the tiers. A task's `tier` meta may name an override key."),
+    },
+    "merge": {
+        "mode": ("`local`: `close` merges into the main checkout under a `MERGE:` line, as before. `pr`: `close` pushes the "
+         "task branch and opens a pull or merge request; `record` merges it under a `MERGE:` line when the host "
+         "reports it clean, and records merges done by anyone from the request state. Setting `pr` is the operator's "
+         "standing permission to push task branches and open requests. Merging still needs the `MERGE:` line."),
+        "host": ("Which CLI speaks to the host: `gh` or `glab`. `auto` reads the `remote` URL: a host name of `github.com` "
+         "means GitHub, a host name that contains `gitlab` means GitLab. A self-managed GitLab on another host name "
+         "needs `host = \"gitlab\"`. Only read in `pr` mode."),
+        "remote": "The git remote the host is reached through.",
+        "base": ("The branch requests target. `\"\"` means the host's default branch, asked once per `run.py` command. A task "
+         "launched with `--base <branch>` targets that branch instead (meta `target`)."),
+        "method": ("How `record` merges. GitHub: `gh pr merge --merge|--squash|--rebase`. GitLab: the project's merge method "
+         "setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two "
+         "values add nothing."),
+        "catch_up": ("How `close` catches up a request that is behind its target, in `pr` mode. `host`: it asks the host to "
+         "rebase the request (GitHub `gh pr update-branch --rebase`, GitLab `PUT merge_requests/<iid>/rebase`) and "
+         "pushes nothing; a host that cannot rebase or refuses this user falls back to `local`. `local`: it rebases "
+         "the branch in its idle worktree and pushes it under the lease."),
+        "after_rebase": ("A shell command that checks the tree after every rebase that `run.py` does, takes from the host, or accepts "
+         "from someone else, and on a rebase onto a newer target that `close` is about to push (the result of a "
+         "rebase round or of a rebase by hand). Empty means no check. It runs in its own process group with a "
+         "10-minute timeout; an event keeps the last 5 lines of its output. A timeout, and a problem on this machine "
+         "(a temporary worktree that cannot be made), are not a failure: nothing is accepted, pushed or started, a "
+         "line says the check could not run, and the result is not kept. A pass or a failure is kept per (head, "
+         "target, command) in `.agentic-team/after-rebase-cache.json`, so `record` runs the command once for each "
+         "head. A non-zero exit counts as a conflict: `run.py round <id> rebase` starts a round when the merge of the "
+         "head into the target passes `git merge-tree` but fails the check (the check runs in a temporary worktree of "
+         "that merge); a local catch-up rebase (`catch_up = \"local\"`) runs it in the task worktree and, on a failure, "
+         "puts the old head back and prints `conflict`; a rebase taken from the host or from someone else (#138) runs "
+         "it in a temporary detached worktree of the new head under `.claude/worktrees/after-rebase-<id>`, which "
+         "`run.py` always removes, and on a failure `pushed` stays and `conflict` is printed. Example: `after_rebase "
+         "= 'test \"$(alembic heads | wc -l)\" -eq 1'` fails a rebase that leaves two Alembic heads."),
+        "draft": ("`true` opens each request as a draft (GitHub `gh pr create --draft`, GitLab a `Draft: ` title), so it "
+         "starts no full CI run until someone marks it ready; `record` reports `pr-draft` until it is. `false`: the "
+         "request opens ready."),
+        "remove_worktrees": ("`true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no "
+         "session, process or container uses them, a clean tree whose ignored files are all disposable, a merged "
+         "`HEAD`); see the cleanup in [Lifecycle](lifecycle.md#verdict-and-close). `false`: it removes nothing, and prints `kept <folder>: "
+         "merge.remove_worktrees is false` once, at the merge."),
+        "disposable": ("Ignored paths that `run.py` may delete with a merged worktree, added to the default list. An entry "
+         "`\"!<pattern>\"` turns off one default pattern. See [Disposable "
+         "patterns](configuration.md#disposable-patterns)."),
+    },
+    "verify": {
+        "kind": "The verify kind of a task without a `verify_kind` meta. See [Task metadata](reference.md#task-metadata).",
+        "revisions_per_attempt": ("The revisions (`run.py revise`) one attempt may have. `0` turns revisions off: the lifecycle of 0.23.0. The "
+         "task's plan key `revisions` overrides it. See [Revisions](lifecycle.md#revisions-fix-in-place)."),
+        "keep_sessions_minutes": ("How long the worker and the verifier stay idle after their newest row of the revision, waiting for a "
+         "revision; then `record` stops them."),
+        "seat": ("Where the verifier runs: `\"task\"`, the task worktree, read only, after the worker's turn; `\"own\"`, a "
+         "`verify-<id>-<n>` folder, as before 0.24.0."),
+        "seat_wait_minutes": ("How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) "
+         "before the verifier gets a folder of its own. In a revision, a new verifier then replaces the kept one."),
+        "ci_ref_prefix": ("The prefix of the scratch branch that `verify --ci-ref` pushes: `<prefix><id>-<attempt>`. ASCII letters, "
+         "digits, `.`, `_`, `-` and `/`; no leading `-`, `.` or `/`, no `..` or `//`; it ends with `-` or `/`. Pick "
+         "one that the push filter of your CI workflow matches."),
+    },
+    "roles": {
+        "default": ("The role of a task with no `role` meta: `\"architect\"`, `\"software-engineer\"`, or a project role. `\"\"` means "
+         "no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See "
+         "[Roles](roles-and-briefs.md#roles)."),
+    },
+    "scope": {
+        "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
+         "lower a baseline, ratchet or allow-list count (never raise it, never add an entry). `\"stale-exemption\"`: "
+         "delete an exemption or baseline row that a scanner run in this attempt proves stale. `\"own-lint\"`: fix lint "
+         "or format errors that this attempt's change caused in files outside SCOPE. `\"own-dependents\"`: change a "
+         "caller, test, fixture, generated file, doc or API sample of the code that this attempt changes, as far as "
+         "an ACCEPTANCE line, a VERIFY command or a gate that the brief names needs it. `\"own-registry\"`: add the "
+         "entry that a check requires for a file this attempt adds, in a table that must list every file (never an "
+         "exemption, a baseline row or an allow-list entry). `\"convention-place\"`: put new code in the file where the "
+         "repository's conventions place it, for example a schema file or a facade, when that file is outside SCOPE. "
+         "`\"moved-path\"`: change the code that a SCOPE path meant, when that path does not exist at the base and `git "
+         "grep` finds that code in exactly one other place. When set, the worker brief's SCOPE gains one line that "
+         "names the kinds, and the worker lists each such change under `Deviations:` as `adjacent: <kind>: <path>`. "
+         "The verifier brief names the same kinds and checks each `adjacent:` line."),
+    },
+    "report": {
+        "require_ran": ("The line prefixes that a worker `PASS` report needs under `Ran:`, by verify kind (`code`, `schema`, "
+         "`design-doc`): `require_ran = { \"code\" = [\"reuse:\", \"mutation:\"], \"design-doc\" = [\"self-check:\"] }`. The "
+         "worker brief's `check-report` command carries one `--require-ran <prefix>` for each prefix of the task's "
+         "verify kind, and refuses a `PASS` report that has no `Ran:` line starting with one of them, naming the "
+         "missing prefixes. Empty: no check, as before. A key that is not a verify kind is a config error."),
+        "checks": ("Project commands that the worker's `check-report` runs before it accepts a `PASS`, for every verify kind. "
+         "See [Report checks](operations.md#report-checks)."),
+        "checks_by_kind": ("The same, for one verify kind (`code`, `schema`, `design-doc`); they run after `checks`: "
+         "`[report.checks_by_kind]` `design-doc = [\"python docs/models/check_refs.py\"]`. A key that is not a verify "
+         "kind is a config error."),
+        "check_timeout_seconds": "The time that each check may take. A command must be one line: a command with a newline is a config error.",
+        "summary_lang": ("The language that the worker and the verifier write their `Summary:` line in (the brief says so in "
+         "English). Project code and every runtime file stay English. See [Issue comment "
+         "summaries](github-backend.md#issue-comment-summaries)."),
+    },
+    "messaging": {
+        "asks_per_attempt": ("How many asks a worker may file in one attempt. `0` forbids asks. A task's `asks` meta overrides it; the "
+         "`mechanical` tier defaults to `0`."),
+        "ask_due_minutes": ("An ask with no answer after this long prints `ask-due` at each `record`, with the hint `run.py answer <id> "
+         "--default`."),
+        "pending_minutes": ("A message that was posted to a socket and has no ack after this long goes back to pending, and the next "
+         "delivery resumes the session. A message that a busy worker has not seen after this long prints "
+         "`steer-pending`."),
+        "doorbell": ("`\"socket\"`: post the doorbell to the worker's inbox socket, and fall back to stop plus resume. `\"resume\"`: "
+         "always stop plus resume. `config.py check` warns when it is `\"socket\"` and a settings file puts the Manager "
+         "in `bypassPermissions`."),
+        "tg_poll_seconds": "The default of `run.py wait --tg-interval`.",
+    },
+    "brief": {
+        "carried_report_bytes": ("The most UTF-8 bytes of one carried report (the previous attempt, an upstream dependency, the worker report "
+         "in a verify brief) in a brief. A report over it is cut at a line boundary and ends with a line that names "
+         "its result id and the command that prints it."),
+        "carried_total_bytes": ("The most UTF-8 bytes of all carried reports of one brief together. It must be at least "
+         "`carried_report_bytes`."),
+    },
+    "notifications": {
+        "skill": ("Skill for operator messages, for example `\"telegram-send:telegram-send\"`. With `\"\"`, the Manager reports "
+         "only in the conversation."),
+        "events": "The events that queue a notice (see [Notifications](operations.md#notifications)). `[]` queues none.",
+        "digest": "`\"daily\"`: `run.py notify-queue --digest` prints one digest a day: merged, in flight, decisions waiting.",
+    },
+    "hooks": {
+        "enabled": "The master switch. With `false`, nothing here has an effect and the launch line is as in 0.28.2.",
+        "layered": "When enabled: reduce the output of the commands in `commands`.",
+        "compact_pins": "When enabled: keep the task's essentials through a compaction.",
+        "summarize_fallback": ("When enabled: when a failed command's output is above `large_chars` and no extraction rule matched, ask "
+         "Haiku (`claude -p --model haiku`) for a summary. It takes 7 to 12 seconds a call and uses the subscription."),
+        "passthrough_chars": "Output below this size is left unchanged.",
+        "large_chars": "The Haiku fallback runs only above this size. At least `passthrough_chars`.",
+        "summarize_seconds": ("The Haiku fallback gives up after this long; the session then sees the last lines and the path of the full "
+         "output."),
+        "commands": ("The commands whose output is reduced. A string with `*`, `?` or `[` is a glob over the whole command (`make "
+         "test*` matches `make test-unit FOO=1`). Any other string is a prefix: its words that do not start with `-` "
+         "must begin the command, and each word after the last such word that starts with `-` must be one of the "
+         "command's words (`gh run view --log` matches `gh run view 123 --log`; a `-` word before the last plain word "
+         "belongs to the prefix, so `python -m pytest` is a prefix; `pytest` matches `pytest -x tests/` and not `cat "
+         "pytest.ini`). A setting replaces the list; it does not add to it."),
+    },
+    "rounds": {
+        "cap": ("The rounds (`run.py round`) a task may have without `--attempt`. A round does not count toward the attempt "
+         "cap. At the cap a `conflict` line names the decision and the override."),
+        "verify": ("`\"always\"`: a round's PASS goes to a verifier session, whatever the task's risk and verify kind, unless its "
+         "head carries the same change as the verified head. `\"by-risk\"`: the rule of a plain attempt (a verifier for "
+         "`risk=high`, CI verify, or a kind that is not `code`)."),
+    },
+}
+
+# A sentence or two under a section heading of the reference, for what applies to the whole section.
+SECTION_NOTES = {
+    "autonomy": "The grant never overrides safety rules, required approvals, or constraints. "
+                "See the [decision-forks principle](../skills/principle-decision-forks/SKILL.md).",
+    "models": "Any tier or override table may also set `profile = \"<name>\"` or `profile = [\"<name>\", ...]`. "
+              "A string tier (`\"opus\"`) uses the Manager's own profile. See [Profiles](configuration.md#workers-on-more-than-one-claude-profile).",
+    "hooks": "Worker hooks (see [Worker hooks](operations.md#worker-hooks)). All off until `enabled` is `true`.",
+}
 
 ALL_KEYS = [f"{s}.{k}" for s, keys in SCHEMA.items() for k in keys]
 

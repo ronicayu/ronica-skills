@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 import config  # noqa: E402
+import reference_data  # noqa: E402
 
 MINIMAL = 'taskgraph.project = "demo"\n'
 
@@ -634,19 +635,12 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(config.taskgraph_store(inner, "demo"))  # the nearer file does not name the project
         self.assertEqual(config.taskgraph_store(self.root, "demo")["local"], ())
 
-    def test_the_readme_table_lists_the_run_time_keys_of_the_code(self):
-        with open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8") as fh:
-            text = fh.read()
-        section = text.split("### Meta keys on the Taskgraph GitHub backend", 1)[1].split("\n#", 1)[0]
-        found = {"local": [], "deferred": [], "on the issue": []}
-        for line in section.splitlines():
-            cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.startswith("| `") else []
-            if cells:
-                found[cells[1]] += re.findall(r"`([a-z_]+)`", cells[0])
-        for kind in ("local", "deferred"):
-            self.assertEqual(sorted(found[kind]), sorted(config.RUNTIME_META[kind]), kind)
-            self.assertIn(f"{kind} = {json.dumps(list(config.RUNTIME_META[kind]))}", section)  # the recommended block
-        self.assertFalse(set(found["on the issue"]) & set(sum(config.RUNTIME_META.values(), ())))
+    def test_the_reference_data_lists_each_run_time_key_once(self):
+        listed = [k for keys, _ in reference_data.META_WHY for k in keys]
+        self.assertEqual(len(listed), len(set(listed)))
+        for kind, keys in config.RUNTIME_META.items():
+            self.assertLessEqual(set(keys), set(listed), kind)
+        self.assertEqual(set(config.RUNTIME_META["local"]) & set(config.RUNTIME_META["deferred"]), set())
 
 
 if __name__ == "__main__":

@@ -41,8 +41,8 @@ picker, invoke it with `@agent-agentic-team:manager`, or type
 `/agentic-team:manager` in an existing session. In each repository
 where you use the Manager, run `/agentic-team:setup` to create its
 `.agentic-team.toml` project config. See the
-[agentic-team README](plugins/agentic-team/README.md) for configuration,
-prompt templates, and model choices.
+[agentic-team README](plugins/agentic-team/README.md) for the quickstart and
+the [reference](plugins/agentic-team/docs/reference.md) for every setting.
 
 `telegram-send` reads its bot token and chat id from
 `~/.config/telegram-send/credentials` (mode 600); its `references/setup.md`

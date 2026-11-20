@@ -139,6 +139,7 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
+from events import EVENTS  # noqa: E402
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
                     manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
 from report_summary import summarize  # noqa: E402
@@ -628,6 +629,7 @@ class Run:
     # --- output
 
     def emit(self, event, task=None, attempt=None, session=None, detail="", next=None):
+        assert event in EVENTS, f"event {event!r} is not in scripts/events.py"
         self.events.append({"event": event, "task": task, "attempt": attempt, "session": session,
                             "detail": detail, "next": next})
         if (kind := NOTIFY_OF_EMIT.get(event)) and task is not None:
@@ -3498,7 +3500,7 @@ def refuse_revision_gap(run, task):
         raise Refused(f"#{task['id']} attempt {attempt} is in revision {wanted}, but this machine has {have} `revise` row(s): "
                       "the rows of a result kind in `results.local` stay in the machine's Taskgraph cache. Run run.py on the "
                       "machine that ran `revise`, and take `revise` out of `results.local` in .taskgraph.toml "
-                      "(see README, When the local cache is lost)")
+                      "(see docs/github-backend.md, When the local cache is lost)")
 
 
 def worker_for(run, tid, attempt, result_id=None, task=None):
@@ -9279,7 +9281,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--keyword", help="one or two hyphenated words added to the session name")
     p.add_argument("--tier", help="a tier or a models.overrides key (overrides the task's tier meta)")
     p.add_argument("--model", help="model alias (overrides the tier)")
@@ -9292,41 +9294,41 @@ def build_parser():
                    "(default: derived from the state of the attempt before it)")
 
     p = sub.add_parser("adopt", help="bring a branch started outside run.py under the Manager")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--branch", required=True, help="the local branch that holds the work")
     p.add_argument("--head", required=True, help="the branch tip (7 to 40 hex characters)")
     p.add_argument("--pr", type=int, help="its open pull or merge request (merge.mode = pr)")
     p.add_argument("--base", help="the commit the work started from (default: the merge base with the target)")
 
     p = sub.add_parser("verify", help="start a verifier for a PASS result")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--ref", help="the output under review (default: the result's Head:)")
     p.add_argument("--result", type=int, help="worker result id (default: the latest for the current attempt)")
-    p.add_argument("--model")
-    p.add_argument("--effort")
+    p.add_argument("--model", help="model alias (overrides the tier)")
+    p.add_argument("--effort", help="effort level (with --model, or to override the tier's)")
     p.add_argument("--profile", help="Claude profile of the verifier: a name from [profiles], or default (overrides the tier)")
     p.add_argument("--again", action="store_true", help="start a new verifier after a verify-blocked verdict or a no-verdict line")
     p.add_argument("--ci-ref", action="store_true",
                    help="push the worker's head to the scratch branch <[verify] ci_ref_prefix><id>-<attempt> (not the "
                         "request's branch) so the verifier judges its CI runs; merge.mode = pr")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
 
     sub.add_parser("record", help="read the queue and print one line per event")
 
     p = sub.add_parser("revise", help="after a verifier's verify-failed verdict, send its blocking findings to the same "
                                       "worker session, which fixes them in the same attempt (a revision)")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
 
     p = sub.add_parser("close", help="record the verdict and tokens, merge or open a request; done once merged")
-    p.add_argument("id", type=int)
-    p.add_argument("--verdict", choices=VERDICTS)
-    p.add_argument("--ref")
+    p.add_argument("id", type=int, help="the task id")
+    p.add_argument("--verdict", choices=VERDICTS, help="the verdict to record, when no verifier gave one (or to override it with --override-verifier)")
+    p.add_argument("--ref", help="the output the verdict is about (default: the Head: of the worker's result)")
     p.add_argument("--ran", help="what you ran and saw (stored in your verify result)")
     p.add_argument("--override-verifier", metavar="REASON", help="change the verifier's verdict; an upgrade needs a run id or link in --ran")
 
     p = sub.add_parser("round", help="start a new attempt of a task that waits for its merge, on the same branch and request; "
                                      "--cancel ends it")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("kind", nargs="?", choices=sorted(ROUND_KINDS), help="what the round is for; its role file has this name")
     p.add_argument("--cancel", action="store_true", help="end the round: the task waits again at its verified head")
     p.add_argument("--keyword", help="one or two hyphenated words added to the session name")
@@ -9338,42 +9340,43 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
 
     p = sub.add_parser("merged", help="record that a task branch is merged")
-    p.add_argument("id", type=int)
-    p.add_argument("--by", choices=("operator", "manager"), default="operator")
+    p.add_argument("id", type=int, help="the task id")
+    p.add_argument("--by", choices=("operator", "manager"), default="operator", help="who merged it")
 
     p = sub.add_parser("repoint", help="pr mode: let a task that waits for its merge follow another request that "
                                        "carries its change")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--pr", type=int, required=True, help="the number of the request to follow (another task's)")
     p.add_argument("--keep-old", action="store_true", help="leave the task's own request open (default: close it with "
                    "a comment that names the new one)")
 
     p = sub.add_parser("add", help="create a task with its dependencies settled: --depends/--blocks or --independent")
-    p.add_argument("title")
+    p.add_argument("title", help="the task title")
     p.add_argument("--depends", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks this one needs first")
     p.add_argument("--blocks", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks that need this one first")
     p.add_argument("--independent", metavar="REASON", help="no task is related; recorded as meta independent=<reason>")
-    p.add_argument("--notes", default="")
-    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE")
+    p.add_argument("--notes", default="", help="the task notes: purpose and acceptance criteria (passed to tg add)")
+    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE",
+                   help="meta pairs for the task, such as scope=, verify= and tier= (passed to tg add)")
     for flag in ("type", "parent", "start", "due", "promised", "priority"):
-        p.add_argument("--" + flag, type=int if flag == "parent" else None)
+        p.add_argument("--" + flag, type=int if flag == "parent" else None, help=f"passed to tg add --{flag}")
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
 
     p = sub.add_parser("abandon", help="abandon a task after attempt 3 failed")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("mode", choices=ABANDON_MODES, metavar="reason", help="the reason code: " + ", ".join(ABANDON_MODES))
     p.add_argument("--why", help="one line of free text: what happened and why the task is dropped (required)")
 
     p = sub.add_parser("depcheck", help="record the verdict of the dependency check before a launch as a `check` row")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--verdict", required=True, choices=DEPCHECK_VERDICTS, help="the subagent's verdict: ok, missing (a "
                    "`missing:` line) or not-checked (a `not checked:` or `ask:` line)")
     p.add_argument("--body-file", required=True, help="the subagent's answer")
 
     p = sub.add_parser("triage", help="record where a Follow-ups line of a result went, as a `triage` row")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--row", required=True, metavar="RESULT#LINE", help="a result id and the number of one of its Follow-ups lines, 3352#2")
     p.add_argument("--to", required=True, nargs="+", metavar="KIND [ID]", help="`task <id>`, `issue <n>` or `dismissed`")
     p.add_argument("--why", help="the reason (required for dismissed)")
@@ -9421,24 +9424,25 @@ def build_parser():
                         "the host limits its rate, so keep the default)")
 
     p = sub.add_parser("answer", help="answer a worker's ask: the answer is a Taskgraph row, and a doorbell wakes the worker")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--ask", type=int, help="the ask row id (default: the newest open ask of the current attempt)")
     how = p.add_mutually_exclusive_group(required=True)
     how.add_argument("--file", help="the answer text")
     how.add_argument("--default", action="store_true", help="answer with the ask's own Default line")
     how.add_argument("--decision", type=int, help="a decision that is done and has --meta ask=<ask id>: its notes are the answer")
     p.add_argument("--supersede", action="store_true", help="answer an ask that is already answered")
-    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="who sends it, as the row's author")
 
     p = sub.add_parser("steer", help="send a running worker a message: change its focus, order or approach inside SCOPE")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--file", required=True, help="the steer text")
-    p.add_argument("--kind", choices=("info", "redirect", "wrap-up", "finding"), default="info")
+    p.add_argument("--kind", choices=("info", "redirect", "wrap-up", "finding"), default="info",
+                   help="info, redirect or wrap-up; finding is refused here, because only revise files it")
     p.add_argument("--interrupt", action="store_true", help="stop the worker and resume it with the doorbell, even when busy")
-    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="who sends it, as the row's author")
 
     p = sub.add_parser("inbox", help="show the messages of a task: asks, answers, steers, acks and their delivery state")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
 
     p = sub.add_parser("notify-queue", help="show or clear the operator notices that events queued; it sends nothing")
     p.add_argument("--clear", action="store_true", help="show the notices, then count them as sent and empty the queue")

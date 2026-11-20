@@ -16,6 +16,8 @@
 #   8. No prompt file in plugins/agentic-team/ (agents, playbooks, skills,
 #      templates) builds a command from $PY, $TG, or R=. The three wrappers
 #      exist and are executable.
+#   9. plugins/agentic-team/docs/reference.md is what scripts/gen_reference.py
+#      prints from the code.
 #
 # Dependencies: bash, jq, awk. Runs every check and exits non-zero if any failed.
 
@@ -349,6 +351,19 @@ if [[ -d plugins/agentic-team ]]; then
     err "agentic-team: wrapper script missing or not executable:$missing_wrappers"
   else
     ok "agentic-team: wrappers run, config, and tg exist and are executable"
+  fi
+
+  # The reference is generated from the parser, the config schema and the event
+  # registry, so it fails here when the code changed and the file did not.
+  if py=$(plugins/agentic-team/scripts/python-path.sh 2>/dev/null); then
+    if reference_output=$("$py" plugins/agentic-team/scripts/gen_reference.py --check 2>&1); then
+      ok "agentic-team: docs/reference.md is up to date"
+    else
+      printf '%s\n' "$reference_output" >&2
+      err "agentic-team: docs/reference.md is out of date; run plugins/agentic-team/scripts/gen_reference.py"
+    fi
+  else
+    warn "agentic-team: no Python 3.11 or later, skipping the reference check"
   fi
 fi
 

@@ -14,7 +14,7 @@ TEST is a module, a class, a test (dotted, as for unittest) or a path to a test 
 for more than one. `-j 1` runs the tests in a single worker, in the order of the serial run when there is no
 .durations.json file.
 
-Every test builds its own temporary folders, so tests do not share state across processes (see the README). The
+Every test builds its own temporary folders, so tests do not share state across processes (see docs/architecture.md). The
 tests start no class or module fixtures, so each test is loaded and run alone.
 """
 

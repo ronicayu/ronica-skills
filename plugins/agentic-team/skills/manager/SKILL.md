@@ -13,7 +13,7 @@ up).
 
 1. **Read the role.** Read `${CLAUDE_PLUGIN_ROOT}/agents/manager.md` now, with
    the Read tool, and follow it from this point. Ignore its frontmatter. In
-   that file and in every file it tells you to read (playbooks, README,
+   that file and in every file it tells you to read (playbooks, docs,
    principles), `${CLAUDE_PLUGIN_ROOT}` means the path above. Write the real
    path in every Bash command.
 2. **Load Taskgraph.** If the `taskgraph:taskgraph` skill is not loaded, load
