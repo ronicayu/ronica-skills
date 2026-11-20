@@ -48,6 +48,8 @@ always_pause = []           # decisions that always need the operator
 
 [notifications]
 # skill = "telegram-send:telegram-send"
+# events = ["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]   # the events that notify; [] sends none
+# digest = "off"            # "daily": one message a day with what merged, what is in flight and the decisions waiting
 
 [merge]
 # mode = "local"            # "pr": close pushes the task branch and opens a pull/merge request; record merges it under a MERGE: line

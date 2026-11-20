@@ -57,6 +57,20 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("verify.seat", out + err)
 
+    def test_notifications_events_and_digest(self):
+        self.write(MINIMAL)
+        loaded = config.load(self.root)["notifications"]
+        self.assertEqual((loaded["events"], loaded["digest"]),
+                         (["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"], "off"))
+        self.write(MINIMAL + '[notifications]\nevents = []\ndigest = "daily"\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        for text, expect in (('events = ["decision", "merged"]', "notifications.events must be a list of notification events"),
+                             ('events = "decision"', "notifications.events must be a list of notification events"),
+                             ('digest = "hourly"', 'notifications.digest must be one of "off", "daily"')):
+            with self.subTest(text=text):
+                self.write(MINIMAL + "[notifications]\n" + text + "\n")
+                self.assertIn(expect, "\n".join(config.problems(config.load(self.root))))
+
     def test_hooks_defaults_and_valid_values(self):
         self.write(MINIMAL)
         hooks = config.load(self.root)["hooks"]

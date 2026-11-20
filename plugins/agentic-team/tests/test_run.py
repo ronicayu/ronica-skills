@@ -9190,6 +9190,41 @@ class PrTest(Base):
         self.assertEqual(self.named(events, "push-refused"), [])
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
 
+    # --- operator notices (notify-queue)
+
+    def queue(self):
+        return self.named(self.events("notify-queue"), "notify")
+
+    @both_hosts
+    def test_notify_a_closed_request_is_queued_once_even_after_the_queue_is_cleared(self):
+        task, wt, head = self.published()
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, state="CLOSED")
+        self.ok("record")
+        self.ok("record")
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"]),
+                         (task, f"[pr-closed] Task #{task}: {self.label()} closed without a merge"))
+        self.assertIn("run.py add", item["next"])
+        self.events("notify-queue", "--clear")
+        self.ok("record")
+        self.assertEqual(self.queue(), [])
+
+    def test_notify_a_failed_push_is_queued_with_the_hook_line(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\necho 'pre-push: refused' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.fake_host(head=head, merge_state="BEHIND")
+        self.ok("close", str(task))
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"].split(";")[0]),
+                         (task, f"[push-failed] Task #{task}: the push to origin/task-1 did not reach the remote"))
+        self.assertIn("pre-push: refused", item["detail"])
+
     @both_hosts
     def test_103_a_push_onto_a_moved_remote_branch_says_where_it_is_and_what_git_said(self):
         task, wt, head = self.published()
@@ -15204,6 +15239,115 @@ class RetroTest(Base):
         self.assertIn("2026-10-26 08:00 UTC", section)
         import run as runner
         self.assertRegex(runner.utc_stamp(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class NotifyTest(Base):
+    """agentic-team 0.30.0: events queue operator notices; run.py sends nothing."""
+
+    ALL = '[notifications]\nevents = ["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]\n'
+
+    def queue(self, *args):
+        return self.named(self.events("notify-queue", *args), "notify")
+
+    def decision(self, title="Keep the old API?", *extra):
+        blocked = self.add_task("Waits for the answer")
+        return blocked, self.events("add", title, "--type", "decision", "--meta", "decider=operator", *extra,
+                                    "--blocks", str(blocked))
+
+    def test_a_decision_for_the_operator_queues_a_notice_with_its_default_and_deadline(self):
+        blocked, events = self.decision("Keep the old API?", "default=keep it", "--due", "2026-12-01")
+        did = self.one(events, "added")["task"]
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"]), (did, f"[decision] Decision #{did} needs you: Keep the old API?"))
+        self.assertEqual(item["next"], f"answer it; #{blocked} wait for it; default if no answer: keep it; answer by: 2026-12-01")
+
+    def test_a_decision_without_default_or_due_says_so_and_other_deciders_queue_nothing(self):
+        self.decision()
+        (item,) = self.queue()
+        self.assertTrue(item["next"].endswith("default if no answer: none set; answer by: no deadline"), item["next"])
+        self.events("notify-queue", "--clear")
+        blocked = self.add_task("Other")
+        self.ok("add", "A question", "--type", "decision", "--meta", "decider=manager", "--blocks", str(blocked))
+        self.ok("add", "A plain task", "--independent", "unrelated")
+        self.assertEqual(self.queue(), [])
+
+    def test_an_abandon_queues_a_notice(self):
+        task = self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
+        self.agents(self.row("task-1", 3), self.finished("task-1"))
+        self.ok("abandon", str(task), "died", "--why", "tested")
+        (item,) = self.queue()
+        self.assertEqual(item["task"], task)
+        self.assertTrue(item["detail"].startswith(f"[abandon] Task #{task} abandoned (died: tested): "), item["detail"])
+        self.assertIn("redo the task or drop it", item["next"])
+
+    def test_a_dry_run_queues_nothing(self):
+        self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
+        self.agents(self.row("task-1", 3), self.finished("task-1"))
+        self.assertEqual(self.queue(), [])
+        out = self.run_cmd("notify-queue", "--add", "blocked", "stuck", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.queue(), [])
+
+    def test_events_filter_what_is_queued(self):
+        self.write_config('[notifications]\nevents = ["abandon"]\n')
+        self.decision()
+        self.assertEqual(self.queue(), [])
+        self.ok("notify-queue", "--add", "all-done", "done")
+        self.assertEqual(self.queue(), [])
+        task = self.running_task(attempt=3, sessions=[self.entry(2, 1), self.entry(2, 3)])
+        self.agents(self.row("task-2", 3), self.finished("task-2"))
+        self.ok("abandon", str(task), "died", "--why", "tested")
+        self.assertEqual([i["detail"].split("]")[0] for i in self.queue()], ["[abandon"])
+        self.write_config('[notifications]\nevents = []\n')
+        self.ok("notify-queue", "--clear")
+        self.decision("Another?")
+        self.assertEqual(self.queue(), [])
+
+    def test_all_done_and_blocked_are_queued_by_the_manager_and_dedup(self):
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.", "--do", "review the merged work")
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        items = self.queue()
+        self.assertEqual([i["detail"] for i in items], ["[all-done] All work is complete.", "[blocked] Waiting for a credential."])
+        self.assertEqual((items[0]["next"], items[1]["next"]), ("review the merged work", None))
+        self.assertEqual(self.run_cmd("notify-queue", "--add", "merged", "x").returncode, 2)  # not an event
+
+    def test_a_cleared_all_done_can_be_queued_again_on_a_later_day(self):
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.ok("notify-queue", "--clear")
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.assertEqual(len(self.queue()), 1)
+
+    def test_notify_queue_reads_without_clearing_and_clear_empties_it(self):
+        self.assertEqual(self.events("notify-queue"), [{"event": "notify-queue", "task": None, "attempt": None,
+                                                        "session": None, "detail": "empty", "next": None}])
+        self.decision()
+        self.assertEqual(len(self.queue()), 1)
+        self.assertEqual(len(self.queue()), 1)
+        self.assertEqual(len(self.queue("--clear")), 1)
+        self.assertEqual(self.one(self.events("notify-queue"), "notify-queue")["detail"], "empty")
+        self.assertEqual(self.run_cmd("notify-queue", "--clear", "--digest").returncode, 2)
+
+    def test_the_digest_is_off_by_default_and_made_once_a_day(self):
+        self.decision()
+        self.assertIn("off", self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"])
+        self.write_config('[notifications]\ndigest = "daily"\n')
+        text = self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"]
+        self.assertRegex(text, r"^Daily digest \d{4}-\d{2}-\d{2}\nMerged or done in the last day: 0\nIn flight: 0\n"
+                                r"Decisions waiting: 1 \(#2 Keep the old API\? no deadline\)$")
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("already made for"))
+
+    def test_digest_text_lists_merged_in_flight_and_decisions_with_a_cap(self):
+        import run as runner
+        payload = {"done": [{"Task": "#1", "Title": "Old"}], "in_flight": [{"Task": f"#{n}", "Title": f"T{n}"} for n in range(2, 5)],
+                   "decisions": [{"Decision": "#9 Pick one", "By": "2026-12-01"}, {"Decision": "#10 Pick two", "By": None}]}
+        self.assertEqual(runner.digest_text("2026-11-20", payload, cap=2), "\n".join([
+            "Daily digest 2026-11-20", "Merged or done in the last day: 1 (#1 Old)",
+            "In flight: 3 (#2 T2; #3 T3; and 1 more)",
+            "Decisions waiting: 2 (#9 Pick one by 2026-12-01; #10 Pick two no deadline)"]))
+        empty = {"done": [], "in_flight": [], "decisions": []}
+        self.assertEqual(runner.digest_text("d", empty), "Daily digest d\nMerged or done in the last day: 0\nIn flight: 0\nDecisions waiting: 0")
 
 
 class TransitionTest(unittest.TestCase):

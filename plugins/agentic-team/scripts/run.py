@@ -49,6 +49,9 @@ Usage:
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
                    tells its session to message after its result
+    notify-queue   show the operator notices that events queued, or clear
+                   them (--clear), queue one (--add), or print the daily
+                   digest (--digest); it sends nothing
     answer <id>    answer a worker's ask (--file, --default or --decision); files
                    an answer row and rings the worker's doorbell
     steer <id>     send a running worker a steer; --interrupt stops and resumes it
@@ -238,6 +241,14 @@ REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it i
 SCRATCH_DIR = ".agentic-team-scratch"  # in a worktree, the one folder for a session's temporary files
 SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
+NOTIFY_QUEUE = "notify-queue.jsonl"  # in the run directory: operator notices that events queued and the Manager has not sent
+NOTIFY_SENT = "notify-sent"  # in the run directory: the key of each notice that was sent, one per line, so an event never notifies twice
+NOTIFY_DIGEST = "notify-digest"  # in the run directory: the day (project time zone) of the last daily digest
+NOTIFY_OF_EMIT = {"abandoned": "abandon", "push-failed": "push-failed", "pr-closed": "pr-closed"}  # emit event -> notifications.events name
+NOTIFY_LEAD = {"abandon": "Task #{task} abandoned {detail}", "push-failed": "Task #{task}: {detail}", "pr-closed": "Task #{task}: {detail}"}
+NOTIFY_DO = {"abandon": "decide whether to redo the task or drop it, and tell the Manager",
+             "push-failed": "fix the push on the machine, or tell the Manager to retry",
+             "pr-closed": "reopen the request on the host, or tell the Manager to redo or drop the task"}
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
 MANAGER_SESSION = "manager-session"  # in the run directory: the Manager's session id, for the compaction hook
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
@@ -340,6 +351,7 @@ class Run:
         self.root = os.path.abspath(args.root)
         self.json = args.json
         self.events = []
+        self.dry_run = bool(getattr(args, "dry_run", False))
         self.payload = None  # `status` prints this instead of the events
         self.text = None
         top = sh(["git", "-C", self.root, "rev-parse", "--show-toplevel"])
@@ -618,6 +630,9 @@ class Run:
     def emit(self, event, task=None, attempt=None, session=None, detail="", next=None):
         self.events.append({"event": event, "task": task, "attempt": attempt, "session": session,
                             "detail": detail, "next": next})
+        if (kind := NOTIFY_OF_EMIT.get(event)) and task is not None:
+            queue_notice(self, kind, task, attempt, NOTIFY_LEAD[kind].format(task=task, detail=detail),
+                         next or NOTIFY_DO[kind])
 
     def flush(self):
         if self.json:
@@ -5738,6 +5753,124 @@ def cmd_notify_to(run, args):
              + (f", at uds:{sock}" if sock else ""))
 
 
+# ----------------------------------------------------------- operator notices
+
+def notice_key(event, task, attempt, line):
+    return hashlib.sha1(f"{event}\0{task}\0{attempt}\0{line}".encode()).hexdigest()[:16]
+
+
+def read_queue(run):
+    """The queued notices, oldest first. A line that is not a JSON object is skipped."""
+    items = []
+    try:
+        with open(os.path.join(run.run_dir, NOTIFY_QUEUE), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict) and "key" in item:
+                    items.append(item)
+    except OSError:
+        pass
+    return items
+
+
+def sent_keys(run):
+    try:
+        with open(os.path.join(run.run_dir, NOTIFY_SENT), encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
+def queue_notice(run, event, task, attempt, line, do, default=None, due=None, once=True):
+    """Queue one operator notice. Nothing is queued in a dry run, for an event that notifications.events leaves out,
+    or for a key already queued. With `once`, a key that an earlier clear recorded as sent is skipped too; the
+    key covers the event, task, attempt and line, so a new failure (a new head, a new reason) notifies again.
+    Returns True when it queued the notice. run.py sends nothing: the Manager sends the queue (run playbook, step 6)."""
+    if run.dry_run or event not in run.config["notifications"]["events"]:
+        return False
+    key = notice_key(event, task, attempt, line)
+    if key in {i["key"] for i in read_queue(run)} or (once and key in sent_keys(run)):
+        return False
+    os.makedirs(run.run_dir, exist_ok=True)
+    with open(os.path.join(run.run_dir, NOTIFY_QUEUE), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"key": key, "event": event, "task": task, "attempt": attempt, "line": line, "do": do,
+                             "default": default, "due": due, "at": run.now()}, ensure_ascii=False) + "\n")
+    return True
+
+
+def notice_next(item):
+    """What the operator can do, as the `next` of a printed notice; a decision adds its default and its deadline."""
+    if item["event"] != "decision":
+        return item.get("do") or None
+    return (f"{item['do']}; default if no answer: {item.get('default') or 'none set'}; "
+            f"answer by: {item.get('due') or 'no deadline'}")
+
+
+def digest_text(day, payload, cap=10):
+    """The daily digest from the payload of a status report (sections done, in_flight, decisions): what merged, what is
+    in flight, and the decisions that wait. At most `cap` rows of each; the rest is a count."""
+    def part(title, rows, label):
+        shown = "; ".join(f"{r[label]} {r.get('Title', '')}".strip() for r in rows[:cap])
+        more = f"; and {len(rows) - cap} more" if len(rows) > cap else ""
+        return f"{title}: {len(rows)}" + (f" ({shown}{more})" if rows else "")
+    decisions = [{**d, "Title": f"by {d['By']}" if d.get("By") else "no deadline"} for d in payload["decisions"]]
+    return "\n".join([f"Daily digest {day}",
+                      part("Merged or done in the last day", payload["done"], "Task"),
+                      part("In flight", payload["in_flight"], "Task"),
+                      part("Decisions waiting", decisions, "Decision")])
+
+
+def cmd_notify_queue(run, args):
+    """Show the queued notices, or --clear them (they count as sent), --add an all-done or blocked notice, or print
+    the --digest. It sends nothing: the Manager sends the notices through notifications.skill."""
+    modes = [bool(args.add), args.clear, args.digest]
+    if sum(modes) > 1:
+        raise Refused("give one of --add, --clear and --digest")
+    if args.do and not args.add:
+        raise Refused("--do goes with --add")
+    if args.add:
+        event, line = args.add
+        if event not in ("all-done", "blocked"):
+            raise Refused("--add takes all-done or blocked; the other events are queued by the command that causes them")
+        if args.dry_run or event not in run.config["notifications"]["events"]:
+            run.emit("notify-queue", None, None, None, f"{event} is not in notifications.events, or a dry run: not queued")
+        elif queue_notice(run, event, None, None, line, args.do or "", once=False):
+            run.emit("notify-queue", None, None, None, f"queued {event}")
+        else:
+            run.emit("notify-queue", None, None, None, f"{event} with this line is already queued")
+        return
+    if args.digest:
+        zone = ZoneInfo(run.config["sessions"]["timezone"])
+        today = datetime.datetime.now(zone).date().isoformat()
+        path = os.path.join(run.run_dir, NOTIFY_DIGEST)
+        last = open(path, encoding="utf-8").read().strip() if os.path.isfile(path) else ""
+        if run.config["notifications"]["digest"] != "daily":
+            run.emit("notify-digest", None, None, None, "off; set notifications.digest = \"daily\" to get one")
+        elif last == today:
+            run.emit("notify-digest", None, None, None, f"already made for {today}")
+        else:
+            cmd_status(run, argparse.Namespace(since="1d", limit=10, mark=False, brief=False))
+            payload, run.payload, run.text = run.payload, None, None
+            os.makedirs(run.run_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(today + "\n")
+            run.emit("notify-digest", None, None, None, digest_text(today, payload))
+        return
+    items = read_queue(run)
+    for item in items:
+        run.emit("notify", item.get("task"), item.get("attempt"), None, f"[{item['event']}] {item['line']}", notice_next(item))
+    if not items:
+        run.emit("notify-queue", None, None, None, "empty")
+    if args.clear:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with open(os.path.join(run.run_dir, NOTIFY_SENT), "a", encoding="utf-8") as fh:
+            fh.writelines(i["key"] + "\n" for i in items)
+        open(os.path.join(run.run_dir, NOTIFY_QUEUE), "w").close()
+
+
 # ----------------------------------------------------------------- cleanup
 
 def worktree_locks(run, cached=False):
@@ -8573,6 +8706,10 @@ def cmd_add(run, args):
              f"blocks {', '.join('#%d' % i for i in args.blocks)}" if args.blocks else "",
              f"independent: {independent}" if independent is not None else ""]
     run.emit("added", tid, None, None, f"{args.title} ({'; '.join(l for l in links if l) or 'no links'})")
+    if is_decision and meta_pairs(args.meta).get("decider") == "operator":
+        queue_notice(run, "decision", tid, None, f"Decision #{tid} needs you: {args.title}",
+                     "answer it; " + ", ".join(f"#{b}" for b in args.blocks) + " wait for it",
+                     meta_pairs(args.meta).get("default"), args.due)
     for _, task, reasons, weak in found:
         run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
 
@@ -9139,7 +9276,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox,depcheck,triage}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int)
@@ -9303,6 +9440,14 @@ def build_parser():
     p = sub.add_parser("inbox", help="show the messages of a task: asks, answers, steers, acks and their delivery state")
     p.add_argument("id", type=int)
 
+    p = sub.add_parser("notify-queue", help="show or clear the operator notices that events queued; it sends nothing")
+    p.add_argument("--clear", action="store_true", help="show the notices, then count them as sent and empty the queue")
+    p.add_argument("--add", nargs=2, metavar=("EVENT", "LINE"),
+                   help="queue a notice for an event that has no run.py line: all-done or blocked, with one plain line")
+    p.add_argument("--do", help="with --add: what the operator can do")
+    p.add_argument("--digest", action="store_true", help="print the daily digest once a day when notifications.digest is daily")
+    p.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+
     p = sub.add_parser("notify-to", help="set, clear, or show the session that sessions message after their result")
     p.add_argument("name", nargs="?", help="the bare session name from the first line of ListAgents")
     p.add_argument("--clear", action="store_true", help="remove the name; new briefs have no notify step")
@@ -9312,7 +9457,7 @@ def build_parser():
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
             "merged": cmd_merged, "add": cmd_add, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "round", "revise", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and

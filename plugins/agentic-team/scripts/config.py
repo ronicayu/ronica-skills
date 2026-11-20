@@ -148,6 +148,8 @@ def system_timezone():
     return "UTC"
 
 
+NOTIFY_EVENTS = ("decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked")  # the default of notifications.events
+
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
 # A default of None means "unset"; callables are evaluated at load time.
@@ -214,7 +216,11 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "carried_report_bytes": ("posint", 3000),
         "carried_total_bytes": ("posint", 12000),
     },
-    "notifications": {"skill": ("str", "")},
+    "notifications": {
+        "skill": ("str", ""),
+        "events": ("events", list(NOTIFY_EVENTS)),
+        "digest": ("choice:off,daily", "off"),
+    },
     "hooks": {
         "enabled": ("bool", False),
         "layered": ("bool", True),
@@ -240,6 +246,7 @@ TYPE_NAMES = {
     "patterns": "a list of path patterns",
     "commands": "a list of command prefixes or globs, none empty",
     "adjacent": "a list of adjacent-change kinds",
+    "events": "a list of notification events: " + ", ".join(f'"{e}"' for e in NOTIFY_EVENTS),
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
     "cmdlist": "a list of non-empty one-line shell commands",
     "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
@@ -436,6 +443,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "adjacent":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "events":
+        return isinstance(value, list) and all(isinstance(v, str) and v in NOTIFY_EVENTS for v in value)
     if kind == "commands":
         return isinstance(value, list) and all(isinstance(v, str) and v.strip() and v == v.strip() for v in value)
     if kind == "ranmap":
