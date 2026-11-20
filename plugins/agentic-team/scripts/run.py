@@ -239,6 +239,7 @@ VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended afte
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
 MANAGER_SESSION = "manager-session"  # in the run directory: the Manager's session id, for the compaction hook
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
+HOOKS_DIR = "hooks"  # in the run directory: each attempt's worker-hooks config
 INBOX_DIR = "inbox"  # in the run directory: each attempt's context file and socket address, each task's pointer flag
 STOPPED_FILE = "stopped-sessions"  # in the run directory: the session ids that run.py stopped, one per line
 NOTIFY_NAME = re.compile(r"[^\x00-\x1f\x7f`]{1,200}")  # one line, no backtick: the brief shows it in backticks
@@ -2136,19 +2137,60 @@ def write_ctx(run, task, attempt, session, cap):
         json.dump(ctx, fh)
     if os.path.lexists(attempt_file(run, tid, attempt, "addr")):
         os.remove(attempt_file(run, tid, attempt, "addr"))
+    write_hooks_config(run, tid, attempt)
+
+
+def hooks_dir(run):
+    return os.path.join(run.run_dir, HOOKS_DIR)
+
+
+def hooks_config_file(run, tid, attempt):
+    return os.path.join(hooks_dir(run), f"task-{tid}-{attempt}.json")
+
+
+def write_hooks_config(run, tid, attempt):
+    """The file that the worker hooks read ([hooks] and the attempt's files); nothing when hooks are off. It is written
+    again at each start of the attempt, and a rowless resume writes it when it is gone."""
+    cfg = run.config["hooks"]
+    if not cfg["enabled"]:
+        return
+    path = hooks_config_file(run, tid, attempt)
+    os.makedirs(hooks_dir(run), exist_ok=True)
+    data = {"layered": cfg["layered"], "compact_pins": cfg["compact_pins"], "summarize_fallback": cfg["summarize_fallback"],
+            "passthrough_chars": cfg["passthrough_chars"], "large_chars": cfg["large_chars"], "summarize_seconds": cfg["summarize_seconds"], "commands": cfg["commands"],
+            "task": tid, "attempt": attempt, "worktree": os.path.join(run.wt_dir, f"task-{tid}"), "brief": os.path.join(run.run_dir, "briefs", f"task-{tid}-{attempt}.md"),
+            "ctx": attempt_file(run, tid, attempt, "ctx.json"), "saved_dir": os.path.join(run.wt_dir, f"task-{tid}", SCRATCH_DIR, "hook-output")}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1)
+
+
+def hook_entry(script, *args, timeout):
+    return {"type": "command", "command": sys.executable, "args": ["-S", os.path.join(PLUGIN_ROOT, "scripts", "hooks", script), *args],
+            "timeout": timeout}
 
 
 def worker_settings(run, tid, attempt):
     """The --settings JSON of a worker: the SessionStart hook that writes its socket address, the PostToolUse hook that
     shows the pointer flag, and, for a worker in bypassPermissions, crossSessionInbound accept (that mode holds a
     peer message for approval otherwise; a doorbell has no authority, so accepting it is safe). Commands are in exec
-    form with absolute paths. The pointer hook runs after every tool call, so it starts Python without `site`."""
+    form with absolute paths. The pointer hook runs after every tool call, so it starts Python without `site`. With
+    [hooks] enabled it adds the worker hooks (scripts/hooks/): the output reducer and the compaction pins. A resume
+    with the full session id wakes the session with these saved settings, so only a start passes them; a verifier
+    gets none, because it must see the raw output it judges."""
     script, py = mailbox_script(), sys.executable
     settings = {"hooks": {
         "SessionStart": [{"matcher": "startup|resume", "hooks": [{"type": "command", "command": py, "args": [
             script, "--ctx", attempt_file(run, tid, attempt, "ctx.json"), "checkin"]}]}],
         "PostToolUse": [{"hooks": [{"type": "command", "command": py, "args": [
             "-S", script, "hook", "--flag", flag_file(run, tid, attempt), "--match", doorbell_prefix(tid, attempt)]}]}]}}
+    hooks = run.config["hooks"]
+    if hooks["enabled"]:
+        cfg = ["--config", hooks_config_file(run, tid, attempt)]
+        if hooks["layered"]:
+            settings["hooks"]["PreToolUse"] = [{"matcher": "Bash", "hooks": [hook_entry("layered.py", "pre", *cfg, timeout=10)]}]
+        if hooks["compact_pins"]:
+            settings["hooks"]["PreCompact"] = [{"hooks": [hook_entry("compact.py", *cfg, timeout=30)]}]
+            settings["hooks"]["SessionStart"].append({"matcher": "compact", "hooks": [hook_entry("compact.py", *cfg, timeout=30)]})
     if run.config["sessions"]["permission_mode"] == "bypassPermissions":
         settings["crossSessionInbound"] = "accept"
     return json.dumps(settings, separators=(",", ":"))
@@ -4223,8 +4265,10 @@ def rowless_flags(run, task, s):
         chosen = None
     model = entry.get("model") or (chosen or {}).get("model") or "sonnet"
     effort = chosen.get("effort") if chosen and chosen.get("model") == model else None
+    attempt = entry.get("attempt") or wanted_attempt(task)
+    write_hooks_config(run, task["id"], attempt)
     args = session_args(run, f"task-{task['id']}", s.name or entry.get("name") or f"task-{task['id']}", model, effort,
-                        worker_settings(run, task["id"], entry.get("attempt") or wanted_attempt(task)))
+                        worker_settings(run, task["id"], attempt))
     return [a for i, a in enumerate(args) if a != "--bg" and a != "--worktree" and not (i and args[i - 1] == "--worktree")]
 
 
