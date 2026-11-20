@@ -128,6 +128,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -135,7 +136,7 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
-from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
+from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
                     manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
 from report_summary import summarize  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
@@ -1379,6 +1380,7 @@ ROLE_INHERITED = ("fits", "tier", "verify_kind", "skills")
 ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
 ROLE_NAME = re.compile(r"[a-z0-9-]+")
 ROLE_ITEM = re.compile(r"([1-9][0-9]*)\. ")  # a numbered item of Method or Review starts at column 0
+CHECK_WAIT_MARGIN = 60  # seconds added to the sum of the check timeouts in the worker brief
 ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
 STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
 
@@ -1718,9 +1720,15 @@ TIER_NOTES = {
 }
 
 
-def tier_note(role_text, tier, rounding=False):
-    """The ROLE section of a worker brief with the note of its tier (TIER_NOTES) after the role text; none in a round."""
+def tier_note(role_text, tier, rounding=False, config=None):
+    """The ROLE section of a worker brief with the judgement note after the role text; none in a round. The note goes to
+    the judgement tier, and to a [models.overrides] key whose model is Opus or Fable (the expensive readers)."""
     note = TIER_NOTES.get(tier)
+    if note is None and config is not None and any(k.strip().lower() == str(tier).strip().lower()
+                                                   for k in config["models"]["overrides"]):
+        model = str(resolve_model(config, tier).get("model") or "").lower()
+        if "opus" in model or "fable" in model:
+            note = TIER_NOTES["judgement"]
     if rounding or not note:
         return role_text
     return note if role_text == "None." else f"{role_text}\n\n{note}"
@@ -2370,6 +2378,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
                    if kind != "verify" else "")
     verifier_arg = " --verifier" if kind == "verify" else ""
+    checks_note = ""
     if kind != "verify":
         for prefix in ([] if in_round(task) else config["report"]["require_ran"].get(verify_kind(run, task, strict=False), [])):
             worker_args += f" --require-ran {quote(prefix)}"
@@ -2377,7 +2386,15 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
         for command in checks:
             worker_args += f" --check={quote(command)}"
         if checks:
-            worker_args += f" --check-timeout {config['report']['check_timeout_seconds']}"
+            limit = config['report']['check_timeout_seconds']
+            worker_args += f" --check-timeout {limit}"
+            wait = len(checks) * limit + CHECK_WAIT_MARGIN
+            checks_note = (f" The report checks can run long. Run this command with a Bash timeout of at least {wait} "
+                           f"seconds (the sum of the check timeouts, {len(checks) * limit}, plus {CHECK_WAIT_MARGIN} "
+                           "seconds of margin), or in the background and watch it with Monitor"
+                           + ("; Bash allows 600 seconds in the foreground at most, so use the background here" if wait > 600 else "")
+                           + ". It also refuses a `PASS` while the worktree has uncommitted changes, before the checks "
+                           "run (commit first) and after them (a check left files behind).")
         if own_base := task_own_base(run, task, base):
             worker_args += f" --base {own_base}"
             if target := check_target(run, task):
@@ -2403,7 +2420,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                        "`Ran:` that does not exist in your worktree, a `PASS` report whose `Files:` leaves out a file "
                        "that your commits changed, a `PASS` report with no `Ran:` line for a prefix that the project "
                        "requires, a `PASS` report while one of the project's report checks fails, and an `ISSUES` or `BLOCKED` "
-                       "report with no `Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
+                       "report with no `Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." + checks_note
+                       if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, session,
                                           report, run.config["report"]["summary_lang"]) if kind == "verify" else
@@ -2564,7 +2582,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
             "ROLE": tier_note(values["ROLE"], tier or (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier,
-                              rounding),
+                              rounding, run.config),
             "VERIFY": values["VERIFY"] + self_review_text(verify_kind(run, task, strict=False), rounding),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
                          f"- Always pause for: {'; '.join(autonomy['always_pause']) or 'None'}"),
@@ -3715,6 +3733,10 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
     if ci:
         push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
+    kept = entry.get("model") or session_model(task, entry.get("id")) or "unknown"
+    if getattr(args, "model", None) or run.config["models"]["verifier_by_tier"]:
+        print(f"note: the resumed verifier keeps model {kept}; --model and [models.verifier_by_tier] choose the model of a "
+              f"new verifier only (run.py verify {tid} --again starts one)", file=sys.stderr)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
         print(f"claude --bg --resume {entry.get('sessionId')} --name {name}-r{revision} <pointer to {brief}>", file=sys.stderr)
@@ -3773,9 +3795,10 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              *([f"- {ci_ref_text(run, ci_entry)}"] if (ci_entry := ci_ref_for(task, attempt, new)) else []),
              f"- A CI run counts only for the commit it ran on: a run of the old head, or of any commit but `{new}`, "
              "proves nothing about the new head.",
-             "- First check that each of your findings below is fixed. Then rerun every VERIFY command on the new head. "
-             "Then check the code that the diff above touched. Do not run the whole method again: a line that the diff "
-             "does not touch keeps your earlier result.",
+             "- Rerun every VERIFY command and every `Checks` command of the project verify skill "
+             "(`.claude/skills/verify/SKILL.md`: lint, type check, tests) at the new head. Then check that each of your "
+             "findings below is fixed, and check the code that the diff above touched. Do not run the rest of the method "
+             "again: a line that the diff does not touch keeps your earlier result.",
              "- Your rules from the first brief stand: read only, scratch files only where it said.", "",
              "## ACCEPTANCE", "", "\n".join(f"- {item}" for item in acceptance), "",
              "## VERIFY", "", str(meta.get("verify", "")).strip(), "",
@@ -4832,6 +4855,11 @@ def record_arrived(run, snap, task, attempt, result):
         run.emit("arrived", tid, attempt, None, f"BLOCKED by {result.get('author') or 'unknown'} (result #{result['id']})",
                  f"decision #{answered[0]} answered; " + retry_next(tid, attempt, task=task))
         return
+    if status == "PASS" and result.get("kind") == "task":
+        failed_checks = recheck_pass(run, task, attempt, result)
+        if failed_checks:  # the report checks of a PASS that its worker did not run: the PASS becomes an ISSUES row
+            result = failed_checks
+            status = result["status"]
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
         carried = round_carry(run, task, tail_or_none(HEAD_ANY.search(result.get("body") or "")))
@@ -4849,6 +4877,54 @@ def record_arrived(run, snap, task, attempt, result):
         nxt = (retry_next(tid, attempt, before="answer it and ", task=task) + ', or run.py add "<question>" --type decision '
                f"--meta decider=operator --blocks {tid}")
     run.emit("arrived", tid, attempt, None, detail, nxt)
+
+
+def recheck_pass(run, task, attempt, result):
+    """record: a worker PASS is checked against the project's [report] checks, so that a worker that left out the
+    check-report flags (or never ran it) does not get through. The checks run in the task worktree at the Head of the
+    report, under the clean-tree rule of check_problems. A failure files an ISSUES row by the Manager (the row that salvage
+    files for a report it recovers: it carries the worker's report with its Status replaced) and returns it; a pass or
+    a check that cannot run here returns None. Each PASS row is checked once: its id is kept in the attempt's
+    `checked` file of the inbox folder."""
+    tid = task["id"]
+    checks = [] if in_round(task) else report_checks(run.config, verify_kind(run, task, strict=False))
+    marker = attempt_file(run, tid, attempt, "checked")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            if fh.read().strip() == str(result["id"]):
+                return None
+    except OSError:
+        pass
+    if not checks:
+        return None
+    path, body = task_worktree(run, tid), result.get("body") or ""
+    head = tail_or_none(HEAD_ANY.search(body))
+    if any(s.live and s.status == "busy" for s in own_sessions(run, tid, "task", attempt)):
+        return None  # the worker still works in the worktree: the checks wait for the next record
+    reason = None
+    if not os.path.isdir(path):
+        reason = "the task worktree is gone"
+    elif not is_sha(head) or run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip() != commit_of(run, head):
+        reason = f"the task worktree is not at the reported Head {str(head)[:7]}"
+    if reason:
+        run.emit("checks-skipped", tid, attempt, None, f"result #{result['id']}: {reason}, so the report checks did not run")
+        return None
+    problems = check_problems(checks, path, run.config["report"]["check_timeout_seconds"])
+    if not problems:
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(str(result["id"]))
+        return None
+    text = problems[0].replace("\n", "\n  ")
+    filed = STATUS_LINE.sub("Status: ISSUES\nAsked: none: filed by run.py record, not by the worker\n"
+                            f"Issues: blocking: record ran the [report] checks at {str(head)[:7]} and refused the PASS: {text}",
+                            body, count=1)
+    added = run.add_result(tid, "task", attempt, "manager", "ISSUES", filed)
+    carry_thread(run, task, attempt)
+    run.emit("checks-failed", tid, attempt, None,
+             f"result #{result['id']} said PASS, but the report checks fail at {str(head)[:7]}; filed ISSUES (result #{added['id']})")
+    return added
 
 
 def round_carry(run, task, head):
@@ -7570,28 +7646,51 @@ def transcript_usage(path, skip=frozenset()):
     return tuple(sum(u[key] for u in usage) for key in USAGE_KEYS)
 
 
-# platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-18. USD per million tokens, by model family:
-# (input, cache write, cache read, output). Cache write is the 5-minute price; transcripts do not say which TTL was used.
+# platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-20. USD per million tokens, by model family and
+# version: (input, cache write, cache read, output). Cache write is the 5-minute price (1.25x input); transcripts do not
+# say which TTL was used. Cache read is 0.1x input, except Fable 5.1 and later (0.025x) and Opus 5.5 and Sonnet 5.5
+# (0.05x). Haiku 5.5 is the price for prompts up to 100k tokens; it pays $0.50/$0.625/$0.05/$2.50 above that, which a
+# summed usage cannot tell. A version that is not listed has no price: the cost shows the `+` marker.
 MODEL_PRICES = {
-    "opus": (4.0, 5.0, 0.20, 20.0),
-    "sonnet": (2.0, 2.5, 0.10, 10.0),
-    "haiku": (0.10, 0.125, 0.01, 0.50),  # prompts up to 100k tokens
-    "fable": (8.0, 10.0, 0.20, 40.0),
+    "fable": {(5, 2): (8.0, 10.0, 0.20, 40.0), (5, 1): (10.0, 12.5, 0.25, 50.0), (5, 0): (10.0, 12.5, 1.0, 50.0)},
+    "opus": {(5, 5): (4.0, 5.0, 0.20, 20.0), **{v: (5.0, 6.25, 0.50, 25.0) for v in ((5, 0), (4, 8), (4, 7), (4, 6), (4, 5))},
+             (4, 1): (15.0, 18.75, 1.50, 75.0), (4, 0): (15.0, 18.75, 1.50, 75.0)},
+    "sonnet": {(5, 5): (2.0, 2.5, 0.10, 10.0), (5, 0): (2.0, 2.5, 0.20, 10.0), (4, 6): (3.0, 3.75, 0.30, 15.0),
+               (4, 5): (3.0, 3.75, 0.30, 15.0), (4, 0): (3.0, 3.75, 0.30, 15.0)},
+    "haiku": {(5, 5): (0.10, 0.125, 0.01, 0.50), (4, 5): (1.0, 1.25, 0.10, 5.0)},
 }
+# A bare alias names the family's current model.
+CURRENT_MODEL = {"fable": (5, 2), "opus": (5, 5), "sonnet": (5, 5), "haiku": (5, 5)}
+MODEL_VERSION = re.compile(r"(?:(\d{1,2})-(\d{1,2})-)?(fable|opus|sonnet|haiku)(?:[-. ]?(\d{1,2})(?:[-.](\d{1,2})(?!\d))?)?")
 
 
-def model_family(model):
-    """The MODEL_PRICES key that a model alias or id names (`opus[1m]`, `claude-sonnet-5-5`), else None."""
-    text = str(model or "").lower()
-    return next((family for family in MODEL_PRICES if family in text), None)
+def model_version(model):
+    """(family, (major, minor)) of a model alias or id: `opus[1m]` is the family's current model, `claude-sonnet-5-5` is
+    (sonnet, (5, 5)), `claude-opus-4-20250514` is (opus, (4, 0)), `claude-3-5-haiku-20241022` is (haiku, (3, 5)). None
+    when it names no family."""
+    found = MODEL_VERSION.search(str(model or "").lower())
+    if not found:
+        return None
+    old_major, old_minor, family, major, minor = found.groups()
+    if old_major:
+        return family, (int(old_major), int(old_minor))
+    if major is None:
+        return family, CURRENT_MODEL[family]
+    return family, (int(major), int(minor or 0))
+
+
+def model_price(model):
+    """The (input, cache write, cache read, output) price of a model alias or id, or None for a family or version that
+    MODEL_PRICES does not list."""
+    found = model_version(model)
+    return MODEL_PRICES[found[0]].get(found[1]) if found else None
 
 
 def usage_cost(usage, model):
-    """The estimated USD of a `sessions` entry's `usage` at the price of its model's family, or None for an unknown model."""
-    family = model_family(model)
-    if family is None:
+    """The estimated USD of a `sessions` entry's `usage` at the list price of its model, or None for an unknown model."""
+    price = model_price(model)
+    if price is None:
         return None
-    price = MODEL_PRICES[family]
     return (usage.get("in", 0) * price[0] + usage.get("cache_write", 0) * price[1]
             + usage.get("cache_read", 0) * price[2] + usage.get("out", 0) * price[3]) / 1e6
 
@@ -8584,26 +8683,103 @@ def report_checks(config, kind):
 
 
 CHECK_TAIL_LINES = 20
+CHECK_REAP_SECONDS = 5  # how long cleanup waits for a killed check's shell
+
+
+def descendants(pid):
+    """The pids of the processes below `pid`, by `ps` parent links (a child that ran setsid left its process group, so
+    only the parent links find it). Empty when ps cannot say."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, todo = [], [pid]
+    while todo:
+        for child in children.get(todo.pop(), []):
+            if child not in found:
+                found.append(child)
+                todo.append(child)
+    return found
+
+
+def kill_check(proc):
+    """Kill a check's whole tree: its process group, and every descendant that left the group with setsid."""
+    below = descendants(proc.pid)
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    for pid in below:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.SubprocessError, OSError):
+        proc.wait(timeout=CHECK_REAP_SECONDS)
+
+
+def run_check(command, cwd, timeout):
+    """Run one check through the shell in `cwd`. (exit code or None for a timeout, the last lines of its output). The output
+    goes to a temp file, not a pipe, so a grandchild that keeps it open cannot hold this call: after a timeout, SIGTERM or
+    SIGINT the whole tree is killed and the file is read as it is."""
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+        def stop(signum, _frame):
+            kill_check(proc)
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            sys.exit(128 + signum)
+
+        saved = {}
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(ValueError):  # not the main thread: no handler
+                saved[signum] = signal.signal(signum, stop)
+        try:
+            try:
+                proc.wait(timeout=timeout)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                kill_check(proc)
+                code = None
+            out.seek(0)
+            tail = "\n".join(out.read().decode("utf-8", "replace").rstrip().splitlines()[-CHECK_TAIL_LINES:])
+        finally:
+            for signum, handler in saved.items():
+                signal.signal(signum, handler)
+    return code, tail
+
+
+def dirty_files(cwd):
+    """The paths that `git status --porcelain` lists in `cwd` (changed or untracked, not ignored); [] when git cannot say."""
+    out = git_ok(cwd, "status", "--porcelain")
+    return [line[3:] for line in (out or "").splitlines()]
 
 
 def check_problems(commands, cwd, timeout):
     """The [report] checks rule of a worker PASS report: each command runs in `cwd` through the shell, with `timeout`
-    seconds; the first that exits non-zero or times out is one problem naming it, with the last lines of its output."""
+    seconds; the first that exits non-zero or times out is one problem naming it, with the last lines of its output.
+    The tree must be clean (`git status --porcelain`) before the checks run, so that they judge committed code, and
+    after they ran, so that a check that leaves files behind is named."""
+    before = dirty_files(cwd)
+    if before:
+        return [f"the worktree has uncommitted changes ({files_text(before, 5)}); the report checks judge committed code: "
+                "commit them (or remove what is not part of the change), then run check-report again"]
     for command in commands:
-        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
-        try:
-            out, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
+        code, tail = run_check(command, cwd, timeout)
+        if code is None:
             return [f"report check `{command}` timed out after {timeout} seconds (the project's [report] checks); "
                     "fix the cause and run check-report again, or report ISSUES"]
-        if proc.returncode:
-            tail = "\n".join(out.rstrip().splitlines()[-CHECK_TAIL_LINES:])
-            return [f"report check `{command}` exited {proc.returncode} (the project's [report] checks); PASS needs "
+        if code:
+            return [f"report check `{command}` exited {code} (the project's [report] checks); PASS needs "
                     "it to exit 0. Fix the cause, or report ISSUES. Last lines of its output:\n" + tail]
+        after = dirty_files(cwd)
+        if after:
+            return [f"report check `{command}` left files behind in the worktree ({files_text(after, 5)}); a check must "
+                    "change nothing that git does not ignore. Fix the check, or add the files to .gitignore, "
+                    "then run check-report again"]
     return []
 
 
@@ -8614,9 +8790,10 @@ SELF_REVIEW = {
         "(`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix each false "
         "one before PASS."),
     "code": (
-        "Before PASS, run guard mutations: break the code under test on purpose, in a copy in "
-        "`.agentic-team-scratch/`, and confirm that the covering tests turn red. Paste each mutation and its red run "
-        "under `Ran:` as `mutation:` lines."),
+        "Before PASS, run guard mutations: break the code under test on purpose. Mutate the file in place, run the "
+        "covering tests and confirm that they fail, restore the file with `git checkout -- <file>`, and confirm that "
+        "`git status` is clean before you go on. Paste each mutation and its red run under `Ran:` as `mutation:` "
+        "lines."),
 }
 
 
@@ -9053,8 +9230,9 @@ def build_parser():
                    "a `Ran:` line that starts with PREFIX (repeat it; the brief passes [report] require_ran)")
     p.add_argument("--check", action="append", default=[], metavar="COMMAND", help="a worker PASS report needs this "
                    "command to exit 0 in the worktree (repeat it; the brief passes [report] checks)")
-    p.add_argument("--check-timeout", type=int, default=600, metavar="SECONDS", help="the time each --check command may "
-                   "take (default 600; the brief passes [report] check_timeout_seconds)")
+    p.add_argument("--check-timeout", type=int, default=SCHEMA["report"]["check_timeout_seconds"][1], metavar="SECONDS",
+                   help="the time each --check command may take (default: the [report] check_timeout_seconds default; "
+                   "the brief passes the project's value)")
     p.add_argument("--base", metavar="SHA", help="the commit the task's own change starts from: a worker PASS report "
                    "must name under `Files:` each file that `git diff --name-only <start>...HEAD` lists, <start> being "
                    "the newer of SHA and the merge base of HEAD with --target")

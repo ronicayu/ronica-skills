@@ -388,7 +388,27 @@ kind, and `--check-timeout <seconds>`. When the report is a worker `PASS` and ha
 each command through the shell in the task worktree, one after the other. A command that exits non-zero, or runs longer
 than `check_timeout_seconds`, refuses the `PASS`: the problem names the command and, for an exit code, the last 20
 lines of its output; the later commands do not run. `ISSUES` and `BLOCKED` reports, verifier reports, and a rebase
-round (which gets no checks, as it gets no `--require-ran`) are not checked. `record` does not run the checks.
+round (which gets no checks, as it gets no `--require-ran`) are not checked.
+
+Each command writes its output to a temporary file, not a pipe, so a child that keeps the output open cannot hold
+`check-report` after a timeout. On a timeout, SIGTERM or SIGINT, `check-report` kills the command's process group and
+every process below it, also one that ran `setsid`. The worker brief tells the worker to run `check-report` with a
+Bash timeout of at least the sum of the check timeouts plus 60 seconds, or in the background with Monitor (Bash allows
+600 seconds in the foreground at most).
+
+The checks judge committed code. `check-report` refuses a `PASS` when `git status --porcelain` lists changes before the
+checks run (commit first), and when it lists changes after a check ran (the check left files behind; the problem names
+them). A path that git ignores does not count.
+
+How the gap of a worker that leaves out the flags is closed: `record` runs the same checks itself. When a worker `PASS`
+row arrives (filed by the worker or salvaged) and `[report] checks` apply to the task's verify kind, `record` runs them in
+the task worktree, at the `Head:` of the report, under the same clean-tree rule. A failure files an `ISSUES` row by the
+Manager in place of the `PASS`: the worker's report with its `Status:` replaced and an `Issues: blocking:` line that
+names the command and the end of its output. This is the path that `record` already uses for a report it recovers
+(`salvage` files the row, and the task follows the ISSUES rows: a fix round or a revision), so the next step is the
+usual `fix round:` hint, and `verify` never sees the PASS. Each PASS row is checked once (its id is kept in
+`inbox/<id>-<attempt>.checked` of the run directory). `record` skips the checks, with a `checks-skipped` line, when the
+worktree is gone or is not at the reported `Head`, and waits while a worker session is still busy in it.
 
 ```toml
 [report]
@@ -403,8 +423,9 @@ The worker brief adds a step to its VERIFY section by verify kind, and `agents/w
 the worker starts a read-only Sonnet subagent (the Agent tool, not a fork) that checks the document for internal
 contradictions, non-deterministic wording and every statement about the current code (`git grep`, or the cited lines),
 pastes its findings under `Ran:` as `self-check:` lines and fixes the false ones. For `code`, the worker runs guard
-mutations (it breaks the code under test on purpose, in a copy in `.agentic-team-scratch/`) and pastes each red run as a
-`mutation:` line. `schema` and a rebase round have no step. The verify method for each kind says that the verifier treats
+mutations (it breaks the code under test on purpose: it mutates the file in place, runs the covering tests and confirms
+that they fail, restores the file with `git checkout -- <file>` and confirms that `git status` is clean) and pastes each
+red run as a `mutation:` line. A mutation in a copy of one file tests nothing, because the tests import from the worktree. `schema` and a rebase round have no step. The verify method for each kind says that the verifier treats
 these lines as the worker's claim. To make a step required, list its prefix in `require_ran`.
 
 ### Revisions (fix in place)
@@ -430,8 +451,9 @@ sequence:
 6. `record` hints `run.py verify <id>`, which resumes the same verifier session
    with a short revision brief: the old and the new head, the diff, the worker's
    new report and the verifier's own findings. The verifier checks each
-   finding, reruns every VERIFY command on the new head, checks the code that the revision diff touched (not the whole method), and files a new verify
-   row. With `seat = "own"` its folder first moves to the new head.
+   finding. It reruns every VERIFY command and every `Checks` command of the project verify skill (lint, type check,
+   tests) at the new head, then checks each fixed finding and the code that the revision diff touched (not the rest of
+   the method), and files a new verify row. With `seat = "own"` its folder first moves to the new head.
 7. `close` records the new verdict: a pass closes the task and stops both
    sessions; another `verify-failed` can take the next revision.
 
@@ -862,7 +884,7 @@ session's message or the end of `wait` wakes it.
 | `add "<title>"` | Creates a task and settles its dependencies in the same call. It passes `--notes`, `--meta`, `--type`, `--parent`, `--start`, `--due`, `--promised` and `--priority` to `tg add`, and needs exactly one way of settling dependencies: `--depends <ids>` and/or `--blocks <ids>`, or `--independent "<reason>"` (recorded as meta `independent`). Without one it refuses (exit 2). It lists the open and in-progress tasks that may be related, at most 10, strongest first, as `candidate` lines: `SCOPE overlap` (the write paths of `--meta scope=` against each task's; a directory covers the paths under it; write the paths a task must not change after `;` or `；`, or after `不改`, `不要改`, `do not`, `never` or `not:`, and they are not compared; a shared file or a shared directory of four or more segments is strong, a shallower shared directory is marked `shared directory only` and `weak` when it is the only reason), `same #<n> reference` (`#<n>` or `gh issue view <n>` in both notes; an external, decision or milestone shows only for this reason, with its type), and `title words` (two shared words of four letters or more, or three shared Chinese character pairs; the weakest). Order: strong SCOPE overlap, same reference, shallow SCOPE overlap, title. A candidate reachable through the given `--depends`/`--blocks` at any depth reads `linked (via #<id>)`. It prints them when it refuses and when it adds; with `--depends`/`--blocks` each reads `linked` or `not linked`. An `added` line gives the new id and its links. A `--type decision` task needs `--blocks` and prints no candidates. |
 | `status` | Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its merge is listed under "Closed, awaiting merge" (`awaiting_merge` in `--json`), not under "In flight"; it is listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by label, with `unlabelled` for a line without a known label (verifier reports, the Manager's `DIED`, `STOPPED`, `ABANDONED` and `BLOCKED` rows, and `leftover ...` lines are not counted), and gives the mean attempts of the tasks done in the period. `--json` has them as `follow_ups` and `attempts` (`{"tasks", "mean"}`). When an in-flight session runs under another Claude profile, the In flight table gains a `Profile` column (`Profile` in `--json`). When a session's token usage is known, the Done and In flight tables gain an `Est. cost` column (see [Cost in status](#cost-in-status)). |
 | `roles` | Lists every task role, one line each: the name, its source (`plugin`, `project`, `project, overrides plugin`, or `project, extends plugin:<name>`), what it fits, its tier, verify kind and skills. `--json` prints one object per role. Read only. A broken role file is listed with its error, and the command exits 1, so you see it before a `launch` fails. See [Roles](#roles). |
-| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Without `--verifier`, an `ISSUES` or `BLOCKED` report needs an `Asked:` line: ask ids (`Asked: #12, #15`) or `Asked: none: <one-line reason>`, else the problem is ``<STATUS> needs an `Asked:` line: ...``. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. The brief adds more for a worker: `--base <sha>` (the task's `base` meta, else the attempt's start) with `--target <ref>` (the fetched remote target branch in `pr` mode, else the branch of the main checkout), and one `--require-ran <prefix>` for each prefix that `[report] require_ran` lists for the task's verify kind. A rebase round gets none of these. With `--base`, a `PASS` report must name under `Files:` every file that `git diff --name-only <start>...HEAD` lists in the worker's worktree, where `<start>` is the newer of `--base` and the merge base of HEAD with `--target`: the task's own commits only, never what a rebase onto the target brought in (a stacked base that is still unmerged is newer than the merge base, so it stays the start; after a restack the merge base is); a deleted file counts as its path and a renamed file as its new path; when more than 20 files changed, a directory entry (`src/`, `src/**`) names the files under it; `ISSUES` and `BLOCKED` reports are not checked, and when git cannot say (an unknown base) nothing is checked. With `--require-ran`, a `PASS` report needs a `Ran:` line that starts with each prefix (a list marker and backticks in front are ignored), else the problem names the missing ones. A verifier's check command has neither: a verifier's report has no `Evidence:` line. With `--verifier`, a report that has more than one `Issues:` field gets the warning "write a single `Issues:` field, one finding per line" (exit code unchanged); every `Issues:` field is read all the same, and a line may be `blocking:` or `blocking[<category>]:` with a category from `stale-ref`, `claim`, `test`, `scope`, `shots`, `behaviour`. `record` never checks a report that it recovers from a transcript or a file: not its evidence, its `Files:` or its `Ran:` lines. |
+| `check-report <file>` | Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a `Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and `leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines under `Evidence:` (the first may sit on the `Evidence:` line; the lines run to the next field; a `None` line does not count), else the problem is ``PASS needs one `Evidence:` line per ACCEPTANCE line: found <k>, ACCEPTANCE has <n>``; `ISSUES` and `BLOCKED` reports are not counted, and without the option nothing changes. Without `--verifier`, an `ISSUES` or `BLOCKED` report needs an `Asked:` line: ask ids (`Asked: #12, #15`) or `Asked: none: <one-line reason>`, else the problem is ``<STATUS> needs an `Asked:` line: ...``. Prints `ok`, or one `run.py: <problem>` line per problem on stderr and exits 2. It reads only the file, so it needs no config, no Taskgraph and no repository; `--json` does not change its output. The brief's REPORT section names it with the session's report file. A worker's brief adds `--mailbox <context file>`: the command then also reads Taskgraph through that file and names a steer of the worker's attempt that has no ack (if Taskgraph cannot be read, it behaves as without the option) and `--acceptance <n>` with the number of ACCEPTANCE items of the task. The brief adds more for a worker: `--base <sha>` (the task's `base` meta, else the attempt's start) with `--target <ref>` (the fetched remote target branch in `pr` mode, else the branch of the main checkout), and one `--require-ran <prefix>` for each prefix that `[report] require_ran` lists for the task's verify kind. A rebase round gets none of these. With `--base`, a `PASS` report must name under `Files:` every file that `git diff --name-only <start>...HEAD` lists in the worker's worktree, where `<start>` is the newer of `--base` and the merge base of HEAD with `--target`: the task's own commits only, never what a rebase onto the target brought in (a stacked base that is still unmerged is newer than the merge base, so it stays the start; after a restack the merge base is); a deleted file counts as its path and a renamed file as its new path; when more than 20 files changed, a directory entry (`src/`, `src/**`) names the files under it; `ISSUES` and `BLOCKED` reports are not checked, and when git cannot say (an unknown base) nothing is checked. With `--require-ran`, a `PASS` report needs a `Ran:` line that starts with each prefix (a list marker and backticks in front are ignored), else the problem names the missing ones. A verifier's check command has neither: a verifier's report has no `Evidence:` line. With `--verifier`, a report that has more than one `Issues:` field gets the warning "write a single `Issues:` field, one finding per line" (exit code unchanged); every `Issues:` field is read all the same, and a line may be `blocking:` or `blocking[<category>]:` with a category from `stale-ref`, `claim`, `test`, `scope`, `shots`, `behaviour`. `record` does not check the evidence, `Files:` or `Ran:` lines of a report that it recovers from a transcript or a file; it does run the `[report] checks` of a worker `PASS` (see [Report checks](#report-checks)). With `--check`, the command also refuses a `PASS` while `git status --porcelain` lists changes before or after the checks. |
 | `wait` | Polls until something in flight changes and prints one `changed` line per change. It prints `timeout` after `--timeout` seconds (default 1800, at most 6600), or `nothing-in-flight` at once when no session runs and, in `pr` mode, no request is open and no CI run is read. It compares each poll with its own first read: the results of each task in progress, the state of each of their sessions, the open decisions, and in `pr` mode each open request of a closed task and the newest CI run that `record` reads. Options: `--tg-interval` (default 5 seconds, from `[messaging] tg_poll_seconds`: how often Taskgraph is read, so a new ask row wakes the Manager within seconds), `--interval` (default 30 seconds: how often `claude agents` is read), `--host-interval` (default 300 seconds; the host limits its rate). It writes nothing. |
 | `notify-to [<name>]` | Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when `manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name. |
 | `answer <id>` | Answers a worker's `ask` row with `--file F`, `--default` (the ask's own `Default:` line) or `--decision <id>` (a done decision with `--meta ask=<ask id>`; its notes are the answer). Options: `--ask <row id>` (default: the newest open ask of the current attempt), `--supersede` (answer an ask again), `--by operator`. It refuses an ask of an ended attempt and a second answer without `--supersede`. It files the `answer` row, then delivers the doorbell. |
@@ -995,8 +1017,8 @@ task is for.
 #### Judgement-tier brief
 
 The ROLE section of a worker brief for a task on the `judgement` tier ends with one line: for reading or searching code,
-start a non-fork Sonnet subagent with a narrow question and use its answer; do not read large files yourself. A rebase round
-and the other tiers do not get it.
+start a non-fork Sonnet subagent with a narrow question and use its answer; do not read large files yourself. A
+`[models.overrides]` key whose model is Opus or Fable gets it too. A rebase round and the other tiers do not get it.
 
 #### Cost in status
 
@@ -1004,8 +1026,14 @@ When a session's `usage` is known (`record` writes it from the transcript, each 
 `run.py status` adds an `Est. cost` column to the Done and In flight tables, and `--json` adds the `Est. cost` key. A cell is
 the sum over the task's sessions, each priced at its model's family in `MODEL_PRICES` (`scripts/run.py`): list prices from
 platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-18, USD per million tokens, cache write at the 5-minute
-price. A session whose model has no price in the table adds nothing and puts a `+` after the amount. Without any known
-usage the column does not appear. It is an estimate: it counts each session's own transcript, not its sub-agents.
+price. The table is keyed by model family and version, so an older pinned model gets its own price, not the current
+family price: `claude-opus-4-1` is $15/$75, `opus` is Opus 5.5. A bare alias (`opus[1m]`, `sonnet`) is the family's
+current model. A session whose model id is not in the table adds nothing and puts a `+` after the amount. Without any
+known usage the column does not appear. It is an estimate, with two gaps. Haiku 5.5 costs $0.50 / $2.50 per million
+input / output tokens for a request whose prompt is over 100,000 tokens (the usual $0.10 / $0.50 below), and the
+estimate uses the lower price, because a summed usage cannot tell which request was long. Subagent costs are not counted:
+the self-check of a `design-doc` task, the Sonnet reads of a `judgement` task and any other subagent a session starts bill
+under their own transcripts, which `record` does not read.
 
 ### `[merge]`
 
@@ -1085,7 +1113,7 @@ pattern.
 | `require_ran` | table of verify kind to list of strings | `{}` | The line prefixes that a worker `PASS` report needs under `Ran:`, by verify kind (`code`, `schema`, `design-doc`): `require_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }`. The worker brief's `check-report` command carries one `--require-ran <prefix>` for each prefix of the task's verify kind, and refuses a `PASS` report that has no `Ran:` line starting with one of them, naming the missing prefixes. Empty: no check, as before. A key that is not a verify kind is a config error. |
 | `checks` | list of strings | `[]` | Project commands that the worker's `check-report` runs before it accepts a `PASS`, for every verify kind. See [Report checks](#report-checks). |
 | `checks_by_kind` | table of verify kind to list of strings | `{}` | The same, for one verify kind (`code`, `schema`, `design-doc`); they run after `checks`: `[report.checks_by_kind]` `design-doc = ["python docs/models/check_refs.py"]`. A key that is not a verify kind is a config error. |
-| `check_timeout_seconds` | positive integer | `600` | The time that each check may take. |
+| `check_timeout_seconds` | positive integer | `600` | The time that each check may take. A command must be one line: a command with a newline is a config error. |
 | `summary_lang` | `"en"` or `"zh"` | `"en"` | The language of the short summary that heads an issue comment on the Taskgraph GitHub backend. See [Issue comment summaries](#issue-comment-summaries). |
 
 ### `[roles]`
@@ -1463,8 +1491,9 @@ one `F<n>: <action>` line per finding, fixes in SCOPE with new commits, and
 answers with a new, complete report (`Revision: <n>` after `Status:`, each
 finding under `Deviations:` as `finding F<n>: <what changed>`). A resumed verifier gets a short revision brief
 (`briefs/task-<id>-<n>-verify-r<r>.md`): the old and new heads, the diff, the
-worker's new report, its own earlier findings, and the order to run the full
-method again on the new head.
+worker's new report, its own earlier findings, and the order to rerun every VERIFY
+command and every `Checks` command of the project verify skill at the new head, then
+check the fixed findings and the code that the diff touched.
 
 Carried reports are short. Every carried report (the previous attempt, each
 upstream dependency, the worker report in a verify brief) drops its `Ran:`
@@ -1892,10 +1921,11 @@ Version 0.30.0 adds the quality gate before verify and the cost defaults. No lif
 - **`[report] checks`, `checks_by_kind`, `check_timeout_seconds`.** New optional keys; empty keeps the old behaviour. See [Report checks](#report-checks).
 - **Issue comment summaries.** A worker report, a verifier report, a `revise` row and a long `ask` or `answer` is filed with a short summary, which Taskgraph 1.22.0 or later shows above the full body on the issue comment. New optional key `[report] summary_lang = "en" | "zh"` (default `"en"`). A verifier's brief now ends with `mailbox.py file-verify` where it ended with `tg result add`; the row is the same. With an older Taskgraph, `tg result add` refuses `--summary`, so update Taskgraph first. `revise` joins `ack`, `steer` and `check` in the recommended `results.local` list, and `config.py check` warns until a GitHub-backend project lists it; a project like DB-FAT should list all four to cut the comment noise. See [Issue comment summaries](#issue-comment-summaries).
 - **Self-review before PASS.** A worker brief for a `design-doc` or `code` task now carries a self-review step (a `self-check:` subagent pass, or `mutation:` guard runs); it is text only, and `check-report` does not require the lines unless `require_ran` does. See [Self-review before PASS](#self-review-before-pass).
-- **A revision verifier no longer runs the whole method again.** The revision brief (and `agents/worker.md`) now says: rerun every VERIFY command, check each fixed finding, and check the code that the revision diff touched. This changes what a verifier does on a revision; there is no setting for it.
+- **A revision verifier no longer runs the whole method again.** The revision brief (and `agents/worker.md`) now says: rerun every VERIFY command and every `Checks` command of the project verify skill at the new head, then check each fixed finding and the code that the revision diff touched. This changes what a verifier does on a revision; there is no setting for it.
 - **`[models.verifier_by_tier]`.** A new optional table. `verify` picks the model as: `--model`, then `verifier_by_tier[<the attempt's tier>]`, then `verifier`, then a model that differs from the worker's. The shipped default is an empty table, so a project that sets nothing keeps the 0.28.2 verifier. Recommended: `implementation = "sonnet"`, `judgement = "opus"`. See [Verifier model per tier](#verifier-model-per-tier).
 - **Judgement-tier brief.** A worker brief for a `judgement` task gains one line: read or search code through a non-fork Sonnet subagent. See [Judgement-tier brief](#judgement-tier-brief).
 - **Cost in `status`.** `Est. cost` column, shown only when usage is known. See [Cost in status](#cost-in-status).
+- **Quality-gate fixes.** `record` now runs the `[report] checks` of a worker `PASS` itself and files `ISSUES` when they fail; `check-report` refuses a `PASS` on a dirty tree before or after the checks, reads each check's output from a temp file and kills a check's whole process tree on a timeout, SIGTERM or SIGINT; `MODEL_PRICES` is per model version; a config command with a newline is an error; a resumed revision verifier prints a note that it keeps its model. A `[models.overrides]` key on Opus or Fable gets the judgement brief. See [Report checks](#report-checks) and [Cost in status](#cost-in-status).
 
 ### Upgrading from 0.28.2
 

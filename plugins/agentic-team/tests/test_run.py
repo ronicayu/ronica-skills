@@ -624,7 +624,7 @@ class Base(unittest.TestCase):
         """The brief names the base and the worktree branch, and tells the worker to move nothing."""
         self.assertIn(f"Base commit: {sha}. Your worktree is already at the base commit `{sha}`, on branch `worktree-task-", text)
         self.assertIn(f"If `git rev-parse HEAD` is not `{sha}`, report BLOCKED and change nothing.", text)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
 
     MAILBOX_PY = os.path.join(os.path.dirname(RUN), "mailbox.py")
 
@@ -1093,7 +1093,7 @@ class RunTest(Base):
         self.assertIn(f"Attempt 2. Your worktree is at `{built}` on branch `worktree-task-1`.", text)
         self.assertIn(f"If `git rev-parse HEAD` is not `{built}`, report BLOCKED and change nothing.", text)
         self.assertNotIn("Base commit:", text)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
         later = "b" * 40
         self.add_result(task, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {later}\nFiles: None\n",
                         attempt=1, by="manager")
@@ -1144,7 +1144,7 @@ class RunTest(Base):
         self.assertIn(f"Output under review: {SHA_A}", context)
         self.assertIn(f"Your worktree is already at `{SHA_A}`. Do not check out another commit.", context)
         self.assertIn(f"If `git rev-parse HEAD` is not `{SHA_A}`, report BLOCKED.", context)
-        self.assertNotIn("git checkout", text)
+        self.assertNotRegex(text, r"git checkout(?! -- <file>)")
         self.assertIn("### Worker report (result #1, PASS, attempt 1)", context)
         self.assertIn("Files: out.txt", context)
         self.assertIn("Last checkpoint: None", context)
@@ -1178,7 +1178,7 @@ class RunTest(Base):
                       ".agentic-team-scratch/base` in the next", context)
         self.assertNotIn("&&", context)
         self.assertIn("Never check out, reset, or add a worktree.", context)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
 
     def test_13_verify_brief_falls_back_to_the_merge_base(self):
         main_head = self.git("rev-parse", "HEAD")
@@ -2010,7 +2010,7 @@ class RunTest(Base):
         argv = self.calls("--bg")[0]
         self.assertEqual(argv[argv.index("--worktree") + 1], "verify-1-1")
         self.assertIn(f"Your worktree is already at `{head}`. Do not check out another commit.", argv[-1])
-        self.assertNotIn("git checkout", argv[-1])
+        self.assertNotRegex(argv[-1], r"git checkout(?! -- <file>)")
         self.agents(self.finished("verify-1-1"))
         self.touch(verifier, "build/out.txt")  # a folder that is not clean is not reused
         self.ok("verify", str(task), "--again")
@@ -2802,8 +2802,8 @@ class RunTest(Base):
                      "With no CI ref, report `check-only` and say under `Ran:` that only a CI run proves the change; "
                      "the Manager then runs `run.py verify <id> --again --ci-ref`.",
                      "Also `test-verified`: a green CI run on the CI ref that exercises the changed workflow or job.",
-                     "Guard mutations are test evidence. When you break the code under test on purpose, in a copy in "
-                     "your scratch folder, and every break turns the covering tests red, the tests prove that code",
+                     "Guard mutations are test evidence. When you break the code under test on purpose and every "
+                     "break turns the covering tests red, the tests prove that code",
                      "that is `test-verified`, not `check-only`, also for a behaviour change those tests cover.",
                      "`check-only`: static checks or a read-through only, with no test, mutation or CI run that proves "
                      "the change."):
@@ -6601,14 +6601,257 @@ class Issue89Test(Base):
                              self.usage_entry(self.entry(task, 1, "verify"), "mystery"))
         self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$14.60+")
 
-    def test_the_price_table_prices_a_family_by_substring(self):
+    def test_the_price_table_prices_a_model_by_family_and_version(self):
         import run as runner
-        self.assertEqual([runner.model_family(m) for m in ("opus", "opus[1m]", "claude-haiku-4-5-20251001",
-                                                           "claude-sonnet-5-5", "fable", "gpt", None)],
-                         ["opus", "opus", "haiku", "sonnet", "fable", None, None])
+        for model, want in (
+                ("opus", (4.0, 5.0, 0.20, 20.0)), ("opus[1m]", (4.0, 5.0, 0.20, 20.0)),
+                ("claude-opus-5-5", (4.0, 5.0, 0.20, 20.0)), ("claude-opus-5", (5.0, 6.25, 0.50, 25.0)),
+                ("claude-opus-4-8-20260101", (5.0, 6.25, 0.50, 25.0)),
+                ("claude-opus-4-1", (15.0, 18.75, 1.50, 75.0)), ("claude-opus-4-20250514", (15.0, 18.75, 1.50, 75.0)),
+                ("sonnet", (2.0, 2.5, 0.10, 10.0)), ("claude-sonnet-5-5", (2.0, 2.5, 0.10, 10.0)),
+                ("claude-sonnet-5", (2.0, 2.5, 0.20, 10.0)),
+                ("claude-sonnet-4-5-20250929", (3.0, 3.75, 0.30, 15.0)),
+                ("fable", (8.0, 10.0, 0.20, 40.0)), ("claude-fable-5-2", (8.0, 10.0, 0.20, 40.0)),
+                ("claude-fable-5-1", (10.0, 12.5, 0.25, 50.0)), ("claude-fable-5", (10.0, 12.5, 1.0, 50.0)),
+                ("haiku", (0.10, 0.125, 0.01, 0.50)), ("claude-haiku-5-5", (0.10, 0.125, 0.01, 0.50)),
+                ("claude-haiku-4-5-20251001", (1.0, 1.25, 0.10, 5.0))):
+            with self.subTest(model):
+                self.assertEqual(runner.model_price(model), want)
+        for model in ("mystery", "gpt", None, "", "claude-opus-9-9", "claude-sonnet-3-7", "claude-3-5-haiku-20241022"):
+            with self.subTest(model):
+                self.assertIsNone(runner.model_price(model))
+                self.assertIsNone(runner.usage_cost({"out": 1}, model))
+        for name, ratio in (("opus", 1.25), ("sonnet", 1.25), ("fable", 1.25), ("haiku", 1.25)):  # cache write is 1.25x input
+            price = runner.model_price(name)
+            self.assertAlmostEqual(price[1] / price[0], ratio)
         self.assertAlmostEqual(runner.usage_cost({"out": 100, "in": 200, "cache_read": 300, "cache_write": 400}, "sonnet"),
                                (200 * 2.0 + 400 * 2.5 + 300 * 0.1 + 100 * 10.0) / 1e6)
-        self.assertIsNone(runner.usage_cost({"out": 1}, "mystery"))
+
+    def test_status_prices_an_older_pinned_model_by_its_own_version_and_marks_an_unknown_one(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "claude-opus-4-1"))
+        # opus 4.1: 15 + 18.75 + 1.5 + 75 per million of each kind
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$110.25")
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "claude-opus-9-9"))
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$0.00+")
+
+    def test_status_shows_the_cost_of_a_done_task(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"))
+        self.tg("done", str(task))
+        sections = json.loads(self.ok("status", pre=["--json"]).stdout)
+        self.assertEqual([row["Est. cost"] for row in sections["done"]], ["$14.60"])
+        self.assertIn("Est. cost", self.status_sections()["Done since last report"])
+        self.assertIn("| $14.60 |", self.status_sections()["Done since last report"])
+
+    def test_a_verifier_brief_has_no_self_review_text(self):
+        text = self.verify_text(self.running_task())
+        self.assertNotIn("Self-review before PASS", text)
+        self.assertNotIn("run guard mutations: break the code under test on purpose", text)
+        self.assertNotIn("`self-check:` lines", text)
+        design = self.verify_text(self.running_task(verify_kind="design-doc"))
+        self.assertNotIn("Self-review before PASS", design)
+        self.assertNotIn("read-only Sonnet subagent with the Agent tool", design)
+
+    def test_the_code_self_review_mutates_in_place_and_restores_with_git(self):
+        text = " ".join(self.brief(self.add_task(verify_kind="code")).split())
+        self.assertIn("Mutate the file in place, run the covering tests and confirm that they fail, restore the file with "
+                      "`git checkout -- <file>`, and confirm that `git status` is clean before you go on", text)
+        self.assertNotIn("in a copy", text)
+        verifier = " ".join(self.verify_text(self.running_task()).split())
+        self.assertIn("restore it with `git checkout -- <file>`", verifier)
+
+    def test_the_judgement_note_goes_to_an_override_tier_on_opus_or_fable(self):
+        note = "start a non-fork Sonnet subagent with a narrow question"
+        self.write_config('[models.overrides]\n"deep audit" = "opus"\n"cheap pass" = "haiku"\n"big think" = "claude-fable-5-2"\n')
+        for tier, want in (("deep audit", True), ("big think", True), ("cheap pass", False), ("implementation", False)):
+            with self.subTest(tier):
+                self.assertEqual(note in self.brief(self.add_task(tier=tier)), want)
+
+    def test_the_worker_brief_names_the_bash_timeout_for_check_report(self):
+        self.write_config('[report]\nchecks = ["a", "b"]\ncheck_timeout_seconds = 100\n')
+        text = " ".join(self.brief(self.add_task()).split())
+        self.assertIn("Run this command with a Bash timeout of at least 260 seconds (the sum of the check timeouts, 200, "
+                      "plus 60 seconds of margin), or in the background and watch it with Monitor.", text)
+        self.assertNotIn("the foreground at most", text)
+        self.write_config('[report]\nchecks = ["a"]\n')
+        text = " ".join(self.brief(self.add_task()).split())
+        self.assertIn("a Bash timeout of at least 660 seconds", text)
+        self.assertIn("Bash allows 600 seconds in the foreground at most, so use the background here", text)
+        self.write_config("")
+        self.assertNotIn("Bash timeout", self.brief(self.add_task()))
+
+    # --- check-report: a clean tree, a hanging child, signals
+
+    def clean_repo(self):
+        repo = os.path.join(self.dir, "chk")
+        os.makedirs(repo)
+        self.git("init", "-q", "-b", "main", cwd=repo)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=repo)
+        self.commit_file("a.txt", "a\n", cwd=repo)
+        return repo
+
+    def at(self, repo, path, *flags, timeout=60):
+        out = subprocess.run([sys.executable, RUN, "check-report", path, *flags], capture_output=True, text=True, cwd=repo,
+                             timeout=timeout)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_check_report_refuses_a_pass_on_a_dirty_tree_before_it_runs_the_checks(self):
+        repo = self.clean_repo()
+        marker = os.path.join(self.dir, "ran")
+        check = f"--check=echo run >> {shlex.quote(marker)}"
+        with open(os.path.join(repo, "a.txt"), "w") as fh:
+            fh.write("changed\n")
+        with open(os.path.join(repo, "new.txt"), "w") as fh:
+            fh.write("new\n")
+        code, out, err = self.at(repo, self.report(), check)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("the worktree has uncommitted changes (a.txt, new.txt)", err)
+        self.assertIn("commit them", err)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(self.at(repo, self.report("ISSUES", Asked="none: x"), check)[0], 0)  # only a worker PASS is held
+        self.git("add", "-A", cwd=repo)
+        self.git("commit", "-q", "-m", "all", cwd=repo)
+        self.assertEqual(self.at(repo, self.report(), check), (0, "ok\n", ""))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_check_report_names_the_files_that_a_check_leaves_behind(self):
+        repo = self.clean_repo()
+        code, out, err = self.at(repo, self.report(), "--check=echo x > leftover.txt; echo y > other.txt")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("report check `echo x > leftover.txt; echo y > other.txt` left files behind in the worktree "
+                      "(leftover.txt, other.txt)", err)
+        os.remove(os.path.join(repo, "leftover.txt"))
+        os.remove(os.path.join(repo, "other.txt"))
+        self.commit_file(".gitignore", "build.out\n", cwd=repo)  # an ignored file is not a leftover
+        self.assertEqual(self.at(repo, self.report(), "--check=echo x > build.out"), (0, "ok\n", ""))
+
+    def grandchild_check(self, pidfile, sleeper="exec sleep 60"):
+        script = ("import subprocess, time\n"
+                  f"subprocess.Popen(['/bin/sh', '-c', 'echo $$ > {pidfile}; {sleeper}'], start_new_session=True)\n"
+                  "time.sleep(60)\n")
+        return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    def assert_gone(self, pidfile):
+        with open(pidfile) as fh:
+            pid = int(fh.read())
+        try:
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.1)
+            self.fail(f"process {pid} of the check is still alive")
+        finally:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_a_timed_out_check_does_not_hang_on_a_child_that_holds_its_output(self):
+        repo = self.clean_repo()
+        pidfile = os.path.join(self.dir, "grandchild.pid")
+        started = time.time()
+        code, _, err = self.at(repo, self.report(), f"--check={self.grandchild_check(pidfile)}", "--check-timeout", "2",
+                               timeout=30)
+        self.assertEqual(code, 2)
+        self.assertIn("timed out after 2 seconds", err)
+        self.assertLess(time.time() - started, 2 + 8)  # the child ran setsid and holds the output: no pipe waits for it
+        self.assert_gone(pidfile)  # the setsid child is killed too: no orphan
+
+    def test_a_signal_kills_the_check_and_what_it_started(self):
+        repo = self.clean_repo()
+        pidfile = os.path.join(self.dir, "grandchild.pid")
+        for signum, want in ((signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGINT, None)):
+            with self.subTest(signum):
+                with contextlib.suppress(OSError):
+                    os.remove(pidfile)
+                proc = subprocess.Popen([sys.executable, RUN, "check-report", self.report(),
+                                         f"--check={self.grandchild_check(pidfile)}", "--check-timeout", "120"],
+                                        cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    for _ in range(100):
+                        if os.path.exists(pidfile) and os.path.getsize(pidfile):
+                            break
+                        time.sleep(0.1)
+                    time.sleep(0.3)
+                    proc.send_signal(signum)
+                    proc.communicate(timeout=20)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                if want is not None:
+                    self.assertEqual(proc.returncode, want)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assert_gone(pidfile)
+
+    # --- record runs the checks of a worker PASS
+
+    def checked_task(self, check, **config_extra):
+        self.write_config(f'[report]\nchecks = [{json.dumps(check)}]\n')
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        return task, wt, head
+
+    def test_record_files_issues_for_a_pass_whose_checks_fail_at_the_reported_head(self):
+        task, wt, head = self.checked_task("grep -q nope out.txt")
+        events = self.events("record")
+        failed = self.one(events, "checks-failed")
+        self.assertIn(f"result #1 said PASS, but the report checks fail at {head[:7]}; filed ISSUES", failed["detail"])
+        arrived = self.one(events, "arrived")
+        self.assertTrue(arrived["detail"].startswith("ISSUES by manager"), arrived)
+        self.assertIn("fix round:", arrived["next"])
+        rows = self.results(task)
+        self.assertEqual([(r["status"], r["author"]) for r in rows], [("PASS", "worker"), ("ISSUES", "manager")])
+        body = rows[-1]["body"]
+        self.assertIn("Status: ISSUES\nAsked: none: filed by run.py record, not by the worker\nIssues: blocking: record ran "
+                      f"the [report] checks at {head[:7]} and refused the PASS: report check `grep -q nope out.txt` exited 1", body)
+        self.assertIn(f"Head: {head}", body)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        again = self.events("record")  # the ISSUES row is the newest: it is not checked or filed twice
+        self.assertEqual(self.named(again, "checks-failed"), [])
+        self.assertEqual(len(self.results(task)), 2)
+
+    def test_record_checks_a_passing_pass_once(self):
+        log = os.path.join(self.dir, "check.log")
+        task, wt, head = self.checked_task(f"grep -q x out.txt && echo run >> {shlex.quote(log)}")
+        first = self.events("record")
+        self.assertEqual(self.named(first, "checks-failed"), [])
+        self.assertEqual(self.one(first, "arrived")["detail"], "PASS by worker (result #1)")
+        self.events("record")
+        with open(log) as fh:
+            self.assertEqual(fh.read(), "run\n")
+        self.assertEqual(len(self.results(task)), 1)
+
+    def test_record_refuses_a_pass_whose_worktree_is_dirty_or_whose_check_leaves_files(self):
+        task, wt, head = self.checked_task("echo x > leftover.txt")
+        failed = self.one(self.events("record"), "checks-failed")
+        self.assertIn("filed ISSUES", failed["detail"])
+        self.assertIn("left files behind in the worktree (leftover.txt)", self.results(task)[-1]["body"])
+        os.remove(os.path.join(wt, "leftover.txt"))
+        self.fresh()
+        self.write_config('[report]\nchecks = ["true"]\n')
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        with open(os.path.join(wt, "dirty.txt"), "w") as fh:
+            fh.write("d\n")
+        self.one(self.events("record"), "checks-failed")
+        self.assertIn("the worktree has uncommitted changes (dirty.txt)", self.results(task)[-1]["body"])
+
+    def test_record_skips_the_checks_when_the_worktree_is_not_at_the_reported_head(self):
+        task, wt, head = self.checked_task("exit 1")
+        self.wt_commit(wt, "later.txt")
+        events = self.events("record")
+        self.assertIn("the task worktree is not at the reported Head", self.one(events, "checks-skipped")["detail"])
+        self.assertEqual(self.named(events, "checks-failed"), [])
+        self.assertEqual(len(self.results(task)), 1)
+
+    def test_record_runs_no_checks_when_the_project_sets_none(self):
+        task = self.running_task()
+        self.pass_report(task)
+        events = self.events("record")
+        self.assertEqual(self.named(events, "checks-failed") + self.named(events, "checks-skipped"), [])
+        self.assertEqual(self.one(events, "arrived")["detail"], "PASS by worker (result #1)")
 
     # --- Files: against git
 
@@ -13705,12 +13948,22 @@ class RevisionTest(Base):
         self.assertIn(f"Old head: `{head}`. New head: `{new}`.", text)
         self.assertIn(f"git --no-optional-locks diff {head} {new}", text)
         self.assertIn("blocking: src/a.py:1: a check fails", text)  # the verifier's own findings
-        self.assertIn("Then rerun every VERIFY command on the new head. Then check the code that the diff above touched. "
-                      "Do not run the whole method again", " ".join(text.split()))
+        flat = " ".join(text.split())
+        self.assertIn("Rerun every VERIFY command and every `Checks` command of the project verify skill "
+                      "(`.claude/skills/verify/SKILL.md`: lint, type check, tests) at the new head. Then check that each of "
+                      "your findings below is fixed, and check the code that the diff above touched. Do not run the rest of "
+                      "the method again", flat)
         self.assertNotIn("run the full method", text)
         self.assertIn("## VERIFY\n\nmake test", text)
         self.assertIn("- done", text)  # the ACCEPTANCE line
         self.assertIn("--task 1 --attempt 1 --by verify-1-1 --lang en", text)
+
+    def test_the_resumed_revision_verifier_says_that_it_keeps_its_model(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        out = self.ok("verify", str(task), "--model", "haiku")
+        self.assertIn("note: the resumed verifier keeps model opus; --model and [models.verifier_by_tier] choose the model "
+                      "of a new verifier only", out.stderr)
 
     def test_140_a_revision_verify_moves_the_ci_ref_to_the_new_head(self):
         self.host = "github"

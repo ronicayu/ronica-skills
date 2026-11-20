@@ -241,7 +241,7 @@ TYPE_NAMES = {
     "commands": "a list of command prefixes or globs, none empty",
     "adjacent": "a list of adjacent-change kinds",
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
-    "cmdlist": "a list of non-empty shell commands",
+    "cmdlist": "a list of non-empty one-line shell commands",
     "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
     "tiermap": 'a table of tier or models.overrides key = model, for example { implementation = "sonnet" }',
     "posint": "a positive integer",
@@ -443,7 +443,7 @@ def type_ok(kind, value):
             isinstance(v, list) and all(isinstance(p, str) and p.strip() and p == p.strip() for p in v)
             for v in value.values())
     if kind == "cmdlist":
-        return isinstance(value, list) and all(isinstance(c, str) and c.strip() for c in value)
+        return isinstance(value, list) and all(isinstance(c, str) and c.strip() and "\n" not in c for c in value)
     if kind == "cmdmap":
         return isinstance(value, dict) and all(type_ok("cmdlist", v) for v in value.values())
     if kind == "posint":

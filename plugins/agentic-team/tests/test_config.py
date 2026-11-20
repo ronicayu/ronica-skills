@@ -333,7 +333,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.problems(config.load(self.root)), [
             'report.checks_by_kind: "design" is not a verify kind; the kinds are code, schema, design-doc (did you mean design-doc?)'])
         for bad in ('checks = "make lint"', 'checks = [""]', 'checks = [1]', "check_timeout_seconds = 0",
-                    'checks_by_kind = { code = "make" }'):
+                    'checks_by_kind = { code = "make" }', 'checks = ["make lint\\nmake test"]',
+                    'checks_by_kind = { code = ["make\\nmake"] }'):
             with self.subTest(bad):
                 self.write(MINIMAL + f"[report]\n{bad}\n")
                 self.assertEqual(len(config.problems(config.load(self.root))), 1)

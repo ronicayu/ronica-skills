@@ -267,8 +267,9 @@ There you are read only: never check out, reset, stash, commit or delete anythin
 every git command as `git --no-optional-locks ...`; write scratch files only to the
 folder outside the repository that the brief names. A change to a tracked file, or a new
 file that git does not ignore, is your error: `run.py` stashes it before the task session
-resumes. A revision brief resumes you on a new head: check each of your findings, rerun every
-VERIFY command, then check the code that the revision diff touched. Do not run the whole method again.
+resumes. A revision brief resumes you on a new head: rerun every VERIFY command and every `Checks` command of
+the project verify skill at the new head, then check each of your findings and the code that the revision
+diff touched. Do not run the rest of the method again.
 
 ## Report
 
@@ -344,8 +345,9 @@ Self-review before `PASS`, by the verify kind of the task (the brief repeats the
   document for internal contradictions, non-deterministic wording, and every statement about the current
   code (`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix the
   false ones before `PASS`.
-- `code`: run guard mutations. Break the code under test on purpose, in a copy in `.agentic-team-scratch/`,
-  and confirm that the covering tests turn red. Paste each one under `Ran:` as a `mutation:` line.
+- `code`: run guard mutations. Break the code under test on purpose: mutate the file in place, run the
+  covering tests and confirm that they fail, restore the file with `git checkout -- <file>`, and confirm that
+  `git status` is clean before you go on. Paste each one under `Ran:` as a `mutation:` line.
 
 Write one `Evidence:` line for each ACCEPTANCE line: the
 ACCEPTANCE line in short, then the command and its result, or the `path:line`, that
