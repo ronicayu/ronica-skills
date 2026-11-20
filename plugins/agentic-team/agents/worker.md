@@ -267,8 +267,8 @@ There you are read only: never check out, reset, stash, commit or delete anythin
 every git command as `git --no-optional-locks ...`; write scratch files only to the
 folder outside the repository that the brief names. A change to a tracked file, or a new
 file that git does not ignore, is your error: `run.py` stashes it before the task session
-resumes. A revision brief resumes you on a new head: check each of your findings, then
-run the full method again, not only the findings.
+resumes. A revision brief resumes you on a new head: check each of your findings, rerun every
+VERIFY command, then check the code that the revision diff touched. Do not run the whole method again.
 
 ## Report
 
@@ -334,6 +334,18 @@ that says the path was `deleted` or `removed` is exempt.
 path of a renamed file, count). When more than 20 files changed, a directory entry such as `src/` names the
 files under it. When the project sets `[report] require_ran` for your task's verify kind, a `PASS` needs a
 `Ran:` line that starts with each prefix the check names (for example `reuse: ...`).
+When it sets `[report] checks`, `check-report` runs those commands in your worktree before it accepts a `PASS`
+and refuses it with the failing command and the end of its output; fix the cause and run it again. A rebase
+round runs none of this.
+
+Self-review before `PASS`, by the verify kind of the task (the brief repeats the step for your kind; a round has none):
+
+- `design-doc`: start a read-only Sonnet subagent with the Agent tool, not a fork. Ask it to check the
+  document for internal contradictions, non-deterministic wording, and every statement about the current
+  code (`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix the
+  false ones before `PASS`.
+- `code`: run guard mutations. Break the code under test on purpose, in a copy in `.agentic-team-scratch/`,
+  and confirm that the covering tests turn red. Paste each one under `Ran:` as a `mutation:` line.
 
 Write one `Evidence:` line for each ACCEPTANCE line: the
 ACCEPTANCE line in short, then the command and its result, or the `path:line`, that

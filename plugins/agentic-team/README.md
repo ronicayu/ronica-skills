@@ -380,6 +380,33 @@ What the operator does with a `kept` line about data:
   Then run `run.py record`.
 - `docker did not answer`: start Docker, then run `run.py record`.
 
+### Report checks
+
+`[report] checks` lets a project put its own quality gate before the verifier. The worker brief's `check-report`
+command gains one `--check=<command>` for each command of `checks` and then of `checks_by_kind` for the task's verify
+kind, and `--check-timeout <seconds>`. When the report is a worker `PASS` and has no other problem, `check-report` runs
+each command through the shell in the task worktree, one after the other. A command that exits non-zero, or runs longer
+than `check_timeout_seconds`, refuses the `PASS`: the problem names the command and, for an exit code, the last 20
+lines of its output; the later commands do not run. `ISSUES` and `BLOCKED` reports, verifier reports, and a rebase
+round (which gets no checks, as it gets no `--require-ran`) are not checked. `record` does not run the checks.
+
+```toml
+[report]
+checks = ["make lint"]
+[report.checks_by_kind]
+design-doc = ["python docs/models/check_refs.py"]   # a stale `file:line` reference fails before a verifier reads it
+```
+
+### Self-review before PASS
+
+The worker brief adds a step to its VERIFY section by verify kind, and `agents/worker.md` repeats it. For `design-doc`,
+the worker starts a read-only Sonnet subagent (the Agent tool, not a fork) that checks the document for internal
+contradictions, non-deterministic wording and every statement about the current code (`git grep`, or the cited lines),
+pastes its findings under `Ran:` as `self-check:` lines and fixes the false ones. For `code`, the worker runs guard
+mutations (it breaks the code under test on purpose, in a copy in `.agentic-team-scratch/`) and pastes each red run as a
+`mutation:` line. `schema` and a rebase round have no step. The verify method for each kind says that the verifier treats
+these lines as the worker's claim. To make a step required, list its prefix in `require_ran`.
+
 ### Revisions (fix in place)
 
 A verifier session's `verify-failed` verdict with `blocking:` lines no longer
@@ -403,7 +430,7 @@ sequence:
 6. `record` hints `run.py verify <id>`, which resumes the same verifier session
    with a short revision brief: the old and the new head, the diff, the worker's
    new report and the verifier's own findings. The verifier checks each
-   finding, runs the full method again on the new head, and files a new verify
+   finding, reruns every VERIFY command on the new head, checks the code that the revision diff touched (not the whole method), and files a new verify
    row. With `seat = "own"` its folder first moves to the new head.
 7. `close` records the new verdict: a pass closes the task and stops both
    sessions; another `verify-failed` can take the next revision.
@@ -1019,6 +1046,9 @@ pattern.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `require_ran` | table of verify kind to list of strings | `{}` | The line prefixes that a worker `PASS` report needs under `Ran:`, by verify kind (`code`, `schema`, `design-doc`): `require_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }`. The worker brief's `check-report` command carries one `--require-ran <prefix>` for each prefix of the task's verify kind, and refuses a `PASS` report that has no `Ran:` line starting with one of them, naming the missing prefixes. Empty: no check, as before. A key that is not a verify kind is a config error. |
+| `checks` | list of strings | `[]` | Project commands that the worker's `check-report` runs before it accepts a `PASS`, for every verify kind. See [Report checks](#report-checks). |
+| `checks_by_kind` | table of verify kind to list of strings | `{}` | The same, for one verify kind (`code`, `schema`, `design-doc`); they run after `checks`: `[report.checks_by_kind]` `design-doc = ["python docs/models/check_refs.py"]`. A key that is not a verify kind is a config error. |
+| `check_timeout_seconds` | positive integer | `600` | The time that each check may take. |
 
 ### `[roles]`
 
@@ -1734,6 +1764,14 @@ ack, so nothing holds a report, a salvage or a `DIED` row. What remains to do is
 says: answer again the asks that `record` prints, and steer again what a worker had not acked.
 Local ids start again at 1000000000000001 in a new cache, so a `steer #<id>` that an older report on the issue names
 may match a new steer.
+
+### Upgrading from 0.28.2
+
+Version 0.30.0 adds the quality gate before verify and the cost defaults. No lifecycle, phase or model change (the TLA+ model under `model/` is unchanged); no migration. Every new key is optional, and the shipped defaults keep 0.28.2 behaviour except for the revision scope below.
+
+- **`[report] checks`, `checks_by_kind`, `check_timeout_seconds`.** New optional keys; empty keeps the old behaviour. See [Report checks](#report-checks).
+- **Self-review before PASS.** A worker brief for a `design-doc` or `code` task now carries a self-review step (a `self-check:` subagent pass, or `mutation:` guard runs); it is text only, and `check-report` does not require the lines unless `require_ran` does. See [Self-review before PASS](#self-review-before-pass).
+- **A revision verifier no longer runs the whole method again.** The revision brief (and `agents/worker.md`) now says: rerun every VERIFY command, check each fixed finding, and check the code that the revision diff touched. This changes what a verifier does on a revision; there is no setting for it.
 
 ### Upgrading from 0.28.1
 

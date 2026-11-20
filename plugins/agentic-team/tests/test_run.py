@@ -14,6 +14,7 @@ import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -6456,6 +6457,67 @@ class Issue89Test(Base):
         verify = self.verify_text(self.running_task())
         self.assertNotIn("--require-ran", verify)
 
+    # --- [report] checks
+
+    def test_check_report_runs_the_check_commands_before_it_accepts_a_pass(self):
+        marker = os.path.join(self.dir, "ran")
+        ok = f"echo run >> {shlex.quote(marker)}"
+        self.assertEqual(self.check(self.report(), f"--check={ok}", "--check=true"), (0, "ok\n", ""))
+        with open(marker) as fh:
+            self.assertEqual(fh.read(), "run\n")
+        failing = "echo one; echo two; echo 'bad ref docs/a.md:3' >&2; exit 3"
+        code, out, err = self.check(self.report(), "--check=true", f"--check={failing}", f"--check={ok}")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(f"report check `{failing}` exited 3", err)
+        self.assertIn("bad ref docs/a.md:3", err)
+        self.assertIn("two", err)
+        with open(marker) as fh:
+            self.assertEqual(fh.read(), "run\n")  # a failing check stops the later ones
+        long = "for i in $(seq 1 50); do echo line$i; done; exit 1"
+        err = self.check(self.report(), f"--check={long}")[2]
+        self.assertIn("line50", err)
+        self.assertIn("line31", err)
+        self.assertNotIn("line30\n", err)
+
+    def test_a_check_that_runs_too_long_is_refused_with_its_command(self):
+        code, _, err = self.check(self.report(), "--check=sleep 30", "--check-timeout", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("report check `sleep 30` timed out after 1 seconds", err)
+
+    def test_the_checks_run_only_for_a_worker_pass_report(self):
+        failing = "--check=exit 1"
+        self.assertEqual(self.check(self.report("ISSUES", Asked="none: the timebox ran out"), failing)[0], 0)
+        self.assertEqual(self.check(self.report("PASS"), failing, "--verifier"), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report(Evidence=None), "--acceptance", "1", failing)[0], 2)
+        self.assertNotIn("report check", self.check(self.report(Evidence=None), "--acceptance", "1", failing)[2])
+
+    def test_the_worker_brief_passes_the_checks_of_its_verify_kind(self):
+        self.write_config('''
+            [report]
+            checks = ["make lint"]
+            check_timeout_seconds = 90
+            [report.checks_by_kind]
+            design-doc = ["python docs/check_refs.py"]
+            ''')
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(' --check="make lint" --check-timeout 90', command)
+        self.assertNotIn("check_refs", command)
+        command = self.section(self.brief(self.add_task(verify_kind="design-doc")), "REPORT")
+        self.assertIn(' --check="make lint" --check="python docs/check_refs.py" --check-timeout 90', command)
+        self.assertNotIn("--check", self.verify_text(self.running_task()))
+
+    def test_the_worker_brief_has_the_self_review_of_its_verify_kind(self):
+        design = self.brief(self.add_task(verify_kind="design-doc"))
+        self.assertIn("### Self-review before PASS", design)
+        self.assertIn("read-only Sonnet subagent with the Agent tool (not a fork)", design)
+        self.assertIn("`self-check:` lines", design)
+        self.assertNotIn("`mutation:` lines", design)
+        code = self.brief(self.add_task(verify_kind="code"))
+        self.assertIn("run guard mutations: break the code under test on purpose", code)
+        self.assertIn("`mutation:` lines", code)
+        self.assertNotIn("`self-check:`", code)
+        self.assertNotIn("Self-review before PASS", self.brief(self.add_task(verify_kind="schema")))
+
     # --- Files: against git
 
     def in_repo(self, path, *flags):
@@ -12854,6 +12916,16 @@ class RoundTest(Base):
         self.assertNotIn("--require-ran", command)
         self.assertNotIn("--base", command)
 
+    def test_a_rebase_round_brief_has_no_checks_and_no_self_review(self):
+        self.write_config('''
+            [report]
+            checks = ["make lint"]
+            ''')
+        task, wt, head, onto = self.waiting()
+        text = self.ok("round", str(task), "rebase", "--dry-run").stdout
+        self.assertNotIn("--check", self.section(text, "REPORT"))
+        self.assertNotIn("Self-review before PASS", text)
+
     def test_119_round_goal_comes_first_and_old_branch_lines_do_not_apply(self):
         task, wt, head, onto = self.waiting()
         self.tg("edit", str(task), "--notes", "Why: domains drift.\n\nRebase round by hand: start from origin/old-base (896308d), "
@@ -13444,7 +13516,7 @@ class RevisionTest(Base):
         self.assertEqual(self.worktree_state(), before)
         self.assertIn(new, open(brief).read())
 
-    def test_verify_revision_brief_has_diff_and_full_method(self):
+    def test_verify_revision_brief_has_diff_and_the_revision_scope(self):
         task, wt, head, _ = self.revised()
         new = self.second_pass(task, wt)
         self.ok("verify", str(task))
@@ -13453,7 +13525,9 @@ class RevisionTest(Base):
         self.assertIn(f"Old head: `{head}`. New head: `{new}`.", text)
         self.assertIn(f"git --no-optional-locks diff {head} {new}", text)
         self.assertIn("blocking: src/a.py:1: a check fails", text)  # the verifier's own findings
-        self.assertIn("every VERIFY command, the project verify skill, and every ACCEPTANCE line", text)
+        self.assertIn("Then rerun every VERIFY command on the new head. Then check the code that the diff above touched. "
+                      "Do not run the whole method again", " ".join(text.split()))
+        self.assertNotIn("run the full method", text)
         self.assertIn("## VERIFY\n\nmake test", text)
         self.assertIn("- done", text)  # the ACCEPTANCE line
         self.assertIn("--kind verify --attempt 1 --by verify-1-1", text)

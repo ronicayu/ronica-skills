@@ -278,6 +278,24 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[report]\nrequire_ran = { "code" = [" reuse:"] }\n')
         self.assertEqual(len(config.problems(config.load(self.root))), 1)
 
+    def test_report_checks_are_commands_with_per_kind_lists_and_a_timeout(self):
+        self.write(MINIMAL)
+        report = config.load(self.root)["report"]
+        self.assertEqual((report["checks"], report["checks_by_kind"], report["check_timeout_seconds"]), ([], {}, 600))
+        self.write(MINIMAL + '[report]\nchecks = ["make lint"]\ncheck_timeout_seconds = 90\n'
+                   '[report.checks_by_kind]\ndesign-doc = ["python docs/check_refs.py"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "report.checks_by_kind", "--json")[:2],
+                         (0, '{"design-doc": ["python docs/check_refs.py"]}\n'))
+        self.write(MINIMAL + '[report.checks_by_kind]\ndesign = ["x"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'report.checks_by_kind: "design" is not a verify kind; the kinds are code, schema, design-doc (did you mean design-doc?)'])
+        for bad in ('checks = "make lint"', 'checks = [""]', 'checks = [1]', "check_timeout_seconds = 0",
+                    'checks_by_kind = { code = "make" }'):
+            with self.subTest(bad):
+                self.write(MINIMAL + f"[report]\n{bad}\n")
+                self.assertEqual(len(config.problems(config.load(self.root))), 1)
+
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
         found = config.problems(config.load(self.root))

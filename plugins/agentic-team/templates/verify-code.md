@@ -56,7 +56,8 @@ Verdict levels for this kind:
   covering tests red, the tests prove that code: with VERIFY passing at the
   head and covering every ACCEPTANCE line, that is `test-verified`, not
   `check-only`, also for a behaviour change those tests cover. List each
-  mutation and its red run under `Ran:`.
+  mutation and its red run under `Ran:`. The worker's own `mutation:` lines under `Ran:` are its claim: rerun
+  at least one of them before you count it.
 - `check-only`: static checks or a read-through only, with no test, mutation
   or CI run that proves the change.
 - `verify-blocked`: a check could not run; name the cause.

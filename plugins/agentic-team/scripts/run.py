@@ -2309,6 +2309,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     if kind != "verify":
         for prefix in ([] if in_round(task) else config["report"]["require_ran"].get(verify_kind(run, task, strict=False), [])):
             worker_args += f" --require-ran {quote(prefix)}"
+        checks = [] if in_round(task) else report_checks(config, verify_kind(run, task, strict=False))
+        for command in checks:
+            worker_args += f" --check={quote(command)}"
+        if checks:
+            worker_args += f" --check-timeout {config['report']['check_timeout_seconds']}"
         if own_base := task_own_base(run, task, base):
             worker_args += f" --base {own_base}"
             if target := check_target(run, task):
@@ -2333,8 +2338,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                        "`Evidence:` lines than ACCEPTANCE lines, a path in backticks under `Files:`, `Evidence:` or "
                        "`Ran:` that does not exist in your worktree, a `PASS` report whose `Files:` leaves out a file "
                        "that your commits changed, a `PASS` report with no `Ran:` line for a prefix that the project "
-                       "requires, and an `ISSUES` or `BLOCKED` report with no "
-                       "`Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
+                       "requires, a `PASS` report while one of the project's report checks fails, and an `ISSUES` or `BLOCKED` "
+                       "report with no `Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
                                           report) if kind == "verify" else
@@ -2494,6 +2499,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                       f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."),
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
+            "VERIFY": values["VERIFY"] + self_review_text(verify_kind(run, task, strict=False), rounding),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
                          f"- Always pause for: {'; '.join(autonomy['always_pause']) or 'None'}"),
             "REPORT_NOTE": "",
@@ -3676,7 +3682,7 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
 
 def render_revision(run, task, attempt, revision, name, folder, old, new, worker, findings, role):
     """The brief of a resumed verifier: the old and the new head, the diff, the worker's new report, the verifier's own
-    earlier findings, and the order to run the full method again on the new head."""
+    earlier findings, and the order to recheck: the fixed findings, every VERIFY command and the code the diff touched."""
     tid = task["id"]
     meta = task.get("meta") or {}
     why, acceptance = parse_notes(task.get("notes"))
@@ -3700,9 +3706,9 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              *([f"- {ci_ref_text(run, ci_entry)}"] if (ci_entry := ci_ref_for(task, attempt, new)) else []),
              f"- A CI run counts only for the commit it ran on: a run of the old head, or of any commit but `{new}`, "
              "proves nothing about the new head.",
-             "- First check that each of your findings below is fixed. Then run the full method of your first brief again "
-             "on the new head: every VERIFY command, the project verify skill, and every ACCEPTANCE line, not only the "
-             "findings. A fix can break a line that passed before.",
+             "- First check that each of your findings below is fixed. Then rerun every VERIFY command on the new head. "
+             "Then check the code that the diff above touched. Do not run the whole method again: a line that the diff "
+             "does not touch keeps your earlier result.",
              "- Your rules from the first brief stand: read only, scratch files only where it said.", "",
              "## ACCEPTANCE", "", "\n".join(f"- {item}" for item in acceptance), "",
              "## VERIFY", "", str(meta.get("verify", "")).strip(), "",
@@ -8438,6 +8444,8 @@ def cmd_check_report(args):
         for field, token, line in missing_paths(body, os.getcwd()):
             problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
                             "path, or say on that line that it was deleted or removed")
+    if args.check and not args.verifier and status and status.group(1) == "PASS" and not problems:
+        problems += check_problems(args.check, os.getcwd(), args.check_timeout)
     waiting, rows = unacked_steers_of(args.mailbox)
     for row in waiting:
         problems.append(f"{mbx.unacked_text(row, rows)}: run the inbox command in MAILBOX, act on it and ack it, "
@@ -8449,6 +8457,56 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+def report_checks(config, kind):
+    """The [report] commands that check-report runs before it accepts a PASS of a task of verify kind `kind`: checks,
+    then checks_by_kind[kind]."""
+    return list(config["report"]["checks"]) + list(config["report"]["checks_by_kind"].get(kind, []))
+
+
+CHECK_TAIL_LINES = 20
+
+
+def check_problems(commands, cwd, timeout):
+    """The [report] checks rule of a worker PASS report: each command runs in `cwd` through the shell, with `timeout`
+    seconds; the first that exits non-zero or times out is one problem naming it, with the last lines of its output."""
+    for command in commands:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return [f"report check `{command}` timed out after {timeout} seconds (the project's [report] checks); "
+                    "fix the cause and run check-report again, or report ISSUES"]
+        if proc.returncode:
+            tail = "\n".join(out.rstrip().splitlines()[-CHECK_TAIL_LINES:])
+            return [f"report check `{command}` exited {proc.returncode} (the project's [report] checks); PASS needs "
+                    "it to exit 0. Fix the cause, or report ISSUES. Last lines of its output:\n" + tail]
+    return []
+
+
+SELF_REVIEW = {
+    "design-doc": (
+        "Before PASS, start a read-only Sonnet subagent with the Agent tool (not a fork). Give it the document and ask "
+        "it to check for internal contradictions, non-deterministic wording, and every statement about the current code "
+        "(`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix each false "
+        "one before PASS."),
+    "code": (
+        "Before PASS, run guard mutations: break the code under test on purpose, in a copy in "
+        "`.agentic-team-scratch/`, and confirm that the covering tests turn red. Paste each mutation and its red run "
+        "under `Ran:` as `mutation:` lines."),
+}
+
+
+def self_review_text(kind, rounding=False):
+    """The self-review step that a worker brief adds to VERIFY (agents/worker.md, Self-review before PASS); none in a
+    round, which changes no content."""
+    text = SELF_REVIEW.get(kind)
+    return "" if rounding or not text else "\n\n### Self-review before PASS\n\n" + text
 
 
 FILES_DIR_LIMIT = 20  # more changed files than this: a directory entry under `Files:` covers the files under it
@@ -8864,6 +8922,10 @@ def build_parser():
                    "under Evidence:, one for each ACCEPTANCE line of the task")
     p.add_argument("--require-ran", action="append", default=[], metavar="PREFIX", help="a worker PASS report needs "
                    "a `Ran:` line that starts with PREFIX (repeat it; the brief passes [report] require_ran)")
+    p.add_argument("--check", action="append", default=[], metavar="COMMAND", help="a worker PASS report needs this "
+                   "command to exit 0 in the worktree (repeat it; the brief passes [report] checks)")
+    p.add_argument("--check-timeout", type=int, default=600, metavar="SECONDS", help="the time each --check command may "
+                   "take (default 600; the brief passes [report] check_timeout_seconds)")
     p.add_argument("--base", metavar="SHA", help="the commit the task's own change starts from: a worker PASS report "
                    "must name under `Files:` each file that `git diff --name-only <start>...HEAD` lists, <start> being "
                    "the newer of SHA and the merge base of HEAD with --target")

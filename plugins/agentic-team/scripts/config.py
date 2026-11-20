@@ -171,6 +171,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "implementation": ("model", {"model": "sonnet", "effort": "high"}),
         "judgement": ("model", {"model": "opus", "effort": None}),
         "verifier": ("model?", None),
+        "verifier_by_tier": ("tiermap", {}),
         "overrides": ("overrides", {}),
     },
     "merge": {
@@ -195,7 +196,12 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
-    "report": {"require_ran": ("ranmap", {})},
+    "report": {
+        "require_ran": ("ranmap", {}),
+        "checks": ("cmdlist", []),
+        "checks_by_kind": ("cmdmap", {}),
+        "check_timeout_seconds": ("posint", 600),
+    },
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),
         "ask_due_minutes": ("posint", 60),
@@ -222,6 +228,9 @@ TYPE_NAMES = {
     "patterns": "a list of path patterns",
     "adjacent": "a list of adjacent-change kinds",
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
+    "cmdlist": "a list of non-empty shell commands",
+    "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
+    "tiermap": 'a table of tier or models.overrides key = model, for example { implementation = "sonnet" }',
     "posint": "a positive integer",
     "nonneg": "an integer that is 0 or more",
     "bool": "true or false",
@@ -372,7 +381,7 @@ def load(root="."):
                 value = default() if callable(default) else json.loads(json.dumps(default))
             if kind in ("model", "model?") and value is not None:
                 value = normalize_model(value) or value
-            elif kind == "overrides" and isinstance(value, dict):
+            elif kind in ("overrides", "tiermap") and isinstance(value, dict):
                 value = {k: normalize_model(v) or v for k, v in value.items()}
             data[section][key] = value
 
@@ -418,6 +427,10 @@ def type_ok(kind, value):
         return isinstance(value, dict) and all(
             isinstance(v, list) and all(isinstance(p, str) and p.strip() and p == p.strip() for p in v)
             for v in value.values())
+    if kind == "cmdlist":
+        return isinstance(value, list) and all(isinstance(c, str) and c.strip() for c in value)
+    if kind == "cmdmap":
+        return isinstance(value, dict) and all(type_ok("cmdlist", v) for v in value.values())
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "nonneg":
@@ -430,7 +443,7 @@ def type_ok(kind, value):
         return normalize_model(value) == value
     if kind == "model?":
         return value is None or normalize_model(value) == value
-    if kind == "overrides":
+    if kind in ("overrides", "tiermap"):
         return isinstance(value, dict) and all(normalize_model(v) == v for v in value.values())
     raise ValueError(kind)
 
@@ -471,9 +484,14 @@ def problems(config):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
             if kind == "patterns":
                 found += pattern_problems(dotted, value)
-            if kind == "ranmap":
+            if kind in ("ranmap", "cmdmap"):
                 found += [f"{dotted}: {json.dumps(k)} is not a verify kind; the kinds are {', '.join(VERIFY_KINDS)}"
                           f"{suggest(k, list(VERIFY_KINDS))}" for k in value if k not in VERIFY_KINDS]
+            if kind == "tiermap":
+                named = [t for t in TIERS if t != "verifier"] + list(config["models"]["overrides"])
+                found += [f"{dotted}: {json.dumps(k)} is not a tier or a models.overrides key; choose from: "
+                          f"{', '.join(named)}{suggest(k, named)}"
+                          for k in value if k.strip().lower() not in {n.strip().lower() for n in named}]
             if kind == "adjacent":
                 found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
                           f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"
@@ -510,6 +528,7 @@ def profile_problems(config):
                          f"CLAUDE_CONFIG_DIR={path} to create it, or fix the path")
     tiers = [(f"models.{tier}", config["models"][tier]) for tier in TIERS]
     tiers += [(f"models.overrides.{key}", value) for key, value in config["models"]["overrides"].items()]
+    tiers += [(f"models.verifier_by_tier.{key}", value) for key, value in config["models"]["verifier_by_tier"].items()]
     for dotted, value in tiers:
         for name in tier_profiles(value):
             if name != DEFAULT_PROFILE and name not in defined:
@@ -730,6 +749,16 @@ def resolve_model(config, name):
     raise ConfigError(f"no tier or models.overrides entry named {name!r}; choose from: {', '.join(choices)}")
 
 
+def verifier_model(config, tier):
+    """The model table that [models] sets for the verifier of a task of `tier`: verifier_by_tier[tier] (a tier or a
+    models.overrides key, any case), else `verifier`, else None (the caller picks the model that differs from the worker's)."""
+    wanted = (tier or "").strip().lower()
+    for key, value in config["models"]["verifier_by_tier"].items():
+        if key.strip().lower() == wanted:
+            return value
+    return config["models"]["verifier"]
+
+
 # ------------------------------------------------------------------ output
 
 def scalar_text(value):
@@ -764,7 +793,7 @@ def show_text(config):
         nested = []
         for key, (kind, _) in keys.items():
             value = config[section][key]
-            if kind == "overrides" and isinstance(value, dict):
+            if kind in ("overrides", "tiermap") and isinstance(value, dict):
                 nested.append((f"{section}.{key}", value))
             elif value is None:
                 lines.append(f"# {key} = (unset)")

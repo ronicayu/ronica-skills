@@ -24,7 +24,9 @@ In the task worktree, run.py stashes such a change before the task session resum
    the repository. Name each missing part. A missing part is a `blocking:`
    finding unless it passes the non-blocking test in your brief.
 3. Contradictions: none inside the document, and none with the other
-   documents of the project that it names or depends on.
+   documents of the project that it names or depends on. The worker's `self-check:` lines under `Ran:` list
+   what its own reviewer found; they do not replace steps 1 to 3. Check that each false statement they
+   name is fixed.
 4. Compare with the base commit named in CONTEXT: `git diff <base> <head>`
    shows what changed. Flag every file or decision that changed outside SCOPE.
 5. Boundary: you do not judge whether a decision is right. That belongs to
