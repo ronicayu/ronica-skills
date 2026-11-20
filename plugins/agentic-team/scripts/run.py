@@ -1799,8 +1799,15 @@ def cmd_workflows(run, args):
     catalog = load_workflows(run)
     problems = catalog.problems
     if args.pick_prompt:
-        if problems:
-            raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(problems), 1)
+        if args.seed is None:
+            raise Refused("--pick-prompt needs --seed <n>: the same seed gives the same order of the options")
+        shared = catalog.library.errors + catalog.errors
+        if shared:
+            raise Refused("fix the stage library first (`run.py workflows --check`):\n  " + "\n  ".join(shared), 1)
+        usable = {n: w for n, w in catalog.workflows.items() if not w.errors}
+        warnings = [f"workflow {n} is left out of the prompt: {w.errors[0]}" for n, w in sorted(catalog.workflows.items()) if w.errors]
+        if not usable:
+            raise Refused("no workflow is usable; fix the workflow files (`run.py workflows --check`):\n  " + "\n  ".join(problems), 1)
         notes = ""
         if args.notes_file:
             try:
@@ -1808,10 +1815,12 @@ def cmd_workflows(run, args):
                     notes = fh.read()
             except (OSError, UnicodeDecodeError) as exc:
                 raise Refused(f"cannot read --notes-file {args.notes_file}: {exc}")
-        prompt, order = wfl.pick_prompt(catalog, args.seed, args.title or "", notes, args.scope or "")
+        prompt, order = wfl.pick_prompt(wfl.Catalog(catalog.library, usable), args.seed, args.title or "", notes, args.scope or "")
         if run.json:
-            run.payload = {"seed": args.seed, "options": order, "prompt": prompt}
+            run.payload = {"seed": args.seed, "options": order, "prompt": prompt, "warnings": warnings}
         else:
+            for warning in warnings:
+                print(f"warn: {warning}", file=sys.stderr)
             run.text = prompt
         return
     rows = []
@@ -9965,7 +9974,7 @@ def build_parser():
     p = sub.add_parser("workflows", help="list the workflows: the plugin's and the project's, with their stages; exit 1 when a file is broken")
     p.add_argument("--check", action="store_true", help="print only the problems of the workflow files and the stage library, or ok")
     p.add_argument("--pick-prompt", action="store_true", help="print the prompt that picks a workflow for a piece of work")
-    p.add_argument("--seed", type=int, default=0, help="with --pick-prompt: the seed that shuffles the options (default 0)")
+    p.add_argument("--seed", type=int, help="with --pick-prompt: the seed that shuffles the options (required)")
     p.add_argument("--title", help="with --pick-prompt: the title of the work")
     p.add_argument("--notes-file", metavar="FILE", help="with --pick-prompt: a file that holds the notes of the work")
     p.add_argument("--scope", help="with --pick-prompt: the SCOPE paths or areas of the work")

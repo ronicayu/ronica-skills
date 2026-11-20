@@ -227,7 +227,7 @@ There is no YAML library. The frontmatter is flat `key: value` lines (split at t
 
 A project workflow with `extends: <name>` takes the stages of that workflow (with `extends: <its own name>`, the plugin's), then lays its own over them: a stage with the same `id` overrides the parent's fields, a new `id` is appended. It cannot remove a stage or make a required stage optional, and the parent may not extend another workflow. To remove a stage, replace the file.
 
-A file with an unknown key, a missing `name` or `description`, a `name` that is not the file name, a stage with an unknown field or an id that is not a library type, a `role`, `verify` or `approval` that is not valid, an `after` that names no stage, or a cycle is broken. Each problem is one line, `<file>:<line>: <problem>`. `run.py workflows` lists a broken file with its problems and exits 1, and so does a broken `stages.toml`. `run.py workflows --check` prints only the problems, or `ok`. `config.py check` runs the same check when `[workflow_policy] enabled` is true or the project has a workflow file. It also needs the stage type `spec` in the library and one workflow that has it, because a hard rule forces a spec stage.
+A file with an unknown key, a missing `name` or `description`, a `name` that is not the file name, a stage with an unknown field or an id that is not a library type, a `role`, `verify` or `approval` that is not valid, an `after` that names no stage, or a cycle is broken. Each problem is one line, `<file>:<line>: <problem>`. `run.py workflows` lists a broken file with its problems and exits 1, and so does a broken `stages.toml`. `run.py workflows --check` prints only the problems, or one `workflows-checked` line. `config.py check` runs the same check when `[workflow_policy] enabled` is true or the project has a workflow file. It also needs the stage type `spec` in the library and one workflow that has it, because a hard rule forces a spec stage.
 
 The body is prose for the Manager: `## When to use`, `## Steps` and an optional `## Stage notes` with one `### <id>` subsection per stage. It is not checked, except that a body over 600 words gets a `warn` line.
 
@@ -260,7 +260,7 @@ A stage with `split: true` may be split into parts before its first attempt, nor
 
 ### Picking a workflow
 
-`run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` fixes the order of the options; the same seed gives the same order, and another seed gives another.
+`run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` is required and fixes the order of the options; the same seed gives the same order, and another seed may give another. A broken workflow file is left out of the prompt, with a `warn:` line on stderr (a `warnings` list with `--json`); a broken `stages.toml` stops the command.
 
 ## Judgement-tier brief
 

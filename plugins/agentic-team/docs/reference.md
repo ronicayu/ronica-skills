@@ -314,7 +314,7 @@ Lists every workflow, one line each: the name, its source (`plugin`, `project`, 
 |---|---|---|---|
 | `--check` |  |  | print only the problems of the workflow files and the stage library, or ok |
 | `--pick-prompt` |  |  | print the prompt that picks a workflow for a piece of work |
-| `--seed` | `SEED` |  | with --pick-prompt: the seed that shuffles the options (default 0) |
+| `--seed` | `SEED` |  | with --pick-prompt: the seed that shuffles the options (required) |
 | `--title` | `TITLE` |  | with --pick-prompt: the title of the work |
 | `--notes-file` | `FILE` |  | with --pick-prompt: a file that holds the notes of the work |
 | `--scope` | `SCOPE` |  | with --pick-prompt: the SCOPE paths or areas of the work |

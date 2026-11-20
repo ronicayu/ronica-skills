@@ -7,6 +7,7 @@ temporary git repository. Nothing here starts a Claude session or reaches the ne
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -252,6 +253,84 @@ class ParserTest(unittest.TestCase):
         self.assertTrue(any("the stage library has no `spec` type" in p for p in self.tree.load().problems))
 
 
+class ParserEdgeTest(unittest.TestCase):
+    """Review fixes: finite estimates, quoted values, a BOM, CRLF and tab indents, `after` order, and file:line on every error."""
+
+    def setUp(self):
+        self.tree = Tree(self)
+        self.tree.plugin_wf("spec-first", workflow("spec-first", stages=("  - {id: spec}", "  - {id: impl, after: [spec]}")))
+
+    def load(self, text, name="demo", **kw):
+        path = self.tree.plugin_wf(name, text)
+        catalog = self.tree.load(**kw)
+        return catalog.workflows[name], path, catalog
+
+    def test_a_non_finite_estimate_is_refused_and_does_not_crash(self):
+        for value in ("inf", "-inf", "nan", "1e999"):
+            with self.subTest(value):
+                flow, path, _ = self.load(workflow(stages=(f"  - {{id: impl, estimate: {value}}}",)))
+                self.assertIn(f"{path}:5: estimate: must be a number of hours above 0", flow.errors[0])
+        self.tree.write(self.tree.plugin_dir, "stages.toml", LIBRARY.replace("estimate = 3", "estimate = inf"))
+        self.assertTrue(any("estimate: must be a number of hours above 0" in p for p in self.tree.load().library.errors))
+
+    def test_one_pair_of_quotes_is_stripped_from_every_scalar(self):
+        flow, _, catalog = self.load(workflow(name='"demo"', description='"a: b"', stages=(
+            '  - {id: "prd", role: "architect", after: []}', "  - {id: 'impl', after: [\"prd\"], estimate: \"2\"}")))
+        self.assertEqual(catalog.problems, [])
+        self.assertEqual(flow.description, "a: b")
+        self.assertEqual([(s.id, s.role, s.after, s.estimate) for s in flow.stages],
+                         [("prd", "architect", [], None), ("impl", "software-engineer", ["prd"], 2)])
+
+    def test_an_empty_value_after_stripping_is_missing(self):
+        flow, path, _ = self.load(workflow(description='""'))
+        self.assertIn(f"{path}:1: no `description` line", flow.errors[0])
+        flow, path, _ = self.load(workflow(stages=("  - {id: impl, role: ''}",)))
+        self.assertIn(f"{path}:5: role: has no value", flow.errors[0])
+
+    def test_a_bom_is_accepted_in_a_workflow_and_in_the_library(self):
+        path = self.tree.plugin_wf("demo", workflow())
+        with open(path, "rb") as fh:
+            body = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + body)
+        lib = os.path.join(self.tree.plugin_dir, "stages.toml")
+        with open(lib, "rb") as fh:
+            body = fh.read()
+        with open(lib, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + body)
+        self.assertEqual(self.tree.load().problems, [])
+
+    def test_crlf_line_ends_and_tab_indents_are_accepted(self):
+        text = "---\r\nname: demo\r\ndescription: A demo.\r\nstages:\r\n\t- {id: prd}\r\n\t- {id: impl, after: [prd]}\r\n---\r\n## When to use\r\nx\r\n"
+        path = os.path.join(self.tree.plugin_dir, "demo.md")
+        with open(path, "wb") as fh:
+            fh.write(text.encode())
+        catalog = self.tree.load()
+        self.assertEqual(catalog.problems, [])
+        self.assertEqual([s.id for s in catalog.workflows["demo"].stages], ["prd", "impl"])
+        self.assertNotIn("\r", catalog.workflows["demo"].body)
+
+    def test_after_names_earlier_stages_only(self):
+        flow, path, _ = self.load(workflow(stages=("  - {id: spec, after: [impl]}", "  - {id: impl}")))
+        self.assertEqual(len(flow.errors), 1)
+        self.assertIn(f"{path}:5: stage 'spec': after: 'impl' is listed later", flow.errors[0])
+
+    def test_every_parser_error_starts_with_a_file_and_a_line(self):
+        bad = ["no frontmatter\n", "---\nname: demo\n", workflow(name="other"), workflow(description=""), "---\nname: demo\ndescription: d\nstages: x\n---\n",
+               workflow(stages=("  - impl",)), workflow(stages=("  - {id: impl, estimate: inf}",)), workflow(stages=("  - {id: impl, after: [x]}",)),
+               workflow(stages=("  - {id: a, after: [b]}", "  - {id: b}")), workflow(stages=("  - {id: impl, colour: red}",)),
+               workflow(stages=("  - {id: impl}", "  - {id: impl}")), workflow(extra="colour: red\n"), workflow(stages=("  - {id: nosuch}",)),
+               workflow(stages=("  - {id: impl, optional: true}",)), workflow(stages=("  - {id: spec, split: true}",)),
+               workflow(stages=("  - {id: spec, decides: true}", "  - {id: impl}")), workflow(stages=("  - {id: a, after: [a]}",))]
+        pattern = re.compile(re.escape(os.path.join(self.tree.plugin_dir, "demo.md")) + r":\d+: ")
+        for text in bad:
+            with self.subTest(text[:50]):
+                flow, _, _ = self.load(text)
+                self.assertTrue(flow.errors, "the file should be broken")
+                for error in flow.errors:
+                    self.assertRegex(error, pattern)
+
+
 class LibraryTest(unittest.TestCase):
     def setUp(self):
         self.tree = Tree(self)
@@ -329,7 +408,7 @@ class ExtendsTest(unittest.TestCase):
                                        "  - {id: test, after: [impl, ux]}"))
         self.assertEqual(flow.errors, [])
         stages = {s.id: s for s in flow.stages}
-        self.assertEqual(list(stages), ["spec", "impl", "test", "ux"])
+        self.assertEqual(list(stages), ["spec", "impl", "ux", "test"])
         self.assertEqual((stages["impl"].estimate, stages["impl"].split, stages["impl"].after), (5, True, ["spec"]))
         self.assertEqual(stages["test"].after, ["impl", "ux"])
         self.assertEqual(stages["spec"].role, "architect")
@@ -369,8 +448,27 @@ class ExtendsTest(unittest.TestCase):
         self.assertIn(f"{path}:6: the stages form a cycle: spec → test → impl → spec", flow.errors[0])
 
     def test_a_merge_that_names_a_missing_stage_is_refused(self):
-        flow, path = self.child("child", ("  - {id: test, after: [nosuch]}",))
+        flow, path = self.child("child", ("  - {id: test, after: [impl, nosuch]}",))
         self.assertIn(f"{path}:6: stage 'test': after: 'nosuch' is not a stage of this workflow", flow.errors[0])
+
+    def test_a_child_cannot_change_the_type_of_an_inherited_stage(self):
+        flow, path = self.child("child", ("  - {id: spec, type: impl}",))
+        self.assertEqual(len(flow.errors), 1)
+        self.assertIn(f"{path}:6: stage 'spec' is spec in base; a workflow that extends another cannot change the type", flow.errors[0])
+        flow, _ = self.child("child", ("  - {id: spec, type: spec, estimate: 3}",))
+        self.assertEqual(flow.errors, [])
+
+    def test_a_child_after_must_keep_the_parent_edges(self):
+        flow, path = self.child("child", ("  - {id: impl, after: []}",))
+        self.assertIn(f"{path}:6: stage 'impl': after: must keep the stages that base lists (spec missing)", flow.errors[0])
+        flow, _ = self.child("child", ("  - {id: ux, type: prd}", "  - {id: impl, after: [spec, ux]}"))
+        self.assertEqual(flow.errors, [])
+        self.assertEqual([s.id for s in flow.stages], ["spec", "ux", "impl", "test"])
+
+    def test_the_decides_error_of_a_child_points_at_the_line_that_added_the_stage(self):
+        self.tree.plugin_wf("base", workflow("base", stages=("  - {id: spec, decides: true}",)))
+        flow, path = self.child("child", ("  - {id: impl}",))
+        self.assertIn(f"{path}:6: stage 'impl': with decides: true no other stage may be listed", flow.errors[0])
 
     def test_extends_needs_an_existing_workflow(self):
         flow, path = self.child("child", ("  - {id: impl}",), extends="nosuch")
@@ -559,14 +657,28 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((as_json["seed"], as_json["prompt"]), (1, first.stdout))
         self.assertEqual(sorted(as_json["options"]), ["change", "feature", "figure-it-out", "fix", "hotfix", "unsure"])
 
-    def test_the_pick_prompt_refuses_while_a_file_is_broken(self):
-        self.project_file("broken.md", "no frontmatter\n")
+    def test_the_pick_prompt_leaves_a_broken_workflow_out_with_a_warning(self):
+        path = self.project_file("broken.md", "no frontmatter\n")
+        out = self.run_py("workflows", "--pick-prompt", "--seed", "1", "--title", "x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"warn: workflow broken is left out of the prompt: {path}:1:", out.stderr)
+        self.assertNotIn("broken", out.stdout)
+        self.assertIn("hotfix", out.stdout)
+        as_json = json.loads(self.run_py("workflows", "--pick-prompt", "--seed", "1", "--title", "x", pre=["--json"]).stdout)
+        self.assertEqual(len(as_json["warnings"]), 1)
+        self.assertNotIn("broken", as_json["options"])
+
+    def test_the_pick_prompt_refuses_a_broken_stage_library_and_needs_a_seed(self):
         out = self.run_py("workflows", "--pick-prompt", "--title", "x")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--pick-prompt needs --seed", out.stderr)
+        self.project_file("stages.toml", '[stage.impl]\nverify = "unit"\n')
+        out = self.run_py("workflows", "--pick-prompt", "--seed", "1", "--title", "x")
         self.assertEqual(out.returncode, 1)
-        self.assertIn("fix the workflow files first", out.stderr)
+        self.assertIn("fix the stage library first", out.stderr)
 
     def test_the_pick_prompt_refuses_an_unreadable_notes_file(self):
-        out = self.run_py("workflows", "--pick-prompt", "--title", "x", "--notes-file", os.path.join(self.dir, "missing.txt"))
+        out = self.run_py("workflows", "--pick-prompt", "--seed", "1", "--title", "x", "--notes-file", os.path.join(self.dir, "missing.txt"))
         self.assertEqual(out.returncode, 2)
         self.assertIn("cannot read --notes-file", out.stderr)
 

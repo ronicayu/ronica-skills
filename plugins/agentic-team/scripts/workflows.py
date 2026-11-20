@@ -20,6 +20,7 @@ config.py, so both can use it; the caller passes the roles it knows as {name: er
 import dataclasses
 import glob
 import hashlib
+import math
 import os
 import random
 import re
@@ -85,14 +86,22 @@ def toml_line(path: str, table: str, key: str | None = None) -> int | None:
 
 
 def number_ok(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def unquote(raw: str) -> str:
+    """`raw` without one pair of matching quotes around it, stripped."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    return raw
 
 
 def library_file(path: str, library: Library, roles: dict[str, str | None], partial: bool) -> dict[str, dict[str, Any]]:
     """The stage tables of one stages.toml, checked. `partial` is a project file: it may leave required keys out."""
     try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+        with open(path, encoding="utf-8-sig") as fh:
+            data = tomllib.loads(fh.read())
     except OSError as exc:
         library.errors.append(f"{path}: cannot read the file: {exc}")
         return {}
@@ -273,12 +282,14 @@ def split_top(text: str) -> list[str]:
 def flow_value(key: str, raw: str) -> Any:
     """The value of one stage field; ValueError names a problem."""
     raw = raw.strip()
+    if key != "after":
+        raw = unquote(raw)
     if not raw:
         raise ValueError("has no value")
     if key == "after":
         if not (raw.startswith("[") and raw.endswith("]")):
             raise ValueError(f"must be a list in brackets, as [a, b] or [], not {raw!r}")
-        names = [n.strip() for n in raw[1:-1].split(",")] if raw[1:-1].strip() else []
+        names = [unquote(n) for n in raw[1:-1].split(",")] if raw[1:-1].strip() else []
         for name in names:
             if not NAME.fullmatch(name):
                 raise ValueError(f"{name!r} is not a stage id (lowercase letters, digits and -)")
@@ -344,7 +355,7 @@ def parse_file(wf: Workflow, roles: dict[str, str | None]) -> dict[str, tuple[in
     """Read wf.path: set wf.items and wf.body, add each syntax problem to wf.errors, and return {key: (line, text)} of the
     top-level frontmatter keys. None when the file has no readable frontmatter."""
     try:
-        with open(wf.path, encoding="utf-8") as fh:
+        with open(wf.path, encoding="utf-8-sig") as fh:
             lines = fh.read().splitlines()
     except (OSError, UnicodeDecodeError) as exc:
         wf.errors.append(f"{wf.path}: cannot read the file: {exc}")
@@ -396,7 +407,8 @@ def parse_file(wf: Workflow, roles: dict[str, str | None]) -> dict[str, tuple[in
             if raw.strip():
                 wf.errors.append(f"{where(wf.path, number)} stages: put one `- {{id: ...}}` line under `stages:`, not a value on this line")
         else:
-            keys[key] = (number, re.split(r"(?:^|\s)#", raw.strip(), maxsplit=1)[0].strip() if key != "description" else raw.strip())
+            value = raw.strip() if key == "description" else re.split(r"(?:^|\s)#", raw.strip(), maxsplit=1)[0].strip()
+            keys[key] = (number, unquote(value))
     return keys
 
 
@@ -471,8 +483,41 @@ def merge_parent(wf: Workflow, parent: Workflow) -> list[Item]:
             wf.errors.append(f"{where(wf.path, item.line)} stage {stage_id!r} is required in {parent.name}; a workflow that extends "
                              "another cannot make a stage of it optional (it cannot remove one)")
             continue
+        if "type" in item.fields and item.fields["type"] != current.fields.get("type", stage_id):
+            wf.errors.append(f"{where(wf.path, item.line)} stage {stage_id!r} is {current.fields.get('type', stage_id)} in {parent.name}; a workflow "
+                             "that extends another cannot change the type of a stage of it (that would remove the stage)")
+            continue
+        if "after" in item.fields and not set(current.fields.get("after", [])) <= set(item.fields["after"]):
+            lost = sorted(set(current.fields.get("after", [])) - set(item.fields["after"]))
+            wf.errors.append(f"{where(wf.path, item.line)} stage {stage_id!r}: after: must keep the stages that {parent.name} lists "
+                             f"({', '.join(lost)} missing); a workflow that extends another can add edges, not remove them")
+            continue
         merged[stage_id] = Item(item.path, item.line, {**current.fields, **item.fields})
     return list(merged.values())
+
+
+def later_in_child(wf: Workflow, parent: Workflow) -> None:
+    """A stage line of a child file may follow a stage of the parent, or a stage listed before it in the child file."""
+    known = {item.fields["id"] for item in parent.items}
+    for item in wf.items:
+        for name in item.fields.get("after", []):
+            if name not in known and name in {i.fields["id"] for i in wf.items} and name != item.fields["id"]:
+                wf.errors.append(f"{where(wf.path, item.line)} stage {item.fields['id']!r}: after: {name!r} is listed later; a stage may "
+                                 "follow only stages that are listed before it")
+        known.add(item.fields["id"])
+
+
+def in_order(items: list[Item]) -> list[Item]:
+    """The merged stage lines, each after the stages it follows (the stable order); a cycle leaves the rest in place."""
+    placed: list[Item] = []
+    pending = list(items)
+    names = {i.fields["id"] for i in items}
+    while pending:
+        ready = next((i for i in pending if all(a in {p.fields["id"] for p in placed} or a not in names
+                                                 for a in i.fields.get("after", []))), pending[0])
+        placed.append(ready)
+        pending.remove(ready)
+    return placed
 
 
 def apply_library(wf: Workflow, items: list[Item], library: Library) -> None:
@@ -502,6 +547,7 @@ def check_graph(wf: Workflow) -> None:
     """The checks over the whole stage list: dangling `after`, a cycle, a required stage, `split`, `decides`."""
     ids = {s.id for s in wf.stages}
     by_id = {s.id: s for s in wf.stages}
+    position = {s.id: i for i, s in enumerate(wf.stages)}
     for stage in wf.stages:
         for name in stage.after:
             if name == stage.id:
@@ -512,6 +558,12 @@ def check_graph(wf: Workflow) -> None:
     cycle = find_cycle({s.id: [n for n in s.after if n in ids] for s in wf.stages})
     if cycle:
         wf.errors.append(f"{where(by_id[cycle[0]].path, by_id[cycle[0]].line)} the stages form a cycle: {' → '.join(cycle)}")
+    else:
+        for stage in wf.stages:
+            for name in stage.after:
+                if name in ids and name != stage.id and position[name] > position[stage.id]:
+                    wf.errors.append(f"{where(stage.path, stage.line)} stage {stage.id!r}: after: {name!r} is listed later; a stage may "
+                                     "follow only stages that are listed before it")
     if wf.stages and all(s.optional for s in wf.stages):
         wf.errors.append(f"{where(wf.stages[0].path, wf.stages[0].line)} every stage is optional; a workflow needs at least one required stage")
     for stage in wf.stages:
@@ -526,8 +578,9 @@ def check_graph(wf: Workflow) -> None:
         elif first.after:
             wf.errors.append(f"{where(first.path, first.line)} stage {first.id!r}: decides: true is for a root stage; it has `after`")
         elif len(wf.stages) > 1:
-            wf.errors.append(f"{where(first.path, first.line)} stage {first.id!r}: with decides: true no other stage may be listed; "
-                             "its result names the rest")
+            other = next(s for s in wf.stages if s is not first)
+            wf.errors.append(f"{where(other.path, other.line)} stage {other.id!r}: with decides: true no other stage may be listed "
+                             f"(stage {first.id!r} decides); its result names the rest")
 
 
 def find_cycle(edges: dict[str, list[str]]) -> list[str]:
@@ -584,6 +637,8 @@ def read_workflow(wf: Workflow, found: dict[str, Workflow], library: Library, ro
             return
         items = merge_parent(wf, parent)
         wf.parent = parent
+        later_in_child(wf, parent)
+        items = in_order(items)
         if wf.errors:
             return
     apply_library(wf, items, library)

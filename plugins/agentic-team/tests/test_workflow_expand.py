@@ -481,6 +481,37 @@ class RelayTest(Base):
         self.assertIn(f"- Workflow: hotfix #{inst}, stage impl (1 of 2)", out)
 
 
+class RuleConfigTest(Base):
+    def problems(self, text):
+        self.config(text)
+        import config
+        return config.problems(config.load(self.root))
+
+    def test_a_valid_rule_and_floor_pass_and_bad_ones_are_named(self):
+        self.assertEqual(self.problems('''
+            approval_floor = { schema = "manager" }
+            [[workflow_rule]]
+            name = "billing"
+            match_paths = ["src/billing/**"]
+            approval = { spec = "human" }
+            risk = "high"
+            on_timeout = "hold"
+            '''), [])
+        found = self.problems('''
+            approval_floor = { code = "sometimes" }
+            [[workflow_rule]]
+            name = "Bad Name"
+            risk = "extreme"
+            on_timeout = "never"
+            approval = { spec = "whenever" }
+            colour = "red"
+            ''')
+        text = "\n".join(found)
+        for expected in ("approval_floor must be", "name must be lowercase", "needs match_paths or match_area", "risk must be one of",
+                         "on_timeout must be one of", "approval must be a table", "unknown key colour"):
+            self.assertIn(expected, text)
+
+
 class PlanTest(unittest.TestCase):
     def test_stage_notes_cut_at_a_heading_and_at_150_words(self):
         body = "## Stage notes\n### a\none two\n### b\n" + "w " * 200 + "\n## Other\ntext\n"
