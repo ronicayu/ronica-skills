@@ -185,11 +185,11 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
-REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Asked|Deviations|Follow-ups|"
+REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Summary|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Asked|Deviations|Follow-ups|"
                           r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
 # The labels that start a report section at column 0: those of REPORT_LABEL, those of the verifier and the project's own
 # `Needs CI`. Any other `Word:` line, such as `Note:` or `Changed:`, continues the section above it.
-SECTION_LINE = re.compile(r"^(Task|Status|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Asked|Findings|"
+SECTION_LINE = re.compile(r"^(Task|Status|Summary|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Asked|Findings|"
                           r"Deviations|Follow-ups|Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason|Needs CI):"
                           r"(?:[ \t]|$)")
 PRIORITY = ("Status", "Asked", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations", "Evidence")  # kept first when a report is cut
@@ -464,7 +464,7 @@ class Run:
     def add_result(self, tid, kind, attempt, by, status, body):
         """File a result row. A report, a revision mark or a long ask or answer also gets the short summary that
         Taskgraph shows on the issue comment (report_summary.summarize)."""
-        summary = summarize(kind, status, body, self.config["report"]["summary_lang"])
+        summary = summarize(kind, status, body)
         return self.tg("result", "add", str(tid), "--kind", kind, "--attempt", str(attempt), "--by", by,
                        "--status", status, *([f"--summary={summary}"] if summary else []), "--body-file", "-", input=body)
 
@@ -868,12 +868,12 @@ def revision_rows(rows, attempt, revision):
     """The rows of `attempt` filed in its revision `revision` (0: before the first `revise` row), or None when the
     attempt has no such revision."""
     mine = [r for r in rows if r.get("attempt") == attempt]
-    marks = sorted(r["id"] for r in mine if r["kind"] == REVISE and r.get("author") == "manager")
+    marks = [i for i, r in enumerate(mine) if r["kind"] == REVISE and r.get("author") == "manager"]
     if revision > len(marks):
         return None
-    start = marks[revision - 1] if revision else 0
-    end = marks[revision] if revision < len(marks) else None
-    return [r for r in mine if r["id"] > start and (end is None or r["id"] < end)]
+    start = marks[revision - 1] + 1 if revision else 0
+    end = marks[revision] if revision < len(marks) else len(mine)
+    return mine[start:end]
 
 
 def turn_ended(s, rows, attempt):
@@ -2141,7 +2141,6 @@ def write_ctx(run, task, attempt, session, cap):
     tid = task["id"]
     ctx = {"python": sys.executable, "tg": run.tg_path, "db": run.db, "project": run.project, "task": tid,
            "attempt": attempt, "by": session, "asks_cap": cap, "lock": lock_file(run, tid),
-           "summary_lang": run.config["report"]["summary_lang"],
            "scope": str((task.get("meta") or {}).get("scope", "")).strip(),
            "inbox_dir": os.path.join(run.run_dir, INBOX_DIR)}
     path = attempt_file(run, tid, attempt, "ctx.json")
@@ -2273,12 +2272,19 @@ def mailbox_section(run, tid, attempt, session, cap, to, revisions=False):
     return "\n".join(lines)
 
 
-def result_command(py, tg, db, project, task_id, attempt, session, report, lang):
+SUMMARY_LANGUAGES = {"en": "English", "zh": "Chinese"}  # [report] summary_lang: the language of the Summary: line
+
+
+def summary_language(run):
+    return f"Write the `Summary:` line in {SUMMARY_LANGUAGES[run.config['report']['summary_lang']]}."
+
+
+def result_command(py, tg, db, project, task_id, attempt, session, report):
     """The command the verifier runs last. It fills in only the status; the body comes from the report file. It
     files the `tg result add` row with the report's summary (mailbox.py file-verify)."""
-    return (f"{quote(py)} {quote(mailbox_script())} file-verify --python {quote(py)} --tg {quote(tg)} --db {quote(db)} "
+    return (f"{quote(py)} {quote(mailbox_script())} file-verify --tg {quote(tg)} --db {quote(db)} "
             f"--project {shlex.quote(project)} --task {task_id} --attempt {attempt} --by {shlex.quote(session)} "
-            f"--lang {lang} --status <STATUS> --body-file {quote(report)}")
+            f"--status <STATUS> --body-file {quote(report)}")
 
 
 def adjacent_text(config):
@@ -2424,7 +2430,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                        if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
         "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, session,
-                                          report, run.config["report"]["summary_lang"]) if kind == "verify" else
+                                          report) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
                            mailbox_command(run, tid, attempt, "report", "--status", "<STATUS>", "--body-file", quote(report))),
         "NOTIFY": notify_step(notify_target(run), tid, kind, attempt),
@@ -2507,7 +2513,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                 "is a blocking issue." if adjacent_text(config) else ""),
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
-                            "verify-blocked, or verify-failed."),
+                            "verify-blocked, or verify-failed. Add a `Summary:` line after `Verdict:`: whether the behaviour "
+                            "change is confirmed, and for verify-failed the main problem, in plain words (1-3 lines, no "
+                            "statistics). " + summary_language(run)),
         })
     else:
         rows = run.results_for(tid)
@@ -2586,7 +2594,10 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
             "VERIFY": values["VERIFY"] + self_review_text(verify_kind(run, task, strict=False), rounding),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
                          f"- Always pause for: {'; '.join(autonomy['always_pause']) or 'None'}"),
-            "REPORT_NOTE": "",
+            "REPORT_NOTE": ("Add a `Summary:` line after `Status:` (after `Revision:` in a revision's report): 1-3 lines "
+                            "that say what behaviour changed, as a user or developer would notice it, ideally as before "
+                            "-> now; for `ISSUES` or `BLOCKED`, what is wrong, in plain words. No statistics, no file "
+                            "lists. The issue comment shows it above the full report. " + summary_language(run)),
         })
     path = os.path.join(PLUGIN_ROOT, "templates", "task-brief.md")
     with open(path) as fh:
@@ -3456,7 +3467,23 @@ def refuse_unless_running(run, task):
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']})")
     refuse_closed(run, task)
+    refuse_revision_gap(run, task)
     return wanted_attempt(task)
+
+
+def refuse_revision_gap(run, task):
+    """Refuse a task whose `revision` meta counts revisions that this machine has no `revise` row for: the rows of the
+    attempt would read as one revision, with the old verify-failed report as the current verdict. It happens when the
+    Taskgraph GitHub backend keeps `revise` local (results.local) and the cache is lost or another machine ran the revise."""
+    attempt, wanted = wanted_attempt(task), revision_of(task)
+    if not wanted:
+        return
+    have = len([r for r in task_rows(run.results_for(task["id"]), attempt, REVISE, history=True) if r.get("author") == "manager"])
+    if have < wanted:
+        raise Refused(f"#{task['id']} attempt {attempt} is in revision {wanted}, but this machine has {have} `revise` row(s): "
+                      "the rows of a result kind in `results.local` stay in the machine's Taskgraph cache. Run run.py on the "
+                      "machine that ran `revise`, and take `revise` out of `results.local` in .taskgraph.toml "
+                      "(see README, When the local cache is lost)")
 
 
 def worker_for(run, tid, attempt, result_id=None, task=None):
@@ -3805,11 +3832,10 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              "\n\n".join(carried), "",
              "## REPORT", "",
              f"Write a new, complete report with the Write tool to `{report}`, in the format of your first brief, with "
-             "a `Verdict:` line after `Status:`. Check it with:", "",
+             "a `Verdict:` line and a `Summary:` line after `Status:` (" + summary_language(run) + "). Check it with:", "",
              f"`{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} check-report {quote(report)} --verifier`",
              "", "Then run this one command, once, with `<STATUS>` replaced:", "", "```sh",
-             result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, name, report,
-                            run.config["report"]["summary_lang"]), "```"]
+             result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, name, report), "```"]
     notify = notify_step(notify_target(run), tid, "verify", attempt)
     return "\n".join(lines) + (notify or "") + "\n"
 
@@ -8633,6 +8659,8 @@ def cmd_check_report(args):
     if not CHECKPOINT_LINE.search(body):
         problems.append("no `Checkpoint:` line")
     status = STATUS_LINE.search(body)
+    if status and not report_field(strip_comments(body), "Summary"):
+        problems.append(SUMMARY_PROBLEM.format(status=status.group(1)))
     if args.acceptance is not None and status and status.group(1) == "PASS":
         found = len(evidence_lines(body))
         if found < args.acceptance:
@@ -8674,6 +8702,11 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+SUMMARY_PROBLEM = ("a {status} report needs a non-empty `Summary:` line, 1-3 lines of plain words: what behaviour changed, "
+                   "as a user or developer would notice it (before -> now); or, for a report that found a problem, what is "
+                   "wrong. No statistics, no file lists. The issue comment shows it above the full report")
 
 
 def report_checks(config, kind):

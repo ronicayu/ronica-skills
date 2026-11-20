@@ -133,7 +133,7 @@ RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
 }
-LOCAL_RESULT_KINDS = ("ack", "steer", "revise", "check")  # the recommended [projects."<name>".results] local list (#133)
+LOCAL_RESULT_KINDS = ("ack", "steer", "check")  # the recommended [projects."<name>".results] local list (#133)
 
 
 def system_timezone():
@@ -700,6 +700,29 @@ def taskgraph_warnings(config):
         for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]]
 
 
+def taskgraph_version_problems():
+    """A problem when the installed Taskgraph is older than 1.22.0: its `tg result add` has no --summary, so every
+    worker and verifier report would fail with "unrecognized arguments". Nothing when tg.py cannot be found: run.py
+    names that itself."""
+    env = os.environ.get("TASKGRAPH_TG")
+    if env and os.path.isfile(env):
+        tg = env
+    else:
+        out = subprocess.run(["bash", os.path.join(PLUGIN_ROOT, "scripts", "tg-path.sh")], capture_output=True, text=True)
+        tg = out.stdout.strip() if out.returncode == 0 else ""
+    if not tg:
+        return []
+    try:
+        out = subprocess.run([sys.executable, tg, "result", "add", "--help"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if "--summary" in out.stdout:
+        return []
+    return [f"taskgraph: {tg} is older than 1.22.0: `tg result add` has no --summary, so every report would fail. "
+            f"Upgrade Taskgraph: `claude plugin update taskgraph@ronica-skills` (every machine on a project, and "
+            f"before agentic-team)"]
+
+
 def plugin_problems(config):
     """(problems, warnings) from `claude plugin list --json` under each profile in [profiles]. A profile needs the
     agentic-team plugin for `--agent agentic-team:worker`; the brief holds absolute paths to the Manager's run.py
@@ -861,7 +884,7 @@ def main(argv=None):
     config = load(args.root)
     try:
         if args.command == "check":
-            found = problems(config)
+            found = problems(config) + taskgraph_version_problems()
             warnings = messaging_warnings(config) + taskgraph_warnings(config)
             if config.get(PROFILES) and not getattr(config, "missing", False):
                 more, extra = plugin_problems(config)

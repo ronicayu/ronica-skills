@@ -10,14 +10,14 @@ Usage:
                                         `--action "F<n>: <what you will change>"` per finding
     mailbox.py --ctx FILE report --status S --body-file F
                                         file the worker's report; refused while a steer has no ack
-    mailbox.py file-verify --python P --tg T --db D --project N --task ID --attempt N --by NAME --lang en|zh
-                           --status S --body-file F
+    mailbox.py file-verify --tg T --db D --project N --task ID --attempt N --by NAME --status S --body-file F
                                         file a verifier's report, with no context file
     mailbox.py hook --flag FILE [--match PREFIX]
                                         a PostToolUse hook: print the flag file's pointer line, if the file exists
                                         and the line starts with PREFIX (this task and attempt)
 
-A worker or verifier report, and a long ask, is filed with a short summary that is built from its text (report_summary.py).
+A worker or verifier report is filed with its `Summary:` text as the issue comment's summary; a long ask is filed
+with a short summary that is built from its text (report_summary.py).
 
 Every message is a Taskgraph result row (kind ask, answer, steer or ack); the row id is the message id. A doorbell
 (a line posted to a socket, or the hook's pointer) only wakes the receiver: it carries no instructions. The receiver
@@ -191,9 +191,9 @@ def tg_json(ctx, *args, input=None):
 
 
 def summary_args(ctx, kind, status, body):
-    """The `tg result add` option for the row's short summary, or nothing. The summary follows [report] summary_lang."""
+    """The `tg result add` option for the row's short summary, or nothing. """
     from report_summary import summarize
-    summary = summarize(kind, status, body, ctx.get("summary_lang", "en"))
+    summary = summarize(kind, status, body)
     return [f"--summary={summary}"] if summary else []
 
 
@@ -470,9 +470,12 @@ def file_report(ctx, kind, status, body_file):
 
 
 def cmd_file_verify(args):
-    """File a verifier's report. It has no context file: the brief's command carries every value."""
-    ctx = {"python": args.python, "tg": args.tg, "db": args.db, "project": args.project, "task": args.task,
-           "attempt": args.attempt, "by": args.by, "summary_lang": args.lang}
+    """File a verifier's report. It has no context file: the brief's command carries every value. It runs tg.py with the
+    interpreter that runs this script, and refuses a --tg that is not a file named tg.py."""
+    if os.path.basename(args.tg) != "tg.py" or not os.path.isfile(args.tg):
+        raise Fail(f"--tg must be the path of an existing tg.py, not {args.tg}")
+    ctx = {"python": sys.executable, "tg": args.tg, "db": args.db, "project": args.project, "task": args.task,
+           "attempt": args.attempt, "by": args.by}
     row = file_report(ctx, "verify", args.status, args.body_file)
     print(f"result #{row['id']} filed for task {args.task} attempt {args.attempt}: {args.status}")
     return 0
@@ -499,7 +502,7 @@ def main(argv=None):
     p.add_argument("--status", required=True, help="PASS, ISSUES or BLOCKED")
     p.add_argument("--body-file", required=True, help="the report file")
     p = sub.add_parser("file-verify", help="file the report of a verifier session (no context file)")
-    for name in ("python", "tg", "db", "project", "by", "lang", "status", "body-file"):
+    for name in ("tg", "db", "project", "by", "status", "body-file"):
         p.add_argument(f"--{name}", required=True)
     p.add_argument("--task", type=int, required=True)
     p.add_argument("--attempt", type=int, required=True)

@@ -1156,7 +1156,7 @@ class RunTest(Base):
         self.assertIn("None: no", self.section(text, "VERIFY"))
         self.assertIn("A behaviour change you did not drive is `check-only`", " ".join(self.section(text, "VERIFY").split()))
         self.assertIn("mailbox.py\" file-verify", text)
-        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --lang en --status <STATUS>", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --status <STATUS>", text)
         self.assertIn("`Verdict:` line", self.section(text, "REPORT"))
         self.assertTrue(self.section(text, "AUTONOMY").startswith("- None."))
         self.assertEqual(self.calls("--bg"), [])
@@ -4976,8 +4976,7 @@ class RunTest(Base):
         self.assertEqual(self.meta(task)["phase"], "reported")
         self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
 
-    def test_101_a_salvaged_worker_report_gets_its_summary_in_the_configured_language(self):
-        self.write_config('\n[report]\nsummary_lang = "zh"\n')
+    def test_101_a_salvaged_worker_report_without_a_summary_gets_the_built_one(self):
         task = self.running_task(session="task-1-1")
         self.worktree("task-1")
         report = (f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {SHA_A}\nIssues: the test fails\n"
@@ -4986,7 +4985,7 @@ class RunTest(Base):
         self.agents(self.finished("task-1"))
         self.ok("record")
         [row] = [r for r in self.results(task) if r["kind"] == "task"]
-        self.assertEqual((row["body"], row["summary"]), (report, "⚠️ 有问题 · the test fails\n已提问: none: nothing to ask"))
+        self.assertEqual((row["body"], row["summary"]), (report, "⚠️ ISSUES · the test fails\nAsked: none: nothing to ask"))
 
     def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
         task = self.running_task(session="task-1-1")
@@ -5029,7 +5028,7 @@ class RunTest(Base):
                          "files and folders in .agentic-team-scratch/; delete nothing there either.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
-        self.assertIn(f'--task 1 --attempt 1 --by verify-1-1 --lang en --status <STATUS> --body-file "{path}"', report)
+        self.assertIn(f'--task 1 --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
         self.assertIn("Add a `Verdict:` line after `Status:`", report)
 
     def test_101_a_verifier_that_ended_is_salvaged_from_its_report_file(self):
@@ -5765,7 +5764,7 @@ class RunTest(Base):
         """Write a full report with this Follow-ups field and run check-report on it."""
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: it works\nBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
                      f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: {follow_ups}\nCheckpoint: {CHECKPOINT}\n")
         return self.run_cmd("check-report", path)
 
@@ -5786,7 +5785,7 @@ class RunTest(Base):
             with self.subTest(status=status, verdict=verdict):
                 issues = "- blocking: a check fails" if status == "ISSUES" else "None"
                 with open(path, "w") as fh:
-                    fh.write(f"Task: 1\nStatus: {status}\nVerdict: {verdict}\nHead: {SHA_A}\nIssues:\n{issues}\n"
+                    fh.write(f"Task: 1\nStatus: {status}\nVerdict: {verdict}\nSummary: s\nHead: {SHA_A}\nIssues:\n{issues}\n"
                              f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
                 out = self.run_cmd("check-report", path, "--verifier")
                 if ok:
@@ -5820,6 +5819,29 @@ class RunTest(Base):
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
             f"run.py: Follow-ups line with no label: `Bug: src/c.py: wrong`; {hint}"])
 
+    def test_check_report_refuses_a_report_with_no_summary_text(self):
+        body = (f"Task: 1\nStatus: PASS\n%sBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+                f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        for summary, ok in (("", False), ("Summary:\n", False), ("Summary: <!-- x -->\n", False),
+                            ("Summary: The export keeps the header row now.\n", True),
+                            ("Summary:\nline one\nline two\n", True)):
+            with open(path, "w") as fh:
+                fh.write(body % summary)
+            out = self.run_cmd("check-report", path)
+            self.assertEqual(out.returncode, 0 if ok else 2, (summary, out.stderr))
+            if not ok:
+                self.assertIn("needs a non-empty `Summary:` line", out.stderr)
+        with open(path, "w") as fh:  # ISSUES needs one too, and so does a verifier
+            fh.write(body.replace("PASS", "ISSUES") % "" + "Asked: none: x\n")
+        self.assertIn("`Summary:`", self.run_cmd("check-report", path).stderr)
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS\nVerdict: test-verified\nHead: abc1234\nCheckpoint: x\n")
+        self.assertIn("`Summary:`", self.run_cmd("check-report", path, "--verifier").stderr)
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS\nVerdict: test-verified\nSummary: confirmed\nHead: abc1234\nCheckpoint: x\n")
+        self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
+
     def test_107_check_report_names_a_missing_status_and_checkpoint(self):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
@@ -5837,7 +5859,7 @@ class RunTest(Base):
         empty = os.path.join(self.dir, "empty")  # not a repository, no .agentic-team.toml
         os.makedirs(empty)
         with open(os.path.join(empty, "report.md"), "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nAsked: #4\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: ISSUES\nSummary: s\nAsked: #4\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         out = self.run_cmd("check-report", os.path.join("empty", "report.md"), root=empty, tg=None)
         self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
         self.assertEqual(self.run_cmd("status", root=empty, tg=None).returncode, 2)  # a command that builds Run refuses
@@ -5852,12 +5874,12 @@ class RunTest(Base):
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
                      f"Checkpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- fix the docs\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nFollow-ups:\n- fix the docs\nCheckpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual(out.returncode, 2)
         self.assertIn("`- fix the docs`", out.stderr)
@@ -5869,10 +5891,26 @@ class RunTest(Base):
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}" --verifier`\n', report)
 
+    def test_the_briefs_name_the_summary_line_and_its_language(self):
+        task = self.add_task()
+        report = self.section(self.brief(task), "REPORT")
+        self.assertIn("Add a `Summary:` line after `Status:`", report)
+        self.assertIn("Write the `Summary:` line in English.", report)
+        self.assertNotIn("Chinese", report)
+        self.write_config('\n[report]\nsummary_lang = "zh"\n')
+        self.assertIn("Write the `Summary:` line in Chinese.", self.section(self.brief(task), "REPORT"))
+        running = self.running_task()
+        self.add_result(running, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(running), "--dry-run").stdout, "REPORT")
+        self.assertIn("Add a `Summary:` line after `Verdict:`", verify)
+        self.assertIn("Write the `Summary:` line in Chinese.", verify)
+        self.assertIn(" file-verify --tg ", verify)
+        self.assertNotIn("--python", verify)
+
     def evidence_report(self, status, evidence, after=""):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: {status}\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
+            fh.write(f"Task: 1\nStatus: {status}\nSummary: s\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
                      f"Checkpoint: {CHECKPOINT}\n")
         return path
 
@@ -5899,7 +5937,7 @@ class RunTest(Base):
         def found(text):
             path = os.path.join(self.dir, "report.md")
             with open(path, "w") as fh:
-                fh.write(f"Task: 1\nStatus: PASS\n{text}Checkpoint: {CHECKPOINT}\n")
+                fh.write(f"Task: 1\nStatus: PASS\nSummary: s\n{text}Checkpoint: {CHECKPOINT}\n")
             out = self.run_cmd("check-report", path, "--acceptance", "99")
             return int(re.search(r"found (\d+),", out.stderr).group(1))
         self.assertEqual(found("Ran: make test\nOK\nEvidence: first -> ok\nsecond -> src/a.py:3\nFiles: a\n"), 2)
@@ -6392,7 +6430,7 @@ class Issue89Test(Base):
 
     def report(self, status="PASS", **fields):
         path = os.path.join(self.dir, "report.md")
-        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+        text = {"Task": "1", "Status": status, "Summary": "the change works", "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
                 "Issues": "None", "Deviations": "None", "Follow-ups": "None", "Checkpoint": CHECKPOINT, **fields}
         with open(path, "w") as fh:
             fh.write("".join(f"{k}: {v}\n" for k, v in text.items() if v is not None))
@@ -6445,7 +6483,7 @@ class Issue89Test(Base):
     def test_a_verifier_report_with_two_issues_blocks_warns_and_stays_valid(self):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: one\nIssues: blocking: two\n"
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nSummary: s\nIssues: blocking: one\nIssues: blocking: two\n"
                      f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         code, out, err = self.check(path, "--verifier")
         self.assertEqual((code, out), (0, "ok\n"))
@@ -9497,8 +9535,7 @@ class MessagingTest(Base):
         ctx = self.ctx()
         self.assertEqual(ctx, {"python": sys.executable, "tg": TG, "db": self.db, "project": "demo", "task": 1, "attempt": 1,
                                "by": "task-1-1", "asks_cap": 3, "lock": os.path.join(self.root, ".agentic-team", "locks", "task-1.lock"),
-                               "scope": "src/", "inbox_dir": os.path.join(self.root, ".agentic-team", "inbox"),
-                               "summary_lang": "en"})
+                               "scope": "src/", "inbox_dir": os.path.join(self.root, ".agentic-team", "inbox")})
         argv = self.calls("--bg")[0]
         self.assertEqual(argv[argv.index("--settings") + 1], self.worker_settings(1, 1))
         self.assertEqual(argv.index("--settings"), argv.index("--name") + 2)  # right after --name, before the brief
@@ -9644,7 +9681,7 @@ class MessagingTest(Base):
         task = self.running_task()
         report = os.path.join(self.dir, "report.md")
         with open(report, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nCheckpoint: {CHECKPOINT}\n")
         ctx = self.inbox_file("1-1.ctx.json")
         os.makedirs(os.path.dirname(ctx))
         with open(ctx, "w") as fh:
@@ -13658,6 +13695,8 @@ class RevisionTest(Base):
         self.ok("launch", str(task))
         if revision is not None:  # launch unsets it: the revisions this attempt has had
             self.tg("edit", str(task), "--meta", f"revision={revision}")
+            for number in range(1, revision + 1):  # the revise rows that run.py revise filed before the meta
+                self.add_result(task, "OPEN", f"Revision: {number}\nFrom: verify #1\nHead: abc\n", kind="revise", by="manager")
         wt, head = self.pass_report(task)
         folder = "task-1" if seat == "task" else "verify-1-1"
         if seat == "own":
@@ -13749,6 +13788,26 @@ class RevisionTest(Base):
                 {"id": 60, "kind": "task", "attempt": 1}, {"id": 70, "kind": "task", "attempt": 2}]
         self.assertEqual([r["id"] for r in runner.current_rows(rows, 1)], [local + 2, 60])
         self.assertEqual([r["id"] for r in runner.current_rows(rows[:2], 1)], [40, local + 1])
+
+    def test_the_rows_of_a_revision_by_number_follow_the_list_order_not_the_id(self):
+        import run as runner
+        local = 10**15  # a `revise` row of a project that keeps the kind local has an id in this range
+        rows = [{"id": 10, "kind": "task", "attempt": 1}, {"id": 20, "kind": "verify", "attempt": 1, "status": "ISSUES"},
+                {"id": local + 1, "kind": "revise", "attempt": 1, "author": "manager"},
+                {"id": 30, "kind": "task", "attempt": 1}, {"id": 40, "kind": "verify", "attempt": 1, "status": "PASS"},
+                {"id": 50, "kind": "task", "attempt": 2}]
+        self.assertEqual([r["id"] for r in runner.revision_rows(rows, 1, 0)], [10, 20])
+        self.assertEqual([r["id"] for r in runner.revision_rows(rows, 1, 1)], [30, 40])
+        self.assertIsNone(runner.revision_rows(rows, 1, 2))
+
+    def test_a_task_in_a_revision_that_this_machine_has_no_revise_row_for_is_refused(self):
+        task, wt, head, events = self.revised()
+        self.assertEqual(self.meta(task)["revision"], 1)
+        self.ok("status")
+        self.tg("edit", str(task), "--meta", "revision=2")
+        err = self.refused("verify", str(task))
+        self.assertIn("is in revision 2, but this machine has 1 `revise` row(s)", err)
+        self.assertIn("results.local", err)
 
     def test_revise_relays_the_findings_of_two_issues_blocks(self):
         body = (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
@@ -13956,7 +14015,7 @@ class RevisionTest(Base):
         self.assertNotIn("run the full method", text)
         self.assertIn("## VERIFY\n\nmake test", text)
         self.assertIn("- done", text)  # the ACCEPTANCE line
-        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --lang en", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --status <STATUS>", text)
 
     def test_the_resumed_revision_verifier_says_that_it_keeps_its_model(self):
         task, wt, head, _ = self.revised()
@@ -14488,7 +14547,7 @@ class Issue130Test(Base):
 
     def report(self, status, **fields):
         path = os.path.join(self.dir, "report.md")
-        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+        text = {"Task": "1", "Status": status, "Summary": "the change works", "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
                 "Issues": "the test fails" if status != "PASS" else "None", "Deviations": "None", "Follow-ups": "None",
                 "Checkpoint": CHECKPOINT, **fields}
         with open(path, "w") as fh:
@@ -15113,7 +15172,7 @@ class RetroTest(Base):
         issues = "\n" + "\n".join(lines)
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nSummary: s\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
         row = {"id": 5, "author": "verify-1-1", "status": "ISSUES", "attempt": 1, "kind": "verify",
                "body": f"Status: ISSUES\nVerdict: verify-failed\nIssues:{issues}\n"}

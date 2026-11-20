@@ -27,10 +27,6 @@ class SummaryTest(unittest.TestCase):
                          "✅ PASS · head c9c6c29 · 3 files changed · 2 commands ran\n"
                          "Evidence: tests pass -> make test: 21 passed")
 
-    def test_a_worker_pass_in_chinese(self):
-        self.assertEqual(summarize("task", "PASS", WORKER_PASS, "zh").splitlines()[0],
-                         "✅ 通过 · 提交 c9c6c29 · 改了 3 个文件 · 跑了 2 条命令")
-
     def test_one_file_and_one_command_are_singular_and_missing_fields_are_left_out(self):
         text = summarize("task", "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA}\nRan: make\nFiles: a.py\n")
         self.assertEqual(text, "✅ PASS · head c9c6c29 · 1 file changed · 1 command ran")
@@ -41,8 +37,6 @@ class SummaryTest(unittest.TestCase):
                          "⚠️ ISSUES · the parser drops the last row\nAsked: #12, #15")
         self.assertEqual(summarize("task", "BLOCKED", "Status: BLOCKED\nIssues: None\nAsked: none: no ask left\n"),
                          "⚠️ BLOCKED\nAsked: none: no ask left")
-        self.assertEqual(summarize("task", "ISSUES", WORKER_ISSUES, "zh"),
-                         "⚠️ 有问题 · the parser drops the last row\n已提问: #12, #15")
 
     def test_verify_failed_counts_the_blocking_findings_and_cuts_the_first_two(self):
         lines = summarize("verify", "ISSUES", VERIFY_FAILED).splitlines()
@@ -50,13 +44,10 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(lines[1], "- the export drops the header row")
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[2].startswith("- xxx") and lines[2].endswith("…") and len(lines[2]) == 2 + 120)
-        self.assertEqual(summarize("verify", "ISSUES", VERIFY_FAILED, "zh").splitlines()[0],
-                         "❌ 验证未通过 · 3 条阻塞问题")
 
     def test_a_passing_verdict_names_the_verdict_and_the_head(self):
         body = f"Task: 7\nStatus: PASS\nVerdict: artifact-verified\nHead: {SHA}\nCheckpoint: x\n"
         self.assertEqual(summarize("verify", "PASS", body), "✅ artifact-verified · head c9c6c29")
-        self.assertEqual(summarize("verify", "PASS", body, "zh"), "✅ artifact-verified · 提交 c9c6c29")
         self.assertEqual(summarize("verify", "PASS", "Status: PASS\n"), "✅ PASS")
 
     def test_a_blocked_verifier_gives_its_first_issue(self):
@@ -66,7 +57,6 @@ class SummaryTest(unittest.TestCase):
     def test_a_revision_mark(self):
         body = "Revision: 2\nFrom: verify #41\nHead: abc\n"
         self.assertEqual(summarize("revise", "OPEN", body), "🔁 revision 2 from verify #41")
-        self.assertEqual(summarize("revise", "OPEN", body, "zh"), "🔁 第 2 轮修订，来自验证 #41")
         self.assertEqual(summarize("revise", "OPEN", "no fields"), "")
 
     def test_an_ask_or_answer_gets_a_summary_only_when_it_is_long(self):
@@ -83,8 +73,30 @@ class SummaryTest(unittest.TestCase):
         for kind, status in (("task", "STOPPED"), ("task", "DIED"), ("ack", "SEEN"), ("steer", "SENT"), ("check", "PASS"), ("verify", "DIED")):
             self.assertEqual(summarize(kind, status, "Status: PASS\nHead: abc\n"), "", (kind, status))
 
-    def test_an_unknown_language_reads_as_english(self):
-        self.assertEqual(summarize("task", "PASS", "Status: PASS\n", "fr"), "✅ PASS")
+    def test_non_blocking_findings_are_not_called_blocking(self):
+        body = "Status: ISSUES\nVerdict: verify-failed\nIssues: the label is off\nIssues: the margin is tight\n"
+        self.assertEqual(summarize("verify", "ISSUES", body).splitlines(),
+                         ["❌ verify-failed · 2 findings", "- the label is off", "- the margin is tight"])
+        self.assertEqual(summarize("verify", "ISSUES", "Status: ISSUES\nIssues: one\n").splitlines()[0],
+                         "❌ verify-failed · 1 finding")
+
+    def test_the_written_summary_is_used_as_it_is_for_a_worker_or_verifier_report(self):
+        text = "Export now keeps the header row.\nBefore: it dropped it."
+        body = f"Task: 7\nStatus: PASS\nSummary: {text}\nHead: {SHA}\nRan: make\nFiles: a.py\n"
+        self.assertEqual(summarize("task", "PASS", body), text)
+        issues = "Status: ISSUES\nSummary: the parser still drops the last row\nIssues: x\nAsked: none: x\n"
+        self.assertEqual(summarize("task", "ISSUES", issues), "the parser still drops the last row")
+        verdict = "Status: ISSUES\nVerdict: verify-failed\nSummary: not confirmed: the export drops the header\nIssues: blocking: a\n"
+        self.assertEqual(summarize("verify", "ISSUES", verdict), "not confirmed: the export drops the header")
+
+    def test_an_empty_or_fenced_summary_line_falls_back_to_the_built_text(self):
+        self.assertEqual(summarize("task", "PASS", "Status: PASS\nSummary:\nHead: abc1234\n"), "✅ PASS · head abc1234")
+        fenced = "Status: PASS\nRan: x\n```\nSummary: from a log\n```\nHead: abc1234\n"
+        self.assertEqual(summarize("task", "PASS", fenced), "✅ PASS · head abc1234 · 1 command ran")
+
+    def test_a_summary_does_not_replace_the_text_of_a_revise_ask_or_stopped_row(self):
+        self.assertEqual(summarize("revise", "OPEN", "Summary: x\nRevision: 1\nFrom: verify #2\n"), "🔁 revision 1 from verify #2")
+        self.assertEqual(summarize("task", "STOPPED", "Summary: x\nStatus: STOPPED\n"), "")
 
 
 if __name__ == "__main__":

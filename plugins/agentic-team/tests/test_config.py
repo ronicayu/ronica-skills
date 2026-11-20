@@ -587,10 +587,26 @@ class ConfigTest(unittest.TestCase):
             f'[projects."demo".results] in {os.path.realpath(path)}' for kind in config.LOCAL_RESULT_KINDS] or err)
         self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["steer", "ask", "check"]\n')
         err = self.run_cli("check")[2]
-        self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack", "revise"])
-        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "revise", "check", "ask", "answer"]\n')
+        self.assertEqual([k for k in config.LOCAL_RESULT_KINDS if f"posts each {k!r} result row" in err], ["ack"])
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "check", "ask", "answer"]\n')
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
-        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "revise", "check", "ask", "answer"))
+        self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "check", "ask", "answer"))
+
+    def test_check_fails_with_an_upgrade_instruction_when_tg_has_no_summary_option(self):
+        self.write(MINIMAL)
+        old = os.path.join(self.root, "tg.py")
+        with open(old, "w") as fh:
+            fh.write("print('usage: tg result add [-h] [--body BODY] [--body-file BODY_FILE]')\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": old}):
+            code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("is older than 1.22.0", out)
+        self.assertIn("Upgrade Taskgraph", out)
+        new = os.path.join(self.root, "tg-new.py")
+        with open(new, "w") as fh:
+            fh.write("print('usage: tg result add [-h] [--summary SUMMARY]')\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": new}):
+            self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)

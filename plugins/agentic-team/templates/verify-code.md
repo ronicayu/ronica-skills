@@ -5,6 +5,7 @@ when the non-blocking test in your brief holds.
 A category on a `blocking:` line is optional: `blocking[stale-ref]:` (a `file:line` reference that no longer
 points at what it names), `blocking[claim]:` (a statement about the code that is false), `blocking[test]:`,
 `blocking[scope]:`, `blocking[shots]:` or `blocking[behaviour]:`. Write one `Issues:` field, one finding per line.
+Write a `Summary:` line (1-3 lines, plain words, no statistics) after `Verdict:`: whether the change is confirmed, and for `verify-failed` the main problem.
 
 ### Method: code
 

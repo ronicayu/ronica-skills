@@ -401,15 +401,15 @@ class MailboxTest(unittest.TestCase):
             fh.write(text)
         return path
 
-    def test_summary_the_worker_report_is_filed_with_a_summary_in_the_ctx_language(self):
-        text = "Task: 1\nStatus: PASS\nHead: c9c6c29" + "0" * 33 + "\nRan: make test\nFiles: a.py, b.py\nCheckpoint: x\n"
-        path = self.write_file("report.md", text)
-        self.assertEqual(self.mb("report", "--status", "PASS", "--body-file", path).returncode, 0)
-        self.write_ctx(summary_lang="zh")
-        self.assertEqual(self.mb("report", "--status", "PASS", "--body-file", path).returncode, 0)
+    def test_summary_the_worker_report_is_filed_with_its_own_summary_text_or_the_built_one(self):
+        base = "Task: 1\nStatus: PASS\n%sHead: c9c6c29" + "0" * 33 + "\nRan: make test\nFiles: a.py, b.py\nCheckpoint: x\n"
+        written = base % "Summary: Export keeps the header row now.\nBefore: it dropped it.\n"
+        built = base % ""
+        self.assertEqual(self.mb("report", "--status", "PASS", "--body-file", self.write_file("a.md", written)).returncode, 0)
+        self.assertEqual(self.mb("report", "--status", "PASS", "--body-file", self.write_file("b.md", built)).returncode, 0)
         first, second = [r for r in self.rows() if r["kind"] == "task"]
-        self.assertEqual((first["body"], first["summary"]), (text, "✅ PASS · head c9c6c29 · 2 files changed · 1 command ran"))
-        self.assertEqual((second["body"], second["summary"]), (text, "✅ 通过 · 提交 c9c6c29 · 改了 2 个文件 · 跑了 1 条命令"))
+        self.assertEqual((first["body"], first["summary"]), (written, "Export keeps the header row now.\nBefore: it dropped it."))
+        self.assertEqual((second["body"], second["summary"]), (built, "✅ PASS · head c9c6c29 · 2 files changed · 1 command ran"))
 
     def test_summary_an_unreadable_report_file_is_left_to_tg_to_refuse(self):
         out = self.mb("report", "--status", "PASS", "--body-file", os.path.join(self.dir, "missing.md"))
@@ -426,13 +426,23 @@ class MailboxTest(unittest.TestCase):
     def test_summary_file_verify_files_the_verifier_report_with_a_summary(self):
         text = "Task: 1\nStatus: PASS\nVerdict: test-verified\nHead: abc1234\nCheckpoint: x\n"
         path = self.write_file("verify.md", text)
-        out = subprocess.run([sys.executable, MAILBOX, "file-verify", "--python", sys.executable, "--tg", TG, "--db", self.db,
-                              "--project", "demo", "--task", str(self.task), "--attempt", "1", "--by", "verify-1-1", "--lang", "en",
+        out = subprocess.run([sys.executable, MAILBOX, "file-verify", "--tg", TG, "--db", self.db,
+                              "--project", "demo", "--task", str(self.task), "--attempt", "1", "--by", "verify-1-1",
                               "--status", "PASS", "--body-file", path], capture_output=True, text=True, env=self.env)
         self.assertEqual(out.returncode, 0, out.stderr)
         (row,) = self.rows("verify")
         self.assertEqual((row["author"], row["attempt"], row["body"], row["summary"]), ("verify-1-1", 1, text, "✅ test-verified · head abc1234"))
         self.assertIn(f"result #{row['id']} filed for task {self.task} attempt 1: PASS", out.stdout)
+
+    def test_summary_file_verify_refuses_a_tg_that_is_not_tg_py(self):
+        path = self.write_file("verify.md", "Status: PASS\nVerdict: test-verified\n")
+        other = self.write_file("other.py", "raise SystemExit(0)\n")
+        out = subprocess.run([sys.executable, MAILBOX, "file-verify", "--tg", other, "--db", self.db,
+                              "--project", "demo", "--task", str(self.task), "--attempt", "1", "--by", "verify-1-1",
+                              "--status", "PASS", "--body-file", path], capture_output=True, text=True, env=self.env)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--tg must be", out.stderr)
+        self.assertEqual(self.rows("verify"), [])
 
     def test_fix09_an_answer_does_not_hold_the_report_only_a_steer_does(self):
         self.message("answer", "Re: #1\nAnswer: x\n", status="ANSWERED")
