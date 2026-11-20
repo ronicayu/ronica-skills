@@ -471,8 +471,9 @@ def file_report(ctx, kind, status, body_file):
 
 def cmd_file_verify(args):
     """File a verifier's report. It has no context file: the brief's command carries every value. It runs tg.py with the
-    interpreter that runs this script, and refuses a --tg that is not a file named tg.py."""
-    if os.path.basename(args.tg) != "tg.py" or not os.path.isfile(args.tg):
+    interpreter that runs this script. --tg is any existing file, as run.py accepts it ($TASKGRAPH_TG or --tg). --python and
+    --lang are ignored: verifiers started from briefs of an older version still pass them."""
+    if not os.path.isfile(args.tg):
         raise Fail(f"--tg must be the path of an existing tg.py, not {args.tg}")
     ctx = {"python": sys.executable, "tg": args.tg, "db": args.db, "project": args.project, "task": args.task,
            "attempt": args.attempt, "by": args.by}
@@ -506,6 +507,8 @@ def main(argv=None):
         p.add_argument(f"--{name}", required=True)
     p.add_argument("--task", type=int, required=True)
     p.add_argument("--attempt", type=int, required=True)
+    for name in ("python", "lang"):  # ignored: briefs of the previous version pass them
+        p.add_argument(f"--{name}", help=argparse.SUPPRESS)
     sub.add_parser("hook", help="PostToolUse hook: print the pointer line of --flag")
     args = parser.parse_args(argv)
     try:

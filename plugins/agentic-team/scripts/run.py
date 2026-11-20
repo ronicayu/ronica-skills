@@ -142,7 +142,7 @@ import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found
 from events import EVENTS  # noqa: E402
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
                     manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
-from report_summary import summarize  # noqa: E402
+from report_summary import SECTION_PATTERN, sections as report_parse, summary_problem, summarize  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -189,13 +189,7 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
-REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Summary|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Asked|Deviations|Follow-ups|"
-                          r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
-# The labels that start a report section at column 0: those of REPORT_LABEL, those of the verifier and the project's own
-# `Needs CI`. Any other `Word:` line, such as `Note:` or `Changed:`, continues the section above it.
-SECTION_LINE = re.compile(r"^(Task|Status|Summary|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Asked|Findings|"
-                          r"Deviations|Follow-ups|Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason|Needs CI):"
-                          r"(?:[ \t]|$)")
+SECTION_LINE = re.compile(r"^(" + SECTION_PATTERN + r"):(?:[ \t]|$)")  # the labels that start a report section at column 0 (report_summary.SECTION_LABELS)
 PRIORITY = ("Status", "Asked", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations", "Evidence")  # kept first when a report is cut
 # The end of the Ran block in a Ran section: right after a blank line, outside a ``` fence, a line at column 0 (no list
 # marker, quote, heading, table bar or backtick first) that reads `<label>:`: up to 40 characters with no colon, then a
@@ -244,7 +238,9 @@ SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
 NOTIFY_QUEUE = "notify-queue.jsonl"  # in the run directory: operator notices that events queued and the Manager has not sent
 NOTIFY_SENT = "notify-sent"  # in the run directory: the key of each notice that was sent, one per line, so an event never notifies twice
-NOTIFY_DIGEST = "notify-digest"  # in the run directory: the day (project time zone) of the last daily digest
+NOTIFY_DIGEST = "notify-digest"  # in the run directory: when the last daily digest was made and sent (ISO time, UTC)
+NOTIFY_DIGEST_PENDING = "notify-digest.pending"  # in the run directory: when the printed digest was made; `--digest --sent` makes it the last
+NOTIFY_LOCK = "notify-queue.lock"  # in the run directory: held while the queue is read, appended to or cleared
 NOTIFY_OF_EMIT = {"abandoned": "abandon", "push-failed": "push-failed", "pr-closed": "pr-closed"}  # emit event -> notifications.events name
 NOTIFY_LEAD = {"abandon": "Task #{task} abandoned {detail}", "push-failed": "Task #{task}: {detail}", "pr-closed": "Task #{task}: {detail}"}
 NOTIFY_DO = {"abandon": "decide whether to redo the task or drop it, and tell the Manager",
@@ -634,7 +630,7 @@ class Run:
                             "detail": detail, "next": next})
         if (kind := NOTIFY_OF_EMIT.get(event)) and task is not None:
             queue_notice(self, kind, task, attempt, NOTIFY_LEAD[kind].format(task=task, detail=detail),
-                         next or NOTIFY_DO[kind])
+                         NOTIFY_DO[kind])
 
     def flush(self):
         if self.json:
@@ -3488,19 +3484,28 @@ def refuse_unless_running(run, task):
     return wanted_attempt(task)
 
 
-def refuse_revision_gap(run, task):
-    """Refuse a task whose `revision` meta counts revisions that this machine has no `revise` row for: the rows of the
-    attempt would read as one revision, with the old verify-failed report as the current verdict. It happens when the
-    Taskgraph GitHub backend keeps `revise` local (results.local) and the cache is lost or another machine ran the revise."""
+def revision_gap(run, task):
+    """(attempt, wanted, have) when the task's `revision` meta counts revisions that this machine has no `revise` row for,
+    else None: the rows of the attempt would read as one revision, with the old verify-failed report as the current
+    verdict. It happens when the Taskgraph GitHub backend keeps `revise` local (results.local) and the cache is lost or
+    another machine ran the revise."""
     attempt, wanted = wanted_attempt(task), revision_of(task)
-    if not wanted:
-        return
+    if not wanted or attempt is None:
+        return None
     have = len([r for r in task_rows(run.results_for(task["id"]), attempt, REVISE, history=True) if r.get("author") == "manager"])
-    if have < wanted:
-        raise Refused(f"#{task['id']} attempt {attempt} is in revision {wanted}, but this machine has {have} `revise` row(s): "
-                      "the rows of a result kind in `results.local` stay in the machine's Taskgraph cache. Run run.py on the "
-                      "machine that ran `revise`, and take `revise` out of `results.local` in .taskgraph.toml "
-                      "(see docs/github-backend.md, When the local cache is lost)")
+    return (attempt, wanted, have) if have < wanted else None
+
+
+GAP_FIX = ("the rows of a result kind in `results.local` stay in the machine's Taskgraph cache. Run run.py on the machine "
+           "that ran `revise`, and take `revise` out of `results.local` in .taskgraph.toml "
+           "(see docs/github-backend.md, When the local cache is lost)")
+
+
+def refuse_revision_gap(run, task):
+    """Refuse a task with a revision gap (revision_gap)."""
+    if gap := revision_gap(run, task):
+        attempt, wanted, have = gap
+        raise Refused(f"#{task['id']} attempt {attempt} is in revision {wanted}, but this machine has {have} `revise` row(s): {GAP_FIX}")
 
 
 def worker_for(run, tid, attempt, result_id=None, task=None):
@@ -5473,7 +5478,12 @@ def host_guard(run, task, fn, *args):
 
 def record_task(run, snap, task, unmanaged):
     """record's part for one task in progress: settle the phase, then the request of a round, then follow the rows, then
-    stop the kept sessions that no revision will use."""
+    stop the kept sessions that no revision will use. A task with a revision gap (revision_gap) gets one line and nothing
+    else: no salvage, DIED or other row is filed on rows that this machine cannot read as the revision's."""
+    if gap := revision_gap(run, task):
+        run.emit("revision-gap", task["id"], gap[0], None,
+                 f"revision {gap[1]}, but this machine has {gap[2]} `revise` row(s); record takes no action on it", GAP_FIX)
+        return
     if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
         if in_round(task) and record_round(run, snap, task):
             return
@@ -5786,6 +5796,10 @@ def sent_keys(run):
         return set()
 
 
+def notify_lock(run):
+    return mbx.locked(os.path.join(run.run_dir, NOTIFY_LOCK))
+
+
 def queue_notice(run, event, task, attempt, line, do, default=None, due=None, once=True):
     """Queue one operator notice. Nothing is queued in a dry run, for an event that notifications.events leaves out,
     or for a key already queued. With `once`, a key that an earlier clear recorded as sent is skipped too; the
@@ -5794,12 +5808,13 @@ def queue_notice(run, event, task, attempt, line, do, default=None, due=None, on
     if run.dry_run or event not in run.config["notifications"]["events"]:
         return False
     key = notice_key(event, task, attempt, line)
-    if key in {i["key"] for i in read_queue(run)} or (once and key in sent_keys(run)):
-        return False
     os.makedirs(run.run_dir, exist_ok=True)
-    with open(os.path.join(run.run_dir, NOTIFY_QUEUE), "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"key": key, "event": event, "task": task, "attempt": attempt, "line": line, "do": do,
-                             "default": default, "due": due, "at": run.now()}, ensure_ascii=False) + "\n")
+    with notify_lock(run):  # the check and the append are one step: two commands never queue the same notice, and a clear never drops one
+        if key in {i["key"] for i in read_queue(run)} or (once and key in sent_keys(run)):
+            return False
+        with open(os.path.join(run.run_dir, NOTIFY_QUEUE), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"key": key, "event": event, "task": task, "attempt": attempt, "line": line, "do": do,
+                                 "default": default, "due": due, "at": run.now()}, ensure_ascii=False) + "\n")
     return True
 
 
@@ -5825,6 +5840,16 @@ def digest_text(day, payload, cap=10):
                       part("Decisions waiting", decisions, "Decision")])
 
 
+def digest_moment(path):
+    """The time written in a digest file (an aware datetime), or None when the file is missing or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            moment = datetime.datetime.fromisoformat(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
+
+
 def cmd_notify_queue(run, args):
     """Show the queued notices, or --clear them (they count as sent), --add an all-done or blocked notice, or print
     the --digest. It sends nothing: the Manager sends the notices through notifications.skill."""
@@ -5833,44 +5858,65 @@ def cmd_notify_queue(run, args):
         raise Refused("give one of --add, --clear and --digest")
     if args.do and not args.add:
         raise Refused("--do goes with --add")
+    if args.sent and not args.digest:
+        raise Refused("--sent goes with --digest")
     if args.add:
         event, line = args.add
         if event not in ("all-done", "blocked"):
             raise Refused("--add takes all-done or blocked; the other events are queued by the command that causes them")
         if args.dry_run or event not in run.config["notifications"]["events"]:
             run.emit("notify-queue", None, None, None, f"{event} is not in notifications.events, or a dry run: not queued")
-        elif queue_notice(run, event, None, None, line, args.do or "", once=False):
+        # a blocked line notifies once, so a drain that finds the same blocker again stays quiet; a new reason notifies
+        elif queue_notice(run, event, None, None, line, args.do or "", once=event == "blocked"):
             run.emit("notify-queue", None, None, None, f"queued {event}")
         else:
             run.emit("notify-queue", None, None, None, f"{event} with this line is already queued")
         return
     if args.digest:
-        zone = ZoneInfo(run.config["sessions"]["timezone"])
-        today = datetime.datetime.now(zone).date().isoformat()
-        path = os.path.join(run.run_dir, NOTIFY_DIGEST)
-        last = open(path, encoding="utf-8").read().strip() if os.path.isfile(path) else ""
-        if run.config["notifications"]["digest"] != "daily":
-            run.emit("notify-digest", None, None, None, "off; set notifications.digest = \"daily\" to get one")
-        elif last == today:
-            run.emit("notify-digest", None, None, None, f"already made for {today}")
-        else:
-            cmd_status(run, argparse.Namespace(since="1d", limit=10, mark=False, brief=False))
-            payload, run.payload, run.text = run.payload, None, None
-            os.makedirs(run.run_dir, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(today + "\n")
-            run.emit("notify-digest", None, None, None, digest_text(today, payload))
+        digest_command(run, args)
         return
-    items = read_queue(run)
+    if args.clear:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with notify_lock(run):  # the notices it prints are exactly the notices it clears: none queued meanwhile is lost
+            items = read_queue(run)
+            with open(os.path.join(run.run_dir, NOTIFY_SENT), "a", encoding="utf-8") as fh:
+                fh.writelines(i["key"] + "\n" for i in items)
+            open(os.path.join(run.run_dir, NOTIFY_QUEUE), "w").close()
+    else:
+        items = read_queue(run)
     for item in items:
         run.emit("notify", item.get("task"), item.get("attempt"), None, f"[{item['event']}] {item['line']}", notice_next(item))
     if not items:
         run.emit("notify-queue", None, None, None, "empty")
-    if args.clear:
+
+
+def digest_command(run, args):
+    """--digest: print the digest of what happened since the last sent digest (the last day on the first run), once a day.
+    The digest counts as made only after the Manager sends it and runs `--digest --sent`."""
+    done, pending = os.path.join(run.run_dir, NOTIFY_DIGEST), os.path.join(run.run_dir, NOTIFY_DIGEST_PENDING)
+    if run.config["notifications"]["digest"] != "daily":
+        run.emit("notify-digest", None, None, None, "off; set notifications.digest = \"daily\" to get one")
+        return
+    if args.sent:
+        if not os.path.isfile(pending):
+            raise Refused("no digest waits to be marked as sent; run `notify-queue --digest` first")
+        os.replace(pending, done)
+        run.emit("notify-digest", None, None, None, "marked as sent")
+        return
+    zone = ZoneInfo(run.config["sessions"]["timezone"])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    last = digest_moment(done)
+    today = now.astimezone(zone).date().isoformat()
+    if last and last.astimezone(zone).date().isoformat() == today:
+        run.emit("notify-digest", None, None, None, f"already made for {today}")
+        return
+    cmd_status(run, argparse.Namespace(since=last.isoformat() if last else "1d", limit=10, mark=False, brief=False))
+    payload, run.payload, run.text = run.payload, None, None
+    if not run.dry_run:
         os.makedirs(run.run_dir, exist_ok=True)
-        with open(os.path.join(run.run_dir, NOTIFY_SENT), "a", encoding="utf-8") as fh:
-            fh.writelines(i["key"] + "\n" for i in items)
-        open(os.path.join(run.run_dir, NOTIFY_QUEUE), "w").close()
+        with open(pending, "w", encoding="utf-8") as fh:
+            fh.write(now.isoformat(timespec="seconds") + "\n")
+    run.emit("notify-digest", None, None, None, digest_text(today, payload), "send it, then run `run.py notify-queue --digest --sent`")
 
 
 # ----------------------------------------------------------------- cleanup
@@ -6487,17 +6533,13 @@ def request_body(run, task, head):
 
 
 def report_fields(body, name):
-    """The texts of the `<name>:` fields of a report, in order: each is the rest of its line and the lines up to the next
-    label, stripped. The first field counts; a later one counts only when it follows a field of the same name at once,
-    as a verifier's `Issues:` line per finding does. A `Files:` line inside `Deviations:` is text of that field."""
-    body = body or ""
-    own = re.compile(rf"(?m)^{re.escape(name)}:")
-    marks = sorted({(m.start(), m.end(), m.group(1) if m.re is REPORT_LABEL else name)
-                    for m in [*REPORT_LABEL.finditer(body), *own.finditer(body)]})
+    """The texts of the `<name>:` fields of a report, in order (report_summary.sections: comments dropped, a ``` fence is
+    text): each is the rest of its line and the lines up to the next label, stripped. The first field counts; a later one
+    counts only when it follows a field of the same name at once, as a verifier's `Issues:` line per finding does."""
     found, previous = [], None
-    for i, (start, end, label) in enumerate(marks):
+    for label, text in report_parse(body):
         if label == name and (not found or previous == name):
-            found.append(body[end:marks[i + 1][0] if i + 1 < len(marks) else len(body)].strip())
+            found.append(text)
         previous = label
     return found
 
@@ -8710,7 +8752,7 @@ def cmd_add(run, args):
     run.emit("added", tid, None, None, f"{args.title} ({'; '.join(l for l in links if l) or 'no links'})")
     if is_decision and meta_pairs(args.meta).get("decider") == "operator":
         queue_notice(run, "decision", tid, None, f"Decision #{tid} needs you: {args.title}",
-                     "answer it; " + ", ".join(f"#{b}" for b in args.blocks) + " wait for it",
+                     "answer it" + ("; " + ", ".join(f"#{b}" for b in args.blocks) + " wait for it" if args.blocks else ""),
                      meta_pairs(args.meta).get("default"), args.due)
     for _, task, reasons, weak in found:
         run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
@@ -8798,8 +8840,10 @@ def cmd_check_report(args):
     if not CHECKPOINT_LINE.search(body):
         problems.append("no `Checkpoint:` line")
     status = STATUS_LINE.search(body)
-    if status and not report_field(strip_comments(body), "Summary"):
+    if status and not report_field(body, "Summary"):
         problems.append(SUMMARY_PROBLEM.format(status=status.group(1)))
+    elif status and (long := summary_problem(report_field(body, "Summary"))):
+        problems.append(long)
     if args.acceptance is not None and status and status.group(1) == "PASS":
         found = len(evidence_lines(body))
         if found < args.acceptance:
@@ -9450,6 +9494,7 @@ def build_parser():
                    help="queue a notice for an event that has no run.py line: all-done or blocked, with one plain line")
     p.add_argument("--do", help="with --add: what the operator can do")
     p.add_argument("--digest", action="store_true", help="print the daily digest once a day when notifications.digest is daily")
+    p.add_argument("--sent", action="store_true", help="with --digest: the digest was sent; count it as made")
     p.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("notify-to", help="set, clear, or show the session that sessions message after their result")

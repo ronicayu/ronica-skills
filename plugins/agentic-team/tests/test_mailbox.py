@@ -6,6 +6,7 @@ here reaches a real session or socket.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -434,15 +435,31 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual((row["author"], row["attempt"], row["body"], row["summary"]), ("verify-1-1", 1, text, "✅ test-verified · head abc1234"))
         self.assertIn(f"result #{row['id']} filed for task {self.task} attempt 1: PASS", out.stdout)
 
-    def test_summary_file_verify_refuses_a_tg_that_is_not_tg_py(self):
-        path = self.write_file("verify.md", "Status: PASS\nVerdict: test-verified\n")
-        other = self.write_file("other.py", "raise SystemExit(0)\n")
-        out = subprocess.run([sys.executable, MAILBOX, "file-verify", "--tg", other, "--db", self.db,
-                              "--project", "demo", "--task", str(self.task), "--attempt", "1", "--by", "verify-1-1",
-                              "--status", "PASS", "--body-file", path], capture_output=True, text=True, env=self.env)
+    def file_verify(self, tg, *extra):
+        path = self.write_file("verify.md", "Status: PASS\nVerdict: test-verified\nHead: abc1234\n")
+        return subprocess.run([sys.executable, MAILBOX, "file-verify", "--tg", tg, "--db", self.db,
+                               "--project", "demo", "--task", str(self.task), "--attempt", "1", "--by", "verify-1-1",
+                               "--status", "PASS", "--body-file", path, *extra], capture_output=True, text=True, env=self.env)
+
+    def test_summary_file_verify_refuses_a_tg_that_is_not_a_file(self):
+        out = self.file_verify(os.path.join(self.dir, "no-tg.py"))
         self.assertEqual(out.returncode, 2)
         self.assertIn("--tg must be", out.stderr)
         self.assertEqual(self.rows("verify"), [])
+
+    def test_summary_file_verify_takes_a_tg_with_any_file_name(self):
+        shutil.copytree(os.path.dirname(TG), os.path.join(self.dir, "scripts"), ignore=shutil.ignore_patterns("__pycache__"))
+        renamed = os.path.join(self.dir, "scripts", "taskgraph-cli")
+        os.rename(os.path.join(self.dir, "scripts", "tg.py"), renamed)
+        out = self.file_verify(renamed)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.rows("verify")), 1)
+
+    def test_summary_file_verify_ignores_the_python_and_lang_flags_of_older_briefs(self):
+        out = self.file_verify(TG, "--python", "/usr/bin/python3", "--lang", "en")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.rows("verify")), 1)
+        self.assertNotIn("--python", subprocess.run([sys.executable, MAILBOX, "file-verify", "--help"], capture_output=True, text=True).stdout)
 
     def test_fix09_an_answer_does_not_hold_the_report_only_a_steer_does(self):
         self.message("answer", "Re: #1\nAnswer: x\n", status="ANSWERED")

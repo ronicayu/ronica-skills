@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-from report_summary import summarize  # noqa: E402
+from report_summary import SECTION_LABELS, fields, summarize  # noqa: E402
 
 SHA = "c9c6c29" + "0" * 33
 WORKER_PASS = (f"Task: 7\nStatus: PASS\nBranch: worktree-task-7\nHead: {SHA}\nWorktree: /w\n"
@@ -97,6 +97,29 @@ class SummaryTest(unittest.TestCase):
     def test_a_summary_does_not_replace_the_text_of_a_revise_ask_or_stopped_row(self):
         self.assertEqual(summarize("revise", "OPEN", "Summary: x\nRevision: 1\nFrom: verify #2\n"), "🔁 revision 1 from verify #2")
         self.assertEqual(summarize("task", "STOPPED", "Summary: x\nStatus: STOPPED\n"), "")
+
+    def test_a_summary_stops_at_every_section_label_of_a_report(self):
+        for label in ("Acceptance evidence", "Needs CI", "Notes", "Evidence", "Findings"):
+            body = f"Status: PASS\nSummary: The export keeps the header row now.\n{label}: x\nHead: abc1234\n"
+            self.assertEqual(summarize("task", "PASS", body), "The export keeps the header row now.", label)
+
+    def test_a_summary_is_cut_to_three_lines_and_to_2000_characters_so_salvage_cannot_fail(self):
+        body = "Status: PASS\nSummary: one\ntwo\n\nthree\nfour\nCheckpoint: x\n"
+        self.assertEqual(summarize("task", "PASS", body), "one\ntwo\nthree")
+        long = summarize("task", "PASS", "Status: PASS\nSummary: " + "x" * 5000 + "\n")
+        self.assertEqual((len(long), long[-1]), (2000, "…"))
+
+    def test_a_summary_inside_a_fence_or_a_comment_is_missing(self):
+        fenced = "Status: PASS\n```\nSummary: from a log\n```\nHead: abc1234\n"
+        self.assertNotIn("Summary", fields(fenced))
+        self.assertNotIn("Summary", fields("Status: PASS\n<!-- Summary: x -->\n"))
+        self.assertEqual(fields("Status: PASS\n<!--\nHead: a\n-->\nHead: b\n")["Head"], ["b"])
+
+    def test_the_shared_label_list_is_what_run_py_reads_as_a_section(self):
+        import run
+        for label in SECTION_LABELS:
+            self.assertTrue(run.SECTION_LINE.match(f"{label}: x"), label)
+        self.assertFalse(run.SECTION_LINE.match("Note: x"))
 
 
 if __name__ == "__main__":

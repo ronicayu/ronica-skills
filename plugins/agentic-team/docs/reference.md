@@ -381,10 +381,10 @@ Shows the task's messages: asks, answers, steers and acks, with the delivery sta
 #### `run.py notify-queue`
 
 ```text
-run.py notify-queue [--clear] [--add ADD] [--do DO] [--digest]
+run.py notify-queue [--clear] [--add ADD] [--do DO] [--digest] [--sent]
 ```
 
-Shows the operator notices that events queued, one `notify` line each (`[event] what happened`, then `next:` what the operator can do, and for a decision its default and deadline); `notify-queue: empty` when there are none. `--clear` shows them, then counts them as sent and empties the queue. `--add all-done|blocked "<line>" [--do "<text>"]` queues one the Manager decides. `--digest` prints the daily digest once a day when `notifications.digest = "daily"`. It sends nothing.
+Shows the operator notices that events queued, one `notify` line each (`[event] what happened`, then `next:` what the operator can do, and for a decision its default and deadline); `notify-queue: empty` when there are none. `--clear` shows them, then counts them as sent and empties the queue. `--add all-done|blocked "<line>" [--do "<text>"]` queues one the Manager decides. `--digest` prints the daily digest once a day when `notifications.digest = "daily"`, of what happened since the last digest that was marked as sent; `--digest --sent` marks the printed digest as sent. It sends nothing.
 
 | Option | Argument | Default | Meaning |
 |---|---|---|---|
@@ -392,6 +392,7 @@ Shows the operator notices that events queued, one `notify` line each (`[event] 
 | `--add` | `ADD` |  | queue a notice for an event that has no run.py line: all-done or blocked, with one plain line |
 | `--do` | `DO` |  | with --add: what the operator can do |
 | `--digest` |  |  | print the daily digest once a day when notifications.digest is daily |
+| `--sent` |  |  | with --digest: the digest was sent; count it as made |
 
 #### `run.py notify-to`
 
@@ -425,7 +426,7 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 
 ### Events
 
-`run.py` prints 107 events. A name that is not in `scripts/events.py` is refused.
+`run.py` prints 108 events. A name that is not in `scripts/events.py` is refused.
 
 | Event | Meaning |
 |---|---|
@@ -466,6 +467,7 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 | `stopping` | A session that run.py stopped has not exited yet. |
 | `stopped` | A worker was stopped (`stop`, a recovery or a close) and a STOPPED result filed, or nothing was left to commit. |
 | `kept-session-stopped` | A worker or verifier that waited for a revision was stopped after `keep_sessions_minutes`. |
+| `revision-gap` | The task is in a revision that this machine has no `revise` row for; record takes no action on it. |
 | `locked` | Another run.py holds the task's lock; record skips the task this time. |
 | `checks-skipped` | The `[report] checks` of a worker PASS did not run, and the line says why. |
 | `checks-failed` | The `[report] checks` failed at the head of a PASS; run.py filed ISSUES. |

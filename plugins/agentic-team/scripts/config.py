@@ -27,7 +27,8 @@ when agentic-team is not installed there. Without [profiles] nothing changes.
 When the .taskgraph.toml that tg finds maps taskgraph.project to the GitHub
 backend, `check` warns (exit 0) for each run-time meta key of RUNTIME_META that
 is in neither meta.local nor meta.deferred of that project, and for each result
-kind of LOCAL_RESULT_KINDS that is not in its results.local.
+kind of LOCAL_RESULT_KINDS that is not in its results.local, and when `revise` is in
+its results.local (it must stay remote).
 
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
@@ -897,7 +898,11 @@ def taskgraph_warnings(config):
             for kind, keys in RUNTIME_META.items() for key in keys if key not in store["local"] + store["deferred"]] + [
         f"taskgraph: the GitHub backend posts each {kind!r} result row as an issue comment, and comments share GitHub's "
         f'rate limit on creating content; add {kind!r} to local under [projects."{project}".results] in {store["path"]}'
-        for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]]
+        for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]] + [
+        f"taskgraph: 'revise' is in results.local under [projects.\"{project}\".results] in {store['path']}: a lost cache, or "
+        "another machine, leaves a task in a revision with no `revise` row, and run.py then refuses it; `revise` must stay "
+        "remote (take it out of the list)"
+        for kind in ("revise",) if kind in store["results_local"]]
 
 
 def taskgraph_version_problems():
@@ -913,9 +918,12 @@ def taskgraph_version_problems():
     if not tg:
         return []
     try:
-        out = subprocess.run([sys.executable, tg, "result", "add", "--help"], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return []
+        out = subprocess.run([sys.executable, tg, "result", "add", "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"taskgraph: could not run tg ({tg}): {exc}"]
+    if out.returncode != 0:
+        reason = (out.stderr.strip().splitlines() or [f"exit {out.returncode}"])[-1]
+        return [f"taskgraph: could not run tg ({tg}): {reason}"]
     if "--summary" in out.stdout:
         return []
     return [f"taskgraph: {tg} is older than 1.22.0: `tg result add` has no --summary, so every report would fail. "

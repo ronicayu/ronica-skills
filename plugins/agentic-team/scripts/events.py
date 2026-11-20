@@ -45,6 +45,7 @@ EVENTS: dict[str, str] = {
     "stopping": "A session that run.py stopped has not exited yet.",
     "stopped": "A worker was stopped (`stop`, a recovery or a close) and a STOPPED result filed, or nothing was left to commit.",
     "kept-session-stopped": "A worker or verifier that waited for a revision was stopped after `keep_sessions_minutes`.",
+    "revision-gap": "The task is in a revision that this machine has no `revise` row for; record takes no action on it.",
     "locked": "Another run.py holds the task's lock; record skips the task this time.",
     "checks-skipped": "The `[report] checks` of a worker PASS did not run, and the line says why.",
     "checks-failed": "The `[report] checks` failed at the head of a PASS; run.py filed ISSUES.",

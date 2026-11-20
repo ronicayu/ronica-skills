@@ -267,8 +267,9 @@ their notices as they happen (`decision`, `abandon`, `push-failed`, `pr-closed`;
 `notify-queue: empty`, send nothing. Otherwise write one message with one plain line per item (what happened, what the
 operator can do; for a decision also its default and its deadline), send it once through `notifications.skill` (without
 one, put it at the top of the reply), then run `notify-queue --clear`. Never send one message per event. If
-`notifications.digest` is `daily`, run `notify-queue --digest` too: it prints the digest once a day and nothing
-more that day; add it to the same message. A periodic brief is not needed when the events and the daily digest are on.
+`notifications.digest` is `daily`, run `notify-queue --digest` too: it prints the digest once a day (what happened since
+the last digest that you marked as sent) and nothing more that day; add it to the same message. After you send the message,
+run `notify-queue --digest --sent`; until then the digest is not counted as made, and the next call prints it again. A periodic brief is not needed when the events and the daily digest are on.
 
 **Reply** at the end of each drain: counts by state, what changed, open
 decisions, branches ready to merge and the tasks that wait on them,

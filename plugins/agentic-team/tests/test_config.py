@@ -623,6 +623,31 @@ class ConfigTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": new}):
             self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
 
+    def test_check_warns_when_revise_is_kept_local_and_says_it_must_stay_remote(self):
+        self.write(MINIMAL)
+        os.environ.pop("TASKGRAPH_CONFIG", None)
+        meta = (f'[projects."demo".meta]\nlocal = {json.dumps(list(config.RUNTIME_META["local"]))}\n'
+                f'deferred = {json.dumps(list(config.RUNTIME_META["deferred"]))}\n')
+        head = 'version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n' + meta
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "check", "revise"]\n')
+        code, out, err = self.run_cli("check")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("'revise' is in results.local", err)
+        self.assertIn("must stay remote", err)
+
+    def test_check_says_tg_could_not_run_instead_of_older_when_the_help_fails(self):
+        self.write(MINIMAL)
+        broken = os.path.join(self.root, "tg-broken.py")
+        with open(broken, "w") as fh:
+            fh.write("import sys\nprint('Traceback: boom', file=sys.stderr)\nsys.exit(1)\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": broken}):
+            code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("could not run tg", out)
+        self.assertIn("boom", out)
+        self.assertNotIn("older than", out)
+
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)
         inner = os.path.join(self.root, "a", "b")

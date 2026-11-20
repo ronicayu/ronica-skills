@@ -5842,6 +5842,32 @@ class RunTest(Base):
             fh.write("Task: 1\nStatus: PASS\nVerdict: test-verified\nSummary: confirmed\nHead: abc1234\nCheckpoint: x\n")
         self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
 
+    def test_check_report_refuses_a_summary_over_three_lines_or_2000_characters(self):
+        body = (f"Task: 1\nStatus: PASS\n%sBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+                f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        for summary, ok in (("Summary: a\nb\nc\n", True), ("Summary: a\nb\nc\nd\n", False),
+                            ("Summary: " + "x" * 2000 + "\n", True), ("Summary: " + "x" * 2001 + "\n", False),
+                            ("Summary: a\nNotes: b\nAcceptance evidence: c\nNeeds CI: no\n", True)):
+            with open(path, "w") as fh:
+                fh.write(body % summary)
+            out = self.run_cmd("check-report", path)
+            self.assertEqual(out.returncode, 0 if ok else 2, (summary[:30], out.stderr))
+            if not ok:
+                self.assertIn("the `Summary:` has", out.stderr)
+
+    def test_check_report_and_report_field_both_treat_a_fenced_summary_as_missing(self):
+        body = (f"Task: 1\nStatus: PASS\nRan: x\n```\nSummary: from a log\n```\nBranch: worktree-task-1\nHead: {SHA_A}\n"
+                f"Worktree: w\nFiles: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(body)
+        self.assertIn("needs a non-empty `Summary:` line", self.run_cmd("check-report", path).stderr)
+        import report_summary
+        import run as run_module
+        self.assertEqual(run_module.report_field(body, "Summary"), "")
+        self.assertEqual(report_summary.summarize("task", "PASS", body).split(" · ")[0], "✅ PASS")
+
     def test_107_check_report_names_a_missing_status_and_checkpoint(self):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
@@ -9205,7 +9231,7 @@ class PrTest(Base):
         (item,) = self.queue()
         self.assertEqual((item["task"], item["detail"]),
                          (task, f"[pr-closed] Task #{task}: {self.label()} closed without a merge"))
-        self.assertIn("run.py add", item["next"])
+        self.assertEqual(item["next"], "reopen the request on the host, or tell the Manager to redo or drop the task")
         self.events("notify-queue", "--clear")
         self.ok("record")
         self.assertEqual(self.queue(), [])
@@ -9224,6 +9250,7 @@ class PrTest(Base):
         self.assertEqual((item["task"], item["detail"].split(";")[0]),
                          (task, f"[push-failed] Task #{task}: the push to origin/task-1 did not reach the remote"))
         self.assertIn("pre-push: refused", item["detail"])
+        self.assertEqual(item["next"], "fix the push on the machine, or tell the Manager to retry")  # operator text, not `run.py close`
 
     @both_hosts
     def test_103_a_push_onto_a_moved_remote_branch_says_where_it_is_and_what_git_said(self):
@@ -12279,13 +12306,13 @@ class BriefSizeTest(Base):
 
     def test_i104_an_upstream_report_is_a_summary_with_the_command_that_prints_it(self):
         task, (up,) = self.with_upstreams([self.body(1, files="base.txt", issues="blocking: slow",
-                                                     extra="Notes: UNKNOWN-NOTE\n")])
+                                                     extra="Remarks: UNKNOWN-NOTE\n")])
         context = self.context(task)
         upstream = context[context.index("### Upstream"):]
         for kept in ("result #1, PASS, attempt 1", "Status: PASS", f"Head: {SHA_A}", "Branch: worktree-task-1",
                      "Files: base.txt", "Issues: blocking: slow", "Follow-ups: none"):
             self.assertIn(kept, upstream)
-        self.assertIn("Notes: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
+        self.assertIn("Remarks: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
         for left in ("Task: 1", "criterion", f"Checkpoint: {CHECKPOINT}"):
             self.assertNotIn(left, upstream)
         self.assertIn(f"result ls {up} --kind task --attempt 1", upstream)
@@ -13844,6 +13871,19 @@ class RevisionTest(Base):
         self.assertIn("is in revision 2, but this machine has 1 `revise` row(s)", err)
         self.assertIn("results.local", err)
 
+    def test_record_takes_no_action_on_a_task_in_a_revision_this_machine_has_no_revise_row_for(self):
+        task, wt, head, events = self.revised()
+        self.tg("edit", str(task), "--meta", "revision=2")
+        before = [r["id"] for r in self.results(task)]
+        events = self.events("record")
+        gap = self.one(events, "revision-gap")
+        self.assertEqual(gap["task"], task)
+        self.assertIn("revision 2, but this machine has 1 `revise` row(s)", gap["detail"])
+        self.assertIn("results.local", gap["next"])
+        self.assertEqual([e["event"] for e in events if e["task"] == task], ["revision-gap"])
+        self.assertEqual([r["id"] for r in self.results(task)], before)  # no salvage, no DIED
+        self.assertEqual(self.meta(task)["revision"], 2)
+
     def test_revise_relays_the_findings_of_two_issues_blocks(self):
         body = (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
                 f"Issues: blocking: src/b.py:2: two\nCheckpoint: {CHECKPOINT}\n")
@@ -15329,6 +15369,101 @@ class NotifyTest(Base):
         self.assertEqual(self.one(self.events("notify-queue"), "notify-queue")["detail"], "empty")
         self.assertEqual(self.run_cmd("notify-queue", "--clear", "--digest").returncode, 2)
 
+    def test_a_blocked_line_notifies_once_and_a_new_reason_notifies_again(self):
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        self.assertEqual(len(self.queue("--clear")), 1)
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        self.assertEqual(self.queue(), [])
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a review.")
+        self.assertEqual([i["detail"] for i in self.queue()], ["[blocked] Waiting for a review."])
+
+    def test_the_same_notice_added_at_once_by_many_commands_is_queued_once(self):
+        self.write_config(self.ALL)
+        outs = []
+        threads = [threading.Thread(target=lambda: outs.append(self.run_cmd("notify-queue", "--add", "blocked", "Same line.")))
+                   for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual([o.returncode for o in outs], [0] * 6, [o.stderr for o in outs])
+        self.assertEqual(len(self.queue()), 1)
+
+    def test_clear_waits_for_the_queue_lock_so_a_notice_added_meanwhile_is_not_lost(self):
+        import mailbox as mbx
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "blocked", "First.")
+        lock = os.path.join(self.root, ".agentic-team", "notify-queue.lock")
+        cmd = [sys.executable, self.logged_run(), "--root", self.root, "--tg", TG]
+        with mbx.locked(lock):
+            clear = subprocess.Popen(cmd + ["notify-queue", "--clear"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, cwd=self.dir, env=self.env)
+            time.sleep(1.0)
+            self.assertIsNone(clear.poll())  # it waits for the lock
+            queue = os.path.join(self.root, ".agentic-team", "notify-queue.jsonl")
+            with open(queue, "a") as fh:  # a notice that arrives while it waits is read by the clear, printed and cleared with it
+                fh.write(json.dumps({"key": "k2", "event": "blocked", "task": None, "attempt": None, "line": "Second.",
+                                     "do": "", "default": None, "due": None, "at": "x"}) + "\n")
+        out, err = clear.communicate(timeout=30)
+        self.assertEqual(clear.returncode, 0, err)
+        self.assertIn("[blocked] First.", out)
+        self.assertIn("[blocked] Second.", out)
+        self.assertEqual(self.queue(), [])
+        with open(os.path.join(self.root, ".agentic-team", "notify-sent")) as fh:
+            self.assertEqual(len(fh.read().split()), 2)
+
+    def digest_files(self):
+        folder = os.path.join(self.root, ".agentic-team")
+        return [os.path.isfile(os.path.join(folder, n)) for n in ("notify-digest.pending", "notify-digest")]
+
+    def test_the_digest_counts_as_made_only_after_sent_and_again_the_next_day(self):
+        self.write_config('[notifications]\ndigest = "daily"\n')
+        self.add_task()
+        self.assertEqual(self.run_cmd("notify-queue", "--digest", "--sent").returncode, 2)  # nothing printed yet
+        first = self.one(self.events("notify-queue", "--digest"), "notify-digest")
+        self.assertTrue(first["detail"].startswith("Daily digest "))
+        self.assertIn("--digest --sent", first["next"])
+        self.assertEqual(self.digest_files(), [True, False])
+        again = self.one(self.events("notify-queue", "--digest"), "notify-digest")  # not sent: it is made again
+        self.assertTrue(again["detail"].startswith("Daily digest "))
+        self.assertIn("marked as sent", self.one(self.events("notify-queue", "--digest", "--sent"), "notify-digest")["detail"])
+        self.assertEqual(self.digest_files(), [False, True])
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("already made for"))
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).isoformat(timespec="seconds")
+        with open(os.path.join(self.root, ".agentic-team", "notify-digest"), "w") as fh:
+            fh.write(old + "\n")
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("Daily digest "))
+
+    def test_sent_goes_with_digest_only(self):
+        self.assertEqual(self.run_cmd("notify-queue", "--sent").returncode, 2)
+
+    def test_the_digest_reads_from_the_last_sent_digest_and_from_one_day_on_the_first_run(self):
+        import run as runner
+        seen = []
+
+        class Stub:
+            dry_run, payload, text = False, None, None
+            config = {"notifications": {"digest": "daily"}, "sessions": {"timezone": "UTC"}}
+            run_dir = os.path.join(self.dir, "stub-run")
+            events = []
+
+            def emit(self, *a):
+                self.events.append(a)
+
+        def status(run, args):
+            seen.append(args.since)
+            run.payload = {"done": [], "in_flight": [], "decisions": []}
+
+        stub, args = Stub(), types.SimpleNamespace(sent=False)
+        with unittest.mock.patch.object(runner, "cmd_status", status):
+            runner.digest_command(stub, args)
+            moment = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).replace(microsecond=0)
+            with open(os.path.join(stub.run_dir, "notify-digest"), "w") as fh:
+                fh.write(moment.isoformat() + "\n")
+            runner.digest_command(stub, args)
+        self.assertEqual(seen, ["1d", moment.isoformat()])
+
     def test_the_digest_is_off_by_default_and_made_once_a_day(self):
         self.decision()
         self.assertIn("off", self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"])
@@ -15336,6 +15471,7 @@ class NotifyTest(Base):
         text = self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"]
         self.assertRegex(text, r"^Daily digest \d{4}-\d{2}-\d{2}\nMerged or done in the last day: 0\nIn flight: 0\n"
                                 r"Decisions waiting: 1 \(#2 Keep the old API\? no deadline\)$")
+        self.ok("notify-queue", "--digest", "--sent")
         self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("already made for"))
 
     def test_digest_text_lists_merged_in_flight_and_decisions_with_a_cap(self):

@@ -373,7 +373,8 @@ COMMAND_DOCS: dict[str, str] = {
      "what the operator can do, and for a decision its default and deadline); `notify-queue: empty` when there are "
      "none. `--clear` shows them, then counts them as sent and empties the queue. `--add all-done|blocked \"<line>\" "
      "[--do \"<text>\"]` queues one the Manager decides. `--digest` prints the daily digest once a day when "
-     "`notifications.digest = \"daily\"`. It sends nothing."),
+     "`notifications.digest = \"daily\"`, of what happened since the last digest that was marked as sent; `--digest --sent` "
+     "marks the printed digest as sent. It sends nothing."),
     "notify-to": ("Stores the Manager's session name in the run directory. Each brief rendered after that tells its session to "
      "send one line with SendMessage after its `result add`, to `uds:<the Manager's inbox socket>` when "
      "`manager.addr` holds it, else to the name. `--clear` removes the name; with no argument it prints the name."),

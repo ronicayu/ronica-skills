@@ -5,9 +5,17 @@ report without one, gets a short text built from the row's fields, with no model
 summarize(kind, status, body) -> str; "" when the row has no summary form (a STOPPED or DIED row, an ack)."""
 import re
 
-LABELS = ("Task", "Status", "Summary", "Revision", "Verdict", "Branch", "Head", "Worktree", "Ran", "Evidence", "Files", "Issues", "Findings",
-          "Asked", "Deviations", "Follow-ups", "Checkpoint", "Session", "From")
-LABEL_LINE = re.compile(r"^(" + "|".join(LABELS) + r"):[ \t]*(.*)$")
+# The labels that start a report section at column 0: the one definition that run.py (SECTION_LINE, REPORT_LABEL), check-report,
+# report_field and fields() below share. Any other `Word:` line, such as `Note:` or `Changed:`, continues the section above it.
+SECTION_LABELS = ("Task", "Status", "Summary", "Revision", "Verdict", "Branch", "Head", "Worktree", "Ran", "Evidence",
+                  "Acceptance evidence", "Files", "Issues", "Findings", "Asked", "Deviations", "Follow-ups", "Checkpoint", "Session",
+                  "Stopped", "Workflow", "Run", "Conclusion", "Overrides", "Reason", "Needs CI", "Notes")
+LABELS = SECTION_LABELS + ("From",)  # `From:` is the label of a revise row, not of a report
+LABEL_PATTERN = "|".join(re.escape(label) for label in LABELS)
+SECTION_PATTERN = "|".join(re.escape(label) for label in SECTION_LABELS)
+LABEL_LINE = re.compile(r"^(" + LABEL_PATTERN + r"):(?:[ \t]+(.*)|$)")
+COMMENT = re.compile(r"<!--.*?-->", re.S)
+SUMMARY_LINES, SUMMARY_CHARS = 3, 2000  # the most lines and characters of a Summary; `tg result add --summary` refuses more
 LIST_MARK = re.compile(r"^(?:[-*]|\d+[.)])\s+")
 BLOCKING = re.compile(r"^blocking(?:\[[a-z-]+\])?:\s*", re.I)
 QUESTION_LINE = re.compile(r"(?m)^Question:[ \t]*(.+)$")
@@ -30,20 +38,44 @@ def cut(text, size=CUT):
     return text if len(text) <= size else text[:size - 1].rstrip() + "…"
 
 
-def fields(body):
-    """{label: [text of each occurrence]}: the rest of its line and the lines up to the next label. A line inside a ```
-    fence is text. A label that repeats gives one entry each, as a verifier's `Issues:` line per finding does."""
-    found, current, fenced = {}, None, False
-    for line in (body or "").splitlines():
+def sections(body):
+    """[(label, text)] of a report, the one parser: `<!-- -->` comments are dropped first; a section is the rest of its
+    `Label:` line (LABELS, at column 0) and the lines up to the next label. A line inside a ``` fence is text, so a label
+    that appears only in a fence is missing. A label that repeats gives one section each."""
+    found, fenced = [], False
+    for line in COMMENT.sub("", body or "").splitlines():
+        match = None if fenced else LABEL_LINE.match(line)
         if line.lstrip().startswith("```"):
             fenced = not fenced
-        match = None if fenced else LABEL_LINE.match(line)
         if match:
-            current = found.setdefault(match.group(1), [])
-            current.append(match.group(2))
-        elif current is not None:
-            current[-1] += "\n" + line
-    return {k: [v.strip() for v in vs] for k, vs in found.items()}
+            found.append((match.group(1), [match.group(2) or ""]))
+        elif found:
+            found[-1][1].append(line)
+    return [(label, "\n".join(lines).strip()) for label, lines in found]
+
+
+def fields(body):
+    """{label: [text of each occurrence]} (see sections). A verifier's `Issues:` line per finding gives one entry each."""
+    out = {}
+    for label, text in sections(body):
+        out.setdefault(label, []).append(text)
+    return out
+
+
+def bounded(text):
+    """A Summary cut to SUMMARY_LINES non-empty lines and SUMMARY_CHARS characters, so `tg result add` accepts it."""
+    out = "\n".join([line.rstrip() for line in (text or "").splitlines() if line.strip()][:SUMMARY_LINES]).strip()
+    return out if len(out) <= SUMMARY_CHARS else out[:SUMMARY_CHARS - 1].rstrip() + "…"
+
+
+def summary_problem(text):
+    """What is wrong with the length of a Summary, or "" when it fits."""
+    lines = len([line for line in text.splitlines() if line.strip()])
+    if lines > SUMMARY_LINES:
+        return f"the `Summary:` has {lines} lines; write at most {SUMMARY_LINES}, and put the detail in the other fields"
+    if len(text) > SUMMARY_CHARS:
+        return f"the `Summary:` has {len(text)} characters; write at most {SUMMARY_CHARS}"
+    return ""
 
 
 def lines_of(values):
@@ -142,7 +174,7 @@ def summarize(kind, status, body):
     """A worker or verifier report: its `Summary:` text as written; the fallback from its other fields only when it has
     none (a salvaged report, DIED, STOPPED)."""
     report = kind in ("task", "verify") and status in REPORT_STATUSES
-    if report and (written := (fields(body).get("Summary") or [""])[0].strip()):
+    if report and (written := bounded((fields(body).get("Summary") or [""])[0])):
         return written
     if kind == "task" and report:
         return worker_summary(status, body, WORDS)
