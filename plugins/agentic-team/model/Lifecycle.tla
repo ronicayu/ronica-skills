@@ -43,7 +43,11 @@ CONSTANTS MAX_ATTEMPTS,  \* line 124: MAX_ATTEMPTS = 3; the configs use 2
           REGRESS_127C,  \* revise ignores the cap
           REGRESS_127H,  \* the resumed verifier is not moved to the new head (its folder, or its brief, stays at the old one)
           REGRESS_127W,  \* verify starts the verifier while the worker is still busy in the same folder
-          REGRESS_127A   \* the report check ignores an unacked finding steer
+          REGRESS_127A,  \* the report check ignores an unacked finding steer
+          \* Workflow templates, owner decision 4 (W4 escalation, planned; Workflow.tla models the stages):
+          ESCALATIONS,   \* TRUE: the Manager may escalate after a report: `stage escalate` stops the kept sessions, writes a
+                         \* STOPPED row with `Reason: escalated`, and the next launch (`--cause escalated`) is exempt from the cap
+          REGRESS_ESC_CAP \* the escalated attempt counts toward the cap (launch exempts only a pause)
 
 ASSUME MERGE_MODE \in {"local", "pr"}
 ASSUME ROUND_VERIFY \in {"always", "by-risk"}
@@ -106,7 +110,7 @@ WorkerStatuses == {"PASS", "ISSUES", "BLOCKED"}
 \* Task rows: a worker's report, or a Manager row: BLOCKEDmgr (file_stuck), DIED, STOPPED without a Head
 \* line (cmd_stop, stop_live), STOPPEDhead (commit_stopped), ABANDONED.
 RowKinds == {"none", "BLOCKEDmgr", "DIED", "STOPPED", "STOPPEDhead", "ABANDONED"} \cup WorkerStatuses
-StopReasons == {"none", "pause", "recover", "close"}
+StopReasons == {"none", "pause", "recover", "close", "escalated"}
 ManagerVerify == {"none", "BLOCKED", "manual", "carried"}   \* carried: a round's round_verdict filed again by the Manager (#119)
 IssueKinds == {"none", "blocking", "unlabelled"}
 Faults == {"none", "role", "exclude"}
@@ -218,8 +222,10 @@ RevisionOK ==
 RetryNext == IF inRound THEN "roundCancel" ELSE IF attempt < MAX_ATTEMPTS THEN "launch" ELSE "abandon"
 RetryNextOld == IF inRound THEN "roundCancel" ELSE IF REGRESS_56 THEN "launch" ELSE RetryNext
 \* stopped_next, lines 748-753: after a pause the launch, at any attempt; after any other stop retry_next.
-\* Before 0.12.0 (REGRESS_59) every STOPPED row read as a pause.
-StoppedNext == IF inRound THEN "roundCancel" ELSE IF stopReason = "pause" \/ REGRESS_59 THEN "launch" ELSE RetryNext
+\* Before 0.12.0 (REGRESS_59) every STOPPED row read as a pause. W4 (planned, owner decision 4): after an escalation
+\* the launch too (it waits for the new stage; Workflow.tla), at any attempt.
+StoppedNext == IF inRound THEN "roundCancel"
+               ELSE IF stopReason \in {"pause", "escalated"} \/ REGRESS_59 THEN "launch" ELSE RetryNext
 \* record_arrived: a round's PASS with the same change as round_from goes to close, which carries the verdict
 \* (round_carry); any other PASS of a round goes to a verifier under [rounds] verify = "always".
 ArrivedNext(st) ==                                                      \* record_arrived, lines 3535-3547
@@ -299,6 +305,9 @@ RecInProgress ==
                    !.vNewer = IF REGRESS_62 THEN FALSE ELSE vNewer,
                    !.vfiled = TRUE, !.ev = "stuck", !.nx = "verifyAgain"]
   IN IF lastTask = "STOPPED" /\ ~REGRESS_54 THEN PauseOut
+     \* W4 (planned): an escalated row is read before the verifier and verdict rows, as a pause is: the escalation
+     \* replaces whatever the verdict would hint (a fix round, or abandon at the cap).
+     ELSE IF lastTask = "STOPPEDhead" /\ stopReason = "escalated" THEN [Same EXCEPT !.ev = "stopped", !.nx = StoppedNext]
      ELSE IF vRunning /\ Stuck(verifier) /\ vfiled /\ ~REGRESS_62 THEN Verdicts(stoppedIdle)
      ELSE IF vRunning /\ Stuck(verifier) THEN stuckOut
      ELSE IF vRunning THEN [Same EXCEPT !.ev = "verifying", !.nx = "none"]          \* 3798-3800
@@ -382,8 +391,9 @@ RevReset ==
 \* abandoned (2359); a task that waits for its merge (refuse_closed, 0.19.0).
 EarlyChecks == ~stopOrder /\ fault = "none" /\ status # "done" /\ ~Awaiting /\ ~abandoned /\ ~inRound   \* refuse_round (#119)
 \* The checks after it: a pause not committed (2412); refuse_past_cap (2555-2563): past MAX_ATTEMPTS only a
-\* STOPPED row with Reason: pause is exempt (#59; before 0.12.0, REGRESS_59, any STOPPED row).
-Exempt == lastTask = "STOPPEDhead" /\ (stopReason = "pause" \/ REGRESS_59)
+\* STOPPED row with Reason: pause is exempt (#59; before 0.12.0, REGRESS_59, any STOPPED row). W4 (planned, owner
+\* decision 4): a STOPPED row with Reason: escalated is exempt too; REGRESS_ESC_CAP leaves it out.
+Exempt == lastTask = "STOPPEDhead" /\ (stopReason = "pause" \/ REGRESS_59 \/ (stopReason = "escalated" /\ ~REGRESS_ESC_CAP))
 LateChecks == lastTask # "STOPPED" /\ ((attempt + 1 <= MAX_ATTEMPTS) \/ Exempt)
 LiveRowsAllowLaunch ==
   /\ ~(Live(worker) /\ ~WorkerIdleFiled)
@@ -584,6 +594,30 @@ Stop ==
                  vv, vIssues, vManager, vNewer, vfiled, verifier, vreport, wtDirty, stopOrder, fault, faulted>>
   /\ UNCHANGED RoundVars
   /\ workerKept' = FALSE /\ UNCHANGED <<revision, verifierKept, findingsOpen, verifierAt, vvRev>>
+
+\* W4 (planned; docs/design/workflow-templates.md section 8, owner decision 4): `run.py stage <inst> escalate <type>
+\* --before <stage>` once the attempt's report (or verdict) is filed and no session of the task is busy. It stops the
+\* worker and the verifier kept for a revision (kept-session-stopped) and writes a STOPPED row with a Head line and
+\* `Reason: escalated`. The next launch (`--cause escalated`) waits for the new stage (Workflow.tla) and does not count
+\* toward the cap. A Manager choice, not a hint: behind ESCALATIONS, which only escalate*.cfg turn on.
+\* Two guards and one effect come from the check (the first run broke VerdictNotLost and PausedWipCommitted): a
+\* verifier that started must have filed its row first (vfiled), else its verdict is lost unseen; and the STOPPED row
+\* carries a Head line, so the WIP is committed first, as commit_stopped does.
+Escalate ==
+  /\ ESCALATIONS
+  /\ status = "in_progress" /\ ~abandoned /\ ~Closed /\ ~inRound
+  /\ lastTask \in WorkerStatuses
+  /\ worker \notin {"busy", "stopping"} /\ verifier # "busy"
+  /\ vfiled
+  /\ worker' = IF Live(worker) THEN AfterStop(worker) ELSE worker
+  /\ verifier' = IF Live(verifier) THEN AfterStop(verifier) ELSE verifier
+  /\ lastTask' = "STOPPEDhead" /\ stopReason' = "escalated"
+  /\ wtDirty' = FALSE
+  /\ UNCHANGED <<status, attempt, abandoned, verdict, merged, pr, mainHas, workerResult,
+                 vv, vIssues, vManager, vNewer, vfiled, vreport, stopOrder, fault, faulted>>
+  /\ UNCHANGED RoundVars
+  /\ workerKept' = FALSE /\ verifierKept' = FALSE
+  /\ UNCHANGED <<revision, findingsOpen, verifierAt, vvRev>>
 
 \* cmd_abandon, lines 5712-5762: stops the task's live worker sessions (5722-5727) and, since 0.12.0 (#57),
 \* its live verifier (5728-5731). At the cap the Manager abandons and re-plans (0.18.0 rule 13): the new task
@@ -885,6 +919,7 @@ Next ==
   \/ StartRound \/ RoundCancel \/ RoundMerged
   \/ TargetConflicts \/ ConflictClears \/ RoundHeadPushed \/ MainConflicts \/ MainConflictClears
   \/ Revise \/ WorkerAcksFindings \/ VerifyResume \/ WorkerKeepEnds \/ VerifierKeepEnds
+  \/ Escalate
 
 Spec == Init /\ [][Next]_vars
 
@@ -933,10 +968,17 @@ NoMergeWithoutPassingVerdict ==
 \* The owner's rule (#59): the attempt passes MAX_ATTEMPTS only by a launch after a pause the operator ordered
 \* (the newest row is STOPPED with Reason: pause); a stop that recovers a quiet or broken session, a stop by
 \* close, and DIED all count as an attempt. An action property: it names the step that passes the cap. A round
-\* (#119) does not count toward the cap: [rounds] cap limits the rounds.
+\* (#119) does not count toward the cap: [rounds] cap limits the rounds. Owner decision 4 (W4, planned): nor does
+\* the attempt that an escalation interrupted (the newest row is STOPPED with Reason: escalated).
 AttemptCap ==
   [][(attempt' > MAX_ATTEMPTS /\ attempt' # attempt)
-       => ((lastTask = "STOPPEDhead" /\ stopReason = "pause") \/ rounds' > rounds)]_vars
+       => ((lastTask = "STOPPEDhead" /\ stopReason \in {"pause", "escalated"}) \/ rounds' > rounds)]_vars
+
+\* Owner decision 4: an escalation never costs the task its last attempt: no hint abandons a task whose newest row is
+\* the escalation's STOPPED row. REGRESS_ESC_CAP (the escalated attempt counts) turns the launch after it into a
+\* refused one at the cap.
+EscalationKeepsAttempt ==
+  [][(abandoned' /\ ~abandoned) => ~(lastTask = "STOPPEDhead" /\ stopReason = "escalated")]_vars
 
 \* cmd_launch line 2489: "A dirty worktree never reaches a worker silently: commit what the last attempt left."
 LaunchCommitsLeftovers == [][Launch => wtDirty' = FALSE]_vars

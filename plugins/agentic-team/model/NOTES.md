@@ -6,6 +6,8 @@ The method comes from poteto's statechart skill in the pstack plugin (https://gi
 
 The model found the six issues that 0.12.0 fixes (#56, #57, #58, #59, #61, #62). Their old paths live on as sensitivity checks (`REGRESS_*`), below. 0.12.1 adds the ghost row (#65), see "Ghost rows". 0.19.0 makes a closed task wait in progress for its merge, see "0.19.0". 0.18.0 adds the verifier's finding labels, the refusals of a broken role file and of a read-only `info/exclude`, and the no-change close of 0.12.3; see "0.18.0" and "Open breaks".
 
+`Workflow.tla`, beside it, models one workflow instance of the workflow templates (stages, dependencies, approvals, splits and the planned W4 commands); see "The workflow model" at the end. `Lifecycle.tla` has the W4 escalation behind `ESCALATIONS` (see "W4 escalation").
+
 ## How to read the model
 
 - The Manager's only moves are the command that `record` names in its `next:` hint, and `record` itself. `Hint` is a derived operator: what `record` would print from the current state. `Record` is an action only when `record` writes something (a row, a meta, a `claude stop`); while it would, `Hint = "record"` and no other command is enabled.
@@ -161,6 +163,16 @@ A verifier's verify-failed verdict with `blocking:` lines no longer starts a new
 - Left out: the stash of a verifier's leftovers (no tracked change is modelled), the move of a seat-own folder as a step of its own (it is part of `VerifyResume`), the slot cap (`check_cap`), CI and Manager verdicts (no revision: `RevisionOK` excludes a Manager row; CI is out of the model), and the resume chain of session ids (the model has one row per session).
 - `phase-edges.json` gains `verdict_failed, revise, running`. `phase-view.mjs` labels `Revise` revise and `VerifyResume` verify.
 
+## W4 escalation (owner decision 4)
+
+Workflow templates (docs/design/workflow-templates.md, section 8 and decision 4) add `run.py stage <inst> escalate`: when a report or a verdict shows that a design is missing, the Manager puts a spec stage before the stage that runs, and that stage's next attempt waits for it. The attempt that the escalation interrupted does not count toward the 3-attempt cap. The command is planned for phase W4; the model has it as `Escalate`, behind the constant `ESCALATIONS` (FALSE in every config of 0.24.0, so their states and results are unchanged):
+
+- `Escalate` is the Manager's choice, not a hint. It is enabled once a worker result is filed (`lastTask` is PASS, ISSUES or BLOCKED), with no busy session, no passing verdict, no round, and a verifier that has filed its row if one started (`vfiled`). It stops both sessions (the ones kept for a revision too), commits the WIP, and writes a STOPPED row with a Head line and `Reason: escalated` (`lastTask = "STOPPEDhead"`, `stopReason = "escalated"`).
+- `StoppedNext` names `launch` after it at any attempt (as after a pause); `RecInProgress` reads the escalated row before the verifier and verdict rows (as it reads a pause); `Exempt` lets the launch pass the cap (`refuse_past_cap` must read the row, not trust a bare `--cause escalated`). In the code the launch waits for the new stage first (Workflow.tla); the model leaves the wait out.
+- `AttemptCap` allows the escalated launch past the cap. The new rule `EscalationKeepsAttempt`: no abandon follows the escalated row, so an escalation never costs the task its last attempt.
+- The first run of `escalate.cfg` broke `PausedWipCommitted` (the STOPPED row claimed a Head line over a dirty worktree) and `escalate-revise.cfg` broke `VerdictNotLost` (an idle verifier with no row was stopped, its verdict lost unseen). Hence the guard `vfiled` and the WIP commit; both are W4 requirements (PREDICTIONS.md, "Workflow templates").
+- `REGRESS_ESC_CAP` leaves the escalated row out of `Exempt` (the cap counts the interrupted attempt): `regress-esc-cap.cfg` must break NoDeadlock (the hint after an escalation at the cap is launch, and launch refuses).
+
 ## Phase edges (#99)
 
 `run.py` changes the `phase` meta only through its table `TRANSITIONS`: `(phase, event) -> phase`. `test_the_table_has_the_edges_of_the_model` in `tests/test_run.py` checks that the table and the model have the same edges. It needs no TLC:
@@ -239,6 +251,7 @@ Run these when you change the model: if they stop breaking, the model has gone b
 | `regress-127w.cfg` | `verify` starts the verifier while the worker is still busy in the task worktree | `NoConcurrentWriters` (3 steps predicted: launch, PASS, verify while the worker's turn still runs) | #127 |
 | `regress-127a.cfg` | the report check ignores an unacked finding steer | `FindingsAckedBeforeReport` (9 steps predicted: launch, PASS, the worker ends, verify, verify-failed, the verifier ends, close, revise, PASS with no ack) | #127 |
 | `regress-89-revise.cfg` (revisions on) | as `regress-89.cfg` | `FixRoundNeedsBlocking` (7 steps predicted: launch, PASS, the worker ends or goes idle, verify, an ISSUES row with no `blocking:` line, the verifier ends, close; the hint is `revise` when the worker ended, `launch` when it went idle; TLC shows whichever it reaches first) | #89 with #127 |
+| `regress-esc-cap.cfg` (`ESCALATIONS` on) | the escalated attempt counts toward the cap (owner decision 4 undone) | `NoDeadlock` (7 steps: launch, the worker ends, record files DIED, launch attempt 2, PASS, the worker ends, escalate; the hint says launch and `refuse_past_cap` refuses) | decision 4 |
 | `regress-65b.cfg` | run.py does not note the sessions it stops (before part 3 of #65): a stopped idle/working row is a young ghost (`ghostStopped`) | `StoppedIdleNeverRefuses` (4 steps: ISSUES, the worker goes idle, launch stops it and refuses on its ghost row). Not `NoDeadlock`: the ghost ends after 30 quiet minutes; the cost is the wait, which the rule names. The first run of this config also broke NoDeadlock, NoMergeWithoutPassingVerdict and NoSessionLeftAtEnd: those came from the model letting a stop-induced ghost come back as idle (a stopped verifier filed check-only after the close; a stopped worker came back and blocked the launch for good), which the probe does not support; `ghostStopped` does not come back | #65, the field's fix-round refusal |
 
 Add one when an issue is fixed: keep its path as a `REGRESS_*` constant that undoes the fix, and a config that must break.
@@ -278,8 +291,11 @@ Add one when an issue is fixed: keep its path as a `REGRESS_*` constant that und
 | 21 | `regress-127w.cfg` | `view.mjs` | as 15, REGRESS_127W | must break NoConcurrentWriters |
 | 22 | `regress-127a.cfg` | `view.mjs` | as 15, REGRESS_127A | must break FindingsAckedBeforeReport |
 | 23 | `regress-89-revise.cfg` | `view.mjs` | as 15, REGRESS_89 | must break FixRoundNeedsBlocking |
+| 24 | `escalate.cfg` | `view.mjs` | as 1, ESCALATIONS = TRUE | every rule holds, `EscalationKeepsAttempt` included; no dead end |
+| 25 | `escalate-revise.cfg` | `view.mjs` | as 15, ESCALATIONS = TRUE | as 24 |
+| 26 | `regress-esc-cap.cfg` | `view.mjs` | as 24, REGRESS_ESC_CAP | must break NoDeadlock |
 
-A TLC run reports one dead end per config (the shortest). The statechart command removes a broken invariant itself and runs again. The constants `MAX_ATTEMPTS`, `MERGE_MODE`, `HIGH_RISK`, `FULL_ENV`, `OPERATOR_PAUSES`, `FAULTS`, `ALLOW_UNCHECKED_REPORT`, `ROUND_CAP` (2; the overviews 1), `ROUND_VERIFY` ("always"), `REVISION_CAP` (0; the revise configs 2, the revise overview 1), `SEAT` ("own"; the revise configs "task", except `check-revise-own.cfg` and `regress-127h.cfg`) and the `REGRESS_*` flags (`REGRESS_89`, `REGRESS_97`, `REGRESS_119` and the four `REGRESS_127*` included) are set in each config.
+A TLC run reports one dead end per config (the shortest). The statechart command removes a broken invariant itself and runs again. The constants `MAX_ATTEMPTS`, `MERGE_MODE`, `HIGH_RISK`, `FULL_ENV`, `OPERATOR_PAUSES`, `FAULTS`, `ALLOW_UNCHECKED_REPORT`, `ROUND_CAP` (2; the overviews 1), `ROUND_VERIFY` ("always"), `REVISION_CAP` (0; the revise configs 2, the revise overview 1), `SEAT` ("own"; the revise configs "task", except `check-revise-own.cfg` and `regress-127h.cfg`), `ESCALATIONS` (FALSE; the escalate configs TRUE) and the `REGRESS_*` flags (`REGRESS_ESC_CAP` included) (`REGRESS_89`, `REGRESS_97`, `REGRESS_119` and the four `REGRESS_127*` included) are set in each config.
 
 `FULL_ENV = FALSE` keeps only the main flow of the environment: a worker reports and ends, a stopped worker exits, a verifier files and ends, the operator merges, the host moves the request. No idle, blocked, prompted, failed or ghost sessions, no dirty worktree, no unfiled report. It is for the overview chart, not for the check.
 
@@ -301,3 +317,104 @@ For `phase-edges.json`, run the commands in "Phase edges".
 ## Keeping the model current
 
 When `run.py` changes a hint, a refusal, or what a command writes, change the matching action and its line numbers, run `check.cfg`, the regress configs and `pause.cfg`, and update PREDICTIONS.md. When it changes `TRANSITIONS`, or a change to the model moves a phase, regenerate `phase-edges.json` ("Phase edges") and run the test; a new difference gets an exclusion with its reason, or a fix. When the check finds a new break, confirm it in the code at the line, file it, and give it an `ALLOW_*` switch (TRUE: the real way out) until the fix lands; then turn the switch into a `REGRESS_*` constant and a regress config.
+
+# The workflow model (Workflow.tla)
+
+`Workflow.tla` models one workflow instance of the workflow templates (docs/design/workflow-templates.md, section 11): the stage tasks that `run.py add --workflow` creates, their dependencies and approval decisions, the parts of a split stage, the owner's `rechoose`, the stage-orphaned hint, and the W4 commands as planned (`escalate`, `downgrade`, `replace`, `cancel`). It is a new module, not a refinement of `Lifecycle.tla`. Code references are to `scripts/run.py` and `scripts/workflows.py` on the workflow-templates branch after W3 (by function).
+
+**The interface assumption.** Each attempt of a stage task is one abstract run: `Launch`, then `Report` (the worker's result is filed and its sessions are kept), then `Finish`: verified and merged, or abandoned. Workflow assumes that every attempt ends one of these two ways and that following `record`'s hints never leaves it in a dead end. `Lifecycle.tla` proves exactly that for one task (its deadlock check with `Done` only at merged or abandoned). Lifecycle in turn leaves out dependencies and decisions (`waits_for`, `gated`), which are the subject of this model.
+
+## Constants
+
+| Constant | Meaning | Configs |
+|---|---|---|
+| `WF` | the workflow: `check` (a project workflow `prd -> ux? -> spec? -> impl* -> test`, spec forced on by a rule and raised to human, impl split with a manager approval), `feature` and `hotfix` (the shipped files) | `check` unless named |
+| `MaxParts` | the parts a split stage may have | 2 (overview 1) |
+| `MaxAdj` | `max_adjustments`: escalations plus downgrades per instance | 2 |
+| `MaxRepl` | `max_replacements` per stage | 1 |
+| `MaxRechoose` | a bound on the owner's `rechoose` (not a code limit; unbounded, it is an infinite legal behaviour) | 1 (overview 0) |
+| `OnTimeout` | `on_timeout` of the rule that raises spec to human | "approve" (`wf-hold.cfg` "hold") |
+| `W4` | TRUE: escalate, downgrade, replace and cancel exist | TRUE (`wf-code-*.cfg` FALSE) |
+| `OPERATOR_FAIR` | the owner answers an open human approval in the end | FALSE |
+| `LATE_RULES` | a split part's SCOPE may match a rule that the instance SCOPE did not (`recheck_rules` after `stage_split`) | TRUE |
+| `FIX_SINK_ORPHAN`, `FIX_RECHOOSE_RULES` | FALSE is the code after W3, TRUE the fix of a break the model found (below) | TRUE (`wf-code-orphan.cfg`, `wf-code-rechoose.cfg` FALSE) |
+| `REGRESS_*` | each restores a bug or drops a guard; its regress config must break | FALSE |
+
+Stage ids are strings; the slot `"+spec"` is the one stage that `escalate spec --before impl` can create (so "each type at most once" is the slot plus `escCount`). Variables: `st[s]` (absent, created, skipped), `deps[s]`, `parts[s]`, `run[s][k]` (none, busy, idle, done, abandoned), `appr[s]` (none, pending, open, approved, defaulted), `due[s]`, `adj`, `escCount`, `repl[s]`, `inst` (open, merged, cancelled), `ruleEver` (the rule stages the workflow record holds), `rechosen`. Waiting, gated and ready are derived (`Satisfied`), not stored.
+
+## Actions and the code they model
+
+| Action | Code |
+|---|---|
+| `Init` (one state per choice of optional stages) | `add_workflow`: `plan_with_rules` (`apply_rules`: a rule's optional stage is forced on, `--skip` of it refused), `build_plan` and `contracted` (a skipped stage's edges go to its upstream), `create_stage` (real `--depends` on each upstream task and its approval decision; `stage_approval` for the level) |
+| `Launch` | `cmd_launch`: `waiting_for` refuses while a dependency or a decision is not done; a downgraded stage counts as done |
+| `Report`, `Finish` | the attempt lifecycle (Lifecycle.tla), abstract |
+| `OpenApproval` | `open_approval` from the merge record and `approve_due` (a pending decision whose stage is done): opens only when every part (`stage_parts_of`) is merged |
+| `ManagerApprove`, `OperatorAnswers` | `stage_approve --by manager` / `--by operator`: refused while a part is unmerged; a human approval only by the operator |
+| `DueArrives`, `ApplyDefault` | the clock; `approve_due` and `stage_approve --default` (none for a held human approval) |
+| `Split` | `stage_split`: only while part 1 (`parts[0]`) has no attempt; the new part copies the upstream, every follower of part 1 depends on it; then `recheck_rules` (`LATE_RULES`) |
+| `Rechoose` | `stage_rechoose`: only before any stage started; every child removed and the plan made again; the rules from `matching_rules` on the record's SCOPE and area |
+| `Escalate`, `Downgrade`, `Replace`, `Cancel` | W4 as planned (section 8), with the guards the check needs (below) |
+| `Settle` | the instance's derived status: every stage merged, every approval answered |
+| `Done` | the end: settled, or (without W4) an abandoned stage with its `stage-orphaned` hint (`orphan_note`, from `cmd_abandon` and `record`) |
+
+Left out: `figure-it-out` and `stage expand` (W4; the spec's `wf-figure.cfg`), external `--depends`/`--blocks` of the instance, the dependency gate, a late rule whose stage is absent (`recheck-missing`: a hint, no state), `escalate --replace`, a split stage that is optional, and rechoose to another workflow (the model rechooses the same workflow with another choice of optional stages, which is enough for the rules).
+
+## Rules and the code that keeps them
+
+| Rule | Kind | Kept by |
+|---|---|---|
+| `TypeOK`, `Acyclic` | invariant | `check_graph`; escalation copies the target's upstream, a downgrade contracts |
+| `NoGhostDeps`: no stage that is not done depends on a stage that does not exist | invariant | `contracted` in `build_plan` (`REGRESS_NO_CONTRACT` breaks it); rechoose removes and recreates every edge |
+| `NoBypass`: a started part has every created stage above it (through skipped ones) merged and approved | invariant | `waiting_for` in `cmd_launch` over the edges of `create_stage`; W4: `escalate` refuses a target with a busy or merged part, and `downgrade` moves the stage's upstream edges to its dependents |
+| `SplitApprovalAfterAllParts` | invariant | `open_approval` (`stage_parts_of`, every part done) and `stage_approve`'s unmerged check |
+| `RuleStagesKept`: while the instance is open, every rule stage of the record exists | invariant | `apply_rules` at add and rechoose; W4 `downgrade` must refuse a rule stage; `stage_rechoose` must keep the rules of the record (finding 2) |
+| `EscalatedKept` | invariant | W4 `downgrade` refuses a stage added by escalation (rechoose may remove it: an override) |
+| `AdjBound` | invariant | W4 limits: `adj <= max_adjustments`, one escalation per type, `repl <= max_replacements` |
+| `NoSessionAfterEnd` | invariant | W4 `cancel` abandons the stages that still run |
+| `NoInsertIntoBusy` | action property | W4 `escalate` refuses a target with a busy session |
+| `Liveness`: `<>[](settled, or held by the owner, or (no W4) orphaned with a hint)` under weak fairness of the Manager's hinted steps, the sessions and the clock | temporal | defaults at the due time (`approve_due`), `replace`/`cancel` on every orphan hint; escalation terminates because `AdjBound` bounds the unfair `Escalate`/`Downgrade` |
+| no dead end | deadlock | as above, with `Done` |
+
+## Findings against the code after W3
+
+1. **An abandoned sink stage gets no hint, and the instance never ends** (`wf-code-orphan.cfg`, deadlock, 15 steps). Trace: prd, spec and impl run, merge and are approved; test launches and is abandoned at the cap. `orphan_note` lists only the task's `blocks` that are not done; test is the last stage and its approval is auto, so `blocks` is empty and no `stage-orphaned` line is printed, by `cmd_abandon` or by `record`. The instance stays in progress for ever, and so does every task that `--blocks` on it; the Manager is never told. The same holds for any auto-approved last stage (test in hotfix, fix, change and feature). Fix (`FIX_SINK_ORPHAN`): `orphan_note` also fires when the stage's instance is not done (name the instance and its external dependents), so that `replace` or `cancel` is hinted.
+2. **`rechoose` drops a rule that `recheck_rules` found** (`wf-code-rechoose.cfg`, `RuleStagesKept`, 2 steps). Trace: `add` creates ux by `--with`; the Manager splits impl and a part's SCOPE matches a rule that requires ux (the instance SCOPE did not), so `recheck_rules` records it as `recheck-satisfied`; the owner runs `rechoose` (no stage has started) without `--with ux`. `stage_rechoose` matches the rules again with `matching_rules(run, scope, area)` on the record's SCOPE only, so the late rule is not applied, ux is not created, and `record.update(rules=applied)` erases the rule from the record. Fix (`FIX_RECHOOSE_RULES`): rechoose applies every rule in `record["rules"]` as well (or matches the union of the SCOPEs, as `recheck_rules` does with `instance_scope_paths`).
+
+Nothing else breaks: the split approval holds (the W2 review fix), approvals cannot be bypassed, skipped stages leave no ghost edges, a held approval waits only for the owner, and every other run ends merged.
+
+## Guidance for W4 (what the model needs from each command)
+
+- **escalate**: refuse past `max_adjustments` and a second escalation of a type; refuse while a part of the target is busy (`NoInsertIntoBusy`) and when a part of the target is merged or abandoned (else `NoBypass` breaks: a merged part already ran without the new stage; `regress-wf-insert-running.cfg`); add the new stage's task and its approval to the deps of every part of the target; stop the kept sessions and write a STOPPED row with a Head line and `Reason: escalated` after committing the WIP; refuse while a started verifier has filed no row (Lifecycle `escalate*.cfg`); `record` reads that row before the verdict rows and hints launch; `refuse_past_cap` exempts the row (not the bare `--cause escalated` flag).
+- **downgrade**: only an optional stage with no attempt; never a rule stage (`regress-wf-skip-rule.cfg`) or an escalated one; count it in `max_adjustments`; move the stage's upstream edges (tasks and approval decisions) to each dependent, as `contracted` does at add. Marking it `tg done` with `stage_state=skipped` alone, as section 8 words it, lets a dependent start before the skipped stage's upstream is merged and approved (`regress-wf-downgrade-done-only.cfg`, `NoBypass` in 2 steps: downgrade ux before prd has run, then launch spec).
+- **replace**: only on a `stage-orphaned` hint, at most `max_replacements` per stage; dependents and the approval decision move to the new task.
+- **cancel**: only on a `stage-orphaned` hint; abandon (and stop the sessions of) every stage that still runs in a parallel branch, not only skip the not-started ones (`NoSessionAfterEnd`).
+- **orphan hint**: must also fire for a stage that nothing depends on (finding 1); otherwise `replace` and `cancel` are never hinted for the last stage, and the deadlock check finds the dead end with W4 on as well.
+- **rechoose** after an escalation removes the escalated stage with the rest; the model allows it as the owner's override. Keep the record's rules (finding 2).
+
+## Workflow configs
+
+| Config | Constants | Expect |
+|---|---|---|
+| `wf-check.cfg` | check, W4, both fixes | every rule holds, no dead end |
+| `wf-feature.cfg` | feature, W4, both fixes | as wf-check |
+| `wf-hold.cfg` | as wf-check, `OnTimeout = "hold"`, the owner may never answer | as wf-check; Liveness allows the held approval |
+| `wf-overview.cfg` | hotfix, W4, MaxParts 1, no rechoose | every rule holds; the chart `assets/diagrams/workflow-statechart.mmd` (`wf-view.mjs`) |
+| `wf-code-fixed.cfg` | check, no W4, both fixes | every rule holds; an orphan with a hint is an accepted end |
+| `wf-code-orphan.cfg` | check, no W4, `FIX_SINK_ORPHAN = FALSE` | must break NoDeadlock (finding 1) |
+| `wf-code-rechoose.cfg` | check, no W4, `FIX_RECHOOSE_RULES = FALSE` | must break RuleStagesKept (finding 2) |
+| `regress-wf-split-approval.cfg` | `REGRESS_SPLIT_APPROVAL`: the approval opens when part 1 merges | must break SplitApprovalAfterAllParts |
+| `regress-wf-skip-rule.cfg` | `REGRESS_SKIP_RULE`: downgrade may skip a rule stage | must break RuleStagesKept |
+| `regress-wf-escalate-loop.cfg` | `REGRESS_ESCALATE_LOOP`: no adjustment bound (EscalatedKept left out of the config: the loop breaks it one step earlier) | must break AdjBound |
+| `regress-wf-no-contract.cfg` | `REGRESS_NO_CONTRACT`: add keeps a skipped stage's edges | must break NoGhostDeps |
+| `regress-wf-downgrade-done-only.cfg` | `REGRESS_DOWNGRADE_DONE_ONLY` | must break NoBypass |
+| `regress-wf-insert-running.cfg` | `REGRESS_INSERT_RUNNING`: escalate before a busy or merged part | must break NoBypass (with NoBypass left out: NoInsertIntoBusy) |
+| `regress-wf-no-default` | `REGRESS_NO_DEFAULT`: an open approval has no default | must break Liveness (a human approval that does not hold waits for ever) |
+
+Run each with TLC directly (the statechart command draws no chart above 500 states) and a timeout, in a new folder:
+
+```
+java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC -workers 8 -config wf-check.cfg Workflow.tla
+```
+
+`wf-check.cfg` takes about a minute; every other config under half a minute. For the chart, run the statechart command on `wf-overview.cfg` with `--view plugins/agentic-team/model/wf-view.mjs`, copy `chart.mmd` to `assets/diagrams/workflow-statechart.mmd` below a `%% Generated by the statechart skill` line, and render it with the statechart skill's `render.mjs`. When `add --workflow`, `open_approval`, `stage_approve`, `stage_split`, `stage_rechoose`, `recheck_rules` or `orphan_note` change, or W4 lands, update the matching action, rerun every Workflow config, and turn each `FIX_*` that the code fixes into a `REGRESS_*` with its config.

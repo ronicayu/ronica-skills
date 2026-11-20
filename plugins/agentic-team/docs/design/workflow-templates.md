@@ -547,6 +547,8 @@ Write a **new module, `model/Workflow.tla`**, not a refinement of `Lifecycle.tla
 
 **Configs**: `wf-hotfix.cfg`, `wf-feature.cfg` (optional ux, split collapsed into one part), `wf-figure.cfg` (decides), `wf-hold.cfg` (`OnTimeout = "hold"` with operator fairness), and one `regress-wf-*.cfg` per flag, each of which must break. TLC's deadlock check means "no dead end" here too: without `Replace` and `Cancel`, an abandoned upstream deadlocks, which proves the orphan rule is needed.
 
+**Results (W5, 2026-11-20).** `model/Workflow.tla` and its configs are in; `model/NOTES.md` ("The workflow model") maps each rule to the code, and `model/PREDICTIONS.md` ("Workflow templates W5") has the runs. The main check (`wf-check.cfg`, 2.7 million states) holds every rule with the W4 commands as guarded there, and each regress config breaks. Against the code after W3 the model found two breaks: an abandoned last stage with an auto approval gets no `stage-orphaned` hint, so the instance never ends (`orphan_note` reads only the task's `blocks`); and `rechoose` drops a rule that `recheck_rules` added after a split. It also sets requirements for W4: `downgrade` must move the skipped stage's upstream edges to its dependents (a done-skipped task alone lets a dependent start before that upstream is approved), `escalate` must refuse a target with a merged part and a verifier that has not filed, and must commit the WIP under its STOPPED row, and `cancel` must abandon the stages that still run. `Lifecycle.tla` has decision 4 (`ESCALATIONS`, `Reason: escalated`, exempt from the cap); every earlier config gives the same states as before.
+
 ## 12. Comparison with pstack
 
 | | pstack poteto-mode playbooks | agentic-team workflows |
