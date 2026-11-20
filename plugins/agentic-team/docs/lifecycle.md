@@ -370,6 +370,13 @@ does not use an attempt. A stop without it recovers a session that went quiet
 or broke (`Reason: recover`), and the attempt counts toward the cap, as a
 `DIED` attempt does.
 
+A third stop is the escalation of a workflow stage (`run.py stage <instance> escalate`, see
+[Changes in flight](roles-and-briefs.md#changes-in-flight)). It acts on an attempt that has reported, so there
+is no session to wait for: it stops the idle sessions, commits the WIP and files one `STOPPED` row with the `Head` and
+`Reason: escalated`; the phase goes from `reported` or `verifying` to `stopped` (an attempt with a failed verdict keeps
+`verdict_failed`). `record` reads that row before the verifier and verdict rows, and its next step is `launch`, which waits
+for the stage that the escalation added. Like a pause, that launch does not use an attempt: `refuse_past_cap` reads the row.
+
 ## The checked model
 
 ![A ready task is launched by run.py, recorded, then verified and closed, retried in a fix round, split, or turned into a decision for the operator](../assets/diagrams/lifecycle.svg)

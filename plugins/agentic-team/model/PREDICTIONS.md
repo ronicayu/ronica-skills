@@ -368,3 +368,9 @@ workers). The phase-edges test passes (`TransitionTest.test_the_table_has_the_ed
 | escalate.cfg | every rule holds, EscalationKeepsAttempt included | 72,227 | 30 | 2 s |
 | escalate-revise.cfg | every rule holds | 620,963 | 48 | 11 s |
 | regress-esc-cap.cfg | breaks NoDeadlock, 7 steps (launch, the worker fails, record files DIED, launch attempt 2, PASS, the worker fails, escalate; launch refused at the cap) | 1,198 at the stop | 9 | 1 s |
+
+# Workflow templates W4 (the escalation lands in run.py)
+
+| Prediction | Result |
+|---|---|
+| `phase-edges.json` regenerated from `check.cfg`, `check-pr.cfg`, `overview-revise.cfg` and `escalate.cfg` differs from the W5 fixture by exactly two edges, `reported, escalated, stopped` and `verifying, escalated, stopped`; a failed verdict keeps `verdict_failed`, so it adds no edge. | Confirmed: the three old configs alone reproduce the old file byte for byte (TLC 2.x, Java 27), and `escalate.cfg` adds those two edges (72,227 distinct states, 2 s). The test `test_the_table_has_the_edges_of_the_model` passes with the two `TRANSITIONS` rows. No exclusion entry was needed. |

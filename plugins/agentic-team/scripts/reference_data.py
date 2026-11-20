@@ -18,16 +18,23 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
      ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule` (the first matching rule), "
       "`pick`: the two answers, their seeds, the workflow resolved, the resolution rule and whether it was unsure; `rules`: each "
       "hard rule that matched, with what it did; `picked_at`, `overrides`, "
-      "`adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `type`, `task`, `approval`, `approval_id`, `split`, "
-      "`after` and `parts`). The instance is never launched; its status is the derived status of its stages.")),
-    (("stage", "stage_part", "stage_origin", "split_declined", "workflow_notes"), "`add --workflow`, `stage split`, `stage approve`",
-     ("On a stage task: its stage id; the part number of a split stage; how it came to exist (`expand`, `with` or `split`); "
+      "`adjustments` (one row for each `stage escalate` and `stage downgrade`: `kind`, `stage`, `type`, `before`, `why`, `row`, `rule`, `at`), "
+      "`ended` (set by `stage cancel`: `kind`, `why`, `at`, and the tasks it abandoned, skipped and closed), `expanded` (set by "
+      "`stage expand`: the workflow, the report row, the stage ids), `scope`, `verify`, and `stages`: each stage's `id`, `type`, `task`, "
+      "`approval`, `approval_id`, `split`, `after`, `parts`, and `escalated`, `before`, `skipped`, `replaced`, `replaced_tasks` where they apply). "
+      "The instance is never launched; its status is the derived status of its stages. A cancelled instance also has `abandoned=cancelled` and `abandoned_why`.")),
+    (("stage", "stage_part", "stage_origin", "split_declined", "workflow_notes"), "`add --workflow`, `stage split`, `stage approve`, `stage escalate`",
+     ("On a stage task: its stage id; the part number of a split stage; how it came to exist (`expand`, `with`, `split` or `escalate`); "
       "the one line that declined a split; and the workflow's notes for the stage, which the brief pastes under CONTEXT.")),
+    (("stage_state", "skipped_why", "replaced_from", "replaced_by"), "`stage downgrade`, `stage cancel`, `stage replace`",
+     ("On a stage task: `stage_state=skipped` (with `skipped_why`) marks a stage that was left out after it was created: the task is done "
+      "with no attempt, and run.py never derives a merge for it. `replaced_from` is on the task that `stage replace` made, and "
+      "`replaced_by` on the abandoned task it took the place of, which leaves the instance.")),
     (("approval_id",), "`add --workflow`", "On a stage task that has an approval: the id of its decision."),
     (("approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default"),
      "`add --workflow`, the merge record, `record`, `stage approve`",
      ("On an approval decision: the stage task and stage id it answers, its level (`manager` or `human`), its state (`pending` "
-      "until the stage merges, `open`, `done`), what happens at the due time (`on_timeout`: `approve` or `hold`), the due time "
+      "until the stage merges, `open`, `done`; `skipped` or `cancelled` for a decision that ended with its stage), what happens at the due time (`on_timeout`: `approve` or `hold`), the due time "
       "(`due_at`, UTC; `decide_by` is its date for Taskgraph) and the `default` that `record` applies. A `human` decision has "
       "`decider=manager` until the stage merges, then `operator`.")),
     (("verify_mode",), "plan",
@@ -133,7 +140,7 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
       "--clear`, in the merge record before `tg done`, and in `abandon`. A task that is done in Taskgraph (closed by "
       "0.18.0) gets no gate. Other gates on the task are not `run.py`'s.")),
     (("abandoned",), "`abandon`",
-     ("The reason code: `died`, `tool-error`, `stuck`, `failed`, `scope-wrong`, `superseded` or `operator` (0.27.2 "
+     ("The reason code: `died`, `tool-error`, `stuck`, `failed`, `scope-wrong`, `superseded`, `operator` or `cancelled` (0.27.2 "
       "and older also wrote `unknown`). Only this marker lists a task as abandoned.")),
     (("abandoned_why",), "`abandon`",
      "The `--why` text of the abandon. `launch` removes it with `abandoned`."),
@@ -199,7 +206,8 @@ META_WHY: list[tuple[tuple[str, ...], str]] = [
     (("gates",),
      "Written by `tg gate`, not `--meta`; the issue shows the open merge gate."),
     (("workflow", "workflow_record", "stage", "stage_part", "stage_origin", "split_declined", "workflow_notes", "approval_id",
-      "approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default"),
+      "approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default",
+      "stage_state", "skipped_why", "replaced_from", "replaced_by"),
      "Another machine must see the workflow and where each stage and approval stands; none of them is local."),
 ]
 
@@ -210,7 +218,8 @@ RESULT_KINDS: list[tuple[str, str, str, str]] = [
       "Checkpoint. `Asked:` lists the ask ids an `ISSUES` or `BLOCKED` report relied on, or says `none: <one-line "
       "reason>` (see [Messaging](messaging.md#messaging), Ask first). Each `Follow-ups:` line is `<label>: <path or "
       "question>: <why>`, with a label from `caller`, `doc`, `test`, `other`, `found`, `split` (`split: timebox: "
-      "<what remains>`) and `flake` (`flake: <check>: <the failing run and the passing rerun>`: a check that failed "
+      "<what remains>`), `design` (`design: <question>: <why>`: a design question that an earlier stage should answer; on a "
+      "workflow stage `record` prints an `escalation-hint`) and `flake` (`flake: <check>: <the failing run and the passing rerun>`: a check that failed "
       "once, not plainly because of the change (a timeout, a network error, a test order problem), and passed on one "
       "rerun with no change; the status stays `PASS`. A failing check that runs code the task changed is not a flake "
       "unless it also fails on the base. A verifier writes a flake as a `flake:` follow-up, not a `blocking:` "
@@ -222,8 +231,9 @@ RESULT_KINDS: list[tuple[str, str, str, str]] = [
       "report that `record` recovered keeps the worker's own status.")),
     ("`task`", "`STOPPED`", "The Manager",
      ("A worker that `stop` stopped (a second row carries the WIP commit `Head:`), or a worker session `close` "
-      "stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), or `close`. "
-      "Only `Reason: pause` keeps the attempt from counting toward the cap; a row with no `Reason:` line counts.")),
+      "stopped. A `Reason:` line says why: `pause` (a `STOP` line was set), `recover` (no `STOP` line), `close`, or `escalated` "
+      "(`stage escalate` stopped an attempt that had reported, after it committed the WIP: one row, with the `Head:`). "
+      "Only `Reason: pause` and `Reason: escalated` keep the attempt from counting toward the cap; a row with no `Reason:` line counts.")),
     ("`task`", "`ABANDONED`", "The Manager",
      "A session `abandon` stopped: `Abandoned: <reason>` and `Why: <text>`."),
     ("`task`", "`PASS`", "The Manager",
@@ -315,8 +325,8 @@ COMMAND_DOCS: dict[str, str] = {
      "or broken session, which counts as an attempt."),
     "abandon": ("Marks a task abandoned after attempt 3 failed, and stops the task's live worker and verifier sessions. "
      "`<reason>` is a code: `died`, `tool-error`, `stuck`, `failed` (the attempts failed on their merits), "
-     "`scope-wrong` (the brief, SCOPE or a dependency was wrong), `superseded` (another task or request replaces it) "
-     "or `operator` (the operator dropped it). `--why` is required: one line of free text, stored in the meta "
+     "`scope-wrong` (the brief, SCOPE or a dependency was wrong), `superseded` (another task or request replaces it), "
+     "or `operator` (the operator dropped it); `stage cancel` abandons with `cancelled`, which no command line takes. `--why` is required: one line of free text, stored in the meta "
      "`abandoned_why`, the `ABANDONED` row (`Abandoned:`, `Why:`) and the `abandoned` line. `unknown` is gone; a "
      "missing `--why` is refused. It also drops a task that waits for its merge: its branch stays unmerged, and in "
      "`pr` mode its request stays open on the host for the operator to close."),
@@ -365,7 +375,26 @@ COMMAND_DOCS: dict[str, str] = {
      "(a part added by `split` does it too); a rule that is new to the record gets a `workflow-rule` line, and one whose stage "
      "is missing gets the way out. `rechoose <workflow>` (`--by operator`, `--note`, `--with`, `--skip`): the owner's override; "
      "it replaces the stages with those of another workflow, with the rules applied again, only while no stage has started. "
-     "It is recorded under `overrides` and is not an adjustment. See [Workflows](roles-and-briefs.md#workflows)."),
+     "It is recorded under `overrides` and is not an adjustment. The changes in flight (see [Workflows](roles-and-briefs.md#changes-in-flight)): "
+     "`escalate <type> --before <stage> --why \"...\" [--from-row <result id>[#<line>]] [--rule <name>]` puts a new stage (normally `spec`) "
+     "and its approval in front of a stage that is not done: they join the dependencies of every part of it. It is refused past "
+     "`[workflow_policy] max_adjustments` (escalations plus downgrades per instance, default 2), for a second escalation of one "
+     "type, and when a part of the target has a busy session, a verifier that has filed no row, a merge or a request waiting for "
+     "its merge, or an abandon. An attempt that has reported is stopped: its idle sessions stop (a revision can no longer follow), "
+     "the WIP is committed, and one `STOPPED` row with the `Head:` and `Reason: escalated` is filed, so `record` reads it before "
+     "the verifier and verdict rows and hints `launch`, which waits for the new stage and does not count toward the 3-attempt cap "
+     "(the row decides; `launch --cause escalated` only records the cause). `downgrade <stage> --why \"...\"` leaves out an optional stage "
+     "(one made by `--with`) that has no attempt and that no rule requires and no escalation added: the stage's upstream tasks and "
+     "approvals move to the stages after it, its approval closes (`skipped`), and the stage is done with `stage_state=skipped`. It "
+     "counts as an adjustment. `replace <stage>` (only after `stage-orphaned`; at most `[workflow_policy] max_replacements` per "
+     "stage, default 1) makes a new task with the same dependencies and approval decision, moves the tasks that waited for the abandoned "
+     "one to it and takes the abandoned one out of the instance. `cancel --why \"...\"` (only after `stage-orphaned`) skips every stage "
+     "that has not started, abandons every stage that has (its sessions stop), including those in parallel branches, closes every "
+     "approval and ends the instance; a task that waits for the instance never starts, and the `workflow-cancelled` line lists it. "
+     "`expand (--from-row <result id> | --workflow <name>) [--meta scope=... verify=...]` is for a `figure-it-out` instance once its "
+     "investigate stage has merged: it reads the `workflow-plan` block of the report (`workflow: <name>` or `stages: [{id: spec}, "
+     "{id: impl, after: [spec]}]`), applies the hard rules that were deferred to it, and creates the stages; every first stage waits "
+     "for the investigate stage and its approval. An ad-hoc plan is recorded as workflow `adhoc`. See [Workflows](roles-and-briefs.md#workflows)."),
     "status": ("Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its "
      "merge is listed under \"Closed, awaiting merge\" (`awaiting_merge` in `--json`), not under \"In flight\"; it is "
      "listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by "

@@ -24,6 +24,7 @@ import math
 import os
 import random
 import re
+import textwrap
 import tomllib
 from typing import Any
 
@@ -953,3 +954,94 @@ def apply_rules(workflows: dict[str, Workflow], wf: Workflow, rules: list[dict[s
             forced.append(stage.id)
         applied.append(app)
     return target, forced, applied
+
+
+# ------------------------------------------------------------------- mid-flight changes (W4)
+
+def library_stage(library: Library, kind: str, stage_id: str | None = None) -> Stage | None:
+    """A required stage of library type `kind`, with the library values and no `after`; None when the library has no such type.
+    `stage escalate` builds the stage it adds this way."""
+    base = library.types.get(kind)
+    if base is None:
+        return None
+    return Stage(id=stage_id or kind, type=kind, role=base["role"], verify=base["verify"], approval=base["approval"],
+                 estimate=base.get("estimate"), scope=base.get("scope", "instance"), verify_cmd=base.get("verify_cmd"),
+                 acceptance=list(base.get("acceptance", [])), after=[], optional=False, split=False, decides=False, path="", line=0)
+
+
+PLAN_BLOCK = re.compile(r"(?ms)^[ \t]*```workflow-plan[ \t]*\n(.*?)^[ \t]*```")
+PLAN_KEYS = ("workflow", "stages", "why")
+
+
+def braced_items(text: str) -> list[str]:
+    """The top-level `{...}` texts of `text`."""
+    items: list[str] = []
+    depth, start = 0, 0
+    for i, char in enumerate(text):
+        if char == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                items.append(text[start:i + 1])
+    return items
+
+
+def parse_plan(body: str) -> dict[str, Any]:
+    """The last `workflow-plan` block of a report: {"workflow": name} or {"stages": [field dicts]}, and "why". ValueError names
+    the problem. The block holds `workflow: <name>` or `stages: [{id: spec}, {id: impl, after: [spec]}]` (flow maps, as in a
+    workflow file), and an optional `why:` line; a `#` comment ends a line."""
+    found = PLAN_BLOCK.findall(body or "")
+    if not found:
+        raise ValueError("the report has no ```workflow-plan block")
+    plan: dict[str, Any] = {}
+    for line in textwrap.dedent(found[-1]).splitlines():
+        key, colon, raw = (line if line.strip().startswith("why:") else re.sub(r"\s#.*$", "", line)).strip().partition(":")
+        if not key:
+            continue
+        if not colon or key not in PLAN_KEYS:
+            raise ValueError(f"the workflow-plan block has the line {line.strip()!r}; its keys are {', '.join(PLAN_KEYS)}")
+        if key in plan:
+            raise ValueError(f"the workflow-plan block sets {key} twice")
+        plan[key] = raw.strip()
+    if ("workflow" in plan) == ("stages" in plan):
+        raise ValueError("the workflow-plan block must name `workflow: <name>` or `stages: [...]`, one of them")
+    if "workflow" in plan:
+        if not NAME.fullmatch(plan["workflow"]):
+            raise ValueError(f"workflow: {plan['workflow']!r} is not a workflow name")
+        return {"workflow": plan["workflow"], "why": plan.get("why", "")}
+    raw = plan["stages"]
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise ValueError("stages: must be a list in brackets of flow maps, as [{id: spec}, {id: impl, after: [spec]}]")
+    items = braced_items(raw[1:-1])
+    if not items:
+        raise ValueError("stages: lists no stage")
+    return {"stages": [flow_map(item) for item in items], "why": plan.get("why", "")}
+
+
+def adhoc_workflow(plan_stages: list[dict[str, Any]], library: Library, roles: dict[str, str | None]) -> Workflow:
+    """The workflow of an ad-hoc plan (`stages: [...]`): every stage is required, built from the library like a file's stage,
+    and checked like one. `errors` holds the problems."""
+    wf = Workflow("adhoc", "workflow-plan", "project")
+    wf.description = "an ad-hoc plan"
+    for number, fields in enumerate(plan_stages, 1):
+        problem = item_problem(fields, roles)
+        if problem is None and (fields.get("optional") or fields.get("decides")):
+            problem = "an ad-hoc plan has required stages only: leave out optional and decides"
+        if problem:
+            wf.errors.append(f"workflow-plan:{number}: {problem}")
+        else:
+            wf.items.append(Item("workflow-plan", number, fields))
+    if wf.errors:
+        return wf
+    apply_library(wf, wf.items, library)
+    seen: set[str] = set()
+    for stage in wf.stages:
+        if stage.id in seen:
+            wf.errors.append(f"workflow-plan: stage {stage.id!r} is listed twice")
+        seen.add(stage.id)
+    if not wf.errors:
+        check_graph(wf)
+    return wf

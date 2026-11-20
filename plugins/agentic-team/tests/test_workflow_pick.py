@@ -314,7 +314,7 @@ class RecheckTest(Base):
         stage = self.record(inst)["stages"][0]["task"]
         self.tg("edit", str(stage), "--meta", 'scope="apps/api/billing/x.py"', "attempt=1")
         line = next(e for e in self.events("stage", str(inst), "recheck") if e["event"] == "workflow-rule")
-        self.assertIn("has started", line["next"])
+        self.assertEqual(line["next"], f'run.py stage {inst} escalate spec --before impl --rule billing --why "<one line>"')
 
     def test_a_present_stage_is_satisfied(self):
         inst = self.instance(self.add_named("fix", "--with", "spec"))

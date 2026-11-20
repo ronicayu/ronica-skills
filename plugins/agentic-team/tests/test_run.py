@@ -2136,7 +2136,7 @@ class RunTest(Base):
         verified = self.one(self.events("record"), "verified")
         self.assertEqual(verified["next"], f"run.py verify {task} --again (the verifier's report has no blocking: line: "
                          "Issues line `a check fails` has no `blocking:` label; start it with `blocking:` (or "
-                         "`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour) "
+                         "`blocking[<category>]:`, the category one of stale-ref, claim, test, scope, shots, behaviour, design) "
                          "and say why it blocks, or move a non-blocking finding to `Follow-ups:` as `nonblocking: <finding>: "
                          "<why it does not block>`)")
 
@@ -5813,7 +5813,7 @@ class RunTest(Base):
     def test_107_check_report_refuses_an_unlabelled_line(self):
         out = self.check_report("\ncaller: src/b.py: calls the old name\n- fix the README too\nBug: src/c.py: wrong")
         self.assertEqual((out.returncode, out.stdout), (2, ""))
-        hint = ("start it with one of caller, doc, test, other, found, split, flake, decision, nonblocking, "
+        hint = ("start it with one of caller, doc, test, other, found, split, flake, decision, nonblocking, design, "
                 "as `<label>: <path or question>: <why>`")
         self.assertEqual(out.stderr.splitlines(), [
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",

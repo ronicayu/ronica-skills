@@ -724,7 +724,8 @@ class ReviewFixTest(Base):
         self.assertIn(f"stage test of #{inst} (#{test}) was abandoned", line["detail"])
         self.assertIn(f"instance #{inst} cannot finish", line["detail"])
         self.assertNotIn("wait for it", line["detail"])
-        self.assertIn("replace and cancel", line["next"])
+        self.assertIn(f"run.py stage {inst} replace test", line["next"])
+        self.assertIn(f"run.py stage {inst} cancel --why", line["next"])
         self.assertEqual(len([e for e in self.events("record") if e["event"] == "stage-orphaned"]), 1)
 
     def test_a_rechoose_that_fails_midway_leaves_the_old_stages_and_says_so(self):

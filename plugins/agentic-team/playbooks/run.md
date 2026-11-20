@@ -101,6 +101,25 @@ every report, and on every wake (step 6).
    - `sessions-restored`: this machine's Taskgraph cache had lost the task's `sessions` meta and `run.py` rebuilt it;
      nothing to do. `sessions-lost`: it could not, and the worker may run on another machine. Do not relaunch it;
      tell the operator and follow the `next:` line only when they say the worker is gone.
+   - `escalation-hint`: a worker's `design:` follow-up, or a verifier's `blocking[design]:` finding, on a stage task of a workflow
+     instance. Run the `next:` command yourself, with a one-line `--why`, and do not ask the operator: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stage <instance> escalate spec --before <stage> --from-row <row> --why "<one line>"`.
+     It puts a spec stage and its approval in front of the stage, stops the attempt that reported (the WIP is committed,
+     and the row says `Reason: escalated`), and the next `launch` of the stage waits for the new stage and does not use an
+     attempt. It is refused while a session of the stage is busy or a verifier has filed no row: `record` again later. It is
+     refused past `max_adjustments` (2), for a second escalation of a stage type, and in front of a merged or abandoned
+     part; then the `next:` says to put the design question in your report. Launch the new stage; answer its approval
+     (`run stage <instance> approve <stage>`) once it merges, then launch the stage that waited. A stage that no longer
+     needs an optional stage before it that has not started: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stage <instance> downgrade <stage> --why "<one line>"`
+     (counts as an adjustment; refused for a required stage, a stage a rule requires or one an escalation added).
+   - `stage-orphaned`: a stage task of an instance was abandoned, so the instance cannot finish and the stages after it never start.
+     Choose by the evidence: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stage <instance> replace <stage>` when the stage is still needed (a
+     new task with the same dependencies and approval; once per stage), else `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stage <instance> cancel --why "<one line>"`
+     (skips what has not started, abandons what runs, ends the instance; tasks that waited for the instance never start, so
+     decide for each one the line names). Both are offered only after this line. Put the choice in your report.
+   - A `figure-it-out` instance, once its investigate stage has merged: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" stage <instance> expand --from-row <result id of its report>`
+     creates the stages of the `workflow-plan` block (a named workflow, or an ad-hoc list), with the hard rules applied; every first
+     stage waits for the investigate stage and its approval. `expand --workflow <name>` when the report has no plan block.
+     A plan that needs a stage type the library lacks is the one question this workflow may take to the operator.
    - `unmanaged`: `"${CLAUDE_PLUGIN_ROOT}/scripts/run" adopt <id> --branch <b> --head <sha> [--pr <n>]` for work you want under `run`; leave the rest.
    - `ci-waiting`, `ci-pending`, `pr-pending`, `pr-blocked`: drain later; a failed check is evidence for a task, not something to debug.
      A required check that failed on a closed task's request keeps it red: the fix is a new attempt of that task on the

@@ -46,6 +46,10 @@ command is `file-verify`, which files its report.
     `split: timebox: <what remains>`.
   - `flake`: a check that failed once and passed on a rerun with no change, as
     `flake: <check>: <evidence: the failing run and the passing rerun>` (see Flakes).
+  - `design`: a design question that the code cannot answer and that an earlier design stage should have settled
+    (the interface, a data model, a trade-off), as `design: <question>: <why the work cannot go on without it>`. On a task
+    of a workflow the Manager reads it and puts a spec stage in front of this one. Use it only when the answer decides the
+    work; a matter of taste is `other`.
 
   A verifier writes a finding about a decision as `decision: <question>`. A
   `leftover ...` line (see Processes) keeps its own form and needs no label. The

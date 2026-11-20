@@ -98,6 +98,8 @@ always_pause = []           # decisions that always need the operator
 [workflow_policy]
 # enabled = false           # true turns workflows on; `config.py check` then validates the workflow files (docs/roles-and-briefs.md: Workflows)
 # design_dir = "docs/design"   # the {design_dir} of the stage library's scope templates
+# max_adjustments = 2       # escalations plus downgrades one workflow instance may have (the owner's rechoose does not count)
+# max_replacements = 1      # times one abandoned stage may be replaced
 
 [brief]
 # carried_report_bytes = 3000   # most UTF-8 bytes of one carried report (previous attempt, upstream, worker report in a verify brief)

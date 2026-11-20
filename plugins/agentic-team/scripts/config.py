@@ -211,6 +211,8 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "human_due_hours": ("posint", 48),
         "approval_floor": ("floormap", {}),
         "when_unsure": ("choice:lighter,heavier,figure-it-out", "lighter"),
+        "max_adjustments": ("nonneg", 2),
+        "max_replacements": ("nonneg", 1),
     },
     "scope": {"adjacent": ("adjacent", [])},
     "report": {
@@ -401,6 +403,11 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
          "`\"heavier\"`: two different names take the heavier one, and two `unsure` take the heaviest. `\"figure-it-out\"`: every row "
          "that has an `unsure` or a disagreement takes `figure-it-out`. The Manager never asks the owner; the choice is in the "
          "`workflow_record` and in the status report. See [Workflows](roles-and-briefs.md#workflows)."),
+        "max_adjustments": ("The most escalations plus downgrades (`run.py stage <instance> escalate` and `downgrade`) one workflow "
+         "instance may have. The owner's `rechoose` does not count. Past the limit the command is refused and the Manager puts "
+         "the need in its report; it never asks the owner. See [Workflows](roles-and-briefs.md#workflows)."),
+        "max_replacements": ("The most times one stage may be replaced after it was abandoned (`run.py stage <instance> replace`). "
+         "See [Workflows](roles-and-briefs.md#workflows)."),
     },
     "scope": {
         "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
