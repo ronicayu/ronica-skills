@@ -798,6 +798,9 @@ class ReviewFixTest(Base):
         self.result(impl, "DIED", "Session: s\nReason: died\n", by="manager", attempt=3)
         err = self.refused("stage", str(inst), "escalate", "spec", "--before", "impl", "--why", "x")
         self.assertIn("attempt 3 has already failed", err)
+        self.assertIn("abandon", err)
+        self.assertIn("stage <instance> replace impl", err)
+        self.assertNotIn("ask the owner", err)
         self.assertEqual(list(self.stages(inst)), ["impl", "test"])
         other = self.add("fix", "Other")
         impl2 = self.stages(other)["impl"]

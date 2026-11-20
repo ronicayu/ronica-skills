@@ -7,7 +7,8 @@ model, so the same input always gives the same output.
 An instance dict holds: id, title, created_at, record (the `workflow_record` meta) and stages (one dict for each stage task
 of the instance). A stage dict holds: id, task, state ("skipped" or None), origin, status, created_at, done_at, attempts,
 revisions, verdicts (the verifier verdicts, in order), failed (the blocking categories of the verify-failed rows) and
-approval (None, or level, outcome, by, state, on_timeout, opened_at, answered_at).
+approval (None, or level, outcome, by, state, on_timeout, opened_at, answered_at), started_at (the start of the task's latest
+attempt). A split stage has several stage dicts with one id in an instance (its parts); the figures count it once for each instance.
 """
 
 import datetime
@@ -24,6 +25,7 @@ THRESHOLDS: dict[str, float] = {
     "unsure_rate": 0.40,        # picks where an answer was unsure
     "override_rate": 0.20,      # picks that the owner overrode, or that an escalation corrected
     "cancel_rate": 0.20,
+    "min_hits": 2,              # a rate rule needs at least this many instances that hit it, whatever the rate
     "min_instances": 3,
     "min_stages": 4,
     "min_approvals": 4,
@@ -78,25 +80,48 @@ def overridden(inst: dict[str, Any]) -> bool:
     return bool(inst["record"].get("overrides"))
 
 
-def stage_stats(stages: list[dict[str, Any]]) -> dict[str, Any]:
-    """One stage id of one workflow, over its stage tasks."""
-    live = [s for s in stages if s.get("state") != "skipped"]
-    firsts = [s["verdicts"][0] for s in live if s.get("verdicts")]
-    failed_first = [v for v in firsts if v in FAILED]
-    times = [h for h in (hours_between(s.get("created_at"), s.get("done_at")) for s in live if s["status"] == "done") if h is not None]
-    approvals = [s["approval"] for s in live if s.get("approval")]
+def corrected(inst: dict[str, Any]) -> bool:
+    """The pick was overridden, or an escalation that is not a hard rule's corrected it (a rule that matched late is not the pick's fault)."""
+    return overridden(inst) or any(a.get("kind") == "escalate" and a.get("trigger") != "rule" for a in inst["record"].get("adjustments") or [])
+
+
+def stage_view(group: list[dict[str, Any]], sid: str) -> list[dict[str, Any]]:
+    """One row for each instance of the group that has stage `sid` (a split stage's parts are one row): its live parts, whether it
+    was verified, whether its first verify failed, and the approval of the stage (the first part that has one)."""
+    rows = []
+    for inst in group:
+        parts = [s for s in inst["stages"] if s["id"] == sid]
+        live = [s for s in parts if s.get("state") != "skipped"]
+        if not parts:
+            continue
+        firsts = [s["verdicts"][0] for s in live if s.get("verdicts")]
+        rows.append({"id": inst["id"], "parts": live, "skipped": len(parts) - len(live), "verified": bool(firsts),
+                     "failed_first": any(v in FAILED for v in firsts),
+                     "approval": next((s["approval"] for s in live if s.get("approval")), None)})
+    return rows
+
+
+def stage_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """One stage id of one workflow, over the rows of `stage_view`: one row for each instance."""
+    live = [s for r in rows for s in r["parts"]]
+    verified = [r for r in rows if r["verified"]]
+    failed = [r for r in verified if r["failed_first"]]
+    times = [h for h in (hours_between(s.get("started_at") or s.get("created_at"), s.get("done_at")) for s in live if s["status"] == "done")
+             if h is not None]
+    approvals = [r["approval"] for r in rows if r["approval"]]
     answered = [a for a in approvals if a.get("outcome")]
     outcomes = counted([a["outcome"] for a in answered])
     waits = [h for h in (hours_between(a.get("opened_at"), a.get("answered_at")) for a in answered) if h is not None]
     return {
+        "instances": sum(1 for r in rows if r["parts"]),
         "tasks": len(live),
-        "skipped": len(stages) - len(live),
+        "skipped": sum(r["skipped"] for r in rows),
         "merged": sum(1 for s in live if s["status"] == "done"),
         "attempts_mean": round(statistics.mean(s["attempts"] for s in live), 2) if live else None,
         "revisions_mean": round(statistics.mean(s["revisions"] for s in live), 2) if live else None,
-        "verified": len(firsts),
-        "first_pass": len(firsts) - len(failed_first),
-        "first_pass_rate": rate(len(firsts) - len(failed_first), len(firsts)),
+        "verified": len(verified),
+        "first_pass": len(verified) - len(failed),
+        "first_pass_rate": rate(len(verified) - len(failed), len(verified)),
         "failed_categories": counted([c for s in live for c in s.get("failed") or []]),
         "median_hours": round(statistics.median(times), 2) if times else None,
         "approvals": {"total": len(approvals), "answered": len(answered), "outcomes": outcomes,
@@ -113,11 +138,8 @@ def workflow_stats(name: str, group: list[dict[str, Any]]) -> dict[str, Any]:
     picked = [i for i in group if pick_of(i).get("answers")]
     agreed = [i for i in picked if pick_of(i)["answers"][0] == pick_of(i)["answers"][1]]
     unsure = [i for i in picked if pick_of(i).get("unsure")]
-    wrong = [i for i in group if overridden(i) or escalated(i)]
-    by_stage: dict[str, list[dict[str, Any]]] = {}
-    for inst in group:
-        for s in inst["stages"]:
-            by_stage.setdefault(s["id"], []).append(s)
+    wrong = [i for i in group if corrected(i)]
+    stage_ids = sorted({s["id"] for inst in group for s in inst["stages"]})
     return {
         "workflow": name,
         "instances": len(group),
@@ -137,7 +159,7 @@ def workflow_stats(name: str, group: list[dict[str, Any]]) -> dict[str, Any]:
                  "escalated_after_pick": sum(1 for i in group if escalated(i)),
                  "accuracy": rate(len(group) - len(wrong), len(group)),
                  "rule_applied": sum(1 for i in group if any(r.get("action") in ("moved", "forced-with") for r in i["record"].get("rules") or []))},
-        "stages": {sid: stage_stats(items) for sid, items in sorted(by_stage.items())},
+        "stages": {sid: stage_stats(stage_view(group, sid)) for sid in stage_ids},
     }
 
 
@@ -169,6 +191,9 @@ def propose(instances: list[dict[str, Any]], stats: dict[str, Any], limits: dict
         out.append({"kind": kind, "workflow": workflow, "stage": stage, "text": text,
                     "evidence": {"instances": sorted(ids), "count": len(ids), "of": of}})
 
+    def enough(hit: list[int]) -> bool:
+        return len(hit) >= t["min_hits"]
+
     for name, group in grouped(instances).items():
         w = stats["workflows"][name]
         n = len(group)
@@ -176,54 +201,61 @@ def propose(instances: list[dict[str, Any]], stats: dict[str, Any], limits: dict
             for stage_type in w["escalated_to"]:
                 hit = [i["id"] for i in group if any(a.get("kind") == "escalate" and a.get("type") == stage_type
                                                      for a in i["record"].get("adjustments") or [])]
-                if len(hit) / n >= t["escalation_rate"]:
+                if enough(hit) and len(hit) / n >= t["escalation_rate"]:
                     add("escalation", name, stage_type,
-                        f"{name} escalated to {stage_type} in {len(hit)} of {n} instances ({ids_text(hit)}): consider making {stage_type} "
-                        f"an optional stage of {name} that is on by default, a hard rule for the paths involved, or tightening the "
+                        f"{name} escalated to {stage_type} in {len(hit)} of {n} instances ({ids_text(hit)}): consider adding {stage_type} "
+                        f"to {name} as a required stage, a hard rule for the paths involved, or tightening the "
                         f"When-to-use of {name} so that this work is picked as a heavier workflow", hit, n)
+            # An optional stage that was decided against (skipped or downgraded, not left out by default), in an instance that ended and
+            # did not escalate to that stage type, counts as left out; an instance that never decided counts for nothing.
             options = {sid for i in group for sid in (i["record"].get("optional") or {})}
             for sid in sorted(options):
-                left = [i["id"] for i in group if (i["record"].get("optional") or {}).get(sid) not in (None, "with")]
-                if len(left) / n >= t["left_out_rate"]:
-                    add("drop-stage", name, sid, f"drop {sid} from {name}: left out in {len(left)} of {n} instances ({ids_text(left)})", left, n)
+                decided = [i for i in group if ended_kind(i) != "running" and (i["record"].get("optional") or {}).get(sid) not in (None, "default-skipped")
+                           and not any(a.get("kind") == "escalate" and a.get("type") == sid for a in i["record"].get("adjustments") or [])]
+                left = [i["id"] for i in decided if i["record"]["optional"][sid] in ("skipped", "downgraded")]
+                if len(decided) >= t["min_instances"] and enough(left) and len(left) / len(decided) >= t["left_out_rate"]:
+                    add("drop-stage", name, sid, f"drop {sid} from {name}: skipped or downgraded in {len(left)} of {len(decided)} instances "
+                        f"that decided it ({ids_text(left)})", left, len(decided))
             p = w["pick"]
-            if p["picked"] >= t["min_instances"] and (p["unsure_rate"] or 0) >= t["unsure_rate"]:
-                unsure = [i["id"] for i in group if pick_of(i).get("unsure")]
+            unsure = [i["id"] for i in group if pick_of(i).get("answers") and pick_of(i).get("unsure")]
+            if p["picked"] >= t["min_instances"] and enough(unsure) and (p["unsure_rate"] or 0) >= t["unsure_rate"]:
                 add("pick-unsure", name, None,
                     f"{p['unsure_rate']:.0%} of the picks that resolved to {name} had an unsure answer ({ids_text(unsure)}): "
                     "the descriptions do not separate it from its neighbours; sharpen its When-to-use", unsure, p["picked"])
-            bad = [i["id"] for i in group if overridden(i) or escalated(i)]
-            if len(bad) / n >= t["override_rate"]:
+            bad = [i["id"] for i in group if corrected(i)]
+            if enough(bad) and len(bad) / n >= t["override_rate"]:
                 add("pick-corrected", name, None,
                     f"{len(bad)} of {n} instances of {name} were overridden or escalated after the pick ({ids_text(bad)}): "
                     f"the pick chooses {name} too often; sharpen its When-to-use", bad, n)
             cancelled = [i["id"] for i in group if ended_kind(i) == "cancelled"]
-            if len(cancelled) / n >= t["cancel_rate"]:
+            if enough(cancelled) and len(cancelled) / n >= t["cancel_rate"]:
                 add("cancels", name, None, f"{len(cancelled)} of {n} instances of {name} were cancelled ({ids_text(cancelled)}): read their "
                     "`why` lines; the stage that orphaned them may need a clearer brief or a different verify kind", cancelled, n)
         for sid, st in w["stages"].items():
-            stages = [(i["id"], s) for i in group for s in i["stages"] if s["id"] == sid and s.get("state") != "skipped"]
-            rows = [(iid, s) for iid, s in stages if s.get("verdicts")]
+            rows = stage_view(group, sid)
+            checked = [r for r in rows if r["verified"]]
             if st["verified"] >= t["min_stages"]:
                 if (st["first_pass_rate"] or 0) >= t["first_pass_auto"]:
-                    levels = {(s.get("approval") or {}).get("level") for _, s in rows}
+                    levels = {(r["approval"] or {}).get("level") for r in checked}
                     if levels == {"manager"}:
+                        ids = [r["id"] for r in checked]
                         add("auto-approval", name, sid,
                             f"stage {sid} of {name} passed its first verify in {st['first_pass']} of {st['verified']} instances "
-                            f"({ids_text([i for i, _ in rows])}) with a manager approval: consider `approval = \"auto\"`",
-                            [i for i, _ in rows], st["verified"])
+                            f"({ids_text(ids)}) with a manager approval: consider `approval = \"auto\"`", ids, st["verified"])
                 elif st["first_pass_rate"] is not None and st["first_pass_rate"] <= t["first_pass_weak"]:
                     top = next(iter(st["failed_categories"]), None)
-                    hit = [i for i, s in rows if s["verdicts"][0] in FAILED]
-                    add("weak-stage", name, sid,
-                        f"stage {sid} of {name} failed its first verify in {len(hit)} of {st['verified']} instances ({ids_text(hit)})"
-                        + (f", most often {top}" if top else "") + ": tighten its Stage notes or split it", hit, st["verified"])
+                    hit = [r["id"] for r in checked if r["failed_first"]]
+                    if enough(hit):
+                        add("weak-stage", name, sid,
+                            f"stage {sid} of {name} failed its first verify in {len(hit)} of {st['verified']} instances ({ids_text(hit)})"
+                            + (f", most often {top}" if top else "") + ": tighten its Stage notes or split it", hit, st["verified"])
             a = st["approvals"]
             if a["answered"] >= t["min_approvals"] and (a["default_rate"] or 0) >= t["default_rate"]:
-                hit = [i for i, s in stages if (s.get("approval") or {}).get("outcome") == "defaulted"]
-                add("approval-defaults", name, sid,
-                    f"the approval of {sid} in {name} was applied by default in {len(hit)} of {a['answered']} instances ({ids_text(hit)}): "
-                    "nobody answers it; make it `manager`, or raise `human_due_hours`", hit, a["answered"])
+                hit = [r["id"] for r in rows if (r["approval"] or {}).get("outcome") == "defaulted"]
+                if enough(hit):
+                    add("approval-defaults", name, sid,
+                        f"the approval of {sid} in {name} was applied by default in {len(hit)} of {a['answered']} instances ({ids_text(hit)}): "
+                        "nobody answers it; make it `manager`, or raise `human_due_hours`", hit, a["answered"])
     return out
 
 

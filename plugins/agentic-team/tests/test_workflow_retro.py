@@ -27,11 +27,11 @@ NOTES = "Why: users need it.\n- [ ] first behaviour\n- [ ] second behaviour"
 FAKE_CLAUDE = "#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[]'; exit 0; fi\necho '[]'\n"
 
 
-def stage(sid, status="done", hours=2.0, verdicts=(), failed=(), approval=None, state=None, attempts=1, revisions=0, origin=None):
+def stage(sid, status="done", hours=2.0, verdicts=(), failed=(), approval=None, state=None, attempts=1, revisions=0, origin=None, started=None):
     start = "2026-11-01T00:00:00Z"
     end = f"2026-11-01T{int(hours):02d}:{int((hours % 1) * 60):02d}:00Z"
     return {"id": sid, "task": 0, "state": state, "origin": origin, "status": status, "created_at": start, "done_at": end if status == "done" else None,
-            "attempts": attempts, "revisions": revisions, "verdicts": list(verdicts), "failed": list(failed), "approval": approval}
+            "started_at": started, "attempts": attempts, "revisions": revisions, "verdicts": list(verdicts), "failed": list(failed), "approval": approval}
 
 
 def approval(outcome, level="manager", by="manager", hours=1.0):
@@ -108,6 +108,12 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(s["ux"]["skipped"], 1)
         self.assertEqual(s["ux"]["tasks"], 0)
 
+    def test_stage_time_runs_from_the_start_of_the_attempt_not_from_the_creation(self):
+        data = [instance(1, "fix", [stage("impl", hours=10, started="2026-11-01T07:00:00Z")]),
+                instance(2, "fix", [stage("impl", hours=6, started="2026-11-01T04:00:00Z")]),
+                instance(3, "fix", [stage("impl", hours=4)])]  # no started_at: created_at is the fallback
+        self.assertEqual(wst.compute(data)["workflows"]["fix"]["stages"]["impl"]["median_hours"], 3.0)  # 3, 2 and 4 hours
+
     def test_the_result_does_not_depend_on_the_order_of_the_instances(self):
         data = self.fixture()
         self.assertEqual(wst.compute(data), wst.compute(list(reversed(data))))
@@ -143,15 +149,25 @@ class ProposalTest(unittest.TestCase):
         self.assertNotIn("escalation", self.kinds(self.make(2, escalated=2)))
 
     def test_drop_stage_fires_when_an_optional_stage_is_always_left_out(self):
-        data = self.make(5, optional={"ux": "default-skipped"})
+        data = self.make(5, optional={"ux": "skipped"})
         found = [p for p in wst.propose(data, wst.compute(data)) if p["kind"] == "drop-stage"]
         self.assertEqual((found[0]["stage"], found[0]["evidence"]["count"], found[0]["evidence"]["of"]), ("ux", 5, 5))
-        self.assertIn("left out in 5 of 5", found[0]["text"])
+        self.assertIn("skipped or downgraded in 5 of 5", found[0]["text"])
 
     def test_drop_stage_does_not_fire_when_the_stage_is_used(self):
-        data = self.make(5, optional={"ux": "default-skipped"})
+        data = self.make(5, optional={"ux": "skipped"})
         data[0]["record"]["optional"]["ux"] = "with"
         self.assertNotIn("drop-stage", self.kinds(data))
+
+    def test_drop_stage_ignores_a_stage_that_was_left_out_by_default(self):
+        self.assertNotIn("drop-stage", self.kinds(self.make(50, optional={"spec": "default-skipped"})))
+
+    def test_drop_stage_counts_ended_instances_that_did_not_escalate_to_the_stage(self):
+        data = self.make(5, optional={"ux": "skipped"})
+        data[0]["stages"][0]["status"] = "in_progress"  # running: not counted
+        data[1]["record"]["adjustments"] = [escalation(type_="ux")]  # escalated to ux: not counted
+        found = [p for p in wst.propose(data, wst.compute(data)) if p["kind"] == "drop-stage"]
+        self.assertEqual((found[0]["evidence"]["instances"], found[0]["evidence"]["of"]), ([3, 4, 5], 3))
 
     def test_auto_approval_fires_for_a_manager_approval_that_always_passes_first(self):
         data = self.make(5)
@@ -198,20 +214,90 @@ class ProposalTest(unittest.TestCase):
         self.assertIn("pick-unsure", self.kinds(data))
         self.assertNotIn("pick-unsure", self.kinds(self.make(5)))
         data[0]["record"]["overrides"] = [{"from": "hotfix", "to": "fix", "by": "operator"}]
+        self.assertNotIn("pick-corrected", self.kinds(data))  # one instance is not enough
+        data[1]["record"]["overrides"] = [{"from": "hotfix", "to": "fix", "by": "operator"}]
         self.assertIn("pick-corrected", self.kinds(data))
         self.assertNotIn("pick-corrected", self.kinds(self.make(5)))
 
     def test_cancels_fires_at_20_percent(self):
         data = self.make(5)
         data[0]["record"]["ended"] = {"kind": "cancelled", "why": "x"}
+        self.assertNotIn("cancels", self.kinds(data))  # one instance is not enough
+        data[1]["record"]["ended"] = {"kind": "cancelled", "why": "x"}
         self.assertIn("cancels", self.kinds(data))
         self.assertNotIn("cancels", self.kinds(self.make(5)))
+
+    def test_one_escalation_and_one_cancel_in_three_instances_propose_nothing(self):
+        data = self.make(3, escalated=1)
+        data[1]["record"]["ended"] = {"kind": "cancelled", "why": "x"}
+        self.assertEqual(self.kinds(data), [])
+
+    def test_an_escalation_by_a_rule_is_not_the_picks_fault(self):
+        data = self.make(5)
+        for i in data[:3]:
+            i["record"]["adjustments"] = [escalation(trigger="rule")]
+        kinds = self.kinds(data)
+        self.assertIn("escalation", kinds)
+        self.assertNotIn("pick-corrected", kinds)
+        self.assertEqual(wst.compute(data)["workflows"]["hotfix"]["pick"]["accuracy"], 1.0)
+
+    def split(self, n):
+        """n instances whose impl stage is split into two parts; only the first part holds the approval."""
+        return [instance(i, "hotfix", [stage("impl", verdicts=["test-verified"], approval=approval("approved")),
+                                       stage("impl", verdicts=["test-verified"])]) for i in range(1, n + 1)]
+
+    def test_a_split_stage_counts_once_for_each_instance_and_still_proposes_auto_approval(self):
+        data = self.split(4)
+        impl = wst.compute(data)["workflows"]["hotfix"]["stages"]["impl"]
+        self.assertEqual((impl["instances"], impl["tasks"], impl["verified"], impl["first_pass"]), (4, 8, 4, 4))
+        found = [p for p in wst.propose(data, wst.compute(data)) if p["kind"] == "auto-approval"]
+        self.assertEqual(found[0]["evidence"], {"instances": [1, 2, 3, 4], "count": 4, "of": 4})
+
+    def test_a_split_stage_that_failed_in_two_parts_is_one_failure(self):
+        data = self.split(4)
+        for i in data[:3]:
+            for part in i["stages"]:
+                part["verdicts"] = ["verify-failed", "test-verified"]
+        found = [p for p in wst.propose(data, wst.compute(data)) if p["kind"] == "weak-stage"]
+        self.assertEqual(found[0]["evidence"], {"instances": [1, 2, 3], "count": 3, "of": 4})
 
     def test_every_proposal_names_instance_ids_and_counts(self):
         data = self.make(10, escalated=4, optional={"ux": "skipped"})
         for p in wst.propose(data, wst.compute(data)):
             self.assertTrue(p["evidence"]["instances"])
             self.assertEqual(p["evidence"]["count"], len(p["evidence"]["instances"]))
+
+
+class CollectTest(unittest.TestCase):
+    """collect_stats makes the same few tg calls for 2 stage tasks and for 60."""
+
+    class Fake:
+        def __init__(self, n):
+            self.calls = []
+            self.tasks = []
+            for i in range(n):
+                inst = 1 + i * 3
+                self.tasks += [{"id": inst, "type": "task", "title": "t", "status": "open", "parent": None, "created_at": "2026-11-01T00:00:00Z",
+                                "meta": {"workflow": "fix", "workflow_record": {"workflow": "fix"}}},
+                               {"id": inst + 1, "type": "task", "title": "s", "status": "done", "parent": inst, "created_at": "2026-11-01T00:00:00Z",
+                                "meta": {"stage": "impl"}},
+                               {"id": inst + 2, "type": "task", "title": "s", "status": "open", "parent": inst, "created_at": "2026-11-01T00:00:00Z",
+                                "meta": {"stage": "test"}}]
+            self.rows = [{"id": t["id"], "task_id": t["id"], "kind": "task", "attempt": 1, "status": "PASS", "body": ""} for t in self.tasks if t["parent"]]
+
+        def tg(self, *args):
+            self.calls.append(args)
+            return self.rows if args[0] == "result" else [] if "decision" in args else self.tasks
+
+    def test_the_number_of_tg_calls_does_not_grow_with_the_tasks(self):
+        import run as runner
+        counts = []
+        for n in (1, 30):
+            fake = self.Fake(n)
+            found = runner.collect_stats(fake, None)
+            self.assertEqual((len(found), sum(len(i["stages"]) for i in found), found[0]["stages"][0]["attempts"]), (n, 2 * n, 1))
+            counts.append(len(fake.calls))
+        self.assertEqual(counts[0], counts[1])
 
 
 class RecordTest(unittest.TestCase):

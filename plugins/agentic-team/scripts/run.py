@@ -1801,11 +1801,11 @@ def workflow_problems(run):
     return load_workflows(run).problems
 
 
-def stage_dict(run, task, decisions):
+def stage_dict(task, rows, decisions):
     """One stage task as the retro reads it: its place, its times, its attempts and revisions, its verifier verdicts and the
     categories of the blocking findings that failed it, and the outcome of its approval. Everything comes from Taskgraph."""
     meta = task.get("meta") or {}
-    rows = sorted(run.results_for(task["id"]), key=lambda r: r["id"])
+    rows = sorted(rows, key=lambda r: r["id"])
     verifiers = [r for r in rows if r["kind"] == "verify" and r.get("author") not in ("manager", "ci")]
     verdicts = [v for v in (verdict_of(r) for r in verifiers) if v]
     failed = [(m.group(1) or "uncategorised") for r in verifiers if verdict_of(r) == "verify-failed"
@@ -1820,6 +1820,7 @@ def stage_dict(run, task, decisions):
                     "answered_at": am.get("answered_at")}
     return {"id": meta.get("stage"), "task": task["id"], "state": meta.get("stage_state"), "origin": meta.get("stage_origin"),
             "status": task["status"], "created_at": task.get("created_at"), "done_at": task.get("done_at"),
+            "started_at": meta.get("started_at"),
             "attempts": max(attempts, default=0), "revisions": sum(1 for r in rows if r["kind"] == REVISE and r.get("author") == "manager"),
             "verdicts": verdicts, "failed": failed, "approval": approval}
 
@@ -1832,6 +1833,9 @@ def collect_stats(run, since):
     for t in tasks:
         if (t.get("meta") or {}).get("stage") and t.get("parent") is not None and t["type"] == "task":
             children.setdefault(t["parent"], []).append(t)
+    results: dict = {}
+    for r in run.tg("result", "ls") or []:  # one call for every row: the number of tg calls does not grow with the tasks
+        results.setdefault(r["task_id"], []).append(r)
     found = []
     for t in sorted(tasks, key=lambda x: x["id"]):
         meta = t.get("meta") or {}
@@ -1842,7 +1846,7 @@ def collect_stats(run, since):
         if since is not None and (made is None or made < since):
             continue
         found.append({"id": t["id"], "title": t["title"], "created_at": t.get("created_at"), "record": record,
-                      "stages": [stage_dict(run, c, decisions) for c in sorted(children.get(t["id"], []), key=lambda x: x["id"])]})
+                      "stages": [stage_dict(c, results.get(c["id"], []), decisions) for c in sorted(children.get(t["id"], []), key=lambda x: x["id"])]})
     return found
 
 
@@ -10044,8 +10048,9 @@ def escalation_check(run, part):
         if attempt >= MAX_ATTEMPTS and not (latest[-1]["status"] == "STOPPED" and stop_reason(latest[-1]) in ("pause", "escalated")):
             # no worker report to stop, so no `escalated` row to exempt the next launch: it would pass the cap and the stage would be stuck
             raise Refused(f"#{tid}: attempt {attempt} has already failed and is the last the cap allows ({MAX_ATTEMPTS}); a launch after "
-                          f"the escalation would be refused. Decide first: run.py abandon {tid} {abandon_placeholder()} --why \"<one line>\", "
-                          f"or run.py launch {tid} --attempt {attempt + 1}")
+                          f"the escalation would be refused, and `launch --attempt {attempt + 1}` would run without the new stage. The Manager "
+                          f"takes the path that works: run.py abandon {tid} superseded --why \"<one line>\", then run.py stage <instance> replace "
+                          f"{sid}, then run.py stage <instance> escalate <type> --before {sid} --why \"<one line>\" (it asks no one)")
         return {"attempt": attempt, "row": False, "was": stored_phase(part)}  # stopped or died already: nothing to stop
     phase = stored_phase(part)
     if phase not in ("reported", "verifying", "verdict_failed"):

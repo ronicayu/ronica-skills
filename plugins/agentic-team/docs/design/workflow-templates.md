@@ -372,7 +372,7 @@ The due time is set when the stage merges, not at creation, so a long stage does
 **Escalate**: `run.py stage <inst> escalate <type> --before <stage> --from-row R --why "..."`
 - Creates the new stage task. It depends on the target stage's current upstream dependencies, and gets an approval node at the library level.
 - Adds the new stage and its approval to the target's dependencies, and to its parts' dependencies.
-- `escalate` is refused when the attempt has a passing verdict (`close` it instead), and when the newest row of an attempt at the cap (3) is a failure that no `escalated` row exempts: the next launch would be refused and the stage stuck. The owner decides (`abandon`, or `launch --attempt 4`).
+- `escalate` is refused when the attempt has a passing verdict (`close` it instead), and when the newest row of an attempt at the cap (3) is a failure that no `escalated` row exempts: the next launch would be refused and the stage stuck. The Manager takes the path that works and asks no one: `abandon <impl> superseded`, then `stage <inst> replace impl`, then `stage <inst> escalate spec --before impl`. (`launch --attempt 4` would run a fourth attempt without the spec, and the escalation would be lost.)
 - If the target has had an attempt, `escalate` refuses only a session that is busy (its turn is not over). A worker or verifier kept idle for a revision is stopped as `kept-session-stopped`, because no revision can follow once an upstream is inserted. The target's next launch waits for the new stage (launch refuses while it waits). The next attempt's brief carries the new stage's report.
 - If the new design changes the target's ACCEPTANCE (brief frozen at start), the Manager abandons the target as `superseded` and creates a fresh stage task by hand. (`stage escalate --replace` is not built.)
 
@@ -472,9 +472,10 @@ stateDiagram-v2
 **Per instance**: the `workflow_record` meta on the parent, as JSON.
 
 ```json
-{"workflow": "change", "version": "<file sha>", "picks": ["feature", "change"], "unsure": true,
- "resolved_by": "lighter", "rule": null, "overridden": null, "optional": {},
- "adjustments": [{"kind": "escalate", "stage": "spec", "trigger": "verifier", "row": 812}], "ended": "merged"}
+{"workflow": "change", "version": "<file sha>",
+ "pick": {"answers": ["feature", "change"], "seeds": [7, 8], "resolved": "change", "rule": "fewer-stages", "unsure": false, "when_unsure": "lighter"},
+ "rules": [], "overrides": [], "optional": {},
+ "adjustments": [{"kind": "escalate", "type": "spec", "stage": "spec", "trigger": "verifier", "row": "812"}], "ended": null}
 ```
 
 **Per stage task**: the meta keys `stage`, `stage_part`, `stage_state` (`skipped` or none) and `stage_origin` (`expand`, `with`, `escalate`, `split`, `replace`). Everything else comes from data that already exists:
@@ -491,9 +492,9 @@ stateDiagram-v2
 | Instances per workflow; pick agreement rate; unsure rate; rule upgrades; owner overrides | G3, pick quality |
 | Escalation rate per workflow and trigger category; downgrade rate | G1, the workflow is too light or too heavy |
 | Verify-failed per stage, by category; attempts per stage; revisions per stage | where a stage is weak |
-| Dependency-check `missing` per 10 launches, workflow tasks against hand-planned tasks | G2 |
+| Dependency-check `missing` per 10 launches, workflow tasks against hand-planned tasks | G2 (not built: read the `depcheck` rows by hand) |
 | Approval wait time per level; defaults applied; holds | G5, due times |
-| Tokens and wall time per stage | cost of each stage |
+| Tokens and wall time per stage | cost of each stage (not built: the stage time shown is from the start of the latest attempt to the merge; tokens are not read) |
 | Stage-orphaned and replacements | plan robustness |
 
 From these, retro proposes changes, for example:
