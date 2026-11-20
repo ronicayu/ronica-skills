@@ -171,7 +171,7 @@ Workflow templates (docs/design/workflow-templates.md, section 8 and decision 4)
 - `StoppedNext` names `launch` after it at any attempt (as after a pause); `RecInProgress` reads the escalated row before the verifier and verdict rows (as it reads a pause); `Exempt` lets the launch pass the cap (`refuse_past_cap` must read the row, not trust a bare `--cause escalated`). In the code the launch waits for the new stage first (Workflow.tla); the model leaves the wait out.
 - `AttemptCap` allows the escalated launch past the cap. The new rule `EscalationKeepsAttempt`: no abandon follows the escalated row, so an escalation never costs the task its last attempt.
 - The first run of `escalate.cfg` broke `PausedWipCommitted` (the STOPPED row claimed a Head line over a dirty worktree) and `escalate-revise.cfg` broke `VerdictNotLost` (an idle verifier with no row was stopped, its verdict lost unseen). Hence the guard `vfiled` and the WIP commit; both are W4 requirements (PREDICTIONS.md, "Workflow templates").
-- Phases: `Escalate` moves `reported` and `verifying` (and `verdict_failed`) to `stopped`. `phase-edges.json` is generated from configs with `ESCALATIONS` off, so the phase-edges test does not see these edges yet. When W4 lands: add the escalation event to `TRANSITIONS` in run.py, a `case "Escalate"` to `phase-view.mjs`, and `escalate.cfg` to the configs that `phase-edges.mjs` reads, then regenerate the fixture.
+- Phases: `Escalate` moves `reported` and `verifying` to `stopped` (a recorded verify-failed verdict keeps `verdict_failed`, since `derive_phase` reads the verdict first, until the launch). `phase-edges.json` is generated from configs with `ESCALATIONS` off, so the phase-edges test does not see these edges yet. When W4 lands: add the escalation event to `TRANSITIONS` in run.py, a `case "Escalate"` to `phase-view.mjs`, and `escalate.cfg` to the configs that `phase-edges.mjs` reads, then regenerate the fixture.
 - `REGRESS_ESC_CAP` leaves the escalated row out of `Exempt` (the cap counts the interrupted attempt): `regress-esc-cap.cfg` must break NoDeadlock (the hint after an escalation at the cap is launch, and launch refuses).
 
 ## Phase edges (#99)
@@ -393,7 +393,7 @@ Nothing else breaks: the split approval holds (the W2 review fix), approvals can
 - **replace**: only on a `stage-orphaned` hint, at most `max_replacements` per stage; dependents and the approval decision move to the new task.
 - **cancel**: only on a `stage-orphaned` hint; abandon (and stop the sessions of) every stage that still runs in a parallel branch, not only skip the not-started ones (`NoSessionAfterEnd`).
 - **orphan hint**: must also fire for a stage that nothing depends on (finding 1); otherwise `replace` and `cancel` are never hinted for the last stage, and the deadlock check finds the dead end with W4 on as well.
-- **phases**: the escalation event needs rows in `TRANSITIONS` (`reported`, `verifying`, `verdict_failed` to `stopped`) and `escalate.cfg` in the phase-edges configs (above, "W4 escalation").
+- **phases**: the escalation event needs rows in `TRANSITIONS` (`reported` and `verifying` to `stopped`) and `escalate.cfg` in the phase-edges configs (above, "W4 escalation").
 - **rechoose** after an escalation removes the escalated stage with the rest; the model allows it as the owner's override. Keep the record's rules (finding 2).
 
 ## Workflow configs
