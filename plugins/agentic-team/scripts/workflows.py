@@ -19,6 +19,7 @@ config.py, so both can use it; the caller passes the roles it knows as {name: er
 
 import dataclasses
 import glob
+import hashlib
 import os
 import random
 import re
@@ -653,3 +654,107 @@ def pick_prompt(catalog: Catalog, seed: int, title: str, notes: str = "", scope:
         lines.append(f"{letter}. {name}: {UNSURE_TEXT if name == 'unsure' else catalog.workflows[name].description}")
     lines += ["", "Answer with exactly these two lines:", "PICK: <name|unsure>", "WHY: <one line>"]
     return "\n".join(lines) + "\n", order
+
+
+# ------------------------------------------------------------------- expansion
+
+@dataclasses.dataclass
+class Plan:
+    """The stages that one instance creates: `stages` in creation order (every stage comes after its upstream stages),
+    `after` the upstream stage ids of each with the skipped stages contracted away, and `optional` what happened to each
+    optional stage: `with`, `skipped` (named in --skip) or `default-skipped` (named in neither)."""
+    stages: list[Stage]
+    after: dict[str, list[str]]
+    optional: dict[str, str]
+
+
+def contracted(stage_id: str, by_id: dict[str, Stage], kept: set[str]) -> list[str]:
+    """The upstream stages of `stage_id` that exist: an `after` stage that is skipped is replaced by its own upstream stages."""
+    found: list[str] = []
+    for name in by_id[stage_id].after:
+        for real in [name] if name in kept else contracted(name, by_id, kept):
+            if real not in found:
+                found.append(real)
+    return found
+
+
+def build_plan(wf: Workflow, with_ids: list[str], skip_ids: list[str]) -> Plan:
+    """The plan of `wf`: every required stage and each optional stage in `with_ids`; the others are left out and their edges
+    contracted. ValueError names a stage that --with or --skip cannot name."""
+    by_id = {s.id: s for s in wf.stages}
+    optional = [s.id for s in wf.stages if s.optional]
+    for flag, ids in (("--with", with_ids), ("--skip", skip_ids)):
+        for name in ids:
+            if name not in by_id:
+                raise ValueError(f"{flag} {name}: workflow {wf.name} has no stage {name}; its stages are {', '.join(by_id)}")
+            if not by_id[name].optional:
+                raise ValueError(f"{flag} {name}: stage {name} is required in {wf.name}; only an optional stage can be named "
+                                 f"({', '.join(optional) or 'this workflow has none'})")
+    both = sorted(set(with_ids) & set(skip_ids))
+    if both:
+        raise ValueError(f"{both[0]} is named in both --with and --skip")
+    mode = {name: "with" if name in with_ids else "skipped" if name in skip_ids else "default-skipped" for name in optional}
+    kept = {s.id for s in wf.stages if not s.optional or mode[s.id] == "with"}
+    ordered: list[Stage] = []
+    after = {s.id: contracted(s.id, by_id, kept) for s in wf.stages if s.id in kept}
+    pending = [s for s in wf.stages if s.id in kept]
+    while pending:  # list order already puts a stage after its upstream stages; this keeps a hand-built plan sound too
+        ready = next(s for s in pending if all(a in {o.id for o in ordered} for a in after[s.id]))
+        ordered.append(ready)
+        pending.remove(ready)
+    return Plan(ordered, after, mode)
+
+
+def stage_notes(body: str, stage_id: str) -> str:
+    """The `### <stage id>` subsection of the `## Stage notes` section of a workflow body, cut at 150 words; "" when there is none."""
+    section = re.search(r"(?ms)^## Stage notes[ \t]*\n(.*?)(?=^## |\Z)", body)
+    if not section:
+        return ""
+    sub = re.search(rf"(?ms)^### {re.escape(stage_id)}[ \t]*\n(.*?)(?=^### |\Z)", section.group(1))
+    text = sub.group(1).strip() if sub else ""
+    words = text.split()
+    return " ".join(words[:150]) if len(words) > 150 else text
+
+
+def file_version(path: str) -> str:
+    """The first 12 hex digits of the SHA-1 of a workflow file: the `version` of a workflow record."""
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha1(fh.read()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+def slug(text: str, limit: int = 40) -> str:
+    """Lowercase letters and digits of `text`, joined by -, at most `limit` characters."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit].strip("-") or "work"
+
+
+def glob_regex(pattern: str) -> "re.Pattern[str]":
+    """A path glob as a regex: `**` crosses folders, `*` and `?` stay inside one."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out)
+
+
+def rule_matches(rule: dict[str, Any], paths: set[str], area: Any) -> bool:
+    """A `[[workflow_rule]]` matches when a write path of the SCOPE (a directory counts as every path under it) fits one of its
+    `match_paths` globs, or the task's `area` is one of its `match_area` names. Title words never match."""
+    areas = rule.get("match_area") or []
+    if areas and str(area or "").strip().lower() in {a.strip().lower() for a in areas}:
+        return True
+    for pattern in rule.get("match_paths") or []:
+        regex = glob_regex(pattern)
+        if any(regex.fullmatch(p) or regex.fullmatch(p.rstrip("/") + "/x") for p in paths):
+            return True
+    return False

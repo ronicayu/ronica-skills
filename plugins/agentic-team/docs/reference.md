@@ -48,6 +48,7 @@ and the Manager runs `record` when a session's message or the end of `wait` wake
 | [`status`](#runpy-status) | print the status report |
 | [`roles`](#runpy-roles) | list the task roles: the plugin's and the project's, with their defaults; exit 1 when a file is broken |
 | [`workflows`](#runpy-workflows) | list the workflows: the plugin's and the project's, with their stages; exit 1 when a file is broken |
+| [`stage`](#runpy-stage) | answer the approval of a workflow stage, or split a stage into parts |
 | [`check-report`](#runpy-check-report) | check a report file before a session files it; needs no config, Taskgraph or repository |
 | [`wait`](#runpy-wait) | poll until something in flight changes, or a time limit; writes nothing |
 | [`answer`](#runpy-answer) | answer a worker's ask: the answer is a Taskgraph row, and a doorbell wakes the worker |
@@ -200,10 +201,10 @@ run.py repoint ID --pr PR [--keep-old]
 #### `run.py add`
 
 ```text
-run.py add TITLE [--depends ID [ID ...]] [--blocks ID [ID ...]] [--independent REASON] [--notes NOTES] [--meta KEY=VALUE [KEY=VALUE ...]] [--type TYPE] [--parent PARENT] [--start START] [--due DUE] [--promised PROMISED] [--priority PRIORITY]
+run.py add TITLE [--depends ID [ID ...]] [--blocks ID [ID ...]] [--independent REASON] [--notes NOTES] [--meta KEY=VALUE [KEY=VALUE ...]] [--type TYPE] [--parent PARENT] [--start START] [--due DUE] [--promised PROMISED] [--priority PRIORITY] [--workflow NAME] [--with STAGE [STAGE ...]] [--skip STAGE [STAGE ...]]
 ```
 
-Creates a task and settles its dependencies in the same call. It passes `--notes`, `--meta`, `--type`, `--parent`, `--start`, `--due`, `--promised` and `--priority` to `tg add`, and needs exactly one way of settling dependencies: `--depends <ids>` and/or `--blocks <ids>`, or `--independent "<reason>"` (recorded as meta `independent`). Without one it refuses (exit 2). It lists the open and in-progress tasks that may be related, at most 10, strongest first, as `candidate` lines: `SCOPE overlap` (the write paths of `--meta scope=` against each task's; a directory covers the paths under it; write the paths a task must not change after `;` or `；`, or after `不改`, `不要改`, `do not`, `never` or `not:`, and they are not compared; a shared file or a shared directory of four or more segments is strong, a shallower shared directory is marked `shared directory only` and `weak` when it is the only reason), `same #<n> reference` (`#<n>` or `gh issue view <n>` in both notes; an external, decision or milestone shows only for this reason, with its type), and `title words` (two shared words of four letters or more, or three shared Chinese character pairs; the weakest). Order: strong SCOPE overlap, same reference, shallow SCOPE overlap, title. A candidate reachable through the given `--depends`/`--blocks` at any depth reads `linked (via #<id>)`. It prints them when it refuses and when it adds; with `--depends`/`--blocks` each reads `linked` or `not linked`. An `added` line gives the new id and its links. A `--type decision` task needs `--blocks` and prints no candidates.
+Creates a task and settles its dependencies in the same call. It passes `--notes`, `--meta`, `--type`, `--parent`, `--start`, `--due`, `--promised` and `--priority` to `tg add`, and needs exactly one way of settling dependencies: `--depends <ids>` and/or `--blocks <ids>`, or `--independent "<reason>"` (recorded as meta `independent`). Without one it refuses (exit 2). It lists the open and in-progress tasks that may be related, at most 10, strongest first, as `candidate` lines: `SCOPE overlap` (the write paths of `--meta scope=` against each task's; a directory covers the paths under it; write the paths a task must not change after `;` or `；`, or after `不改`, `不要改`, `do not`, `never` or `not:`, and they are not compared; a shared file or a shared directory of four or more segments is strong, a shallower shared directory is marked `shared directory only` and `weak` when it is the only reason), `same #<n> reference` (`#<n>` or `gh issue view <n>` in both notes; an external, decision or milestone shows only for this reason, with its type), and `title words` (two shared words of four letters or more, or three shared Chinese character pairs; the weakest). Order: strong SCOPE overlap, same reference, shallow SCOPE overlap, title. A candidate reachable through the given `--depends`/`--blocks` at any depth reads `linked (via #<id>)`. It prints them when it refuses and when it adds; with `--depends`/`--blocks` each reads `linked` or `not linked`. An `added` line gives the new id and its links. A `--type decision` task needs `--blocks` and prints no candidates. With `--workflow <name>` (needs `[workflow_policy] enabled = true`) it creates a workflow instance in one locked run: the gate runs once for the whole piece of work; the instance task (meta `workflow`, `workflow_record`; `--blocks` ids wait for it) is the parent of one task for each required stage and each `--with <stage>`, created with real `--depends` (a root stage takes the external `--depends`; a later stage depends on each upstream stage and on that stage's approval decision). An optional stage that is not named in `--with` is left out, as is one in `--skip`; the stages after it depend on its upstream stages instead. `--meta scope=` and `verify=` are the instance's: the stages that write code use them, a design stage gets a document path under `[workflow_policy] design_dir`. The notes need a why sentence and `- [ ]` acceptance lines. A stage whose approval is `manager` or `human` also gets a decision under the instance, due once the stage merges (see `stage`). One `workflow-added` line lists the stages, the stages left out and the approvals. `--with` and `--skip` name optional stages only. See [Workflows](roles-and-briefs.md#workflows).
 
 | Option | Argument | Default | Meaning |
 |---|---|---|---|
@@ -219,6 +220,9 @@ Creates a task and settles its dependencies in the same call. It passes `--notes
 | `--due` | `DUE` |  | passed to tg add --due |
 | `--promised` | `PROMISED` |  | passed to tg add --promised |
 | `--priority` | `PRIORITY` |  | passed to tg add --priority |
+| `--workflow` | `NAME` |  | create one task for each stage of this workflow, under an instance task (`run.py workflows` lists them); --meta scope= and verify= are the instance's |
+| `--with` | `STAGE [STAGE ...]` |  | with --workflow: create this optional stage (it is left out otherwise) |
+| `--skip` | `STAGE [STAGE ...]` |  | with --workflow: leave this optional stage out, and say so in the record |
 
 #### `run.py stop`
 
@@ -314,6 +318,27 @@ Lists every workflow, one line each: the name, its source (`plugin`, `project`, 
 | `--title` | `TITLE` |  | with --pick-prompt: the title of the work |
 | `--notes-file` | `FILE` |  | with --pick-prompt: a file that holds the notes of the work |
 | `--scope` | `SCOPE` |  | with --pick-prompt: the SCOPE paths or areas of the work |
+
+#### `run.py stage`
+
+```text
+run.py stage ID ACTION STAGE [--default] [--by BY] [--note NOTE] [--decline-split REASON] [--part TITLE] [--meta KEY=VALUE [KEY=VALUE ...]] [--depends ID [ID ...]]
+```
+
+`approve`: answers the approval decision of a stage of a workflow instance. It refuses while the stage is not merged. A `manager` approval checks workflow facts only: every `decision:` follow-up of the stage is triaged (`triage`), and each splittable stage after it is split (`split`) or declined with `--decline-split "<one line>"`. A `human` approval needs `--by operator`, after the owner has answered. `--default` applies the default (approve) of an approval that is past its due time; it refuses an approval that holds (`on_timeout = "hold"`). `record` applies the same default itself at the due time (`approval-due`), so `--default` is for a Manager that runs it by hand. `split`: adds a part to a stage whose workflow sets `split: true`, before the stage has an attempt. The first call re-titles the stage's own task as part 1; each later call creates a part with the same upstream dependencies, and every later stage then depends on all parts. `--meta scope=` is required. A part whose files overlap a sibling's must name it with `--depends`. See [Workflows](roles-and-briefs.md#workflows).
+
+| Option | Argument | Default | Meaning |
+|---|---|---|---|
+| `ID` |  |  | the id of the workflow instance task |
+| `ACTION` |  |  | approve: answer the stage's approval decision; split: add a part to a stage that may be split. One of `approve`, `split`. |
+| `STAGE` |  |  | the stage id, for example spec or impl |
+| `--default` |  |  | approve: apply the default of an approval that is past its due time |
+| `--by` | `BY` | `manager` | approve: who answers; a `human` approval needs operator. One of `manager`, `operator`. |
+| `--note` | `NOTE` |  | approve: one line for the decision's notes |
+| `--decline-split` | `REASON` |  | approve: one line on why a splittable stage after this one is not split |
+| `--part` | `TITLE` |  | split: the title of the part; the first call names part 1, the stage's own task |
+| `--meta` | `KEY=VALUE [KEY=VALUE ...]` |  | split: meta of the part; scope= is required |
+| `--depends` | `ID [ID ...]` |  | split: sibling parts that this part waits for; needed when their files overlap |
 
 #### `run.py check-report`
 
@@ -444,7 +469,7 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 
 ### Events
 
-`run.py` prints 111 events. A name that is not in `scripts/events.py` is refused.
+`run.py` prints 116 events. A name that is not in `scripts/events.py` is refused.
 
 | Event | Meaning |
 |---|---|
@@ -462,6 +487,11 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 | `workflow` | One workflow, as `run.py workflows` lists it: its source, description and stages. |
 | `workflow-broken` | A workflow file or a stage library file with an error, as `run.py workflows` lists it; the command exits 1. |
 | `workflows-checked` | `run.py workflows --check` found no problem. |
+| `workflow-added` | `add --workflow` created an instance: its stages, the stages left out and the approvals. |
+| `approval-opened` | A stage merged and its approval decision is open: its due time and default; a `human` one is now the owner's. |
+| `approval-due` | An approval decision passed its due time and `record` applied its default (approve). |
+| `approved` | A stage approval was answered: by the Manager, the owner or the default. |
+| `split` | A stage was split: the new part, or the first part named. |
 | `sessions-restored` | The local Taskgraph cache had no `sessions` meta; run.py rebuilt it from `claude agents`. |
 | `sessions-lost` | A task in progress has no `sessions` meta and no matching session row; its worker may run on another machine. |
 | `verifying` | A verifier started for a PASS result: model, session, ref, verify kind and seat. |
@@ -585,10 +615,14 @@ secrets in either file.
 
 Model values are either a model id (`"opus"`) or a table (`{ model = "sonnet", effort = "high" }`). A table may add
 `profile`, a Claude profile for the sessions of that tier (see [Profiles](configuration.md#workers-on-more-than-one-claude-profile)). One optional table,
-`[profiles]`, has names of your own and is not in the list below. How agents read the config, and what `check`
+`[profiles]`, has names of your own and is not in the list below. So is the array of tables `[[workflow_rule]]`, the hard rules
+of the workflows: each has a `name`, `match_paths` (globs over the write paths of a SCOPE) or `match_area` (the `area` meta),
+and optionally `require_stage`, `approval` (a table of stage = level, for example `{ spec = "human" }`), `risk` (`low`,
+`medium` or `high`, set on every stage task) and `on_timeout` (`approve` or `hold`; `hold` makes a `human` approval wait for the
+owner with no deadline). See [Workflows](roles-and-briefs.md#workflows). How agents read the config, and what `check`
 reports, is in [Configuration](configuration.md).
 
-The config has 16 sections and 59 keys.
+The config has 16 sections and 62 keys.
 
 ### `[taskgraph]`
 
@@ -671,6 +705,9 @@ Any tier or override table may also set `profile = "<name>"` or `profile = ["<na
 |---|---|---|---|
 | `enabled` | true or false | `false` | `true` turns workflows on: `config.py check` then validates the workflow files and the stage library, and a broken file is reported like a broken role file. `false` (the default) leaves workflows off. See [Workflows](roles-and-briefs.md#workflows). |
 | `design_dir` | a string | `"docs/design"` | The folder of design documents: the `{design_dir}` in the scope template of a stage type of the stage library (`stages.toml`). A path relative to the repository root, without a trailing `/`. |
+| `manager_due_hours` | a positive integer | `2` | Hours after a stage merges until the decision of its `manager` approval is due. At the due time `record` approves it by default. See [Workflows](roles-and-briefs.md#workflows). |
+| `human_due_hours` | a positive integer | `48` | Hours after a stage merges until the decision of its `human` approval is due. At the due time `record` applies the default (approve), unless the rule that raised the approval sets `on_timeout = "hold"`. |
+| `approval_floor` | a table of verify kind = "auto", "manager" or "human", for example { schema = "manager" } | `{}` | The lowest approval of a stage by its verify kind, for example `{ schema = "manager" }`: a stage whose verify kind is `schema` then needs at least a `manager` approval. The approval of a stage is the highest of its workflow value, the `approval` of a matching `[[workflow_rule]]` and this floor. |
 
 ### `[scope]`
 
@@ -737,13 +774,17 @@ Worker hooks (see [Worker hooks](operations.md#worker-hooks)). All off until `en
 
 ## Task metadata
 
-Task notes hold the purpose and acceptance criteria, following the Taskgraph skill. Metadata holds everything else. There are 46 keys.
+Task notes hold the purpose and acceptance criteria, following the Taskgraph skill. Metadata holds everything else. There are 62 keys.
 
 | Key | Set by | Meaning |
 |---|---|---|
 | `scope`, `verify`, `tier`, `risk` | plan | Brief inputs. `tier` is a tier name or a `models.overrides` key. `risk=high` sends verification to a separate session. |
 | `role` | plan | The task's role: a name from `run.py roles`. Empty or absent means the config's `roles.default`, else no role. See [Roles](roles-and-briefs.md#roles). |
 | `estimate` | plan | Taskgraph's own estimate in hours. The worker's timebox is twice it. |
+| `workflow`, `workflow_record` | `add --workflow` | On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule`, `adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `task`, `approval`, `approval_id`, `split`, `after` and `parts`). The instance is never launched; its status is the derived status of its stages. |
+| `stage`, `stage_part`, `stage_origin`, `split_declined`, `workflow_notes` | `add --workflow`, `stage split`, `stage approve` | On a stage task: its stage id; the part number of a split stage; how it came to exist (`expand`, `with` or `split`); the one line that declined a split; and the workflow's notes for the stage, which the brief pastes under CONTEXT. |
+| `approval_id` | `add --workflow` | On a stage task that has an approval: the id of its decision. |
+| `approval_for`, `approval_stage`, `approval_level`, `approval_state`, `on_timeout`, `due_at`, `decide_by`, `default` | `add --workflow`, the merge record, `record`, `stage approve` | On an approval decision: the stage task and stage id it answers, its level (`manager` or `human`), its state (`pending` until the stage merges, `open`, `done`), what happens at the due time (`on_timeout`: `approve` or `hold`), the due time (`due_at`, UTC; `decide_by` is its date for Taskgraph) and the `default` that `record` applies. A `human` decision has `decider=manager` until the stage merges, then `operator`. |
 | `verify_mode` | plan | `session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: `<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name. |
 | `verify_kind` | plan | `code` (default), `schema` or `design-doc`. Selects the verifier's method text and the pass level: `code` closes on `artifact-verified` or `test-verified`; the other two only on `artifact-verified`. Unset means the config's `verify.kind`. |
 | `started_at`, `session`, `model`, `attempt` | `launch`, `adopt` | The current attempt, and when it started (UTC, ISO 8601; a task from 0.27.2 or older has a local string). `adopt` writes `session=adopted` and no `model`. |
@@ -808,6 +849,7 @@ writes, and its class. The block to add to `.taskgraph.toml`, and what happens w
 | `abandoned`, `abandoned_why` | on the issue | The only marker of an abandoned task, and its reason. |
 | `ci_refs` | on the issue | The scratch branches on the remote that a passing `close` or `abandon` must delete, from any machine. |
 | `gates` | on the issue | Written by `tg gate`, not `--meta`; the issue shows the open merge gate. |
+| `workflow`, `workflow_record`, `stage`, `stage_part`, `stage_origin`, `split_declined`, `workflow_notes`, `approval_id`, `approval_for`, `approval_stage`, `approval_level`, `approval_state`, `on_timeout`, `due_at`, `decide_by`, `default` | on the issue | Another machine must see the workflow and where each stage and approval stands; none of them is local. |
 
 The plan keys (`scope`, `verify`, `verify_kind`, `verify_mode`, `tier`, `role`, `risk`, `estimate`) and a decision's
 `decider` and `ask` are written by the Manager or you with `tg`, not by `run.py`; they stay on the issue.

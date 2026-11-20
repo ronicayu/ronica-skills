@@ -80,6 +80,11 @@ LOCAL = ".agentic-team.local.toml"
 TODO = "TODO"
 VERIFY_KINDS = ("code", "schema", "design-doc")
 TIERS = ("mechanical", "implementation", "judgement", "verifier")
+RULES = "workflow_rule"  # an optional array of tables, `[[workflow_rule]]`: the hard rules of the workflows; not in SCHEMA
+APPROVAL_LEVELS = ("auto", "manager", "human")
+RULE_KEYS = ("name", "match_paths", "match_area", "require_stage", "approval", "risk", "on_timeout")
+RISK_LEVELS = ("low", "medium", "high")
+ON_TIMEOUT = ("approve", "hold")
 PROFILES = "profiles"  # an optional table: profile name -> CLAUDE_CONFIG_DIR; the names are free, so it is not in SCHEMA
 DEFAULT_PROFILE = "default"  # the Manager's own environment; reserved, never defined in [profiles]
 PLUGIN_NAME = "agentic-team"
@@ -201,6 +206,9 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     "workflow_policy": {
         "enabled": ("bool", False),
         "design_dir": ("str", "docs/design"),
+        "manager_due_hours": ("posint", 2),
+        "human_due_hours": ("posint", 48),
+        "approval_floor": ("floormap", {}),
     },
     "scope": {"adjacent": ("adjacent", [])},
     "report": {
@@ -255,6 +263,7 @@ TYPE_NAMES = {
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
     "cmdlist": "a list of non-empty one-line shell commands",
     "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
+    "floormap": 'a table of verify kind = "auto", "manager" or "human", for example { schema = "manager" }',
     "tiermap": 'a table of tier or models.overrides key = model, for example { implementation = "sonnet" }',
     "posint": "a positive integer",
     "nonneg": "an integer that is 0 or more",
@@ -378,6 +387,13 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
          "[Workflows](roles-and-briefs.md#workflows)."),
         "design_dir": ("The folder of design documents: the `{design_dir}` in the scope template of a stage type of the stage library "
          "(`stages.toml`). A path relative to the repository root, without a trailing `/`."),
+        "manager_due_hours": ("Hours after a stage merges until the decision of its `manager` approval is due. At the due time `record` "
+         "approves it by default. See [Workflows](roles-and-briefs.md#workflows)."),
+        "human_due_hours": ("Hours after a stage merges until the decision of its `human` approval is due. At the due time `record` "
+         "applies the default (approve), unless the rule that raised the approval sets `on_timeout = \"hold\"`."),
+        "approval_floor": ("The lowest approval of a stage by its verify kind, for example `{ schema = \"manager\" }`: a stage whose "
+         "verify kind is `schema` then needs at least a `manager` approval. The approval of a stage is the highest of its workflow "
+         "value, the `approval` of a matching `[[workflow_rule]]` and this floor."),
     },
     "scope": {
         "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
@@ -525,6 +541,10 @@ def unknown_keys(raw, source):
             if not isinstance(body, dict):
                 found.append(f"{source}: {section} must be a table ([{section}])")
             continue
+        if section == RULES:
+            if not (isinstance(body, list) and all(isinstance(r, dict) for r in body)):
+                found.append(f"{source}: {section} must be an array of tables ([[{section}]])")
+            continue
         if section not in SCHEMA:
             if isinstance(body, dict):
                 found.append(f"{source}: unknown section [{section}]{suggest(section, list(SCHEMA))}")
@@ -610,6 +630,8 @@ def load(root="."):
 
     if isinstance(merged.get(PROFILES), dict):  # present only when the project sets it
         data[PROFILES] = dict(merged[PROFILES])
+    if isinstance(merged.get(RULES), list):
+        data[RULES] = json.loads(json.dumps(merged[RULES]))
     sessions = data["sessions"]
     if sessions["timezone"] == "":
         sessions["timezone"] = system_timezone()
@@ -658,6 +680,8 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(c, str) and c.strip() and "\n" not in c for c in value)
     if kind == "cmdmap":
         return isinstance(value, dict) and all(type_ok("cmdlist", v) for v in value.values())
+    if kind == "floormap":
+        return isinstance(value, dict) and all(v in APPROVAL_LEVELS for v in value.values())
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "nonneg":
@@ -711,7 +735,7 @@ def problems(config):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
             if kind == "patterns":
                 found += pattern_problems(dotted, value)
-            if kind in ("ranmap", "cmdmap"):
+            if kind in ("ranmap", "cmdmap", "floormap"):
                 found += [f"{dotted}: {json.dumps(k)} is not a verify kind; the kinds are {', '.join(VERIFY_KINDS)}"
                           f"{suggest(k, list(VERIFY_KINDS))}" for k in value if k not in VERIFY_KINDS]
             if kind == "tiermap":
@@ -738,7 +762,37 @@ def problems(config):
     project = config["taskgraph"]["project"]
     if isinstance(project, str) and not project.strip():
         found.append("taskgraph.project is empty; `tg projects` lists names")
-    return found + profile_problems(config)
+    return found + rule_problems(config.get(RULES) or []) + profile_problems(config)
+
+
+def rule_problems(rules):
+    """Problems in the `[[workflow_rule]]` tables. A rule matches SCOPE write paths or the `area` meta, never title words."""
+    found, names = [], set()
+    for number, rule in enumerate(rules, 1):
+        where = f"workflow_rule #{number}" + (f" ({rule['name']})" if isinstance(rule.get("name"), str) and rule["name"] else "")
+        if not isinstance(rule.get("name"), str) or not re.fullmatch(r"[a-z0-9-]+", rule["name"]):
+            found.append(f"{where}: name must be lowercase letters, digits and -")
+        elif rule["name"] in names:
+            found.append(f"{where}: the name is used twice")
+        names.add(rule.get("name"))
+        for key in rule:
+            if key not in RULE_KEYS:
+                found.append(f"{where}: unknown key {key}{suggest(key, list(RULE_KEYS))}")
+        for key in ("match_paths", "match_area"):
+            if key in rule and not (isinstance(rule[key], list) and rule[key] and all(isinstance(v, str) and v.strip() for v in rule[key])):
+                found.append(f"{where}: {key} must be a non-empty list of strings")
+        if not (rule.get("match_paths") or rule.get("match_area")):
+            found.append(f"{where}: needs match_paths or match_area; a rule matches SCOPE paths or the area meta, never title words")
+        if "require_stage" in rule and not (isinstance(rule["require_stage"], str) and rule["require_stage"].strip()):
+            found.append(f"{where}: require_stage must be a stage type name")
+        approval = rule.get("approval", {})
+        if not (isinstance(approval, dict) and all(isinstance(k, str) and v in APPROVAL_LEVELS for k, v in approval.items())):
+            found.append(f"{where}: approval must be a table of stage = {', '.join(APPROVAL_LEVELS)}, for example {{ spec = \"human\" }}")
+        if "risk" in rule and rule["risk"] not in RISK_LEVELS:
+            found.append(f"{where}: risk must be one of {', '.join(RISK_LEVELS)}")
+        if "on_timeout" in rule and rule["on_timeout"] not in ON_TIMEOUT:
+            found.append(f"{where}: on_timeout must be one of {', '.join(ON_TIMEOUT)}")
+    return found
 
 
 def tier_profiles(value):
@@ -1067,6 +1121,10 @@ def show_text(config):
         for name, table in nested:
             lines.append(f"\n[{name}]")
             lines += [f"{toml_key(k)} = {toml_value(v)}" for k, v in table.items()]
+        lines.append("")
+    for rule in config.get(RULES) or []:
+        lines.append(f"[[{RULES}]]")
+        lines += [f"{k} = {toml_value(v)}" for k, v in rule.items()]
         lines.append("")
     if config.get(PROFILES):
         lines.append(f"[{PROFILES}]")

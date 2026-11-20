@@ -2516,6 +2516,7 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
                            mailbox_command(run, tid, attempt, "report", "--status", "<STATUS>", "--body-file", quote(report))),
         "NOTIFY": notify_step(notify_target(run), tid, kind, attempt),
+        "WORKFLOW": workflow_context(run, task) if kind != "verify" else "",
         "MAILBOX": ("None. You file no question and take no message: judge the output and report." if kind == "verify"
                     else mailbox_section(run, tid, attempt, session, cap, notify_target(run), revision_cap(run, task) > 0)),
     }
@@ -3140,6 +3141,8 @@ def cmd_launch(run, args):
     if task["type"] != "task":
         raise Refused(f'#{tid} is a {task["type"]}, not a task; a decision is answered with '
                       f'tg edit {tid} --notes "<answer>", then tg done {tid}')
+    if is_instance(task):
+        raise Refused(f"#{tid} is a workflow instance; it is never launched. Launch its stages: tg ls --parent {tid}")
     if task["derived_status"] == "done":
         raise Refused(f"#{tid} is done")
     refuse_closed(run, task)
@@ -5256,7 +5259,7 @@ def ci_target(run, task, rows):
 def record_in_progress(run, snap, task, unmanaged):
     tid, meta = task["id"], task.get("meta") or {}
     attempt = wanted_attempt(task)
-    if meta.get("abandoned"):
+    if meta.get("abandoned") or is_instance(task):  # an instance is never launched: its stages are
         return
     if attempt is None:
         unmanaged.append(tid)
@@ -5657,6 +5660,7 @@ def cmd_record(run, args):
     for task in sorted(snap.in_progress + snap.closed, key=lambda t: t["id"]):
         if task["status"] != "done":
             fill_usage(run, task)
+    approve_due(run, snap)
     if run.marked_done:  # a merge recorded here makes its dependents ready
         snap.ready = run.tg("ready") or []
     for d in sorted(snap.decisions, key=lambda t: t["id"]):
@@ -8398,6 +8402,7 @@ def finish_merged(run, task):
     if task["status"] != "done":
         task["status"] = "done"
         run.marked_done.append(task["id"])
+    open_approval(run, task)
 
 
 def cmd_close(run, args):
@@ -8776,21 +8781,17 @@ def candidate_detail(task, reasons, weak, link):
     return f"{task['title']} [{where}]: {'; '.join(reasons)}{'; weak' if weak else ''}{mark}"
 
 
-def cmd_add(run, args):
-    """Create a task with its dependencies settled: `--depends` and `--blocks`, or `--independent "<reason>"`. Without
-    them it refuses and lists the open tasks that may be related, so the Manager chooses at the moment of creation."""
-    is_decision = args.type == "decision"
+def link_gate(run, args, is_decision, quiet=False):
+    """The dependency gate of `add`: (independent reason or None, every node, the candidates, link_of). It refuses a task that
+    settles no dependency and lists the candidates, so the Manager chooses at the moment of creation."""
     linked = set(args.depends) | set(args.blocks)
     independent = args.independent.strip() if args.independent is not None else None
-    if is_decision and not args.blocks:
-        raise Refused('a decision needs --blocks <ids>, the tasks that wait for the answer: run.py add "<question>" '
-                      "--type decision --meta decider=operator --blocks <ids>")
     if independent == "":
         raise Refused('--independent takes the reason: --independent "<why no task is related>"')
     if independent is not None and linked:
         raise Refused("give --depends/--blocks or --independent, not both")
     everything = run.tg("ls") or []  # not --status: a milestone or a parent has a computed status that the filter skips
-    found = [] if is_decision else add_candidates(everything, args.title, args.notes, meta_pairs(args.meta).get("scope"))
+    found = [] if is_decision or quiet else add_candidates(everything, args.title, args.notes, meta_pairs(args.meta).get("scope"))
     reached = link_paths(everything, args.depends, args.blocks)
 
     def link_of(task):
@@ -8803,6 +8804,26 @@ def cmd_add(run, args):
             run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, None))
         raise Refused('settle the dependencies of the new task: --depends <ids> (it needs their result or code), --blocks <ids> '
                       '(they need it), or --independent "<why no task is related>"; the candidates above may be related')
+    return independent, found, link_of
+
+
+def cmd_add(run, args):
+    """Create a task with its dependencies settled: `--depends` and `--blocks`, or `--independent "<reason>"`. Without
+    them it refuses and lists the open tasks that may be related, so the Manager chooses at the moment of creation. With
+    `--workflow` it creates a whole workflow instance (add_workflow). Returns the new task's id.
+
+    A workflow calls this for each task it creates, with the internal attributes `settled` (the gate ran once for the whole
+    instance), `quiet` (no candidate lines) and `approval_for` (a decision that blocks nothing yet)."""
+    if getattr(args, "workflow", None):
+        return add_workflow(run, args)
+    is_decision = args.type == "decision"
+    if is_decision and not args.blocks and not getattr(args, "approval_for", None):
+        raise Refused('a decision needs --blocks <ids>, the tasks that wait for the answer: run.py add "<question>" '
+                      "--type decision --meta decider=operator --blocks <ids>")
+    if getattr(args, "settled", False):
+        independent, found, link_of = args.independent, [], lambda task: None
+    else:
+        independent, found, link_of = link_gate(run, args, is_decision, getattr(args, "quiet", False))
     cmd = ["add", args.title]
     for flag, value in (("--notes", args.notes), ("--type", args.type), ("--parent", args.parent), ("--start", args.start),
                         ("--due", args.due), ("--promised", args.promised), ("--priority", args.priority)):
@@ -8825,6 +8846,438 @@ def cmd_add(run, args):
                      meta_pairs(args.meta).get("default"), args.due)
     for _, task, reasons, weak in found:
         run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
+    return tid
+
+
+# --------------------------------------------------------- workflow instances
+
+LEVEL = {level: rank for rank, level in enumerate(("auto", "manager", "human"))}
+RISK_RANK = {level: rank for rank, level in enumerate(("low", "medium", "high"))}
+INSTANCE_META = ("workflow", "workflow_record")
+KEEP_ON_INSTANCE = ("scope", "verify", "estimate")  # --meta pairs that belong to the instance's record, not to its task node
+
+
+def is_instance(task):
+    meta = task.get("meta") or {}
+    return "workflow" in meta and "stage" not in meta
+
+
+def stage_meta_pairs(pairs, *skip):
+    """The raw `--meta` pairs whose key is not in `skip`."""
+    return [p for p in pairs if p.partition("=")[0] not in skip]
+
+
+def fill_template(text, **values):
+    return re.sub(r"\{(\w+)\}", lambda m: str(values.get(m.group(1), m.group(0))), text)
+
+
+def workflow_lock(run):
+    try:
+        return mbx.locked(os.path.join(run.run_dir, "locks", "workflow.lock"))
+    except mbx.Fail as exc:
+        raise Refused(str(exc), exc.code)
+
+
+def stage_approval(run, stage, rules, path_set, area):
+    """(approval level, on_timeout) of a stage: the highest of its workflow value, the `approval` of each matching rule and
+    the `approval_floor` of its verify kind. A `human` approval holds when a matching rule says so."""
+    level = stage.approval
+    floor = run.config["workflow_policy"]["approval_floor"].get(stage.verify)
+    if floor and LEVEL[floor] > LEVEL[level]:
+        level = floor
+    hold = False
+    for rule in rules:
+        asked = (rule.get("approval") or {}).get(stage.id) or (rule.get("approval") or {}).get(stage.type)
+        if asked and LEVEL[asked] > LEVEL[level]:
+            level = asked
+        hold = hold or rule.get("on_timeout") == "hold"
+    return level, "hold" if hold and level == "human" else "approve"
+
+
+def approval_notes(stage_id, level, hold):
+    facts = ("Manager approval checks workflow facts only, never the work: the stage is merged, every `decision:` follow-up "
+             "of it is triaged, and a splittable stage after it is split or declined in one line. " if level == "manager" else
+             "The owner decides this. ")
+    default = ("It has no deadline: it waits until the owner answers." if hold else
+               "If nobody answers by the due time, `run.py record` approves it by default.")
+    return (f"Approval of stage {stage_id}. The decision opens when the stage merges. {facts}{default} "
+            f"Answer: run.py stage <instance> approve {stage_id}.")
+
+
+def add_workflow(run, args):
+    """`add --workflow <name>`: one instance task, one task for each stage that is created, and one decision for each
+    stage whose approval is not `auto`, in one locked run. Every stage task goes through cmd_add with real --depends: its
+    upstream stage tasks and their approvals; a root stage takes the external --depends."""
+    policy = run.config["workflow_policy"]
+    if not policy["enabled"]:
+        raise Refused("workflows are off; set `enabled = true` under [workflow_policy] in .agentic-team.toml to use --workflow")
+    if args.type:
+        raise Refused("--workflow creates tasks and decisions of its own; leave out --type")
+    catalog = load_workflows(run)
+    if catalog.problems:
+        raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(catalog.problems))
+    wf = catalog.workflows.get(args.workflow)
+    if wf is None:
+        raise Refused(f"no workflow named {args.workflow!r}; available workflows: {', '.join(sorted(catalog.workflows)) or 'none'}")
+    try:
+        plan = wfl.build_plan(wf, args.with_, args.skip)
+    except ValueError as exc:
+        raise Refused(str(exc))
+    if any(s.decides for s in plan.stages) and len(plan.stages) > 1:
+        raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
+    meta = meta_pairs(args.meta)
+    scope, verify = str(meta.get("scope") or "").strip(), str(meta.get("verify") or "").strip()
+    why, acceptance = parse_notes(args.notes)
+    if not (why and acceptance):
+        raise Refused("the notes need a sentence on why the work is needed and `- [ ]` acceptance lines: every stage task starts "
+                      "from them")
+    for stage in plan.stages:
+        if stage.scope == "instance" and not scope:
+            raise Refused(f'stage {stage.id} writes the instance SCOPE: add --meta scope="<paths it may write; paths it may not>"')
+        if stage.verify != "design-doc" and not (verify or stage.verify_cmd):
+            raise Refused(f'stage {stage.id} needs a VERIFY: add --meta verify="<exact commands or checks>"')
+    independent, _, link_of = link_gate(run, args, False)
+    rules = [r for r in run.config.get("workflow_rule") or [] if wfl.rule_matches(r, write_paths(scope), meta.get("area"))]
+    risk = max((r["risk"] for r in rules if r.get("risk")), key=lambda v: RISK_RANK[v], default=None)
+    design_dir = policy["design_dir"]
+    base = wfl.slug(args.title)
+    passed = stage_meta_pairs(args.meta, *KEEP_ON_INSTANCE, "workflow", "workflow_record", "stage", "role", "verify_kind", "risk")
+    version = wfl.file_version(wf.path)
+    created, decisions, entries, root_note = {}, {}, [], None
+    instance = None
+    with workflow_lock(run):
+        try:
+            record = {"workflow": wf.name, "version": version, "optional": plan.optional, "rule": rules[0]["name"] if rules else None,
+                      "adjustments": [], "ended": None, "scope": scope, "verify": verify, "stages": entries}
+            instance = cmd_add(run, argparse.Namespace(
+                title=args.title, notes=args.notes, depends=[], blocks=args.blocks, independent=args.independent, parent=args.parent,
+                type=None, start=args.start, due=args.due, promised=None, priority=args.priority, workflow=None, settled=True,
+                meta=[meta_arg("workflow", wf.name), *passed, *([meta_arg("risk", risk)] if risk else [])]))
+            root_note = independent if independent is not None else f"root stage of workflow instance #{instance}"
+            for stage in plan.stages:
+                created_id = create_stage(run, args, wf, stage, plan, instance, created, decisions, entries, passed, risk, rules,
+                                          scope, verify, why, acceptance, design_dir, base, root_note)
+                created[stage.id] = created_id
+            run.edit_meta(instance, workflow_record=record)
+        except BaseException:
+            if instance is not None:
+                with contextlib.suppress(Refused):
+                    run.tg("rm", str(instance), "--recursive")
+            raise
+    skipped = ", ".join(f"{k} ({'--skip' if v == 'skipped' else 'not asked for'})" for k, v in plan.optional.items() if v != "with")
+    approvals = ", ".join(f"{e['id']} {e['approval']}" for e in entries if e["approval"] != "auto")
+    roots = [created[s.id] for s in plan.stages if not plan.after[s.id]]
+    listed = ", ".join(f"{e['id']} #{e['task']}" for e in entries)
+    run.emit("workflow-added", instance, None, None,
+             f"{wf.name}: {args.title}; stages {listed}"
+             + (f"; left out: {skipped}" if skipped else "") + (f"; approvals: {approvals}" if approvals else "")
+             + (f"; rule {rules[0]['name']}" if rules else ""),
+             f"run.py launch {roots[0]}" if roots else None)
+    return instance
+
+
+def create_stage(run, args, wf, stage, plan, instance, created, decisions, entries, passed, risk, rules, scope, verify, why,
+                 acceptance, design_dir, base, root_note):
+    """Create the task of one stage, and its approval decision when it has one; returns the task id."""
+    design = stage.verify == "design-doc"
+    slug = f"{base}-{stage.id}"
+    values = {"design_dir": design_dir, "slug": slug}
+    path = fill_template(stage.scope, **values) if stage.scope != "instance" else ""
+    stage_scope = f"{path}; do not change anything else" if path else scope
+    stage_verify = (fill_template(stage.verify_cmd, path=path, **values) if stage.verify_cmd else
+                    f"The document {path} meets every ACCEPTANCE line." if design and path else verify)
+    level, on_timeout = stage_approval(run, stage, rules, write_paths(scope), None)
+    lines = list(stage.acceptance) if design else []
+    if design:
+        if not any("instance acceptance" in l.lower() for l in lines):
+            lines.append("Covers every instance acceptance line.")
+    else:
+        lines += acceptance
+    goal = f"Why: {why} (stage {stage.id} of the {wf.name} workflow, instance #{instance})."
+    if design:
+        goal += " Instance acceptance: " + "; ".join(acceptance) + "."
+    notes = goal + "\n" + "\n".join(f"- [ ] {l}" for l in lines)
+    notes_text = wfl.stage_notes(wf.body, stage.id)
+    pairs = [meta_arg("stage", stage.id), meta_arg("stage_origin", "with" if stage.optional else "expand"), meta_arg("role", stage.role),
+             meta_arg("verify_kind", stage.verify), meta_arg("scope", stage_scope), meta_arg("verify", stage_verify), *passed]
+    if stage.estimate is not None:
+        pairs.append(f"estimate={stage.estimate}")
+    if risk:
+        pairs.append(meta_arg("risk", risk))
+    if notes_text:
+        pairs.append(meta_arg("workflow_notes", notes_text))
+    depends = []
+    for up in plan.after[stage.id]:
+        depends += [created[up]] + ([decisions[up]] if up in decisions else [])
+    external = [] if depends else list(args.depends)
+    depends = depends or external
+    tid = cmd_add(run, argparse.Namespace(
+        title=f"{args.title} — {stage.id}", notes=notes, depends=depends, blocks=[], independent=None if depends else root_note,
+        parent=instance, type=None, start=None, due=None, promised=None, priority=args.priority, workflow=None, quiet=True, meta=pairs))
+    entry = {"id": stage.id, "task": tid, "approval": level, "approval_id": None, "split": stage.split, "after": plan.after[stage.id]}
+    entries.append(entry)
+    if level != "auto":
+        hold = on_timeout == "hold"
+        node = cmd_add(run, argparse.Namespace(
+            title=f"Approve {stage.id} of {args.title}", notes=approval_notes(stage.id, level, hold), depends=[tid], blocks=[],
+            independent=None, parent=instance, type="decision", start=None, due=None, promised=None, priority=None, workflow=None,
+            approval_for=tid, quiet=True,
+            meta=["decider=manager", meta_arg("approval_for", tid), meta_arg("approval_stage", stage.id), meta_arg("approval_level", level),
+                  meta_arg("approval_state", "pending"), meta_arg("on_timeout", on_timeout),
+                  meta_arg("default", "hold" if hold else "approve")]))
+        decisions[stage.id] = node
+        entry["approval_id"] = node
+        run.edit_meta(tid, approval_id=node)
+    return tid
+
+
+def short_field(body, name, limit=200):
+    """The first line of a report field, cut at `limit` characters."""
+    lines = [l.strip() for l in report_field(strip_comments(body or ""), name).splitlines() if l.strip()]
+    text = " ".join(lines[:1])
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def workflow_context(run, task):
+    """The CONTEXT lines of a stage task: its place in the workflow, what each upstream stage reported (its Summary, the
+    Files that name its documents, its Head), and the workflow's notes for the stage. "" for any other task."""
+    meta = task.get("meta") or {}
+    parent = task.get("parent")
+    if not meta.get("stage") or parent is None:
+        return ""
+    record = (run.show(parent).get("meta") or {}).get("workflow_record")
+    if not isinstance(record, dict):
+        return ""
+    ids = [e["id"] for e in record.get("stages") or []]
+    place = f" ({ids.index(meta['stage']) + 1} of {len(ids)})" if meta["stage"] in ids else ""
+    text = f"- Workflow: {record.get('workflow')} #{parent}, stage {meta['stage']}{place}"
+    for dep in task.get("depends_on") or []:
+        node = run.show(dep["id"])
+        if (node.get("meta") or {}).get("stage") is None or node.get("parent") != parent:
+            continue
+        found = [r for r in run.results_for(dep["id"]) if is_worker_result(r)]
+        if not found:
+            continue
+        body = found[-1].get("body") or ""
+        bits = [short_field(body, "Summary"), f"Files: {short_field(body, 'Files')}" if short_field(body, "Files") else "",
+                f"Head {short_field(body, 'Head')[:7]}" if short_field(body, "Head") else ""]
+        text += f"\n- Upstream {node['meta']['stage']} #{dep['id']}: " + "; ".join(b for b in bits if b)
+    if meta.get("workflow_notes"):
+        text += "\n- Workflow notes: " + str(meta["workflow_notes"]).replace("\n", "\n  ")
+    return "\n" + text
+
+
+# ------------------------------------------------------------ approval decisions
+
+def hours_from_now(hours):
+    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)
+
+
+def open_approval(run, stage, node=None):
+    """A stage merged: its approval decision becomes due. A `manager` decision gets its due time (`manager_due_hours`); a
+    `human` one turns into an operator decision with its due time (`human_due_hours`, or none when it holds), and the
+    owner is told once, through the notify queue. A decision that is open already, or done, is left as it is."""
+    meta = stage.get("meta") or {}
+    if run.dry_run or not meta.get("approval_id") or meta.get("stage_state") == "skipped":
+        return
+    node = node or run.show(meta["approval_id"])
+    nmeta = node.get("meta") or {}
+    if node["status"] == "done" or nmeta.get("approval_state") != "pending":
+        return
+    policy, level = run.config["workflow_policy"], nmeta.get("approval_level")
+    hold = level == "human" and nmeta.get("on_timeout") == "hold"
+    fields = {"approval_state": "open"}
+    due = None
+    if not hold:
+        due = hours_from_now(policy["human_due_hours"] if level == "human" else policy["manager_due_hours"])
+        fields.update(due_at=due.strftime("%Y-%m-%dT%H:%M:%SZ"), decide_by=due.date().isoformat())
+    if level == "human":
+        fields["decider"] = "operator"
+    run.write_meta(node, **fields)
+    waits = [b["id"] if isinstance(b, dict) else b for b in node.get("blocks") or []]
+    when = "no deadline: it waits for you" if hold else f"due {fields['due_at']}, default {nmeta.get('default') or 'approve'}"
+    run.emit("approval-opened", node["id"], None, None,
+             f"{nmeta.get('approval_stage')} of #{node.get('parent')} merged; the {level} approval is open, {when}",
+             f"run.py stage {node.get('parent')} approve {nmeta.get('approval_stage')}")
+    if level == "human":
+        queue_notice(run, "decision", node["id"], None, f"Decision #{node['id']} needs you: {node['title']}",
+                     "answer it with run.py stage " + f"{node.get('parent')} approve {nmeta.get('approval_stage')} --by operator"
+                     + ("; " + ", ".join(f"#{b}" for b in waits) + " wait for it" if waits else ""),
+                     nmeta.get("default") or "approve", fields.get("due_at"))
+
+
+def close_approval(run, node, text):
+    """Answer an approval decision: its notes hold the answer (a downstream brief pastes them), then `tg done`."""
+    run.write_meta(node, approval_state="done")
+    run.tg("edit", str(node["id"]), "--notes", text)
+    run.tg("done", str(node["id"]))
+    node["status"] = "done"
+    run.marked_done.append(node["id"])
+
+
+def approve_due(run, snap):
+    """Apply the default of each open approval decision whose due time has passed: `approve`, written in its notes."""
+    if run.dry_run:
+        return
+    decisions = snap.decisions
+    if any((d.get("meta") or {}).get("approval_state") for d in decisions):
+        decisions = snap.decisions = run.tg("ls", "--type", "decision", "--status", "open", "in_progress") or []
+    for d in list(decisions):
+        meta = d.get("meta") or {}
+        stage = snap.by_id.get(meta.get("approval_for"))
+        if meta.get("approval_state") == "pending" and stage and stage["status"] == "done":
+            open_approval(run, stage, run.show(d["id"]))
+    decisions = snap.decisions = run.tg("ls", "--type", "decision", "--status", "open", "in_progress") or []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for d in list(decisions):
+        meta = d.get("meta") or {}
+        if meta.get("approval_state") != "open" or not meta.get("due_at") or meta.get("on_timeout") == "hold" and meta.get("approval_level") == "human":
+            continue
+        try:
+            due = datetime.datetime.fromisoformat(str(meta["due_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if now >= due:
+            close_approval(run, d, f"Approved by default at {run.now()}: nobody answered by {meta['due_at']}.")
+            snap.decisions.remove(d)
+            run.emit("approval-due", d["id"], None, None,
+                     f"the {meta.get('approval_level')} approval of {meta.get('approval_stage')} passed its due time {meta['due_at']}; "
+                     "applied the default: approve")
+
+
+def instance_stages(run, args):
+    """(the instance node, its record, {stage id: [the tasks of the stage]}) for the id of `stage`."""
+    node = run.show(args.id)
+    record = (node.get("meta") or {}).get("workflow_record")
+    if not isinstance(record, dict):
+        raise Refused(f"#{args.id} is not a workflow instance; run.py add --workflow creates one")
+    found = {}
+    for task in run.tg("ls", "--parent", str(args.id), "--status", "open", "in_progress", "done", "ready", "blocked") or []:
+        sid = (task.get("meta") or {}).get("stage")
+        if sid:
+            found.setdefault(sid, []).append(task)
+    return node, record, found
+
+
+def untriaged_decisions(run, tid):
+    """The `decision:` follow-up lines of the task's reports that no `triage` row names, as `<result>#<line>`."""
+    rows = run.results_for(tid)
+    triaged = {m.group(1) for r in rows if r["kind"] == "triage" and (m := re.search(r"(?m)^Row: (\S+)$", r.get("body") or ""))}
+    return [f"{r['id']}#{n}" for r in rows if r["kind"] in ("task", "verify")
+            for n, (label, _) in enumerate(follow_ups(r.get("body")), 1) if label == "decision" and f"{r['id']}#{n}" not in triaged]
+
+
+def cmd_stage(run, args):
+    """`stage <instance> approve|split <stage>`: answer a stage's approval, or split a splittable stage into parts."""
+    with workflow_lock(run):
+        {"approve": stage_approve, "split": stage_split}[args.action](run, args)
+
+
+def stage_node(run, args, found):
+    if args.stage not in found:
+        raise Refused(f"#{args.id} has no stage {args.stage}; its stages are {', '.join(found) or 'none'}")
+    return found[args.stage][0]
+
+
+def stage_approve(run, args):
+    node, record, found = instance_stages(run, args)
+    stage = stage_node(run, args, found)
+    did = (stage.get("meta") or {}).get("approval_id")
+    if not did:
+        raise Refused(f"stage {args.stage} of #{args.id} has no approval to answer: its approval is auto")
+    decision = run.show(did)
+    dmeta = decision.get("meta") or {}
+    if decision["status"] == "done":
+        run.emit("approved", did, None, None, f"{args.stage} of #{args.id} is approved already")
+        return
+    if run.show(stage["id"])["status"] != "done":
+        raise Refused(f"stage {args.stage} (#{stage['id']}) is not merged yet; its approval opens when it merges")
+    level = dmeta.get("approval_level")
+    if args.default:
+        if dmeta.get("approval_state") != "open":
+            open_approval(run, stage, decision)
+            decision = run.show(did)
+            dmeta = decision.get("meta") or {}
+        if dmeta.get("on_timeout") == "hold" and level == "human":
+            raise Refused(f"the approval of {args.stage} holds until the owner answers (its rule sets on_timeout = \"hold\"); "
+                          f"run.py stage {args.id} approve {args.stage} --by operator once the owner has")
+        if minutes_since(dmeta.get("due_at") or "") <= 0:
+            raise Refused(f"the approval of {args.stage} is due {dmeta.get('due_at') or 'at an unknown time'}; --default applies after it")
+        close_approval(run, decision, f"Approved by default at {run.now()}: nobody answered by {dmeta['due_at']}.")
+        run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by default")
+        return
+    if level == "human" and args.by != "operator":
+        raise Refused(f"the approval of {args.stage} is the owner's: run.py stage {args.id} approve {args.stage} --by operator "
+                      "once the owner has answered, or --default after the due time")
+    if args.by == "manager":
+        problems = [f"decision follow-up {row} is not triaged (run.py triage {stage['id']} --row {row} --to ...)"
+                    for row in untriaged_decisions(run, stage["id"])]
+        later = [b["id"] if isinstance(b, dict) else b for b in decision.get("blocks") or []]
+        entries = {e["id"]: e for e in record.get("stages") or []}
+        for tid in later:
+            sid = (run.show(tid).get("meta") or {}).get("stage")
+            if sid and entries.get(sid, {}).get("split") and not any((t.get("meta") or {}).get("stage_part") for t in found.get(sid, [])) \
+                    and not (found[sid][0].get("meta") or {}).get("split_declined"):
+                if args.decline_split:
+                    run.edit_meta(found[sid][0]["id"], split_declined=args.decline_split.strip())
+                else:
+                    problems.append(f"stage {sid} may be split and is not: run.py stage {args.id} split {sid} --part \"<title>\" "
+                                    f"--meta scope=..., or --decline-split \"<one line>\"")
+        if problems:
+            raise Refused(f"the approval of {args.stage} cannot be answered yet:\n  " + "\n  ".join(problems))
+    note = (args.note or "").strip()
+    close_approval(run, decision, f"Approved by {args.by} at {run.now()}" + (f": {note}" if note else "."))
+    run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by {args.by}")
+
+
+def stage_split(run, args):
+    node, record, found = instance_stages(run, args)
+    stage = stage_node(run, args, found)
+    entry = next((e for e in record.get("stages") or [] if e["id"] == args.stage), {})
+    if not entry.get("split"):
+        raise Refused(f"stage {args.stage} cannot be split: its workflow does not set `split: true` on it")
+    if not args.part or not args.part.strip():
+        raise Refused('split needs --part "<title>" and --meta scope=<the files of the part>')
+    meta = meta_pairs(args.meta)
+    scope = str(meta.get("scope") or "").strip()
+    if not scope:
+        raise Refused("a part needs its own files: add --meta scope=\"<paths it may write; paths it may not>\"")
+    parts = found[args.stage]
+    first = run.show(parts[0]["id"])
+    if wanted_attempt(first) is not None or first["status"] != "open":
+        raise Refused(f"stage {args.stage} has started (#{first['id']}); a stage is split before its first attempt")
+    mine = write_paths(scope)
+    for sibling in parts:
+        if (sib := (sibling.get("meta") or {}).get("stage_part")) and sibling["id"] not in args.depends:
+            strong, _ = scope_overlaps(mine, write_paths((sibling.get("meta") or {}).get("scope")))
+            if strong:
+                raise Refused(f"part {sib} (#{sibling['id']}) writes {', '.join(strong[:3])} too; name it with --depends {sibling['id']} "
+                              "so that the two parts do not run side by side")
+    title = f"{node['title']} — {args.stage}: {args.part.strip()}"
+    others = [p for p in parts if (p.get("meta") or {}).get("stage_part")]
+    number = len(others) + 1
+    if number == 1:
+        run.tg("edit", str(first["id"]), "--title", title, "--meta", meta_arg("scope", scope), "stage_part=1")
+        run.emit("split", first["id"], None, None, f"{args.stage} of #{args.id}: part 1 is #{first['id']}: {args.part.strip()}",
+                 f'run.py stage {args.id} split {args.stage} --part "<title>" --meta scope=...')
+        parts_ids = [first["id"]]
+    else:
+        upstream = [d["id"] if isinstance(d, dict) else d for d in first.get("depends_on") or []]
+        extra = [d for d in args.depends if d not in upstream]
+        keep = [meta_arg(k, (first.get("meta") or {})[k]) for k in ("stage", "role", "verify_kind", "verify", "estimate", "risk", "area", "workflow_notes")
+                if k in (first.get("meta") or {})]
+        tid = cmd_add(run, argparse.Namespace(
+            title=title, notes=(first.get("notes") or "") + f"\nPart {number} of stage {args.stage}: {args.part.strip()}.", depends=upstream + extra,
+            blocks=[], independent=None, parent=args.id, type=None, start=None, due=None, promised=None, priority=None, workflow=None,
+            meta=[*keep, meta_arg("scope", scope), meta_arg("stage_part", number), meta_arg("stage_origin", "split")]))
+        followers = [b["id"] if isinstance(b, dict) else b for b in first.get("blocks") or []]
+        for later in followers:
+            if (run.show(later).get("meta") or {}).get("stage") != args.stage:
+                run.tg("dep", "add", str(later), str(tid))
+        parts_ids = [p["id"] for p in others] + [tid]
+        run.emit("split", tid, None, None, f"{args.stage} of #{args.id}: part {number} is #{tid}: {args.part.strip()}")
+    entry["parts"] = parts_ids
+    run.edit_meta(args.id, workflow_record=record)
 
 
 def cmd_abandon(run, args):
@@ -9391,7 +9844,7 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,workflows,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,workflows,stage,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
     p.add_argument("id", type=int, help="the task id")
@@ -9473,6 +9926,12 @@ def build_parser():
                    help="meta pairs for the task, such as scope=, verify= and tier= (passed to tg add)")
     for flag in ("type", "parent", "start", "due", "promised", "priority"):
         p.add_argument("--" + flag, type=int if flag == "parent" else None, help=f"passed to tg add --{flag}")
+    p.add_argument("--workflow", metavar="NAME", help="create one task for each stage of this workflow, under an instance task "
+                   "(`run.py workflows` lists them); --meta scope= and verify= are the instance's")
+    p.add_argument("--with", dest="with_", nargs="+", action="extend", default=[], metavar="STAGE",
+                   help="with --workflow: create this optional stage (it is left out otherwise)")
+    p.add_argument("--skip", nargs="+", action="extend", default=[], metavar="STAGE",
+                   help="with --workflow: leave this optional stage out, and say so in the record")
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
     p.add_argument("id", type=int, help="the task id")
@@ -9510,6 +9969,18 @@ def build_parser():
     p.add_argument("--title", help="with --pick-prompt: the title of the work")
     p.add_argument("--notes-file", metavar="FILE", help="with --pick-prompt: a file that holds the notes of the work")
     p.add_argument("--scope", help="with --pick-prompt: the SCOPE paths or areas of the work")
+
+    p = sub.add_parser("stage", help="answer the approval of a workflow stage, or split a stage into parts")
+    p.add_argument("id", type=int, help="the id of the workflow instance task")
+    p.add_argument("action", choices=("approve", "split"), help="approve: answer the stage's approval decision; split: add a part to a stage that may be split")
+    p.add_argument("stage", help="the stage id, for example spec or impl")
+    p.add_argument("--default", action="store_true", help="approve: apply the default of an approval that is past its due time")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="approve: who answers; a `human` approval needs operator")
+    p.add_argument("--note", help="approve: one line for the decision's notes")
+    p.add_argument("--decline-split", metavar="REASON", help="approve: one line on why a splittable stage after this one is not split")
+    p.add_argument("--part", metavar="TITLE", help="split: the title of the part; the first call names part 1, the stage's own task")
+    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE", help="split: meta of the part; scope= is required")
+    p.add_argument("--depends", type=int, nargs="+", action="extend", default=[], metavar="ID", help="split: sibling parts that this part waits for; needed when their files overlap")
 
     p = sub.add_parser("check-report", help="check a report file before a session files it; needs no config, "
                                             "Taskgraph or repository")
@@ -9583,7 +10054,7 @@ def build_parser():
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
             "merged": cmd_merged, "add": cmd_add, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "roles": cmd_roles, "workflows": cmd_workflows, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "workflows": cmd_workflows, "stage": cmd_stage, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "round", "revise", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and

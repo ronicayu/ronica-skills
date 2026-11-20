@@ -4,11 +4,16 @@ Each entry says what a version changes and, where it needs one, how to upgrade f
 
 ## Unreleased
 
-Workflow templates, phase W1: the workflow files, their checks and the commands that read them. No lifecycle, phase or model change; `run.py add` is unchanged. See [Workflows](docs/roles-and-briefs.md#workflows).
+Workflow templates, phases W1 and W2: the workflow files and their checks, then `run.py add --workflow`, the approval decisions and `run.py stage`. No lifecycle, phase or model change; `run.py add` without `--workflow` is unchanged. See [Workflows](docs/roles-and-briefs.md#workflows).
 
 - **Workflow files.** A workflow is a markdown playbook with a restricted YAML frontmatter that lists its stages. The plugin ships `hotfix`, `fix`, `change`, `feature` and `figure-it-out` and a stage library, `stages.toml`, in `templates/workflows/`. A project adds or replaces files in `.claude/agentic-team/workflows/`, and may extend a workflow by one level.
 - **`run.py workflows`.** Lists the workflows with their descriptions and stages and exits 1 when a file is broken. `--check` prints only the problems. `--pick-prompt` prints the prompt that picks a workflow, with the options in an order that `--seed` fixes.
 - **`[workflow_policy]`.** New optional section with `enabled` (default `false`) and `design_dir` (default `docs/design`). With `enabled = true`, or with workflow files in the project, `config.py check` also validates the workflow files and the stage library.
+- **`run.py add --workflow <name>`** (W2). Creates an instance task and one task for each required stage and each `--with` stage, with real `--depends`: a root stage takes the external `--depends`, a later stage depends on its upstream stages and their approval decisions, a task that `--blocks` waits for the whole instance. An optional stage that is not named, or is in `--skip`, is left out and its edges are contracted. The instance is never launched and `record` leaves it out of `unmanaged`. Needs `[workflow_policy] enabled = true`.
+- **Approval decisions.** A stage with `approval = "manager"` or `"human"` gets a decision that depends on the stage. It is due `manager_due_hours` (2) or `human_due_hours` (48) after the stage merges and approves by default; `record` applies the default (`approval-due`). A `human` decision is created for the Manager and turns into an owner decision, with one notify-queue notice, when the stage merges. `[[workflow_rule]]` raises an approval, sets `risk` and may set `on_timeout = "hold"` (no deadline); `[workflow_policy] approval_floor` sets the lowest approval for a verify kind.
+- **`run.py stage <instance> approve|split <stage>`.** `approve` answers an approval (`--default` after the due time, `--by operator` for the owner's answer, `--decline-split` for a splittable stage that stays whole); `split` adds a part to a stage with `split: true`.
+- **Briefs.** A stage brief gets a `Workflow:` line in CONTEXT with the stage's place, each upstream stage's Summary, Files and Head, and the workflow's notes for the stage.
+- **Meta.** `workflow`, `workflow_record`, `stage`, `stage_part`, `stage_origin`, `split_declined`, `workflow_notes`, `approval_id` and the approval decision keys stay on the issue on the GitHub backend.
 
 ## 0.30.0
 

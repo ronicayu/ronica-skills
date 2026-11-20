@@ -14,6 +14,20 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
       "See [Roles](roles-and-briefs.md#roles).")),
     (("estimate",), "plan",
      "Taskgraph's own estimate in hours. The worker's timebox is twice it."),
+    (("workflow", "workflow_record"), "`add --workflow`",
+     ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule`, "
+      "`adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `task`, `approval`, `approval_id`, `split`, "
+      "`after` and `parts`). The instance is never launched; its status is the derived status of its stages.")),
+    (("stage", "stage_part", "stage_origin", "split_declined", "workflow_notes"), "`add --workflow`, `stage split`, `stage approve`",
+     ("On a stage task: its stage id; the part number of a split stage; how it came to exist (`expand`, `with` or `split`); "
+      "the one line that declined a split; and the workflow's notes for the stage, which the brief pastes under CONTEXT.")),
+    (("approval_id",), "`add --workflow`", "On a stage task that has an approval: the id of its decision."),
+    (("approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default"),
+     "`add --workflow`, the merge record, `record`, `stage approve`",
+     ("On an approval decision: the stage task and stage id it answers, its level (`manager` or `human`), its state (`pending` "
+      "until the stage merges, `open`, `done`), what happens at the due time (`on_timeout`: `approve` or `hold`), the due time "
+      "(`due_at`, UTC; `decide_by` is its date for Taskgraph) and the `default` that `record` applies. A `human` decision has "
+      "`decider=manager` until the stage merges, then `operator`.")),
     (("verify_mode",), "plan",
      ("`session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: "
       "`<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name.")),
@@ -182,6 +196,9 @@ META_WHY: list[tuple[tuple[str, ...], str]] = [
      "The scratch branches on the remote that a passing `close` or `abandon` must delete, from any machine."),
     (("gates",),
      "Written by `tg gate`, not `--meta`; the issue shows the open merge gate."),
+    (("workflow", "workflow_record", "stage", "stage_part", "stage_origin", "split_declined", "workflow_notes", "approval_id",
+      "approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default"),
+     "Another machine must see the workflow and where each stage and approval stands; none of them is local."),
 ]
 
 # (kind, status, written by, meaning)
@@ -315,7 +332,27 @@ COMMAND_DOCS: dict[str, str] = {
      "same reference, shallow SCOPE overlap, title. A candidate reachable through the given `--depends`/`--blocks` at "
      "any depth reads `linked (via #<id>)`. It prints them when it refuses and when it adds; with "
      "`--depends`/`--blocks` each reads `linked` or `not linked`. An `added` line gives the new id and its links. A "
-     "`--type decision` task needs `--blocks` and prints no candidates."),
+     "`--type decision` task needs `--blocks` and prints no candidates. With `--workflow <name>` (needs `[workflow_policy] "
+     "enabled = true`) it creates a workflow instance in one locked run: the gate runs once for the whole piece of work; "
+     "the instance task (meta `workflow`, `workflow_record`; `--blocks` ids wait for it) is the parent of one task for "
+     "each required stage and each `--with <stage>`, created with real `--depends` (a root stage takes the external "
+     "`--depends`; a later stage depends on each upstream stage and on that stage's approval decision). An optional stage "
+     "that is not named in `--with` is left out, as is one in `--skip`; the stages after it depend on its upstream "
+     "stages instead. `--meta scope=` and `verify=` are the instance's: the stages that write code use them, a design stage "
+     "gets a document path under `[workflow_policy] design_dir`. The notes need a why sentence and `- [ ]` acceptance "
+     "lines. A stage whose approval is `manager` or `human` also gets a decision under the instance, due once the stage "
+     "merges (see `stage`). One `workflow-added` line lists the stages, the stages left out and the approvals. "
+     "`--with` and `--skip` name optional stages only. See [Workflows](roles-and-briefs.md#workflows)."),
+    "stage": ("`approve`: answers the approval decision of a stage of a workflow instance. It refuses while the stage is not "
+     "merged. A `manager` approval checks workflow facts only: every `decision:` follow-up of the stage is triaged "
+     "(`triage`), and each splittable stage after it is split (`split`) or declined with `--decline-split \"<one line>\"`. "
+     "A `human` approval needs `--by operator`, after the owner has answered. `--default` applies the default (approve) of an "
+     "approval that is past its due time; it refuses an approval that holds (`on_timeout = \"hold\"`). `record` applies the same "
+     "default itself at the due time (`approval-due`), so `--default` is for a Manager that runs it by hand. `split`: adds a "
+     "part to a stage whose workflow sets `split: true`, before the stage has an attempt. The first call re-titles the stage's "
+     "own task as part 1; each later call creates a part with the same upstream dependencies, and every later stage then "
+     "depends on all parts. `--meta scope=` is required. A part whose files overlap a sibling's must name it with "
+     "`--depends`. See [Workflows](roles-and-briefs.md#workflows)."),
     "status": ("Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its "
      "merge is listed under \"Closed, awaiting merge\" (`awaiting_merge` in `--json`), not under \"In flight\"; it is "
      "listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by "
@@ -442,7 +479,11 @@ secrets in either file.
 
 Model values are either a model id (`"opus"`) or a table (`{ model = "sonnet", effort = "high" }`). A table may add
 `profile`, a Claude profile for the sessions of that tier (see [Profiles](configuration.md#workers-on-more-than-one-claude-profile)). One optional table,
-`[profiles]`, has names of your own and is not in the list below. How agents read the config, and what `check`
+`[profiles]`, has names of your own and is not in the list below. So is the array of tables `[[workflow_rule]]`, the hard rules
+of the workflows: each has a `name`, `match_paths` (globs over the write paths of a SCOPE) or `match_area` (the `area` meta),
+and optionally `require_stage`, `approval` (a table of stage = level, for example `{ spec = "human" }`), `risk` (`low`,
+`medium` or `high`, set on every stage task) and `on_timeout` (`approve` or `hold`; `hold` makes a `human` approval wait for the
+owner with no deadline). See [Workflows](roles-and-briefs.md#workflows). How agents read the config, and what `check`
 reports, is in [Configuration](configuration.md)."""
 
 META_INTRO = """\

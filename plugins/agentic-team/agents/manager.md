@@ -53,6 +53,7 @@ Match the situation to a playbook. Read it at `${CLAUDE_PLUGIN_ROOT}/playbooks/<
 | Situation | Playbook |
 |-----------|----------|
 | New work, or results that change scope | `plan` |
+| New work, workflows on (`[workflow_policy] enabled`) | `run workflows`, pick the workflow, then `run add --workflow <name>` (`plan`, step 2a); answer each stage's approval with `run stage <instance> approve <stage>` |
 | Anything in flight: drain, act, verify, close, launch | `run` |
 | The operator asks for status, or all work is done | `report` |
 | The operator asks to pause | `pause` |

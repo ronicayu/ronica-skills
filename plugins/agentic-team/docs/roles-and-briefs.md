@@ -231,6 +231,33 @@ A file with an unknown key, a missing `name` or `description`, a `name` that is 
 
 The body is prose for the Manager: `## When to use`, `## Steps` and an optional `## Stage notes` with one `### <id>` subsection per stage. It is not checked, except that a body over 600 words gets a `warn` line.
 
+### Adding work with a workflow
+
+With `[workflow_policy] enabled = true`, `run.py add "<title>" --workflow <name> [--with <stage>]... [--skip <stage>]... --notes "..." --meta scope=... verify=... (--depends ids | --blocks ids | --independent "<reason>")` creates one piece of work in one locked run:
+
+- **The instance**: a parent task with your title and notes, and the meta `workflow` and `workflow_record` (the stages, what happened to each optional stage, the rule that applied). It is never launched, `record` leaves it out of `unmanaged`, and its status is the derived status of its stages. A task that `--blocks` waits for the instance, so for every stage.
+- **One task for each required stage and each `--with` stage**, under the instance, titled `<title> — <stage id>`, with the stage's role, verify kind, estimate and a SCOPE and VERIFY: a code stage takes the instance's `scope=` and `verify=`; a design stage writes one document, `<design_dir>/<title slug>-<stage id>.md`. Each carries the workflow's `### <stage id>` notes as `Workflow notes`. The notes you give must hold a why sentence and `- [ ]` acceptance lines: an impl or test stage carries them, and a design stage must cover each of them.
+- **Real dependencies.** A root stage takes the external `--depends` (or your `--independent` reason). Every other stage depends on each upstream stage and on that stage's approval decision, so `launch` refuses it until both are done. An optional stage that is in neither `--with` nor `--skip` is left out like a skipped one (the lighter choice); a stage that came after it depends on its upstream stages instead, so nothing waits for a stage that does not exist. `--with` and `--skip` name optional stages only.
+- **The brief** of a stage names its place (`Workflow: feature #41, stage impl (4 of 5)`), and for each upstream stage its `Summary:`, the `Files:` that name its documents and its `Head`, and the answer in the approval decision. A downstream brief already carries the upstream report; the line points at what to read first.
+
+### Approvals
+
+A stage whose `approval` is `manager` or `human` gets a decision under the instance that depends on the stage, and the next stage depends on it. The approval is the highest of the stage's workflow value, the `approval` of a `[[workflow_rule]]` that matches the instance's SCOPE write paths or `area` meta (`match_paths`, `match_area`; a rule also sets `risk` on every stage task), and `[workflow_policy] approval_floor` for the stage's verify kind. Nothing lowers an approval during a run.
+
+| Approval | Decider | Due | At the due time |
+|---|---|---|---|
+| `auto` | none | none | none |
+| `manager` | The Manager: `run.py stage <instance> approve <stage>` | `manager_due_hours` (2) after the stage merges | `record` approves it by default |
+| `human` | The owner: the decision is created with `decider=manager`, and the merge record turns it into `decider=operator`, queues one `decision` notice and sets the due time | `human_due_hours` (48) after the stage merges | `record` approves it by default, unless the rule that raised it sets `on_timeout = "hold"`: it then has no due time and waits for the owner |
+
+The due time starts when the stage merges, not when the decision is created. It is stored as `due_at` (UTC) on the decision, and as `decide_by`, its date, for Taskgraph. `record` applies the default of every decision that is past `due_at` (`approval-due`): it writes the answer into the decision's notes, which a downstream brief pastes, and marks it done. A held approval stays in every digest until the owner answers; `stage approve <stage> --by operator` records that answer.
+
+A `manager` approval checks workflow facts only, never the work: the stage is merged, every `decision:` follow-up of the stage is triaged (`run.py triage`), and a stage after it that may be split is split or declined (`--decline-split "<one line>"`). A failed check is a task or a decision, not a rejection.
+
+### Splitting a stage
+
+A stage with `split: true` may be split into parts before its first attempt, normally at the spec approval, along the spec's phase table: `run.py stage <instance> split <stage> --part "<title>" --meta scope=<the part's files>`. The first call names part 1, the stage's own task; each later call creates a part with the same upstream dependencies, and every stage after it then depends on all parts. A part whose files overlap a sibling's must name it with `--depends <id>`. Do not split by estimate alone.
+
 ### Picking a workflow
 
 `run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` fixes the order of the options; the same seed gives the same order, and another seed gives another.

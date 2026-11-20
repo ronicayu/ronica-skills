@@ -20,6 +20,11 @@ EVENTS: dict[str, str] = {
     "workflow": "One workflow, as `run.py workflows` lists it: its source, description and stages.",
     "workflow-broken": "A workflow file or a stage library file with an error, as `run.py workflows` lists it; the command exits 1.",
     "workflows-checked": "`run.py workflows --check` found no problem.",
+    "workflow-added": "`add --workflow` created an instance: its stages, the stages left out and the approvals.",
+    "approval-opened": "A stage merged and its approval decision is open: its due time and default; a `human` one is now the owner's.",
+    "approval-due": "An approval decision passed its due time and `record` applied its default (approve).",
+    "approved": "A stage approval was answered: by the Manager, the owner or the default.",
+    "split": "A stage was split: the new part, or the first part named.",
     "sessions-restored": "The local Taskgraph cache had no `sessions` meta; run.py rebuilt it from `claude agents`.",
     "sessions-lost": "A task in progress has no `sessions` meta and no matching session row; its worker may run on another machine.",
     # verify

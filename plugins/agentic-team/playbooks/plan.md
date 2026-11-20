@@ -41,6 +41,23 @@ adds what Taskgraph cannot decide.
      rejected alternative of each decision, failure modes (half-migrated, rolled back),
      migration steps, and a closed checklist for the coders who follow. The checklist
      refers to no git-ignored scratch file; census scripts go into the repository.
+   **With workflows on** (`[workflow_policy] enabled = true`): create the work with
+   `run.py add "<title>" --workflow <name> [--with <stage>] [--skip <stage>] ...`
+   instead of one task per stage. Read `run.py workflows` for the descriptions
+   and pick the workflow whose "When to use" fits; take the lighter one when
+   unsure. The workflow sets each stage's role, verify kind, estimate, SCOPE,
+   dependencies and approval: set a meta key yourself only to depart from it.
+   The notes you give need a why sentence and `- [ ]` acceptance lines, and
+   `--meta scope=` and `verify=` are the instance's. A stage whose approval is
+   `manager` gets a decision after it merges: answer it with
+   `run.py stage <instance> approve <stage>` once the stage's `decision:`
+   follow-ups are triaged. At the approval of a `spec` stage, split a stage that
+   may be split along the spec's phase table (`run.py stage <instance> split
+   <stage> --part "<title>" --meta scope=...`, one call for each part), or
+   decline the split in one line (`approve --decline-split "<why>"`). A `human`
+   approval is the owner's: it turns into an owner decision when its stage
+   merges, and `record` approves it by default at its due time. Hand-planned
+   tasks keep working beside workflow instances.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
    Record only a dependency that is real, and split a task that is too large to
