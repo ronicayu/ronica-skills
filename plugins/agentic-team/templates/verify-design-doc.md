@@ -5,6 +5,7 @@ when the non-blocking test in your brief holds.
 A category on a `blocking:` line is optional: `blocking[stale-ref]:` (a `file:line` reference that no longer
 points at what it names), `blocking[claim]:` (a statement about the code that is false), `blocking[test]:`,
 `blocking[scope]:`, `blocking[shots]:` or `blocking[behaviour]:`. Write one `Issues:` field, one finding per line.
+Write a `Summary:` line (1-3 lines, plain words, no statistics) after `Verdict:`: whether the change is confirmed, and for `verify-failed` the main problem.
 
 ### Method: design-doc
 
@@ -24,7 +25,9 @@ In the task worktree, run.py stashes such a change before the task session resum
    the repository. Name each missing part. A missing part is a `blocking:`
    finding unless it passes the non-blocking test in your brief.
 3. Contradictions: none inside the document, and none with the other
-   documents of the project that it names or depends on.
+   documents of the project that it names or depends on. The worker's `self-check:` lines under `Ran:` list
+   what its own reviewer found; they do not replace steps 1 to 3. Check that each false statement they
+   name is fixed.
 4. Compare with the base commit named in CONTEXT: `git diff <base> <head>`
    shows what changed. Flag every file or decision that changed outside SCOPE.
 5. Boundary: you do not judge whether a decision is right. That belongs to

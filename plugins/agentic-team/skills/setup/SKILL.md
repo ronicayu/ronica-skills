@@ -6,8 +6,8 @@ description: "Create or complete the Agentic Team project config (.agentic-team.
 # Set up an Agentic Team project
 
 Create or complete `.agentic-team.toml` in the repository root so the Manager
-can run. Key meanings are in the plugin README under Configuration:
-`${CLAUDE_PLUGIN_ROOT}/README.md`. Check the config at any point with:
+can run. Key meanings are in the plugin reference under Configuration:
+`${CLAUDE_PLUGIN_ROOT}/docs/reference.md`. Check the config at any point with:
 
 ```sh
 "${CLAUDE_PLUGIN_ROOT}/scripts/config" check
@@ -43,7 +43,7 @@ Python 3.11 or later, or to set `AGENTIC_TEAM_PYTHON` to its path.
    `forbidden`. It affects safety, so do not set it to `[]` unless the user
    confirms that nothing applies. Leave `[scope] adjacent` unset unless the user
    asks for it: it lets a worker make narrow changes outside SCOPE
-   (`lower-ratchet`, `stale-exemption`, `own-lint`; see the README).
+   (`lower-ratchet`, `stale-exemption`, `own-lint`; see the reference, `[scope]`).
 6. **Keep private values and run state out of git.** Put machine-specific or
    private values in `.agentic-team.local.toml`, with the same tables and
    only the keys that override. Its keys win; a list there replaces the

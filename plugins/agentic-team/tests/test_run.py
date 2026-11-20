@@ -14,6 +14,7 @@ import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -623,7 +624,7 @@ class Base(unittest.TestCase):
         """The brief names the base and the worktree branch, and tells the worker to move nothing."""
         self.assertIn(f"Base commit: {sha}. Your worktree is already at the base commit `{sha}`, on branch `worktree-task-", text)
         self.assertIn(f"If `git rev-parse HEAD` is not `{sha}`, report BLOCKED and change nothing.", text)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
 
     MAILBOX_PY = os.path.join(os.path.dirname(RUN), "mailbox.py")
 
@@ -1030,7 +1031,7 @@ class RunTest(Base):
         text = self.brief(task)
         command = self.section(text, "REPORT")
         # 0.16.0: the worker files its report through mailbox.py, which refuses while a steer has no ack and then runs
-        # the same `tg result add`; the verifier's command is still the bare `tg result add`
+        # the same `tg result add`; the verifier files through `mailbox.py file-verify`, which runs `tg result add`
         expected = (f'"{sys.executable}" "{self.MAILBOX_PY}" --ctx "{self.inbox_file("1-1.ctx.json")}" '
                     "report --status <STATUS> --body-file ")
         self.assertIn(expected, command)
@@ -1092,7 +1093,7 @@ class RunTest(Base):
         self.assertIn(f"Attempt 2. Your worktree is at `{built}` on branch `worktree-task-1`.", text)
         self.assertIn(f"If `git rev-parse HEAD` is not `{built}`, report BLOCKED and change nothing.", text)
         self.assertNotIn("Base commit:", text)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
         later = "b" * 40
         self.add_result(task, "STOPPED", f"Session: s\nWorktree: w\nBranch: b\nHead: {later}\nFiles: None\n",
                         attempt=1, by="manager")
@@ -1143,7 +1144,7 @@ class RunTest(Base):
         self.assertIn(f"Output under review: {SHA_A}", context)
         self.assertIn(f"Your worktree is already at `{SHA_A}`. Do not check out another commit.", context)
         self.assertIn(f"If `git rev-parse HEAD` is not `{SHA_A}`, report BLOCKED.", context)
-        self.assertNotIn("git checkout", text)
+        self.assertNotRegex(text, r"git checkout(?! -- <file>)")
         self.assertIn("### Worker report (result #1, PASS, attempt 1)", context)
         self.assertIn("Files: out.txt", context)
         self.assertIn("Last checkpoint: None", context)
@@ -1154,7 +1155,8 @@ class RunTest(Base):
         self.assertIn("### Project verify skill", self.section(text, "VERIFY"))
         self.assertIn("None: no", self.section(text, "VERIFY"))
         self.assertIn("A behaviour change you did not drive is `check-only`", " ".join(self.section(text, "VERIFY").split()))
-        self.assertIn("--kind verify --attempt 1 --by verify-1-1 --status <STATUS>", text)
+        self.assertIn("mailbox.py\" file-verify", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --status <STATUS>", text)
         self.assertIn("`Verdict:` line", self.section(text, "REPORT"))
         self.assertTrue(self.section(text, "AUTONOMY").startswith("- None."))
         self.assertEqual(self.calls("--bg"), [])
@@ -1176,7 +1178,7 @@ class RunTest(Base):
                       ".agentic-team-scratch/base` in the next", context)
         self.assertNotIn("&&", context)
         self.assertIn("Never check out, reset, or add a worktree.", context)
-        self.assertNotRegex(text, r"git (reset|checkout|switch)")
+        self.assertNotRegex(text, r"git (reset|checkout(?! -- <file>)|switch)")  # restoring one mutated file is allowed
 
     def test_13_verify_brief_falls_back_to_the_merge_base(self):
         main_head = self.git("rev-parse", "HEAD")
@@ -2008,7 +2010,7 @@ class RunTest(Base):
         argv = self.calls("--bg")[0]
         self.assertEqual(argv[argv.index("--worktree") + 1], "verify-1-1")
         self.assertIn(f"Your worktree is already at `{head}`. Do not check out another commit.", argv[-1])
-        self.assertNotIn("git checkout", argv[-1])
+        self.assertNotRegex(argv[-1], r"git checkout(?! -- <file>)")
         self.agents(self.finished("verify-1-1"))
         self.touch(verifier, "build/out.txt")  # a folder that is not clean is not reused
         self.ok("verify", str(task), "--again")
@@ -2800,8 +2802,8 @@ class RunTest(Base):
                      "With no CI ref, report `check-only` and say under `Ran:` that only a CI run proves the change; "
                      "the Manager then runs `run.py verify <id> --again --ci-ref`.",
                      "Also `test-verified`: a green CI run on the CI ref that exercises the changed workflow or job.",
-                     "Guard mutations are test evidence. When you break the code under test on purpose, in a copy in "
-                     "your scratch folder, and every break turns the covering tests red, the tests prove that code",
+                     "Guard mutations are test evidence. When you break the code under test on purpose and every "
+                     "break turns the covering tests red, the tests prove that code",
                      "that is `test-verified`, not `check-only`, also for a behaviour change those tests cover.",
                      "`check-only`: static checks or a read-through only, with no test, mutation or CI run that proves "
                      "the change."):
@@ -4974,6 +4976,17 @@ class RunTest(Base):
         self.assertEqual(self.meta(task)["phase"], "reported")
         self.assertEqual([(r["status"], r["author"], r["body"]) for r in self.results(task)], [("ISSUES", "manager", report)])
 
+    def test_101_a_salvaged_worker_report_without_a_summary_gets_the_built_one(self):
+        task = self.running_task(session="task-1-1")
+        self.worktree("task-1")
+        report = (f"Task: 1\nStatus: ISSUES\nBranch: worktree-task-1\nHead: {SHA_A}\nIssues: the test fails\n"
+                  f"Asked: none: nothing to ask\nCheckpoint: {CHECKPOINT}\n")
+        self.write_report("task-1", "task-1-1", report)
+        self.agents(self.finished("task-1"))
+        self.ok("record")
+        [row] = [r for r in self.results(task) if r["kind"] == "task"]
+        self.assertEqual((row["body"], row["summary"]), (report, "⚠️ ISSUES · the test fails\nAsked: none: nothing to ask"))
+
     def test_101_a_worker_report_in_the_transcript_is_salvaged(self):
         task = self.running_task(session="task-1-1")
         report = f"Task: 1\nStatus: BLOCKED\nHead: {SHA_A}\nCheckpoint: {CHECKPOINT}\n"
@@ -5015,7 +5028,7 @@ class RunTest(Base):
                          "files and folders in .agentic-team-scratch/; delete nothing there either.")
         report = self.section(text, "REPORT")
         self.assertIn(f"`{path}`", report)
-        self.assertIn(f'--kind verify --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
+        self.assertIn(f'--task 1 --attempt 1 --by verify-1-1 --status <STATUS> --body-file "{path}"', report)
         self.assertIn("Add a `Verdict:` line after `Status:`", report)
 
     def test_101_a_verifier_that_ended_is_salvaged_from_its_report_file(self):
@@ -5033,6 +5046,13 @@ class RunTest(Base):
         self.assertEqual(len(self.verify_rows(task)), 1)
         closed = self.events("close", str(task), "--ref", "output.tar")  # no --verdict: the row is the verifier's
         self.assertIn("test-verified at output.tar", self.one(closed, "closed")["detail"])
+
+    def test_101_a_salvaged_verifier_report_gets_a_summary(self):
+        task = self.verifying_task(self.finished("verify-1-1"))
+        self.write_report("verify-1-1", "verify-1-1", self.VERIFIER_REPORT)
+        self.ok("record")
+        [row] = self.verify_rows(task)
+        self.assertEqual(row["summary"], f"✅ test-verified · head {SHA_A[:7]}")
 
     def test_101_a_verifier_idle_after_its_turn_is_salvaged_and_stopped(self):
         for number, status in enumerate(("idle", None), 1):  # None: no process runs it
@@ -5744,7 +5764,7 @@ class RunTest(Base):
         """Write a full report with this Follow-ups field and run check-report on it."""
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: it works\nBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
                      f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: {follow_ups}\nCheckpoint: {CHECKPOINT}\n")
         return self.run_cmd("check-report", path)
 
@@ -5765,7 +5785,7 @@ class RunTest(Base):
             with self.subTest(status=status, verdict=verdict):
                 issues = "- blocking: a check fails" if status == "ISSUES" else "None"
                 with open(path, "w") as fh:
-                    fh.write(f"Task: 1\nStatus: {status}\nVerdict: {verdict}\nHead: {SHA_A}\nIssues:\n{issues}\n"
+                    fh.write(f"Task: 1\nStatus: {status}\nVerdict: {verdict}\nSummary: s\nHead: {SHA_A}\nIssues:\n{issues}\n"
                              f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
                 out = self.run_cmd("check-report", path, "--verifier")
                 if ok:
@@ -5799,6 +5819,55 @@ class RunTest(Base):
             f"run.py: Follow-ups line with no label: `- fix the README too`; {hint}",
             f"run.py: Follow-ups line with no label: `Bug: src/c.py: wrong`; {hint}"])
 
+    def test_check_report_refuses_a_report_with_no_summary_text(self):
+        body = (f"Task: 1\nStatus: PASS\n%sBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+                f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        for summary, ok in (("", False), ("Summary:\n", False), ("Summary: <!-- x -->\n", False),
+                            ("Summary: The export keeps the header row now.\n", True),
+                            ("Summary:\nline one\nline two\n", True)):
+            with open(path, "w") as fh:
+                fh.write(body % summary)
+            out = self.run_cmd("check-report", path)
+            self.assertEqual(out.returncode, 0 if ok else 2, (summary, out.stderr))
+            if not ok:
+                self.assertIn("needs a non-empty `Summary:` line", out.stderr)
+        with open(path, "w") as fh:  # ISSUES needs one too, and so does a verifier
+            fh.write(body.replace("PASS", "ISSUES") % "" + "Asked: none: x\n")
+        self.assertIn("`Summary:`", self.run_cmd("check-report", path).stderr)
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS\nVerdict: test-verified\nHead: abc1234\nCheckpoint: x\n")
+        self.assertIn("`Summary:`", self.run_cmd("check-report", path, "--verifier").stderr)
+        with open(path, "w") as fh:
+            fh.write("Task: 1\nStatus: PASS\nVerdict: test-verified\nSummary: confirmed\nHead: abc1234\nCheckpoint: x\n")
+        self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
+
+    def test_check_report_refuses_a_summary_over_three_lines_or_2000_characters(self):
+        body = (f"Task: 1\nStatus: PASS\n%sBranch: worktree-task-1\nHead: {SHA_A}\nWorktree: w\nRan: make test: ok\n"
+                f"Files: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        for summary, ok in (("Summary: a\nb\nc\n", True), ("Summary: a\nb\nc\nd\n", False),
+                            ("Summary: " + "x" * 2000 + "\n", True), ("Summary: " + "x" * 2001 + "\n", False),
+                            ("Summary: a\nNotes: b\nAcceptance evidence: c\nNeeds CI: no\n", True)):
+            with open(path, "w") as fh:
+                fh.write(body % summary)
+            out = self.run_cmd("check-report", path)
+            self.assertEqual(out.returncode, 0 if ok else 2, (summary[:30], out.stderr))
+            if not ok:
+                self.assertIn("the `Summary:` has", out.stderr)
+
+    def test_check_report_and_report_field_both_treat_a_fenced_summary_as_missing(self):
+        body = (f"Task: 1\nStatus: PASS\nRan: x\n```\nSummary: from a log\n```\nBranch: worktree-task-1\nHead: {SHA_A}\n"
+                f"Worktree: w\nFiles: None\nIssues: None\nDeviations: None\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+        path = os.path.join(self.dir, "report.md")
+        with open(path, "w") as fh:
+            fh.write(body)
+        self.assertIn("needs a non-empty `Summary:` line", self.run_cmd("check-report", path).stderr)
+        import report_summary
+        import run as run_module
+        self.assertEqual(run_module.report_field(body, "Summary"), "")
+        self.assertEqual(report_summary.summarize("task", "PASS", body).split(" · ")[0], "✅ PASS")
+
     def test_107_check_report_names_a_missing_status_and_checkpoint(self):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
@@ -5816,7 +5885,7 @@ class RunTest(Base):
         empty = os.path.join(self.dir, "empty")  # not a repository, no .agentic-team.toml
         os.makedirs(empty)
         with open(os.path.join(empty, "report.md"), "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nAsked: #4\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: ISSUES\nSummary: s\nAsked: #4\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         out = self.run_cmd("check-report", os.path.join("empty", "report.md"), root=empty, tg=None)
         self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "ok\n", ""))
         self.assertEqual(self.run_cmd("status", root=empty, tg=None).returncode, 2)  # a command that builds Run refuses
@@ -5831,12 +5900,12 @@ class RunTest(Base):
         self.assertLess(report.index("check-report"), report.index("report --status"))
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nEvidence: it is done -> make test: ok\nFollow-ups:\n- caller: src/b.py: calls it\n"
                      f"Checkpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nFollow-ups:\n- fix the docs\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nFollow-ups:\n- fix the docs\nCheckpoint: {CHECKPOINT}\n")
         out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, cwd=self.dir, env=self.env)
         self.assertEqual(out.returncode, 2)
         self.assertIn("`- fix the docs`", out.stderr)
@@ -5848,10 +5917,26 @@ class RunTest(Base):
         path = os.path.join(self.root, ".claude", "worktrees", "verify-1-1", ".agentic-team", "report-verify-1-1.md")
         self.assertIn(f'\n`"{sys.executable}" "{RUN}" check-report "{path}" --verifier`\n', report)
 
+    def test_the_briefs_name_the_summary_line_and_its_language(self):
+        task = self.add_task()
+        report = self.section(self.brief(task), "REPORT")
+        self.assertIn("Add a `Summary:` line after `Status:`", report)
+        self.assertIn("Write the `Summary:` line in English.", report)
+        self.assertNotIn("Chinese", report)
+        self.write_config('\n[report]\nsummary_lang = "zh"\n')
+        self.assertIn("Write the `Summary:` line in Chinese.", self.section(self.brief(task), "REPORT"))
+        running = self.running_task()
+        self.add_result(running, "PASS", f"Task: 1\nStatus: PASS\nHead: {SHA_A}\n")
+        verify = self.section(self.ok("verify", str(running), "--dry-run").stdout, "REPORT")
+        self.assertIn("Add a `Summary:` line after `Verdict:`", verify)
+        self.assertIn("Write the `Summary:` line in Chinese.", verify)
+        self.assertIn(" file-verify --tg ", verify)
+        self.assertNotIn("--python", verify)
+
     def evidence_report(self, status, evidence, after=""):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: {status}\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
+            fh.write(f"Task: 1\nStatus: {status}\nSummary: s\nRan: make test: ok\n{evidence}{after}Files: None\nFollow-ups: None\n"
                      f"Checkpoint: {CHECKPOINT}\n")
         return path
 
@@ -5878,7 +5963,7 @@ class RunTest(Base):
         def found(text):
             path = os.path.join(self.dir, "report.md")
             with open(path, "w") as fh:
-                fh.write(f"Task: 1\nStatus: PASS\n{text}Checkpoint: {CHECKPOINT}\n")
+                fh.write(f"Task: 1\nStatus: PASS\nSummary: s\n{text}Checkpoint: {CHECKPOINT}\n")
             out = self.run_cmd("check-report", path, "--acceptance", "99")
             return int(re.search(r"found (\d+),", out.stderr).group(1))
         self.assertEqual(found("Ran: make test\nOK\nEvidence: first -> ok\nsecond -> src/a.py:3\nFiles: a\n"), 2)
@@ -6219,7 +6304,7 @@ class RoleTest(Base):
         self.role_file("child", fits=None, extends="base", verify_kind="design-doc", review=None)
         role = self.section(self.brief(self.add_task(role="child")), "ROLE")
         self.assertIn("Load these skills with the Skill tool before you start: a:b.", role)
-        self.assertTrue(role.endswith("Method text of base.\n\nMethod text of child."), role)
+        self.assertTrue(role.split("\n\nFor reading or searching code", 1)[0].endswith("Method text of base.\n\nMethod text of child."), role)
         self.assertEqual(self.section(self.verify_text(self.running_task(role="child")), "ROLE").split("\n\n", 1)[1],
                          "Review text of base.")
         row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "child")
@@ -6371,7 +6456,7 @@ class Issue89Test(Base):
 
     def report(self, status="PASS", **fields):
         path = os.path.join(self.dir, "report.md")
-        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+        text = {"Task": "1", "Status": status, "Summary": "the change works", "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
                 "Issues": "None", "Deviations": "None", "Follow-ups": "None", "Checkpoint": CHECKPOINT, **fields}
         with open(path, "w") as fh:
             fh.write("".join(f"{k}: {v}\n" for k, v in text.items() if v is not None))
@@ -6424,7 +6509,7 @@ class Issue89Test(Base):
     def test_a_verifier_report_with_two_issues_blocks_warns_and_stays_valid(self):
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: one\nIssues: blocking: two\n"
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nSummary: s\nIssues: blocking: one\nIssues: blocking: two\n"
                      f"Follow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         code, out, err = self.check(path, "--verifier")
         self.assertEqual((code, out), (0, "ok\n"))
@@ -6455,6 +6540,382 @@ class Issue89Test(Base):
         self.assertNotIn("reuse:", command)
         verify = self.verify_text(self.running_task())
         self.assertNotIn("--require-ran", verify)
+
+    # --- [report] checks
+
+    def test_check_report_runs_the_check_commands_before_it_accepts_a_pass(self):
+        marker = os.path.join(self.dir, "ran")
+        ok = f"echo run >> {shlex.quote(marker)}"
+        self.assertEqual(self.check(self.report(), f"--check={ok}", "--check=true"), (0, "ok\n", ""))
+        with open(marker) as fh:
+            self.assertEqual(fh.read(), "run\n")
+        failing = "echo one; echo two; echo 'bad ref docs/a.md:3' >&2; exit 3"
+        code, out, err = self.check(self.report(), "--check=true", f"--check={failing}", f"--check={ok}")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(f"report check `{failing}` exited 3", err)
+        self.assertIn("bad ref docs/a.md:3", err)
+        self.assertIn("two", err)
+        with open(marker) as fh:
+            self.assertEqual(fh.read(), "run\n")  # a failing check stops the later ones
+        long = "for i in $(seq 1 50); do echo line$i; done; exit 1"
+        err = self.check(self.report(), f"--check={long}")[2]
+        self.assertIn("line50", err)
+        self.assertIn("line31", err)
+        self.assertNotIn("line30\n", err)
+
+    def test_a_check_that_runs_too_long_is_refused_with_its_command(self):
+        code, _, err = self.check(self.report(), "--check=sleep 30", "--check-timeout", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("report check `sleep 30` timed out after 1 seconds", err)
+
+    def test_the_checks_run_only_for_a_worker_pass_report(self):
+        failing = "--check=exit 1"
+        self.assertEqual(self.check(self.report("ISSUES", Asked="none: the timebox ran out"), failing)[0], 0)
+        self.assertEqual(self.check(self.report("PASS"), failing, "--verifier"), (0, "ok\n", ""))
+        self.assertEqual(self.check(self.report(Evidence=None), "--acceptance", "1", failing)[0], 2)
+        self.assertNotIn("report check", self.check(self.report(Evidence=None), "--acceptance", "1", failing)[2])
+
+    def test_the_worker_brief_passes_the_checks_of_its_verify_kind(self):
+        self.write_config('''
+            [report]
+            checks = ["make lint"]
+            check_timeout_seconds = 90
+            [report.checks_by_kind]
+            design-doc = ["python docs/check_refs.py"]
+            ''')
+        command = self.section(self.brief(self.add_task()), "REPORT")
+        self.assertIn(' --check="make lint" --check-timeout 90', command)
+        self.assertNotIn("check_refs", command)
+        command = self.section(self.brief(self.add_task(verify_kind="design-doc")), "REPORT")
+        self.assertIn(' --check="make lint" --check="python docs/check_refs.py" --check-timeout 90', command)
+        self.assertNotIn("--check", self.verify_text(self.running_task()))
+
+    def test_the_worker_brief_has_the_self_review_of_its_verify_kind(self):
+        design = self.brief(self.add_task(verify_kind="design-doc"))
+        self.assertIn("### Self-review before PASS", design)
+        self.assertIn("read-only Sonnet subagent with the Agent tool (not a fork)", design)
+        self.assertIn("`self-check:` lines", design)
+        self.assertNotIn("`mutation:` lines", design)
+        code = self.brief(self.add_task(verify_kind="code"))
+        self.assertIn("run guard mutations: break the code under test on purpose", code)
+        self.assertIn("`mutation:` lines", code)
+        self.assertNotIn("`self-check:`", code)
+        self.assertNotIn("Self-review before PASS", self.brief(self.add_task(verify_kind="schema")))
+
+    # --- cost defaults
+
+    def verifier_model_of(self, config_text="", **meta):
+        self.fresh()
+        self.write_config(config_text)
+        task = self.running_task(**meta)
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        return re.search(r"--model (\S+)", self.run_cmd("verify", str(task), "--dry-run").stderr).group(1)
+
+    def test_the_verifier_model_comes_from_verifier_by_tier_then_verifier(self):
+        by_tier = ('[models]\nverifier = "haiku"\n[models.verifier_by_tier]\nimplementation = "sonnet"\n'
+                   'judgement = "opus"\n"data migration" = "fable"\n[models.overrides]\n'
+                   '"data migration" = "opus"\n')
+        for name, config_text, meta, want in (
+                ("a tier of the table", by_tier, {}, "sonnet"),
+                ("another tier of the table", by_tier, {"tier": "judgement"}, "opus"),
+                ("an override key of the table", by_tier, {"tier": "data migration"}, "fable"),
+                ("a tier the table lacks falls back to verifier", by_tier, {"tier": "mechanical"}, "haiku"),
+                ("no table: verifier", '[models]\nverifier = "haiku"\n', {}, "haiku"),
+                ("neither: the model that differs from the worker's", "", {"model": "opus"}, "sonnet"),
+                ("neither, the worker on sonnet", "", {"model": "sonnet"}, "opus")):
+            with self.subTest(name):
+                self.assertEqual(self.verifier_model_of(config_text, **meta), want)
+
+    def test_the_model_flag_beats_verifier_by_tier(self):
+        self.write_config('[models.verifier_by_tier]\nimplementation = "sonnet"\n')
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.assertIn("--model haiku", self.run_cmd("verify", str(task), "--dry-run", "--model", "haiku").stderr)
+
+    def test_the_judgement_brief_tells_the_worker_to_read_code_through_a_sonnet_subagent(self):
+        note = ("For reading or searching code, start a non-fork Sonnet subagent with a narrow question and use its "
+                "answer; do not read large files yourself.")
+        self.assertIn(note, self.section(self.brief(self.add_task(tier="judgement")), "ROLE"))
+        self.assertNotIn(note, self.brief(self.add_task(tier="implementation")))
+        self.assertNotIn(note, self.verify_text(self.running_task(tier="judgement")))
+
+    GB = 1_000_000
+
+    def usage_entry(self, entry, model, **over):
+        usage = {"out": self.GB, "in": self.GB, "cache_read": self.GB, "cache_write": self.GB}
+        return {**entry, "model": model, "usage": {**usage, **over}}
+
+    def test_status_shows_the_estimated_cost_of_each_task_when_usage_is_known(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"),
+                             self.usage_entry(self.entry(task, 1, "verify"), "opus[1m]"))
+        flight = self.status_sections()["In flight"]
+        self.assertIn("| Checkpoint | Est. cost |", flight)
+        self.assertIn("| $43.80 |", flight)  # sonnet 2 + 2.5 + 0.1 + 10, opus 4 + 5 + 0.2 + 20, per million tokens
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$43.80")
+
+    def test_status_has_no_cost_column_when_no_usage_is_known(self):
+        self.running_task()
+        self.assertNotIn("Est. cost", self.status_sections()["In flight"])
+        self.assertNotIn("Est. cost", json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0])
+
+    def test_status_marks_a_cost_that_leaves_out_a_model_with_no_price(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"),
+                             self.usage_entry(self.entry(task, 1, "verify"), "mystery"))
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$14.60+")
+
+    def test_the_price_table_prices_a_model_by_family_and_version(self):
+        import run as runner
+        for model, want in (
+                ("opus", (4.0, 5.0, 0.20, 20.0)), ("opus[1m]", (4.0, 5.0, 0.20, 20.0)),
+                ("claude-opus-5-5", (4.0, 5.0, 0.20, 20.0)), ("claude-opus-5", (5.0, 6.25, 0.50, 25.0)),
+                ("claude-opus-4-8-20260101", (5.0, 6.25, 0.50, 25.0)),
+                ("claude-opus-4-1", (15.0, 18.75, 1.50, 75.0)), ("claude-opus-4-20250514", (15.0, 18.75, 1.50, 75.0)),
+                ("sonnet", (2.0, 2.5, 0.10, 10.0)), ("claude-sonnet-5-5", (2.0, 2.5, 0.10, 10.0)),
+                ("claude-sonnet-5", (2.0, 2.5, 0.20, 10.0)),
+                ("claude-sonnet-4-5-20250929", (3.0, 3.75, 0.30, 15.0)),
+                ("fable", (8.0, 10.0, 0.20, 40.0)), ("claude-fable-5-2", (8.0, 10.0, 0.20, 40.0)),
+                ("claude-fable-5-1", (10.0, 12.5, 0.25, 50.0)), ("claude-fable-5", (10.0, 12.5, 1.0, 50.0)),
+                ("haiku", (0.10, 0.125, 0.01, 0.50)), ("claude-haiku-5-5", (0.10, 0.125, 0.01, 0.50)),
+                ("claude-haiku-4-5-20251001", (1.0, 1.25, 0.10, 5.0))):
+            with self.subTest(model):
+                self.assertEqual(runner.model_price(model), want)
+        for model in ("mystery", "gpt", None, "", "claude-opus-9-9", "claude-sonnet-3-7", "claude-3-5-haiku-20241022"):
+            with self.subTest(model):
+                self.assertIsNone(runner.model_price(model))
+                self.assertIsNone(runner.usage_cost({"out": 1}, model))
+        for name, ratio in (("opus", 1.25), ("sonnet", 1.25), ("fable", 1.25), ("haiku", 1.25)):  # cache write is 1.25x input
+            price = runner.model_price(name)
+            self.assertAlmostEqual(price[1] / price[0], ratio)
+        self.assertAlmostEqual(runner.usage_cost({"out": 100, "in": 200, "cache_read": 300, "cache_write": 400}, "sonnet"),
+                               (200 * 2.0 + 400 * 2.5 + 300 * 0.1 + 100 * 10.0) / 1e6)
+
+    def test_status_prices_an_older_pinned_model_by_its_own_version_and_marks_an_unknown_one(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "claude-opus-4-1"))
+        # opus 4.1: 15 + 18.75 + 1.5 + 75 per million of each kind
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$110.25")
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "claude-opus-9-9"))
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$0.00+")
+
+    def test_status_shows_the_cost_of_a_done_task(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"))
+        self.tg("done", str(task))
+        sections = json.loads(self.ok("status", pre=["--json"]).stdout)
+        self.assertEqual([row["Est. cost"] for row in sections["done"]], ["$14.60"])
+        self.assertIn("Est. cost", self.status_sections()["Done since last report"])
+        self.assertIn("| $14.60 |", self.status_sections()["Done since last report"])
+
+    def test_a_verifier_brief_has_no_self_review_text(self):
+        text = self.verify_text(self.running_task())
+        self.assertNotIn("Self-review before PASS", text)
+        self.assertNotIn("run guard mutations: break the code under test on purpose", text)
+        self.assertNotIn("`self-check:` lines", text)
+        design = self.verify_text(self.running_task(verify_kind="design-doc"))
+        self.assertNotIn("Self-review before PASS", design)
+        self.assertNotIn("read-only Sonnet subagent with the Agent tool", design)
+
+    def test_the_code_self_review_mutates_in_place_and_restores_with_git(self):
+        text = " ".join(self.brief(self.add_task(verify_kind="code")).split())
+        self.assertIn("Mutate the file in place, run the covering tests and confirm that they fail, restore the file with "
+                      "`git checkout -- <file>`, and confirm that `git status` is clean before you go on", text)
+        self.assertNotIn("in a copy", text)
+        verifier = " ".join(self.verify_text(self.running_task()).split())
+        self.assertIn("restore it with `git checkout -- <file>`", verifier)
+
+    def test_the_judgement_note_goes_to_an_override_tier_on_opus_or_fable(self):
+        note = "start a non-fork Sonnet subagent with a narrow question"
+        self.write_config('[models.overrides]\n"deep audit" = "opus"\n"cheap pass" = "haiku"\n"big think" = "claude-fable-5-2"\n')
+        for tier, want in (("deep audit", True), ("big think", True), ("cheap pass", False), ("implementation", False)):
+            with self.subTest(tier):
+                self.assertEqual(note in self.brief(self.add_task(tier=tier)), want)
+
+    def test_the_worker_brief_names_the_bash_timeout_for_check_report(self):
+        self.write_config('[report]\nchecks = ["a", "b"]\ncheck_timeout_seconds = 100\n')
+        text = " ".join(self.brief(self.add_task()).split())
+        self.assertIn("Run this command with a Bash timeout of at least 260 seconds (the sum of the check timeouts, 200, "
+                      "plus 60 seconds of margin), or in the background and watch it with Monitor.", text)
+        self.assertNotIn("the foreground at most", text)
+        self.write_config('[report]\nchecks = ["a"]\n')
+        text = " ".join(self.brief(self.add_task()).split())
+        self.assertIn("a Bash timeout of at least 660 seconds", text)
+        self.assertIn("Bash allows 600 seconds in the foreground at most, so use the background here", text)
+        self.write_config("")
+        self.assertNotIn("Bash timeout", self.brief(self.add_task()))
+
+    # --- check-report: a clean tree, a hanging child, signals
+
+    def clean_repo(self):
+        repo = os.path.join(self.dir, "chk")
+        os.makedirs(repo)
+        self.git("init", "-q", "-b", "main", cwd=repo)
+        for key, value in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            self.git("config", key, value, cwd=repo)
+        self.commit_file("a.txt", "a\n", cwd=repo)
+        return repo
+
+    def at(self, repo, path, *flags, timeout=60):
+        out = subprocess.run([sys.executable, RUN, "check-report", path, *flags], capture_output=True, text=True, cwd=repo,
+                             timeout=timeout)
+        return out.returncode, out.stdout, out.stderr
+
+    def test_check_report_refuses_a_pass_on_a_dirty_tree_before_it_runs_the_checks(self):
+        repo = self.clean_repo()
+        marker = os.path.join(self.dir, "ran")
+        check = f"--check=echo run >> {shlex.quote(marker)}"
+        with open(os.path.join(repo, "a.txt"), "w") as fh:
+            fh.write("changed\n")
+        with open(os.path.join(repo, "new.txt"), "w") as fh:
+            fh.write("new\n")
+        code, out, err = self.at(repo, self.report(), check)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("the worktree has uncommitted changes (a.txt, new.txt)", err)
+        self.assertIn("commit them", err)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(self.at(repo, self.report("ISSUES", Asked="none: x"), check)[0], 0)  # only a worker PASS is held
+        self.git("add", "-A", cwd=repo)
+        self.git("commit", "-q", "-m", "all", cwd=repo)
+        self.assertEqual(self.at(repo, self.report(), check), (0, "ok\n", ""))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_check_report_names_the_files_that_a_check_leaves_behind(self):
+        repo = self.clean_repo()
+        code, out, err = self.at(repo, self.report(), "--check=echo x > leftover.txt; echo y > other.txt")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("report check `echo x > leftover.txt; echo y > other.txt` left files behind in the worktree "
+                      "(leftover.txt, other.txt)", err)
+        os.remove(os.path.join(repo, "leftover.txt"))
+        os.remove(os.path.join(repo, "other.txt"))
+        self.commit_file(".gitignore", "build.out\n", cwd=repo)  # an ignored file is not a leftover
+        self.assertEqual(self.at(repo, self.report(), "--check=echo x > build.out"), (0, "ok\n", ""))
+
+    def grandchild_check(self, pidfile, sleeper="exec sleep 60"):
+        script = ("import subprocess, time\n"
+                  f"subprocess.Popen(['/bin/sh', '-c', 'echo $$ > {pidfile}; {sleeper}'], start_new_session=True)\n"
+                  "time.sleep(60)\n")
+        return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    def assert_gone(self, pidfile):
+        with open(pidfile) as fh:
+            pid = int(fh.read())
+        try:
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.1)
+            self.fail(f"process {pid} of the check is still alive")
+        finally:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_a_timed_out_check_does_not_hang_on_a_child_that_holds_its_output(self):
+        repo = self.clean_repo()
+        pidfile = os.path.join(self.dir, "grandchild.pid")
+        started = time.time()
+        code, _, err = self.at(repo, self.report(), f"--check={self.grandchild_check(pidfile)}", "--check-timeout", "2",
+                               timeout=30)
+        self.assertEqual(code, 2)
+        self.assertIn("timed out after 2 seconds", err)
+        self.assertLess(time.time() - started, 2 + 8)  # the child ran setsid and holds the output: no pipe waits for it
+        self.assert_gone(pidfile)  # the setsid child is killed too: no orphan
+
+    def test_a_signal_kills_the_check_and_what_it_started(self):
+        repo = self.clean_repo()
+        pidfile = os.path.join(self.dir, "grandchild.pid")
+        for signum, want in ((signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGINT, None)):
+            with self.subTest(signum):
+                with contextlib.suppress(OSError):
+                    os.remove(pidfile)
+                proc = subprocess.Popen([sys.executable, RUN, "check-report", self.report(),
+                                         f"--check={self.grandchild_check(pidfile)}", "--check-timeout", "120"],
+                                        cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    for _ in range(100):
+                        if os.path.exists(pidfile) and os.path.getsize(pidfile):
+                            break
+                        time.sleep(0.1)
+                    time.sleep(0.3)
+                    proc.send_signal(signum)
+                    proc.communicate(timeout=20)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                if want is not None:
+                    self.assertEqual(proc.returncode, want)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assert_gone(pidfile)
+
+    # --- record runs the checks of a worker PASS
+
+    def checked_task(self, check, **config_extra):
+        self.write_config(f'[report]\nchecks = [{json.dumps(check)}]\n')
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        return task, wt, head
+
+    def test_record_files_issues_for_a_pass_whose_checks_fail_at_the_reported_head(self):
+        task, wt, head = self.checked_task("grep -q nope out.txt")
+        events = self.events("record")
+        failed = self.one(events, "checks-failed")
+        self.assertIn(f"result #1 said PASS, but the report checks fail at {head[:7]}; filed ISSUES", failed["detail"])
+        arrived = self.one(events, "arrived")
+        self.assertTrue(arrived["detail"].startswith("ISSUES by manager"), arrived)
+        self.assertIn("fix round:", arrived["next"])
+        rows = self.results(task)
+        self.assertEqual([(r["status"], r["author"]) for r in rows], [("PASS", "worker"), ("ISSUES", "manager")])
+        body = rows[-1]["body"]
+        self.assertIn("Status: ISSUES\nAsked: none: filed by run.py record, not by the worker\nIssues: blocking: record ran "
+                      f"the [report] checks at {head[:7]} and refused the PASS: report check `grep -q nope out.txt` exited 1", body)
+        self.assertIn(f"Head: {head}", body)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        again = self.events("record")  # the ISSUES row is the newest: it is not checked or filed twice
+        self.assertEqual(self.named(again, "checks-failed"), [])
+        self.assertEqual(len(self.results(task)), 2)
+
+    def test_record_checks_a_passing_pass_once(self):
+        log = os.path.join(self.dir, "check.log")
+        task, wt, head = self.checked_task(f"grep -q x out.txt && echo run >> {shlex.quote(log)}")
+        first = self.events("record")
+        self.assertEqual(self.named(first, "checks-failed"), [])
+        self.assertEqual(self.one(first, "arrived")["detail"], "PASS by worker (result #1)")
+        self.events("record")
+        with open(log) as fh:
+            self.assertEqual(fh.read(), "run\n")
+        self.assertEqual(len(self.results(task)), 1)
+
+    def test_record_refuses_a_pass_whose_worktree_is_dirty_or_whose_check_leaves_files(self):
+        task, wt, head = self.checked_task("echo x > leftover.txt")
+        failed = self.one(self.events("record"), "checks-failed")
+        self.assertIn("filed ISSUES", failed["detail"])
+        self.assertIn("left files behind in the worktree (leftover.txt)", self.results(task)[-1]["body"])
+        os.remove(os.path.join(wt, "leftover.txt"))
+        self.fresh()
+        self.write_config('[report]\nchecks = ["true"]\n')
+        task = self.running_task()
+        wt, head = self.pass_report(task)
+        with open(os.path.join(wt, "dirty.txt"), "w") as fh:
+            fh.write("d\n")
+        self.one(self.events("record"), "checks-failed")
+        self.assertIn("the worktree has uncommitted changes (dirty.txt)", self.results(task)[-1]["body"])
+
+    def test_record_skips_the_checks_when_the_worktree_is_not_at_the_reported_head(self):
+        task, wt, head = self.checked_task("exit 1")
+        self.wt_commit(wt, "later.txt")
+        events = self.events("record")
+        self.assertIn("the task worktree is not at the reported Head", self.one(events, "checks-skipped")["detail"])
+        self.assertEqual(self.named(events, "checks-failed"), [])
+        self.assertEqual(len(self.results(task)), 1)
+
+    def test_record_runs_no_checks_when_the_project_sets_none(self):
+        task = self.running_task()
+        self.pass_report(task)
+        events = self.events("record")
+        self.assertEqual(self.named(events, "checks-failed") + self.named(events, "checks-skipped"), [])
+        self.assertEqual(self.one(events, "arrived")["detail"], "PASS by worker (result #1)")
 
     # --- Files: against git
 
@@ -8755,6 +9216,42 @@ class PrTest(Base):
         self.assertEqual(self.named(events, "push-refused"), [])
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
 
+    # --- operator notices (notify-queue)
+
+    def queue(self):
+        return self.named(self.events("notify-queue"), "notify")
+
+    @both_hosts
+    def test_notify_a_closed_request_is_queued_once_even_after_the_queue_is_cleared(self):
+        task, wt, head = self.published()
+        self.orders("MERGE: verified branches into main\n")
+        self.fake_host(head=head, state="CLOSED")
+        self.ok("record")
+        self.ok("record")
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"]),
+                         (task, f"[pr-closed] Task #{task}: {self.label()} closed without a merge"))
+        self.assertEqual(item["next"], "reopen the request on the host, or tell the Manager to redo or drop the task")
+        self.events("notify-queue", "--clear")
+        self.ok("record")
+        self.assertEqual(self.queue(), [])
+
+    def test_notify_a_failed_push_is_queued_with_the_hook_line(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\necho 'pre-push: refused' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.fake_host(head=head, merge_state="BEHIND")
+        self.ok("close", str(task))
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"].split(";")[0]),
+                         (task, f"[push-failed] Task #{task}: the push to origin/task-1 did not reach the remote"))
+        self.assertIn("pre-push: refused", item["detail"])
+        self.assertEqual(item["next"], "fix the push on the machine, or tell the Manager to retry")  # operator text, not `run.py close`
+
     @both_hosts
     def test_103_a_push_onto_a_moved_remote_branch_says_where_it_is_and_what_git_said(self):
         task, wt, head = self.published()
@@ -9246,7 +9743,7 @@ class MessagingTest(Base):
         task = self.running_task()
         report = os.path.join(self.dir, "report.md")
         with open(report, "w") as fh:
-            fh.write(f"Task: 1\nStatus: PASS\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: PASS\nSummary: s\nCheckpoint: {CHECKPOINT}\n")
         ctx = self.inbox_file("1-1.ctx.json")
         os.makedirs(os.path.dirname(ctx))
         with open(ctx, "w") as fh:
@@ -11809,13 +12306,13 @@ class BriefSizeTest(Base):
 
     def test_i104_an_upstream_report_is_a_summary_with_the_command_that_prints_it(self):
         task, (up,) = self.with_upstreams([self.body(1, files="base.txt", issues="blocking: slow",
-                                                     extra="Notes: UNKNOWN-NOTE\n")])
+                                                     extra="Remarks: UNKNOWN-NOTE\n")])
         context = self.context(task)
         upstream = context[context.index("### Upstream"):]
         for kept in ("result #1, PASS, attempt 1", "Status: PASS", f"Head: {SHA_A}", "Branch: worktree-task-1",
                      "Files: base.txt", "Issues: blocking: slow", "Follow-ups: none"):
             self.assertIn(kept, upstream)
-        self.assertIn("Notes: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
+        self.assertIn("Remarks: UNKNOWN-NOTE", upstream)  # a line with no known label continues Follow-ups
         for left in ("Task: 1", "criterion", f"Checkpoint: {CHECKPOINT}"):
             self.assertNotIn(left, upstream)
         self.assertIn(f"result ls {up} --kind task --attempt 1", upstream)
@@ -12940,6 +13437,16 @@ class RoundTest(Base):
         self.assertNotIn("--require-ran", command)
         self.assertNotIn("--base", command)
 
+    def test_a_rebase_round_brief_has_no_checks_and_no_self_review(self):
+        self.write_config('''
+            [report]
+            checks = ["make lint"]
+            ''')
+        task, wt, head, onto = self.waiting()
+        text = self.ok("round", str(task), "rebase", "--dry-run").stdout
+        self.assertNotIn("--check", self.section(text, "REPORT"))
+        self.assertNotIn("Self-review before PASS", text)
+
     def test_119_round_goal_comes_first_and_old_branch_lines_do_not_apply(self):
         task, wt, head, onto = self.waiting()
         self.tg("edit", str(task), "--notes", "Why: domains drift.\n\nRebase round by hand: start from origin/old-base (896308d), "
@@ -13250,6 +13757,8 @@ class RevisionTest(Base):
         self.ok("launch", str(task))
         if revision is not None:  # launch unsets it: the revisions this attempt has had
             self.tg("edit", str(task), "--meta", f"revision={revision}")
+            for number in range(1, revision + 1):  # the revise rows that run.py revise filed before the meta
+                self.add_result(task, "OPEN", f"Revision: {number}\nFrom: verify #1\nHead: abc\n", kind="revise", by="manager")
         wt, head = self.pass_report(task)
         folder = "task-1" if seat == "task" else "verify-1-1"
         if seat == "own":
@@ -13312,6 +13821,7 @@ class RevisionTest(Base):
         self.assertEqual((marks[0]["author"], marks[0]["status"], marks[0]["attempt"]), ("manager", "OPEN", 1))
         self.assertIn(f"Revision: 1\nFrom: verify #{self.verify_row}\nHead: {head}\nVerifier: verify-1-1\n", marks[0]["body"])
         self.assertIn("revision 1", self.one(events, "revised")["detail"])
+        self.assertEqual(marks[0]["summary"], f"🔁 revision 1 from verify #{self.verify_row}")
 
     def test_revise_files_one_finding_steer_with_every_blocking_line(self):
         lines = ("src/a.py:1: one", "src/b.py:2: two", "docs/c.md: three")
@@ -13340,6 +13850,39 @@ class RevisionTest(Base):
                 {"id": 60, "kind": "task", "attempt": 1}, {"id": 70, "kind": "task", "attempt": 2}]
         self.assertEqual([r["id"] for r in runner.current_rows(rows, 1)], [local + 2, 60])
         self.assertEqual([r["id"] for r in runner.current_rows(rows[:2], 1)], [40, local + 1])
+
+    def test_the_rows_of_a_revision_by_number_follow_the_list_order_not_the_id(self):
+        import run as runner
+        local = 10**15  # a `revise` row of a project that keeps the kind local has an id in this range
+        rows = [{"id": 10, "kind": "task", "attempt": 1}, {"id": 20, "kind": "verify", "attempt": 1, "status": "ISSUES"},
+                {"id": local + 1, "kind": "revise", "attempt": 1, "author": "manager"},
+                {"id": 30, "kind": "task", "attempt": 1}, {"id": 40, "kind": "verify", "attempt": 1, "status": "PASS"},
+                {"id": 50, "kind": "task", "attempt": 2}]
+        self.assertEqual([r["id"] for r in runner.revision_rows(rows, 1, 0)], [10, 20])
+        self.assertEqual([r["id"] for r in runner.revision_rows(rows, 1, 1)], [30, 40])
+        self.assertIsNone(runner.revision_rows(rows, 1, 2))
+
+    def test_a_task_in_a_revision_that_this_machine_has_no_revise_row_for_is_refused(self):
+        task, wt, head, events = self.revised()
+        self.assertEqual(self.meta(task)["revision"], 1)
+        self.ok("status")
+        self.tg("edit", str(task), "--meta", "revision=2")
+        err = self.refused("verify", str(task))
+        self.assertIn("is in revision 2, but this machine has 1 `revise` row(s)", err)
+        self.assertIn("results.local", err)
+
+    def test_record_takes_no_action_on_a_task_in_a_revision_this_machine_has_no_revise_row_for(self):
+        task, wt, head, events = self.revised()
+        self.tg("edit", str(task), "--meta", "revision=2")
+        before = [r["id"] for r in self.results(task)]
+        events = self.events("record")
+        gap = self.one(events, "revision-gap")
+        self.assertEqual(gap["task"], task)
+        self.assertIn("revision 2, but this machine has 1 `revise` row(s)", gap["detail"])
+        self.assertIn("results.local", gap["next"])
+        self.assertEqual([e["event"] for e in events if e["task"] == task], ["revision-gap"])
+        self.assertEqual([r["id"] for r in self.results(task)], before)  # no salvage, no DIED
+        self.assertEqual(self.meta(task)["revision"], 2)
 
     def test_revise_relays_the_findings_of_two_issues_blocks(self):
         body = (f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues: blocking: src/a.py:1: one\n"
@@ -13530,7 +14073,7 @@ class RevisionTest(Base):
         self.assertEqual(self.worktree_state(), before)
         self.assertIn(new, open(brief).read())
 
-    def test_verify_revision_brief_has_diff_and_full_method(self):
+    def test_verify_revision_brief_has_diff_and_the_revision_scope(self):
         task, wt, head, _ = self.revised()
         new = self.second_pass(task, wt)
         self.ok("verify", str(task))
@@ -13539,10 +14082,22 @@ class RevisionTest(Base):
         self.assertIn(f"Old head: `{head}`. New head: `{new}`.", text)
         self.assertIn(f"git --no-optional-locks diff {head} {new}", text)
         self.assertIn("blocking: src/a.py:1: a check fails", text)  # the verifier's own findings
-        self.assertIn("every VERIFY command, the project verify skill, and every ACCEPTANCE line", text)
+        flat = " ".join(text.split())
+        self.assertIn("Rerun every VERIFY command and every `Checks` command of the project verify skill "
+                      "(`.claude/skills/verify/SKILL.md`: lint, type check, tests) at the new head. Then check that each of "
+                      "your findings below is fixed, and check the code that the diff above touched. Do not run the rest of "
+                      "the method again", flat)
+        self.assertNotIn("run the full method", text)
         self.assertIn("## VERIFY\n\nmake test", text)
         self.assertIn("- done", text)  # the ACCEPTANCE line
-        self.assertIn("--kind verify --attempt 1 --by verify-1-1", text)
+        self.assertIn("--task 1 --attempt 1 --by verify-1-1 --status <STATUS>", text)
+
+    def test_the_resumed_revision_verifier_says_that_it_keeps_its_model(self):
+        task, wt, head, _ = self.revised()
+        self.second_pass(task, wt)
+        out = self.ok("verify", str(task), "--model", "haiku")
+        self.assertIn("note: the resumed verifier keeps model opus; --model and [models.verifier_by_tier] choose the model "
+                      "of a new verifier only", out.stderr)
 
     def test_140_a_revision_verify_moves_the_ci_ref_to_the_new_head(self):
         self.host = "github"
@@ -14067,7 +14622,7 @@ class Issue130Test(Base):
 
     def report(self, status, **fields):
         path = os.path.join(self.dir, "report.md")
-        text = {"Task": "1", "Status": status, "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
+        text = {"Task": "1", "Status": status, "Summary": "the change works", "Ran": "make test: ok", "Evidence": "a -> make test: ok", "Files": "None",
                 "Issues": "the test fails" if status != "PASS" else "None", "Deviations": "None", "Follow-ups": "None",
                 "Checkpoint": CHECKPOINT, **fields}
         with open(path, "w") as fh:
@@ -14692,7 +15247,7 @@ class RetroTest(Base):
         issues = "\n" + "\n".join(lines)
         path = os.path.join(self.dir, "report.md")
         with open(path, "w") as fh:
-            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
+            fh.write(f"Task: 1\nStatus: ISSUES\nVerdict: verify-failed\nSummary: s\nIssues:{issues}\nFollow-ups: None\nCheckpoint: {CHECKPOINT}\n")
         self.assertEqual(self.run_cmd("check-report", path, "--verifier").returncode, 0)
         row = {"id": 5, "author": "verify-1-1", "status": "ISSUES", "attempt": 1, "kind": "verify",
                "body": f"Status: ISSUES\nVerdict: verify-failed\nIssues:{issues}\n"}
@@ -14724,6 +15279,211 @@ class RetroTest(Base):
         self.assertIn("2026-10-26 08:00 UTC", section)
         import run as runner
         self.assertRegex(runner.utc_stamp(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class NotifyTest(Base):
+    """agentic-team 0.30.0: events queue operator notices; run.py sends nothing."""
+
+    ALL = '[notifications]\nevents = ["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]\n'
+
+    def queue(self, *args):
+        return self.named(self.events("notify-queue", *args), "notify")
+
+    def decision(self, title="Keep the old API?", *extra):
+        blocked = self.add_task("Waits for the answer")
+        return blocked, self.events("add", title, "--type", "decision", "--meta", "decider=operator", *extra,
+                                    "--blocks", str(blocked))
+
+    def test_a_decision_for_the_operator_queues_a_notice_with_its_default_and_deadline(self):
+        blocked, events = self.decision("Keep the old API?", "default=keep it", "--due", "2026-12-01")
+        did = self.one(events, "added")["task"]
+        (item,) = self.queue()
+        self.assertEqual((item["task"], item["detail"]), (did, f"[decision] Decision #{did} needs you: Keep the old API?"))
+        self.assertEqual(item["next"], f"answer it; #{blocked} wait for it; default if no answer: keep it; answer by: 2026-12-01")
+
+    def test_a_decision_without_default_or_due_says_so_and_other_deciders_queue_nothing(self):
+        self.decision()
+        (item,) = self.queue()
+        self.assertTrue(item["next"].endswith("default if no answer: none set; answer by: no deadline"), item["next"])
+        self.events("notify-queue", "--clear")
+        blocked = self.add_task("Other")
+        self.ok("add", "A question", "--type", "decision", "--meta", "decider=manager", "--blocks", str(blocked))
+        self.ok("add", "A plain task", "--independent", "unrelated")
+        self.assertEqual(self.queue(), [])
+
+    def test_an_abandon_queues_a_notice(self):
+        task = self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
+        self.agents(self.row("task-1", 3), self.finished("task-1"))
+        self.ok("abandon", str(task), "died", "--why", "tested")
+        (item,) = self.queue()
+        self.assertEqual(item["task"], task)
+        self.assertTrue(item["detail"].startswith(f"[abandon] Task #{task} abandoned (died: tested): "), item["detail"])
+        self.assertIn("redo the task or drop it", item["next"])
+
+    def test_a_dry_run_queues_nothing(self):
+        self.running_task(attempt=3, sessions=[self.entry(1, 1), self.entry(1, 3)])
+        self.agents(self.row("task-1", 3), self.finished("task-1"))
+        self.assertEqual(self.queue(), [])
+        out = self.run_cmd("notify-queue", "--add", "blocked", "stuck", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.queue(), [])
+
+    def test_events_filter_what_is_queued(self):
+        self.write_config('[notifications]\nevents = ["abandon"]\n')
+        self.decision()
+        self.assertEqual(self.queue(), [])
+        self.ok("notify-queue", "--add", "all-done", "done")
+        self.assertEqual(self.queue(), [])
+        task = self.running_task(attempt=3, sessions=[self.entry(2, 1), self.entry(2, 3)])
+        self.agents(self.row("task-2", 3), self.finished("task-2"))
+        self.ok("abandon", str(task), "died", "--why", "tested")
+        self.assertEqual([i["detail"].split("]")[0] for i in self.queue()], ["[abandon"])
+        self.write_config('[notifications]\nevents = []\n')
+        self.ok("notify-queue", "--clear")
+        self.decision("Another?")
+        self.assertEqual(self.queue(), [])
+
+    def test_all_done_and_blocked_are_queued_by_the_manager_and_dedup(self):
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.", "--do", "review the merged work")
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        items = self.queue()
+        self.assertEqual([i["detail"] for i in items], ["[all-done] All work is complete.", "[blocked] Waiting for a credential."])
+        self.assertEqual((items[0]["next"], items[1]["next"]), ("review the merged work", None))
+        self.assertEqual(self.run_cmd("notify-queue", "--add", "merged", "x").returncode, 2)  # not an event
+
+    def test_a_cleared_all_done_can_be_queued_again_on_a_later_day(self):
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.ok("notify-queue", "--clear")
+        self.ok("notify-queue", "--add", "all-done", "All work is complete.")
+        self.assertEqual(len(self.queue()), 1)
+
+    def test_notify_queue_reads_without_clearing_and_clear_empties_it(self):
+        self.assertEqual(self.events("notify-queue"), [{"event": "notify-queue", "task": None, "attempt": None,
+                                                        "session": None, "detail": "empty", "next": None}])
+        self.decision()
+        self.assertEqual(len(self.queue()), 1)
+        self.assertEqual(len(self.queue()), 1)
+        self.assertEqual(len(self.queue("--clear")), 1)
+        self.assertEqual(self.one(self.events("notify-queue"), "notify-queue")["detail"], "empty")
+        self.assertEqual(self.run_cmd("notify-queue", "--clear", "--digest").returncode, 2)
+
+    def test_a_blocked_line_notifies_once_and_a_new_reason_notifies_again(self):
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        self.assertEqual(len(self.queue("--clear")), 1)
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a credential.")
+        self.assertEqual(self.queue(), [])
+        self.ok("notify-queue", "--add", "blocked", "Waiting for a review.")
+        self.assertEqual([i["detail"] for i in self.queue()], ["[blocked] Waiting for a review."])
+
+    def test_the_same_notice_added_at_once_by_many_commands_is_queued_once(self):
+        self.write_config(self.ALL)
+        outs = []
+        threads = [threading.Thread(target=lambda: outs.append(self.run_cmd("notify-queue", "--add", "blocked", "Same line.")))
+                   for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual([o.returncode for o in outs], [0] * 6, [o.stderr for o in outs])
+        self.assertEqual(len(self.queue()), 1)
+
+    def test_clear_waits_for_the_queue_lock_so_a_notice_added_meanwhile_is_not_lost(self):
+        import mailbox as mbx
+        self.write_config(self.ALL)
+        self.ok("notify-queue", "--add", "blocked", "First.")
+        lock = os.path.join(self.root, ".agentic-team", "notify-queue.lock")
+        cmd = [sys.executable, self.logged_run(), "--root", self.root, "--tg", TG]
+        with mbx.locked(lock):
+            clear = subprocess.Popen(cmd + ["notify-queue", "--clear"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, cwd=self.dir, env=self.env)
+            time.sleep(1.0)
+            self.assertIsNone(clear.poll())  # it waits for the lock
+            queue = os.path.join(self.root, ".agentic-team", "notify-queue.jsonl")
+            with open(queue, "a") as fh:  # a notice that arrives while it waits is read by the clear, printed and cleared with it
+                fh.write(json.dumps({"key": "k2", "event": "blocked", "task": None, "attempt": None, "line": "Second.",
+                                     "do": "", "default": None, "due": None, "at": "x"}) + "\n")
+        out, err = clear.communicate(timeout=30)
+        self.assertEqual(clear.returncode, 0, err)
+        self.assertIn("[blocked] First.", out)
+        self.assertIn("[blocked] Second.", out)
+        self.assertEqual(self.queue(), [])
+        with open(os.path.join(self.root, ".agentic-team", "notify-sent")) as fh:
+            self.assertEqual(len(fh.read().split()), 2)
+
+    def digest_files(self):
+        folder = os.path.join(self.root, ".agentic-team")
+        return [os.path.isfile(os.path.join(folder, n)) for n in ("notify-digest.pending", "notify-digest")]
+
+    def test_the_digest_counts_as_made_only_after_sent_and_again_the_next_day(self):
+        self.write_config('[notifications]\ndigest = "daily"\n')
+        self.add_task()
+        self.assertEqual(self.run_cmd("notify-queue", "--digest", "--sent").returncode, 2)  # nothing printed yet
+        first = self.one(self.events("notify-queue", "--digest"), "notify-digest")
+        self.assertTrue(first["detail"].startswith("Daily digest "))
+        self.assertIn("--digest --sent", first["next"])
+        self.assertEqual(self.digest_files(), [True, False])
+        again = self.one(self.events("notify-queue", "--digest"), "notify-digest")  # not sent: it is made again
+        self.assertTrue(again["detail"].startswith("Daily digest "))
+        self.assertIn("marked as sent", self.one(self.events("notify-queue", "--digest", "--sent"), "notify-digest")["detail"])
+        self.assertEqual(self.digest_files(), [False, True])
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("already made for"))
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).isoformat(timespec="seconds")
+        with open(os.path.join(self.root, ".agentic-team", "notify-digest"), "w") as fh:
+            fh.write(old + "\n")
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("Daily digest "))
+
+    def test_sent_goes_with_digest_only(self):
+        self.assertEqual(self.run_cmd("notify-queue", "--sent").returncode, 2)
+
+    def test_the_digest_reads_from_the_last_sent_digest_and_from_one_day_on_the_first_run(self):
+        import run as runner
+        seen = []
+
+        class Stub:
+            dry_run, payload, text = False, None, None
+            config = {"notifications": {"digest": "daily"}, "sessions": {"timezone": "UTC"}}
+            run_dir = os.path.join(self.dir, "stub-run")
+            events = []
+
+            def emit(self, *a):
+                self.events.append(a)
+
+        def status(run, args):
+            seen.append(args.since)
+            run.payload = {"done": [], "in_flight": [], "decisions": []}
+
+        stub, args = Stub(), types.SimpleNamespace(sent=False)
+        with unittest.mock.patch.object(runner, "cmd_status", status):
+            runner.digest_command(stub, args)
+            moment = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).replace(microsecond=0)
+            with open(os.path.join(stub.run_dir, "notify-digest"), "w") as fh:
+                fh.write(moment.isoformat() + "\n")
+            runner.digest_command(stub, args)
+        self.assertEqual(seen, ["1d", moment.isoformat()])
+
+    def test_the_digest_is_off_by_default_and_made_once_a_day(self):
+        self.decision()
+        self.assertIn("off", self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"])
+        self.write_config('[notifications]\ndigest = "daily"\n')
+        text = self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"]
+        self.assertRegex(text, r"^Daily digest \d{4}-\d{2}-\d{2}\nMerged or done in the last day: 0\nIn flight: 0\n"
+                                r"Decisions waiting: 1 \(#2 Keep the old API\? no deadline\)$")
+        self.ok("notify-queue", "--digest", "--sent")
+        self.assertTrue(self.one(self.events("notify-queue", "--digest"), "notify-digest")["detail"].startswith("already made for"))
+
+    def test_digest_text_lists_merged_in_flight_and_decisions_with_a_cap(self):
+        import run as runner
+        payload = {"done": [{"Task": "#1", "Title": "Old"}], "in_flight": [{"Task": f"#{n}", "Title": f"T{n}"} for n in range(2, 5)],
+                   "decisions": [{"Decision": "#9 Pick one", "By": "2026-12-01"}, {"Decision": "#10 Pick two", "By": None}]}
+        self.assertEqual(runner.digest_text("2026-11-20", payload, cap=2), "\n".join([
+            "Daily digest 2026-11-20", "Merged or done in the last day: 1 (#1 Old)",
+            "In flight: 3 (#2 T2; #3 T3; and 1 more)",
+            "Decisions waiting: 2 (#9 Pick one by 2026-12-01; #10 Pick two no deadline)"]))
+        empty = {"done": [], "in_flight": [], "decisions": []}
+        self.assertEqual(runner.digest_text("d", empty), "Daily digest d\nMerged or done in the last day: 0\nIn flight: 0\nDecisions waiting: 0")
 
 
 class TransitionTest(unittest.TestCase):

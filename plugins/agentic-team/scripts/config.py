@@ -27,7 +27,8 @@ when agentic-team is not installed there. Without [profiles] nothing changes.
 When the .taskgraph.toml that tg finds maps taskgraph.project to the GitHub
 backend, `check` warns (exit 0) for each run-time meta key of RUNTIME_META that
 is in neither meta.local nor meta.deferred of that project, and for each result
-kind of LOCAL_RESULT_KINDS that is not in its results.local.
+kind of LOCAL_RESULT_KINDS that is not in its results.local, and when `revise` is in
+its results.local (it must stay remote).
 
 Exit 0 OK, 2 config problem, 1 unexpected error. `get` and `model` refuse to
 answer while `check` reports problems.
@@ -127,8 +128,8 @@ REF_PREFIX = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]*[-/]")
 TASKGRAPH_TOML = ".taskgraph.toml"
 # The meta keys that run.py writes as run-time state, by their class on the Taskgraph GitHub backend: "local" stays in
 # this machine's cache and is never sent, "deferred" is sent with the next write to the issue. Every other key that
-# run.py writes stays on the issue. The README's table "Meta keys on the Taskgraph GitHub backend" lists the same keys
-# (a test compares them).
+# run.py writes stays on the issue. docs/reference.md prints the class of every key from this table, and a test checks
+# that reference_data.META_WHY lists each key.
 RUNTIME_META = {
     "local": ("sessions", "session", "cleanup_kept", "host_rebase", "mailbox", "mailbox_ids"),
     "deferred": ("tokens", "model", "started_at"),
@@ -147,6 +148,8 @@ def system_timezone():
         pass
     return "UTC"
 
+
+NOTIFY_EVENTS = ("decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked")  # the default of notifications.events
 
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
@@ -171,6 +174,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "implementation": ("model", {"model": "sonnet", "effort": "high"}),
         "judgement": ("model", {"model": "opus", "effort": None}),
         "verifier": ("model?", None),
+        "verifier_by_tier": ("tiermap", {}),
         "overrides": ("overrides", {}),
     },
     "merge": {
@@ -195,7 +199,13 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
     },
     "roles": {"default": ("str", "")},
     "scope": {"adjacent": ("adjacent", [])},
-    "report": {"require_ran": ("ranmap", {})},
+    "report": {
+        "require_ran": ("ranmap", {}),
+        "checks": ("cmdlist", []),
+        "checks_by_kind": ("cmdmap", {}),
+        "check_timeout_seconds": ("posint", 600),
+        "summary_lang": ("choice:en,zh", "en"),
+    },
     "messaging": {
         "asks_per_attempt": ("nonneg", 3),
         "ask_due_minutes": ("posint", 60),
@@ -207,7 +217,11 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "carried_report_bytes": ("posint", 3000),
         "carried_total_bytes": ("posint", 12000),
     },
-    "notifications": {"skill": ("str", "")},
+    "notifications": {
+        "skill": ("str", ""),
+        "events": ("events", list(NOTIFY_EVENTS)),
+        "digest": ("choice:off,daily", "off"),
+    },
     "hooks": {
         "enabled": ("bool", False),
         "layered": ("bool", True),
@@ -233,7 +247,11 @@ TYPE_NAMES = {
     "patterns": "a list of path patterns",
     "commands": "a list of command prefixes or globs, none empty",
     "adjacent": "a list of adjacent-change kinds",
+    "events": "a list of notification events: " + ", ".join(f'"{e}"' for e in NOTIFY_EVENTS),
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
+    "cmdlist": "a list of non-empty one-line shell commands",
+    "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
+    "tiermap": 'a table of tier or models.overrides key = model, for example { implementation = "sonnet" }',
     "posint": "a positive integer",
     "nonneg": "an integer that is 0 or more",
     "bool": "true or false",
@@ -250,6 +268,197 @@ def type_name(kind):
         return "one of " + ", ".join(f'"{c}"' for c in kind[7:].split(","))
     return TYPE_NAMES[kind]
 
+
+# What each key means, as `docs/reference.md` prints it. A link is relative to `docs/`.
+DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "taskgraph": {
+        "project": "Taskgraph project name (`tg projects` lists them). Required: `config.py check` fails while it is empty.",
+    },
+    "constraints": {
+        "forbidden": ("One rule per item; they become FORBIDDEN in every brief. The template sets `[\"TODO\"]` until someone "
+         "confirms the list, even if it ends up empty."),
+    },
+    "autonomy": {
+        "grant": "Decisions and actions the Manager may take without asking. `\"\"` means no standing grant.",
+        "always_pause": "Decisions that always need the operator, even under the grant.",
+    },
+    "sessions": {
+        "max_parallel": ("Cap on in-flight sessions, workers and verifiers. Start with 1 or 2. The Manager refills as sessions "
+         "finish."),
+        "permission_mode": "`--permission-mode` for worker sessions.",
+        "timezone": ("IANA zone name, for example `\"Asia/Singapore\"`. Used for the times that `status` shows and the TIMEZONE of "
+         "the brief. `run.py` records its own times (`started_at`, `merged_at`, `Stopped:`) in UTC, ISO 8601, as "
+         "`2026-11-17T09:05:00Z`; `status` reads an older local string (`2026-11-17 17:05 SGT`) too and shows it as "
+         "it is."),
+        "timezone_label": "Label written after times, for example `\"SGT\"`. Set it when the derived label is an offset such as `+08`.",
+    },
+    "models": {
+        "mechanical": ("Sweeps, counts, diffs, summaries. Use an alias: an older pinned id such as `claude-haiku-4-5-20251001` "
+         "drops out of `auto` mode in a `--bg` worker and waits on a permission prompt."),
+        "implementation": "Well-scoped build or edit work with a known answer shape.",
+        "judgement": "Judgement, review, prose readers rely on, long unattended runs.",
+        "verifier": ("Verification sessions. Unset means a different model from the worker's: `opus`, or `sonnet` if the worker "
+         "ran on `opus`."),
+        "verifier_by_tier": ("`[models.verifier_by_tier]` maps a tier (`mechanical`, `implementation`, `judgement`) or a "
+         "`[models.overrides]` key to the verifier model of a task on that tier: a model id or a table with `effort` "
+         "and `profile`, as for a tier. See [Verifier model per tier](configuration.md#verifier-model-per-tier). "
+         "Empty: `verifier` decides, as before."),
+        "overrides": ("`[models.overrides]` maps a work type to a model, for example `\"data migration\" = { model = \"opus\", effort "
+         "= \"high\" }`. Matched case-insensitively before the tiers. A task's `tier` meta may name an override key."),
+    },
+    "merge": {
+        "mode": ("`local`: `close` merges into the main checkout under a `MERGE:` line, as before. `pr`: `close` pushes the "
+         "task branch and opens a pull or merge request; `record` merges it under a `MERGE:` line when the host "
+         "reports it clean, and records merges done by anyone from the request state. Setting `pr` is the operator's "
+         "standing permission to push task branches and open requests. Merging still needs the `MERGE:` line."),
+        "host": ("Which CLI speaks to the host: `gh` or `glab`. `auto` reads the `remote` URL: a host name of `github.com` "
+         "means GitHub, a host name that contains `gitlab` means GitLab. A self-managed GitLab on another host name "
+         "needs `host = \"gitlab\"`. Only read in `pr` mode."),
+        "remote": "The git remote the host is reached through.",
+        "base": ("The branch requests target. `\"\"` means the host's default branch, asked once per `run.py` command. A task "
+         "launched with `--base <branch>` targets that branch instead (meta `target`)."),
+        "method": ("How `record` merges. GitHub: `gh pr merge --merge|--squash|--rebase`. GitLab: the project's merge method "
+         "setting decides between merge commit, rebase and fast-forward; `squash` adds `squash=true`, the other two "
+         "values add nothing."),
+        "catch_up": ("How `close` catches up a request that is behind its target, in `pr` mode. `host`: it asks the host to "
+         "rebase the request (GitHub `gh pr update-branch --rebase`, GitLab `PUT merge_requests/<iid>/rebase`) and "
+         "pushes nothing; a host that cannot rebase or refuses this user falls back to `local`. `local`: it rebases "
+         "the branch in its idle worktree and pushes it under the lease."),
+        "after_rebase": ("A shell command that checks the tree after every rebase that `run.py` does, takes from the host, or accepts "
+         "from someone else, and on a rebase onto a newer target that `close` is about to push (the result of a "
+         "rebase round or of a rebase by hand). Empty means no check. It runs in its own process group with a "
+         "10-minute timeout; an event keeps the last 5 lines of its output. A timeout, and a problem on this machine "
+         "(a temporary worktree that cannot be made), are not a failure: nothing is accepted, pushed or started, a "
+         "line says the check could not run, and the result is not kept. A pass or a failure is kept per (head, "
+         "target, command) in `.agentic-team/after-rebase-cache.json`, so `record` runs the command once for each "
+         "head. A non-zero exit counts as a conflict: `run.py round <id> rebase` starts a round when the merge of the "
+         "head into the target passes `git merge-tree` but fails the check (the check runs in a temporary worktree of "
+         "that merge); a local catch-up rebase (`catch_up = \"local\"`) runs it in the task worktree and, on a failure, "
+         "puts the old head back and prints `conflict`; a rebase taken from the host or from someone else (#138) runs "
+         "it in a temporary detached worktree of the new head under `.claude/worktrees/after-rebase-<id>`, which "
+         "`run.py` always removes, and on a failure `pushed` stays and `conflict` is printed. Example: `after_rebase "
+         "= 'test \"$(alembic heads | wc -l)\" -eq 1'` fails a rebase that leaves two Alembic heads."),
+        "draft": ("`true` opens each request as a draft (GitHub `gh pr create --draft`, GitLab a `Draft: ` title), so it "
+         "starts no full CI run until someone marks it ready; `record` reports `pr-draft` until it is. `false`: the "
+         "request opens ready."),
+        "remove_worktrees": ("`true`: after a merge, `run.py` removes the task's worktrees and sessions when they are safe to remove (no "
+         "session, process or container uses them, a clean tree whose ignored files are all disposable, a merged "
+         "`HEAD`); see the cleanup in [Lifecycle](lifecycle.md#verdict-and-close). `false`: it removes nothing, and prints `kept <folder>: "
+         "merge.remove_worktrees is false` once, at the merge."),
+        "disposable": ("Ignored paths that `run.py` may delete with a merged worktree, added to the default list. An entry "
+         "`\"!<pattern>\"` turns off one default pattern. See [Disposable "
+         "patterns](configuration.md#disposable-patterns)."),
+    },
+    "verify": {
+        "kind": "The verify kind of a task without a `verify_kind` meta. See [Task metadata](reference.md#task-metadata).",
+        "revisions_per_attempt": ("The revisions (`run.py revise`) one attempt may have. `0` turns revisions off: the lifecycle of 0.23.0. The "
+         "task's plan key `revisions` overrides it. See [Revisions](lifecycle.md#revisions-fix-in-place)."),
+        "keep_sessions_minutes": ("How long the worker and the verifier stay idle after their newest row of the revision, waiting for a "
+         "revision; then `record` stops them."),
+        "seat": ("Where the verifier runs: `\"task\"`, the task worktree, read only, after the worker's turn; `\"own\"`, a "
+         "`verify-<id>-<n>` folder, as before 0.24.0."),
+        "seat_wait_minutes": ("How long after a worker's report `verify` waits for a worker that is still busy (it refuses and names it) "
+         "before the verifier gets a folder of its own. In a revision, a new verifier then replaces the kept one."),
+        "ci_ref_prefix": ("The prefix of the scratch branch that `verify --ci-ref` pushes: `<prefix><id>-<attempt>`. ASCII letters, "
+         "digits, `.`, `_`, `-` and `/`; no leading `-`, `.` or `/`, no `..` or `//`; it ends with `-` or `/`. Pick "
+         "one that the push filter of your CI workflow matches."),
+    },
+    "roles": {
+        "default": ("The role of a task with no `role` meta: `\"architect\"`, `\"software-engineer\"`, or a project role. `\"\"` means "
+         "no role. A name that has no role file makes `launch`, `adopt` and `verify` refuse. See "
+         "[Roles](roles-and-briefs.md#roles)."),
+    },
+    "scope": {
+        "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
+         "lower a baseline, ratchet or allow-list count (never raise it, never add an entry). `\"stale-exemption\"`: "
+         "delete an exemption or baseline row that a scanner run in this attempt proves stale. `\"own-lint\"`: fix lint "
+         "or format errors that this attempt's change caused in files outside SCOPE. `\"own-dependents\"`: change a "
+         "caller, test, fixture, generated file, doc or API sample of the code that this attempt changes, as far as "
+         "an ACCEPTANCE line, a VERIFY command or a gate that the brief names needs it. `\"own-registry\"`: add the "
+         "entry that a check requires for a file this attempt adds, in a table that must list every file (never an "
+         "exemption, a baseline row or an allow-list entry). `\"convention-place\"`: put new code in the file where the "
+         "repository's conventions place it, for example a schema file or a facade, when that file is outside SCOPE. "
+         "`\"moved-path\"`: change the code that a SCOPE path meant, when that path does not exist at the base and `git "
+         "grep` finds that code in exactly one other place. When set, the worker brief's SCOPE gains one line that "
+         "names the kinds, and the worker lists each such change under `Deviations:` as `adjacent: <kind>: <path>`. "
+         "The verifier brief names the same kinds and checks each `adjacent:` line."),
+    },
+    "report": {
+        "require_ran": ("The line prefixes that a worker `PASS` report needs under `Ran:`, by verify kind (`code`, `schema`, "
+         "`design-doc`): `require_ran = { \"code\" = [\"reuse:\", \"mutation:\"], \"design-doc\" = [\"self-check:\"] }`. The "
+         "worker brief's `check-report` command carries one `--require-ran <prefix>` for each prefix of the task's "
+         "verify kind, and refuses a `PASS` report that has no `Ran:` line starting with one of them, naming the "
+         "missing prefixes. Empty: no check, as before. A key that is not a verify kind is a config error."),
+        "checks": ("Project commands that the worker's `check-report` runs before it accepts a `PASS`, for every verify kind. "
+         "See [Report checks](operations.md#report-checks)."),
+        "checks_by_kind": ("The same, for one verify kind (`code`, `schema`, `design-doc`); they run after `checks`: "
+         "`[report.checks_by_kind]` `design-doc = [\"python docs/models/check_refs.py\"]`. A key that is not a verify "
+         "kind is a config error."),
+        "check_timeout_seconds": "The time that each check may take. A command must be one line: a command with a newline is a config error.",
+        "summary_lang": ("The language that the worker and the verifier write their `Summary:` line in (the brief says so in "
+         "English). Project code and every runtime file stay English. See [Issue comment "
+         "summaries](github-backend.md#issue-comment-summaries)."),
+    },
+    "messaging": {
+        "asks_per_attempt": ("How many asks a worker may file in one attempt. `0` forbids asks. A task's `asks` meta overrides it; the "
+         "`mechanical` tier defaults to `0`."),
+        "ask_due_minutes": ("An ask with no answer after this long prints `ask-due` at each `record`, with the hint `run.py answer <id> "
+         "--default`."),
+        "pending_minutes": ("A message that was posted to a socket and has no ack after this long goes back to pending, and the next "
+         "delivery resumes the session. A message that a busy worker has not seen after this long prints "
+         "`steer-pending`."),
+        "doorbell": ("`\"socket\"`: post the doorbell to the worker's inbox socket, and fall back to stop plus resume. `\"resume\"`: "
+         "always stop plus resume. `config.py check` warns when it is `\"socket\"` and a settings file puts the Manager "
+         "in `bypassPermissions`."),
+        "tg_poll_seconds": "The default of `run.py wait --tg-interval`.",
+    },
+    "brief": {
+        "carried_report_bytes": ("The most UTF-8 bytes of one carried report (the previous attempt, an upstream dependency, the worker report "
+         "in a verify brief) in a brief. A report over it is cut at a line boundary and ends with a line that names "
+         "its result id and the command that prints it."),
+        "carried_total_bytes": ("The most UTF-8 bytes of all carried reports of one brief together. It must be at least "
+         "`carried_report_bytes`."),
+    },
+    "notifications": {
+        "skill": ("Skill for operator messages, for example `\"telegram-send:telegram-send\"`. With `\"\"`, the Manager reports "
+         "only in the conversation."),
+        "events": "The events that queue a notice (see [Notifications](operations.md#notifications)). `[]` queues none.",
+        "digest": "`\"daily\"`: `run.py notify-queue --digest` prints one digest a day: merged, in flight, decisions waiting.",
+    },
+    "hooks": {
+        "enabled": "The master switch. With `false`, nothing here has an effect and the launch line is as in 0.28.2.",
+        "layered": "When enabled: reduce the output of the commands in `commands`.",
+        "compact_pins": "When enabled: keep the task's essentials through a compaction.",
+        "summarize_fallback": ("When enabled: when a failed command's output is above `large_chars` and no extraction rule matched, ask "
+         "Haiku (`claude -p --model haiku`) for a summary. It takes 7 to 12 seconds a call and uses the subscription."),
+        "passthrough_chars": "Output below this size is left unchanged.",
+        "large_chars": "The Haiku fallback runs only above this size. At least `passthrough_chars`.",
+        "summarize_seconds": ("The Haiku fallback gives up after this long; the session then sees the last lines and the path of the full "
+         "output."),
+        "commands": ("The commands whose output is reduced. A string with `*`, `?` or `[` is a glob over the whole command (`make "
+         "test*` matches `make test-unit FOO=1`). Any other string is a prefix: its words that do not start with `-` "
+         "must begin the command, and each word after the last such word that starts with `-` must be one of the "
+         "command's words (`gh run view --log` matches `gh run view 123 --log`; a `-` word before the last plain word "
+         "belongs to the prefix, so `python -m pytest` is a prefix; `pytest` matches `pytest -x tests/` and not `cat "
+         "pytest.ini`). A setting replaces the list; it does not add to it."),
+    },
+    "rounds": {
+        "cap": ("The rounds (`run.py round`) a task may have without `--attempt`. A round does not count toward the attempt "
+         "cap. At the cap a `conflict` line names the decision and the override."),
+        "verify": ("`\"always\"`: a round's PASS goes to a verifier session, whatever the task's risk and verify kind, unless its "
+         "head carries the same change as the verified head. `\"by-risk\"`: the rule of a plain attempt (a verifier for "
+         "`risk=high`, CI verify, or a kind that is not `code`)."),
+    },
+}
+
+# A sentence or two under a section heading of the reference, for what applies to the whole section.
+SECTION_NOTES = {
+    "autonomy": "The grant never overrides safety rules, required approvals, or constraints. "
+                "See the [decision-forks principle](../skills/principle-decision-forks/SKILL.md).",
+    "models": "Any tier or override table may also set `profile = \"<name>\"` or `profile = [\"<name>\", ...]`. "
+              "A string tier (`\"opus\"`) uses the Manager's own profile. See [Profiles](configuration.md#workers-on-more-than-one-claude-profile).",
+    "hooks": "Worker hooks (see [Worker hooks](operations.md#worker-hooks)). All off until `enabled` is `true`.",
+}
 
 ALL_KEYS = [f"{s}.{k}" for s, keys in SCHEMA.items() for k in keys]
 
@@ -384,7 +593,7 @@ def load(root="."):
                 value = default() if callable(default) else json.loads(json.dumps(default))
             if kind in ("model", "model?") and value is not None:
                 value = normalize_model(value) or value
-            elif kind == "overrides" and isinstance(value, dict):
+            elif kind in ("overrides", "tiermap") and isinstance(value, dict):
                 value = {k: normalize_model(v) or v for k, v in value.items()}
             data[section][key] = value
 
@@ -426,12 +635,18 @@ def type_ok(kind, value):
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "adjacent":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "events":
+        return isinstance(value, list) and all(isinstance(v, str) and v in NOTIFY_EVENTS for v in value)
     if kind == "commands":
         return isinstance(value, list) and all(isinstance(v, str) and v.strip() and v == v.strip() for v in value)
     if kind == "ranmap":
         return isinstance(value, dict) and all(
             isinstance(v, list) and all(isinstance(p, str) and p.strip() and p == p.strip() for p in v)
             for v in value.values())
+    if kind == "cmdlist":
+        return isinstance(value, list) and all(isinstance(c, str) and c.strip() and "\n" not in c for c in value)
+    if kind == "cmdmap":
+        return isinstance(value, dict) and all(type_ok("cmdlist", v) for v in value.values())
     if kind == "posint":
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if kind == "nonneg":
@@ -444,7 +659,7 @@ def type_ok(kind, value):
         return normalize_model(value) == value
     if kind == "model?":
         return value is None or normalize_model(value) == value
-    if kind == "overrides":
+    if kind in ("overrides", "tiermap"):
         return isinstance(value, dict) and all(normalize_model(v) == v for v in value.values())
     raise ValueError(kind)
 
@@ -485,9 +700,14 @@ def problems(config):
                     found.append(f"{dotted}: {value!r} is not an IANA time zone, for example \"Asia/Singapore\"")
             if kind == "patterns":
                 found += pattern_problems(dotted, value)
-            if kind == "ranmap":
+            if kind in ("ranmap", "cmdmap"):
                 found += [f"{dotted}: {json.dumps(k)} is not a verify kind; the kinds are {', '.join(VERIFY_KINDS)}"
                           f"{suggest(k, list(VERIFY_KINDS))}" for k in value if k not in VERIFY_KINDS]
+            if kind == "tiermap":
+                named = [t for t in TIERS if t != "verifier"] + list(config["models"]["overrides"])
+                found += [f"{dotted}: {json.dumps(k)} is not a tier or a models.overrides key; choose from: "
+                          f"{', '.join(named)}{suggest(k, named)}"
+                          for k in value if k.strip().lower() not in {n.strip().lower() for n in named}]
             if kind == "adjacent":
                 found += [f"{dotted}: {json.dumps(v)} is not an adjacent-change kind; the kinds are "
                           f"{', '.join(ADJACENT_KINDS)}{suggest(v, list(ADJACENT_KINDS))}"
@@ -532,6 +752,7 @@ def profile_problems(config):
                          f"CLAUDE_CONFIG_DIR={path} to create it, or fix the path")
     tiers = [(f"models.{tier}", config["models"][tier]) for tier in TIERS]
     tiers += [(f"models.overrides.{key}", value) for key, value in config["models"]["overrides"].items()]
+    tiers += [(f"models.verifier_by_tier.{key}", value) for key, value in config["models"]["verifier_by_tier"].items()]
     for dotted, value in tiers:
         for name in tier_profiles(value):
             if name != DEFAULT_PROFILE and name not in defined:
@@ -677,7 +898,37 @@ def taskgraph_warnings(config):
             for kind, keys in RUNTIME_META.items() for key in keys if key not in store["local"] + store["deferred"]] + [
         f"taskgraph: the GitHub backend posts each {kind!r} result row as an issue comment, and comments share GitHub's "
         f'rate limit on creating content; add {kind!r} to local under [projects."{project}".results] in {store["path"]}'
-        for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]]
+        for kind in LOCAL_RESULT_KINDS if kind not in store["results_local"]] + [
+        f"taskgraph: 'revise' is in results.local under [projects.\"{project}\".results] in {store['path']}: a lost cache, or "
+        "another machine, leaves a task in a revision with no `revise` row, and run.py then refuses it; `revise` must stay "
+        "remote (take it out of the list)"
+        for kind in ("revise",) if kind in store["results_local"]]
+
+
+def taskgraph_version_problems():
+    """A problem when the installed Taskgraph is older than 1.22.0: its `tg result add` has no --summary, so every
+    worker and verifier report would fail with "unrecognized arguments". Nothing when tg.py cannot be found: run.py
+    names that itself."""
+    env = os.environ.get("TASKGRAPH_TG")
+    if env and os.path.isfile(env):
+        tg = env
+    else:
+        out = subprocess.run(["bash", os.path.join(PLUGIN_ROOT, "scripts", "tg-path.sh")], capture_output=True, text=True)
+        tg = out.stdout.strip() if out.returncode == 0 else ""
+    if not tg:
+        return []
+    try:
+        out = subprocess.run([sys.executable, tg, "result", "add", "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"taskgraph: could not run tg ({tg}): {exc}"]
+    if out.returncode != 0:
+        reason = (out.stderr.strip().splitlines() or [f"exit {out.returncode}"])[-1]
+        return [f"taskgraph: could not run tg ({tg}): {reason}"]
+    if "--summary" in out.stdout:
+        return []
+    return [f"taskgraph: {tg} is older than 1.22.0: `tg result add` has no --summary, so every report would fail. "
+            f"Upgrade Taskgraph: `claude plugin update taskgraph@ronica-skills` (every machine on a project, and "
+            f"before agentic-team)"]
 
 
 def plugin_problems(config):
@@ -752,6 +1003,16 @@ def resolve_model(config, name):
     raise ConfigError(f"no tier or models.overrides entry named {name!r}; choose from: {', '.join(choices)}")
 
 
+def verifier_model(config, tier):
+    """The model table that [models] sets for the verifier of a task of `tier`: verifier_by_tier[tier] (a tier or a
+    models.overrides key, any case), else `verifier`, else None (the caller picks the model that differs from the worker's)."""
+    wanted = (tier or "").strip().lower()
+    for key, value in config["models"]["verifier_by_tier"].items():
+        if key.strip().lower() == wanted:
+            return value
+    return config["models"]["verifier"]
+
+
 # ------------------------------------------------------------------ output
 
 def scalar_text(value):
@@ -786,7 +1047,7 @@ def show_text(config):
         nested = []
         for key, (kind, _) in keys.items():
             value = config[section][key]
-            if kind == "overrides" and isinstance(value, dict):
+            if kind in ("overrides", "tiermap") and isinstance(value, dict):
                 nested.append((f"{section}.{key}", value))
             elif value is None:
                 lines.append(f"# {key} = (unset)")
@@ -831,7 +1092,7 @@ def main(argv=None):
     config = load(args.root)
     try:
         if args.command == "check":
-            found = problems(config)
+            found = problems(config) + taskgraph_version_problems()
             warnings = messaging_warnings(config) + taskgraph_warnings(config)
             if config.get(PROFILES) and not getattr(config, "missing", False):
                 more, extra = plugin_problems(config)

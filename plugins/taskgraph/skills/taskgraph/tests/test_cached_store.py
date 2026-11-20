@@ -396,6 +396,30 @@ def test_result_add_posts_a_comment_and_needs_no_refresh(env, fake):
     assert "no such task: 99" in env.fail("result", "add", "99", "--status", "PASS")
 
 
+def test_a_result_summary_is_the_visible_comment_and_the_pull_reads_the_exact_body(env, fake):
+    a = env.ok("add", "A")["id"]
+    body = "Status: PASS\nRan: `make`\n"
+    row = env.ok("result", "add", str(a), "--status", "PASS", "--by", "w", "--summary", "PASS in short", "--body", body)
+    [comment] = fake.comments(a)
+    first, _, rest = comment["body"].partition("\n")
+    assert first.startswith("<!-- taskgraph:result v1 ")
+    assert rest == f"PASS in short\n\n<details><summary>Full result</summary>\n\n```\n{body}\n```\n\n</details>"
+    assert row["summary"] == "PASS in short"
+    env.age(31)
+    [again] = env.ok("--fresh", "result", "ls", str(a))
+    assert (again["id"], again["body"], again["summary"]) == (row["id"], body, "PASS in short")
+    other = env.ok("add", "B")["id"]
+    env.ok("result", "add", str(other), "--status", "PASS", "--body", "plain")
+    assert fake.comments(other)[0]["body"].endswith("\"status\":\"PASS\"} -->\nplain")
+
+
+def test_a_local_result_kind_keeps_its_summary_in_the_cache(env, fake):
+    a = env.ok("add", "A")["id"]
+    row = env.ok("result", "add", str(a), "--kind", "ack", "--status", "SEEN", "--summary", "short", "--body", "Re: #1\n")
+    assert fake.comments(a) == [] and row["summary"] == "short"
+    assert env.ok("result", "ls", str(a))[0]["summary"] == "short"
+
+
 def test_result_from_another_machine_arrives_with_the_pull(env, fake):
     a = env.ok("add", "A")["id"]
     from tgstore.base import ResultInput

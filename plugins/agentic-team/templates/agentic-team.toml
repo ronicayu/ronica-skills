@@ -2,7 +2,7 @@
 # root, or run /agentic-team:setup. Replace every "TODO". Omit a key to use
 # its default. Never put credentials or secrets here. Private or
 # machine-specific values go in .agentic-team.local.toml (gitignored); its
-# keys override these. Field reference: plugins/agentic-team/README.md.
+# keys override these. Field reference: plugins/agentic-team/docs/reference.md.
 
 [taskgraph]
 project = "TODO"            # required; `tg projects` lists names
@@ -30,17 +30,26 @@ always_pause = []           # decisions that always need the operator
 # mechanical = { model = "haiku", profile = "api" }
 # implementation = { model = "sonnet", effort = "high", profile = ["default", "api"] }
 
+# A verifier per tier (a tier or a [models.overrides] key); it wins over `verifier`. Recommended: Sonnet verifies
+# implementation work at half the price, Opus verifies judgement work. Unset: today's `verifier` rule.
+# [models.verifier_by_tier]
+# implementation = "sonnet"
+# judgement = "opus"
+# mechanical = "sonnet"
+
 # [models.overrides]
 # "data migration" = { model = "opus", effort = "high" }   # use as a task's `tier`
 
 # Claude profiles for workers: name = the CLAUDE_CONFIG_DIR of that profile. "default" is the Manager's own and needs
 # no entry. Paths are machine-specific: put [profiles] in .agentic-team.local.toml and keep the tiers here. Each profile
-# needs the repository trusted and the agentic-team plugin installed (README: Workers on more than one Claude profile).
+# needs the repository trusted and the agentic-team plugin installed (docs/configuration.md: Workers on more than one Claude profile).
 # [profiles]
 # api = "~/.claude-api"
 
 [notifications]
 # skill = "telegram-send:telegram-send"
+# events = ["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"]   # the events that notify; [] sends none
+# digest = "off"            # "daily": one message a day with what merged, what is in flight and the decisions waiting
 
 [merge]
 # mode = "local"            # "pr": close pushes the task branch and opens a pull/merge request; record merges it under a MERGE: line
@@ -52,7 +61,7 @@ always_pause = []           # decisions that always need the operator
 # after_rebase = ""        # a shell command run in the rebased tree after every rebase (e.g. test "$(alembic heads | wc -l)" -eq 1); a failure counts as a conflict
 # draft = false             # true opens each request as a draft (no full CI until someone marks it ready); record reports pr-draft
 # remove_worktrees = true # false: keep every worktree and session of a merged task (run.py removes nothing)
-# disposable = []          # ignored paths that run.py may delete with a merged worktree, added to the defaults; "!build/" turns a default off (README: Disposable patterns)
+# disposable = []          # ignored paths that run.py may delete with a merged worktree, added to the defaults; "!build/" turns a default off (docs/configuration.md: Disposable patterns)
 
 [messaging]
 # asks_per_attempt = 3      # asks a worker may file per attempt; 0 forbids them (a task's `asks` meta overrides; the mechanical tier defaults to 0)
@@ -77,16 +86,21 @@ always_pause = []           # decisions that always need the operator
 
 [report]
 # require_ran = { "code" = ["reuse:", "mutation:"], "design-doc" = ["self-check:"] }  # by verify kind: the line prefixes that a worker PASS report needs under Ran:; empty by default
+# checks = ["make lint"]    # commands that check-report runs in the task worktree before it accepts a PASS; a non-zero exit refuses it, naming the command
+# check_timeout_seconds = 600   # the time each check may take
+# summary_lang = "en"       # "en" or "zh": the language the worker and verifier write their `Summary:` line in (shown above the full report on the issue comment)
+# [report.checks_by_kind]   # the same by verify kind, run after `checks`
+# design-doc = ["python docs/models/check_refs.py"]
 
 [roles]
-# default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (README: Roles)
+# default = ""              # the role of a task without a `role` meta: "architect", "software-engineer", or a project role (docs/roles-and-briefs.md: Roles)
 
 [brief]
 # carried_report_bytes = 3000   # most UTF-8 bytes of one carried report (previous attempt, upstream, worker report in a verify brief)
 # carried_total_bytes = 12000   # most UTF-8 bytes of all carried reports of one brief; at least carried_report_bytes
 
 [hooks]
-# enabled = false               # master switch: worker sessions get per-session hooks (README: Worker hooks); off by default
+# enabled = false               # master switch: worker sessions get per-session hooks (docs/operations.md: Worker hooks); off by default
 # layered = true                # when enabled: reduce the output of the test, build and log commands below
 # compact_pins = true           # when enabled: keep task id, GOAL, SCOPE, ACCEPTANCE, VERIFY, findings, Head and uncommitted changes through a compaction
 # summarize_fallback = false    # when enabled: summarize a failed output over large_chars with `claude -p --model haiku` when no rule matches (7-12 s, uses the subscription)

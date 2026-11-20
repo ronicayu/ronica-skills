@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from tgstore.base import ResultInput  # noqa: E402
+from tgstore.base import ResultInput, StoreError  # noqa: E402
 from tgstore.github.body import LIMIT  # noqa: E402
 from tgstore.github.comments import join_parts, parse_comment, render_claim, render_result, split_text  # noqa: E402
 
@@ -25,7 +27,7 @@ def test_result_marker_round_trip():
     assert first == '<!-- taskgraph:result v1 {"at":"2026-11-08T09:00:00Z","attempt":2,"by":"task-12-2","key":"9f2c1d0e7a4b","kind":"task","part":1,"parts":1,"status":"PASS"} -->'
     assert rest == row.body
     [out] = results([body])
-    assert out == {"id": 100, "at": "2026-11-08T09:00:00Z", "status": "PASS", "kind": "task", "attempt": 2, "author": "task-12-2", "body": row.body}
+    assert out == {"id": 100, "at": "2026-11-08T09:00:00Z", "status": "PASS", "kind": "task", "attempt": 2, "author": "task-12-2", "body": row.body, "summary": ""}
 
 
 def test_result_without_attempt_or_author_or_body():
@@ -92,3 +94,90 @@ def test_claim_comment_is_not_a_result_and_a_result_is_not_a_claim():
     assert "result" not in parse_comment(claim)
     result = as_comments(render_result(ResultInput("PASS", "task", 1, "w", "<!-- taskgraph:claim v1 {\"token\":\"x\",\"claimant\":\"c\"} -->"), AT))[0]
     assert "claim" not in parse_comment(result)
+
+
+SUMMARY = "\u2705 PASS \u00b7 head abc1234 \u00b7 3 files changed\nSecond line"
+
+
+def test_a_summary_goes_above_the_full_body_in_a_details_block():
+    row = ResultInput("PASS", "task", 1, "w", "Status: PASS\nRan: `make`\n", SUMMARY)
+    [body] = render_result(row, AT, key="k1")
+    first, _, rest = body.partition("\n")
+    assert '"summary":"' in first and '"fence":3' in first
+    assert rest == f"{SUMMARY}\n\n<details><summary>Full result</summary>\n\n```\nStatus: PASS\nRan: `make`\n\n```\n\n</details>"
+    [out] = results([body])
+    assert out["body"] == row.body and out["summary"] == SUMMARY
+
+
+def test_a_result_without_a_summary_is_the_same_comment_as_before():
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", "text", ""), AT, key="k1")
+    assert body == '<!-- taskgraph:result v1 {"at":"2026-11-08T09:00:00Z","attempt":1,"by":"w","key":"k1","kind":"task","part":1,"parts":1,"status":"PASS"} -->\ntext'
+
+
+def test_the_body_comes_back_exact_whatever_it_holds():
+    bodies = ["", "\n", "```\ncode\n```\n", "a ```` b\n", "`" * 40 + "\n", "tail </details>\n\n</details>", "<!-- taskgraph:meta v1 -->\n", "x\r\ny  "]
+    for text in bodies:
+        parts = render_result(ResultInput("PASS", "task", 1, "w", text, "sum"), AT)
+        [out] = results(parts)
+        assert out["body"] == text and out["summary"] == "sum", repr(text)
+
+
+def test_the_fence_is_longer_than_any_run_of_backticks_in_the_body():
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", "a ``` b\n", "s"), AT)
+    assert "\n````\na ``` b\n\n````\n\n</details>" in body
+
+
+def test_a_very_long_backtick_run_gets_a_longer_fence():
+    text = "`" * 40 + "\n"
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", text, "s"), AT)
+    assert f"\n{'`' * 41}\n{text}\n{'`' * 41}\n\n</details>" in body
+    assert results([body])[0]["body"] == text
+
+
+def test_a_summary_with_html_is_shown_escaped_and_kept_exact():
+    summary = "a <!-- b --> <script>x</script> & c"
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", "text", summary), AT)
+    visible = body.partition("\n")[2]
+    assert "<!--" not in visible and "<script>" not in visible
+    assert visible.startswith("a &lt;!-- b --&gt; &lt;script&gt;x&lt;/script&gt; &amp; c\n\n<details>")
+    [out] = results([body])
+    assert out["summary"] == summary and out["body"] == "text"
+
+
+def test_a_comment_whose_line_ends_became_crlf_still_unwraps():
+    row = ResultInput("PASS", "task", 1, "w", "a\n\nb\n", "sum <x>")
+    [body] = render_result(row, AT)
+    first, _, rest = body.partition("\n")
+    [out] = results([first + "\n" + rest.replace("\n", "\r\n")])
+    assert out["summary"] == "sum <x>" and out["body"] == "a\r\n\r\nb\r\n"
+
+
+def test_a_summary_that_leaves_no_room_is_refused_and_does_not_loop():
+    with pytest.raises(StoreError, match="no room"):
+        render_result(ResultInput("PASS", "task", 1, "w", "text", "s" * 300_000), AT)
+    with pytest.raises(StoreError):
+        split_text("abc", 0)
+
+
+def test_a_comment_edited_on_github_is_read_as_it_stands():
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", "text", "sum"), AT)
+    edited = body.replace("</details>", "")
+    [out] = results([edited])
+    assert out["body"].endswith("text\n```\n\n") and out["summary"] == "sum"
+
+
+def test_a_summary_shows_on_part_one_only_and_every_part_joins_exact():
+    text = "".join(f"line {i:06d} {'\u00e9' * 20}\n" for i in range(12000))
+    body = text + "x" * (600_000 - len(text.encode("utf-8")))
+    parts = render_result(ResultInput("PASS", "task", 1, "w", body, SUMMARY), AT)
+    assert len(parts) == 3 and all(len(p.encode("utf-8")) <= LIMIT for p in parts)
+    assert [p.count(SUMMARY.split("\n")[1]) for p in parts] == [2, 0, 0]  # part 1: the meta and the visible text
+    assert "<summary>Full result (part 2 of 3)</summary>" in parts[1]
+    [out] = results(parts)
+    assert out["body"] == body and out["summary"] == SUMMARY
+
+
+def test_a_missing_part_with_a_summary_still_reads_with_the_note():
+    parts = render_result(ResultInput("PASS", "task", 1, "w", "x" * 600_000, "s"), AT)
+    [out] = results([parts[0], parts[2]])
+    assert out["body"].endswith("\n[incomplete: 2 of 3 parts]") and out["summary"] == "s"

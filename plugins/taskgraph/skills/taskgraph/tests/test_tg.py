@@ -1669,7 +1669,7 @@ def test_result_add_reads_each_body_source(tg, raw, tmp_path):
     assert [r["body"] for r in rows] == ["from flag", "# Report\nnaïve café ✓\n", "from stdin\n", ""]
     assert [r["status"] for r in rows] == ["PASS", "ISSUES", "BLOCKED", "DIED"]
     assert json.loads(p.stdout) == rows[2]
-    assert set(rows[0]) == {"id", "task_id", "at", "status", "kind", "attempt", "author", "body"}
+    assert set(rows[0]) == {"id", "task_id", "at", "status", "kind", "attempt", "author", "body", "summary"}
     assert rows[0]["kind"] == "task" and rows[0]["attempt"] is None and rows[0]["author"] is None
     assert len(rows[0]["at"]) == 20 and rows[0]["at"].endswith("Z") and rows[0]["at"][10] == "T"
 
@@ -1731,6 +1731,50 @@ def logged(tg):
         tg("result", "add", str(a), "--status", "PASS", "--kind", "verify", "--attempt", "2", "--body", "a3")["id"],
     ]
     return a, b, log
+
+
+def test_result_summary_round_trips_with_the_body_on_every_backend(tg, raw, tmp_path):
+    t = add(tg, "A")
+    body = "Status: PASS\nRan: `make test`\n```\ncode\n```\n</details>\nlast  "
+    row = tg("result", "add", str(t), "--status", "PASS", "--summary", "PASS - two lines\nsecond", "--body", body)
+    assert row["summary"] == "PASS - two lines\nsecond" and row["body"] == body
+    note = tmp_path / "summary.md"
+    note.write_text("from file\n\n", encoding="utf-8")
+    tg("result", "add", str(t), "--status", "ISSUES", "--summary-file", str(note), "--body", "b2")
+    tg("result", "add", str(t), "--status", "DIED", "--body", "plain")
+    rows = tg("result", "ls", str(t))
+    assert [(r["body"], r["summary"]) for r in rows] == [(body, "PASS - two lines\nsecond"), ("b2", "from file"), ("plain", "")]
+    shown = tg("show", str(t))["results"]
+    assert [r["summary"] for r in shown] == ["PASS - two lines\nsecond", "from file", ""] and all("body" not in r for r in shown)
+    assert [r["summary"] for r in tg("--brief", "result", "ls", str(t))] == ["PASS - two lines\nsecond", "from file", ""]
+    text = raw("--project", "demo", "result", "ls", str(t)).stdout
+    assert "    summary: PASS - two lines\n             second\n    Status: PASS" in text
+    assert "      summary: from file" in raw("--project", "demo", "show", str(t)).stdout
+
+
+def test_result_summary_options_are_checked(fail, tg, tmp_path):
+    t = add(tg, "A")
+    fail("result", "add", str(t), "--status", "PASS", "--summary", "x", "--summary-file", "-")
+    fail("result", "add", str(t), "--status", "PASS", "--body-file", "-", "--summary-file", "-")
+    fail("result", "add", str(t), "--status", "PASS", "--summary-file", str(tmp_path / "missing.md"))
+    assert tg("result", "ls", str(t)) == []
+
+
+def test_a_summary_over_the_limit_is_refused(fail, tg):
+    t = add(tg, "A")
+    fail("result", "add", str(t), "--status", "PASS", "--summary", "x" * 2001)
+    tg("result", "add", str(t), "--status", "PASS", "--summary", "x" * 2000)
+    assert len(tg("result", "ls", str(t))[0]["summary"]) == 2000
+
+
+def test_a_long_body_with_a_summary_reads_back_exact_on_every_backend(tg, raw, tmp_path):
+    t = add(tg, "A")
+    body = "line\n" * 120_000
+    big = tmp_path / "big.txt"
+    big.write_text(body, encoding="utf-8")
+    tg("result", "add", str(t), "--status", "PASS", "--summary", "long one", "--body-file", str(big))
+    [row] = tg("result", "ls", str(t))
+    assert row["body"] == body and row["summary"] == "long one"
 
 
 def test_result_ls_order_and_filters(tg, logged):
@@ -1850,7 +1894,7 @@ def test_export_includes_results(tg, raw, logged, tmp_path):
     raw("--project", "other", "--json", "result", "add", "3", "--status", "DIED")
     data = json.loads(raw("--project", "demo", "export").stdout)
     assert ids(data["results"]) == log
-    assert data["results"][0] == {"id": log[0], "task_id": a, "at": data["results"][0]["at"], "status": "ISSUES", "kind": "task", "attempt": 1, "author": "w1", "body": "a1"}
+    assert data["results"][0] == {"id": log[0], "task_id": a, "at": data["results"][0]["at"], "status": "ISSUES", "kind": "task", "attempt": 1, "author": "w1", "body": "a1", "summary": ""}
     assert len(json.loads(raw("--project", "demo", "export", "--all-projects").stdout)["results"]) == 5
     out = tmp_path / "backup.json"
     tg("export", "--out", str(out))
@@ -1890,7 +1934,7 @@ def test_results_table_is_added_to_an_old_database(db, raw, tg):
     assert row["id"] == 1
     assert [r["body"] for r in tg("result", "ls", "1")] == ["late"]
     cols = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(results)")]
-    assert cols == ["id", "task_id", "at", "status", "kind", "attempt", "author", "body"]
+    assert cols == ["id", "task_id", "at", "status", "kind", "attempt", "author", "body", "summary"]
 
 
 def test_concurrent_writers_all_land(tg, raw, db):

@@ -10,7 +10,8 @@ You run one task from the brief in your first message, in your own git worktree 
 own branch. The Manager owns the plan, Taskgraph state, integration, and contact with
 the operator. You own the work inside SCOPE and an honest report. You talk to the Manager
 only through the MAILBOX commands in your brief, and through the one line that REPORT may ask
-for after your result. A verifier has no MAILBOX: it asks and receives nothing.
+for after your result. A verifier has no MAILBOX: it asks and receives nothing, and its one
+command is `file-verify`, which files its report.
 
 ## Before you start
 
@@ -127,7 +128,7 @@ for after your result. A verifier has no MAILBOX: it asks and receives nothing.
   such as the dependency install. If your VERIFY cannot run without such a target, report
   `BLOCKED` and name it.
 - **Taskgraph is read only,** except the one report command in your brief (it runs
-  `tg result add`, and it refuses while a steer has no ack) and the MAILBOX commands,
+  `tg result add`, and it refuses while a steer has no ack; a verifier's is `file-verify`) and the MAILBOX commands,
   which file your `ask` and `ack` rows. The Manager runs `tg start`,
   `tg done`, and every metadata change.
 - **Decision forks.** Before you ask anything, read
@@ -267,8 +268,9 @@ There you are read only: never check out, reset, stash, commit or delete anythin
 every git command as `git --no-optional-locks ...`; write scratch files only to the
 folder outside the repository that the brief names. A change to a tracked file, or a new
 file that git does not ignore, is your error: `run.py` stashes it before the task session
-resumes. A revision brief resumes you on a new head: check each of your findings, then
-run the full method again, not only the findings.
+resumes. A revision brief resumes you on a new head: rerun every VERIFY command and every `Checks` command of
+the project verify skill at the new head, then check each of your findings and the code that the revision
+diff touched. Do not run the rest of the method again.
 
 ## Report
 
@@ -282,7 +284,7 @@ brief, then end.
    `Files:`. Then run the `check-report` command in REPORT. It reads the file and changes
    nothing. Fix in the file what it names, with the Write tool, and run it again. If the
    command is refused, or it names a problem that you cannot fix, go on to step 2.
-2. Run the one report command in REPORT. Copy it as it is and fill in only the
+2. Run the one report command in REPORT (a verifier's is `file-verify`). Copy it as it is and fill in only the
    status. If it says that a steer has no ack, run the inbox command, act on it, ack it,
    and run the report command again. If it fails for another reason, run it again once.
 3. If REPORT has a notify step and the command succeeded, send that one line to the
@@ -301,6 +303,7 @@ messages.
 ```text
 Task: <id>
 Status: PASS | ISSUES | BLOCKED
+Summary: <1-3 lines: what behaviour changed, as a user or developer would notice it, ideally before -> now; for ISSUES or BLOCKED, what is wrong. No statistics, no file lists>
 Revision: <n> (only in a revision's report; leave the line out otherwise)
 Branch: <output of `git branch --show-current`>
 Head: <output of `git rev-parse HEAD`>
@@ -334,12 +337,31 @@ that says the path was `deleted` or `removed` is exempt.
 path of a renamed file, count). When more than 20 files changed, a directory entry such as `src/` names the
 files under it. When the project sets `[report] require_ran` for your task's verify kind, a `PASS` needs a
 `Ran:` line that starts with each prefix the check names (for example `reuse: ...`).
+When it sets `[report] checks`, `check-report` runs those commands in your worktree before it accepts a `PASS`
+and refuses it with the failing command and the end of its output; fix the cause and run it again. A rebase
+round runs none of this.
+
+Self-review before `PASS`, by the verify kind of the task (the brief repeats the step for your kind; a round has none):
+
+- `design-doc`: start a read-only Sonnet subagent with the Agent tool, not a fork. Ask it to check the
+  document for internal contradictions, non-deterministic wording, and every statement about the current
+  code (`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix the
+  false ones before `PASS`.
+- `code`: run guard mutations. Break the code under test on purpose: mutate the file in place, run the
+  covering tests and confirm that they fail, restore the file with `git checkout -- <file>`, and confirm that
+  `git status` is clean before you go on. Paste each one under `Ran:` as a `mutation:` line.
 
 Write one `Evidence:` line for each ACCEPTANCE line: the
 ACCEPTANCE line in short, then the command and its result, or the `path:line`, that
 proves it. A known gap means `ISSUES`, not `PASS`. A change outside SCOPE goes under
 `Deviations:`. The `check-report` command refuses a `PASS` with fewer `Evidence:` lines
 than ACCEPTANCE lines.
+
+Every report has a `Summary:` line, right after `Status:` (a verifier's: right after `Verdict:`): 1-3 lines in plain words that say what behaviour changed,
+as a user or developer would notice it, ideally as `before -> now`. No statistics, no file lists, no commit ids. For
+`ISSUES` or `BLOCKED`, it says what is wrong. The issue comment shows it above the full report, as written. Write it
+in the language that the brief names. `check-report` refuses a report with no `Summary:` text. A verifier's
+`Summary:` says whether the behaviour change is confirmed, and on `verify-failed` the main problem.
 
 A task report has no `Verdict:` line. A verifier's report keeps its own format: it has no
 `Evidence:` and no `Asked:` line, and it adds a `Verdict:` line after `Status:`:

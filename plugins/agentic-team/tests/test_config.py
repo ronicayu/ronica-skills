@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 import config  # noqa: E402
+import reference_data  # noqa: E402
 
 MINIMAL = 'taskgraph.project = "demo"\n'
 
@@ -56,6 +57,20 @@ class ConfigTest(unittest.TestCase):
         code, out, err = self.run_cli("check")
         self.assertEqual(code, 2)
         self.assertIn("verify.seat", out + err)
+
+    def test_notifications_events_and_digest(self):
+        self.write(MINIMAL)
+        loaded = config.load(self.root)["notifications"]
+        self.assertEqual((loaded["events"], loaded["digest"]),
+                         (["decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked"], "off"))
+        self.write(MINIMAL + '[notifications]\nevents = []\ndigest = "daily"\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        for text, expect in (('events = ["decision", "merged"]', "notifications.events must be a list of notification events"),
+                             ('events = "decision"', "notifications.events must be a list of notification events"),
+                             ('digest = "hourly"', 'notifications.digest must be one of "off", "daily"')):
+            with self.subTest(text=text):
+                self.write(MINIMAL + "[notifications]\n" + text + "\n")
+                self.assertIn(expect, "\n".join(config.problems(config.load(self.root))))
 
     def test_hooks_defaults_and_valid_values(self):
         self.write(MINIMAL)
@@ -320,6 +335,60 @@ class ConfigTest(unittest.TestCase):
         self.write(MINIMAL + '[report]\nrequire_ran = { "code" = [" reuse:"] }\n')
         self.assertEqual(len(config.problems(config.load(self.root))), 1)
 
+    def test_report_checks_are_commands_with_per_kind_lists_and_a_timeout(self):
+        self.write(MINIMAL)
+        report = config.load(self.root)["report"]
+        self.assertEqual((report["checks"], report["checks_by_kind"], report["check_timeout_seconds"]), ([], {}, 600))
+        self.write(MINIMAL + '[report]\nchecks = ["make lint"]\ncheck_timeout_seconds = 90\n'
+                   '[report.checks_by_kind]\ndesign-doc = ["python docs/check_refs.py"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [])
+        self.assertEqual(self.run_cli("get", "report.checks_by_kind", "--json")[:2],
+                         (0, '{"design-doc": ["python docs/check_refs.py"]}\n'))
+        self.write(MINIMAL + '[report.checks_by_kind]\ndesign = ["x"]\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'report.checks_by_kind: "design" is not a verify kind; the kinds are code, schema, design-doc (did you mean design-doc?)'])
+        for bad in ('checks = "make lint"', 'checks = [""]', 'checks = [1]', "check_timeout_seconds = 0",
+                    'checks_by_kind = { code = "make" }', 'checks = ["make lint\\nmake test"]',
+                    'checks_by_kind = { code = ["make\\nmake"] }'):
+            with self.subTest(bad):
+                self.write(MINIMAL + f"[report]\n{bad}\n")
+                self.assertEqual(len(config.problems(config.load(self.root))), 1)
+
+    def test_summary_lang_is_en_or_zh_and_defaults_to_en(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["report"]["summary_lang"], "en")
+        self.write(MINIMAL + '[report]\nsummary_lang = "zh"\n')
+        self.assertEqual((config.problems(config.load(self.root)), self.run_cli("get", "report.summary_lang")[:2]), ([], (0, "zh\n")))
+        self.write(MINIMAL + '[report]\nsummary_lang = "fr"\n')
+        self.assertIn('summary_lang must be one of "en", "zh"', " ".join(config.problems(config.load(self.root))))
+
+    def test_verifier_by_tier_maps_tiers_and_override_keys_to_models(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["models"]["verifier_by_tier"], {})
+        self.assertIsNone(config.verifier_model(config.load(self.root), "implementation"))
+        self.write(MINIMAL + '[models]\nverifier = "haiku"\n[models.overrides]\n"Data Migration" = "opus"\n'
+                   '[models.verifier_by_tier]\nimplementation = "sonnet"\njudgement = { model = "opus", effort = "high" }\n'
+                   '"data migration" = "fable"\n')
+        loaded = config.load(self.root)
+        self.assertEqual(config.problems(loaded), [])
+        for tier, want in (("implementation", "sonnet"), ("Implementation ", "sonnet"), ("judgement", "opus"),
+                           ("DATA MIGRATION", "fable"), ("mechanical", "haiku"), (None, "haiku")):
+            self.assertEqual(config.verifier_model(loaded, tier)["model"], want, tier)
+        self.assertEqual(config.verifier_model(loaded, "judgement")["effort"], "high")
+
+    def test_verifier_by_tier_rejects_unknown_keys_and_bad_models(self):
+        self.write(MINIMAL + '[models.verifier_by_tier]\nimplementaton = "sonnet"\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'models.verifier_by_tier: "implementaton" is not a tier or a models.overrides key; choose from: mechanical, '
+            "implementation, judgement (did you mean implementation?)"])
+        self.write(MINIMAL + '[models.verifier_by_tier]\nverifier = "sonnet"\n')
+        self.assertEqual(len(config.problems(config.load(self.root))), 1)
+        self.write(MINIMAL + '[models.verifier_by_tier]\njudgement = ""\n')
+        self.assertIn("models.verifier_by_tier must be a table of tier or models.overrides key = model",
+                      config.problems(config.load(self.root))[0])
+        self.write(MINIMAL + '[models.verifier_by_tier]\njudgement = { model = "opus", profile = "nope" }\n')
+        self.assertIn("models.verifier_by_tier.judgement uses profile 'nope'", config.problems(config.load(self.root))[0])
+
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
         found = config.problems(config.load(self.root))
@@ -538,6 +607,47 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("check"), (0, "ok\n", ""))
         self.assertEqual(config.taskgraph_store(self.root, "demo")["results_local"], ("ack", "steer", "check", "ask", "answer"))
 
+    def test_check_fails_with_an_upgrade_instruction_when_tg_has_no_summary_option(self):
+        self.write(MINIMAL)
+        old = os.path.join(self.root, "tg.py")
+        with open(old, "w") as fh:
+            fh.write("print('usage: tg result add [-h] [--body BODY] [--body-file BODY_FILE]')\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": old}):
+            code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("is older than 1.22.0", out)
+        self.assertIn("Upgrade Taskgraph", out)
+        new = os.path.join(self.root, "tg-new.py")
+        with open(new, "w") as fh:
+            fh.write("print('usage: tg result add [-h] [--summary SUMMARY]')\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": new}):
+            self.assertEqual(self.run_cli("check")[:2], (0, "ok\n"))
+
+    def test_check_warns_when_revise_is_kept_local_and_says_it_must_stay_remote(self):
+        self.write(MINIMAL)
+        os.environ.pop("TASKGRAPH_CONFIG", None)
+        meta = (f'[projects."demo".meta]\nlocal = {json.dumps(list(config.RUNTIME_META["local"]))}\n'
+                f'deferred = {json.dumps(list(config.RUNTIME_META["deferred"]))}\n')
+        head = 'version = 1\n[projects."demo"]\nbackend = "github"\nrepo = "o/r"\n' + meta
+        self.write_taskgraph(head + '[projects."demo".results]\nlocal = ["ack", "steer", "check", "revise"]\n')
+        code, out, err = self.run_cli("check")
+        self.assertEqual((code, out), (0, "ok\n"))
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("'revise' is in results.local", err)
+        self.assertIn("must stay remote", err)
+
+    def test_check_says_tg_could_not_run_instead_of_older_when_the_help_fails(self):
+        self.write(MINIMAL)
+        broken = os.path.join(self.root, "tg-broken.py")
+        with open(broken, "w") as fh:
+            fh.write("import sys\nprint('Traceback: boom', file=sys.stderr)\nsys.exit(1)\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": broken}):
+            code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("could not run tg", out)
+        self.assertIn("boom", out)
+        self.assertNotIn("older than", out)
+
     def test_the_taskgraph_file_is_found_as_tg_finds_it(self):
         os.environ.pop("TASKGRAPH_CONFIG", None)
         inner = os.path.join(self.root, "a", "b")
@@ -550,19 +660,12 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(config.taskgraph_store(inner, "demo"))  # the nearer file does not name the project
         self.assertEqual(config.taskgraph_store(self.root, "demo")["local"], ())
 
-    def test_the_readme_table_lists_the_run_time_keys_of_the_code(self):
-        with open(os.path.join(os.path.dirname(HERE), "README.md"), encoding="utf-8") as fh:
-            text = fh.read()
-        section = text.split("### Meta keys on the Taskgraph GitHub backend", 1)[1].split("\n#", 1)[0]
-        found = {"local": [], "deferred": [], "on the issue": []}
-        for line in section.splitlines():
-            cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.startswith("| `") else []
-            if cells:
-                found[cells[1]] += re.findall(r"`([a-z_]+)`", cells[0])
-        for kind in ("local", "deferred"):
-            self.assertEqual(sorted(found[kind]), sorted(config.RUNTIME_META[kind]), kind)
-            self.assertIn(f"{kind} = {json.dumps(list(config.RUNTIME_META[kind]))}", section)  # the recommended block
-        self.assertFalse(set(found["on the issue"]) & set(sum(config.RUNTIME_META.values(), ())))
+    def test_the_reference_data_lists_each_run_time_key_once(self):
+        listed = [k for keys, _ in reference_data.META_WHY for k in keys]
+        self.assertEqual(len(listed), len(set(listed)))
+        for kind, keys in config.RUNTIME_META.items():
+            self.assertLessEqual(set(keys), set(listed), kind)
+        self.assertEqual(set(config.RUNTIME_META["local"]) & set(config.RUNTIME_META["deferred"]), set())
 
 
 if __name__ == "__main__":

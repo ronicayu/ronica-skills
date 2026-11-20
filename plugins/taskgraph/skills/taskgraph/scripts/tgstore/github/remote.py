@@ -386,7 +386,7 @@ class GitHubRemote:
 
         self.run([(f"result comment {i} of {len(parts)}", op(t)) for i, t in enumerate(parts, 1)])
         return {"id": posted[0]["id"], "task_id": number, "at": posted[0]["created_at"], "status": row.status, "kind": row.kind, "attempt": row.attempt,
-                "author": row.author, "body": row.body}
+                "author": row.author, "body": row.body, "summary": row.summary}
 
 
     # -- claim (spec 8, with the rules of the model check) ----------------------------------------------------------

@@ -5,6 +5,7 @@ when the non-blocking test in your brief holds.
 A category on a `blocking:` line is optional: `blocking[stale-ref]:` (a `file:line` reference that no longer
 points at what it names), `blocking[claim]:` (a statement about the code that is false), `blocking[test]:`,
 `blocking[scope]:`, `blocking[shots]:` or `blocking[behaviour]:`. Write one `Issues:` field, one finding per line.
+Write a `Summary:` line (1-3 lines, plain words, no statistics) after `Verdict:`: whether the change is confirmed, and for `verify-failed` the main problem.
 
 ### Method: code
 
@@ -52,11 +53,16 @@ Verdict levels for this kind:
   not drive is `check-only`, not `test-verified`. Also `test-verified`: a
   green CI run on the CI ref that exercises the changed workflow or job.
 - Guard mutations are test evidence. When you break the code under test on
-  purpose, in a copy in your scratch folder, and every break turns the
-  covering tests red, the tests prove that code: with VERIFY passing at the
+  purpose and every break turns the covering tests red, the tests prove that code: with VERIFY passing at the
   head and covering every ACCEPTANCE line, that is `test-verified`, not
   `check-only`, also for a behaviour change those tests cover. List each
-  mutation and its red run under `Ran:`.
+  mutation and its red run under `Ran:`. In your own folder, mutate the file in
+  place, run the covering tests, restore it with `git checkout -- <file>` and
+  confirm that `git status` is clean. In the task worktree you are read only:
+  export the head into your scratch folder with `git archive` and mutate and
+  run the tests there, never in a copy of one file inside the worktree (the
+  tests import from the worktree, so such a copy tests nothing). The worker's own `mutation:` lines under `Ran:` are its claim: rerun
+  at least one of them before you count it.
 - `check-only`: static checks or a read-through only, with no test, mutation
   or CI run that proves the change.
 - `verify-blocked`: a check could not run; name the cause.

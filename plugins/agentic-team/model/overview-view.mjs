@@ -1,4 +1,4 @@
-// Overview of Lifecycle.tla for the README: the main flow in about a dozen states.
+// Overview of Lifecycle.tla for docs/lifecycle.md: the main flow in about a dozen states.
 // Use it with overview.cfg (FULL_ENV = FALSE, OPERATOR_PAUSES = TRUE).
 // Labels are for the product reader (statechart SKILL.md, "Pick the chart"): each state names its subject, each arrow
 // starts with its actor, and `glossary` explains every actor and short noun. The actors have the names of view.mjs.
@@ -57,7 +57,7 @@ export const step = (action, from, to) => {
     case "Launch": return from.attempt === 0 ? "the Manager starts the first attempt" : "the Manager starts the next attempt";
     case "VerifyPlain": case "VerifyAgain": return "the Manager starts a verifier session";
     case "CloseAuto": case "CloseManual": return closeLabel(from, to);
-    // The README chart draws the pause only from the working state, where it normally happens. A pause from a
+    // The lifecycle chart draws the pause only from the working state, where it normally happens. A pause from a
     // verifying or verdict state also leads to "Task paused"; hiding those arrows keeps the chart readable.
     case "Stop":
       if (state(from) !== WORKING) return null;

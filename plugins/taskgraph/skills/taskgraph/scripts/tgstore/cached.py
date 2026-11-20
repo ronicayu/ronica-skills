@@ -15,7 +15,7 @@ from tgstore.base import Capabilities, StoreError, now
 from tgstore.changes import PRIORITIES, ChangeSet, changeset, event_rows
 from tgstore.github import body as bodies
 from tgstore.remote import KEEP, Create, Edit, Plan, SyncState, canon
-from tgstore.sqlite import DB_TIMEOUT, SCHEMA
+from tgstore.sqlite import DB_TIMEOUT, SCHEMA, migrate
 
 EXTRA = """
 CREATE TABLE IF NOT EXISTS remote_tasks (
@@ -51,9 +51,7 @@ def open_cache(path):
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
-        with conn:
-            conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id)")
+    migrate(conn)
     conn.executescript(EXTRA)
     return conn
 
@@ -221,8 +219,8 @@ class CachedRemoteStore:
                     self.check_remote_ids(r["id"] for r in rows)
                     conn.execute("DELETE FROM results WHERE task_id=? AND id < ?", (number, LOCAL_RESULT_BASE))
                     conn.executemany(
-                        "INSERT OR REPLACE INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        [(r["id"], number, r["at"], r["status"], r["kind"], r["attempt"], r["author"], r["body"]) for r in rows],
+                        "INSERT OR REPLACE INTO results (id, task_id, at, status, kind, attempt, author, body, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [(r["id"], number, r["at"], r["status"], r["kind"], r["attempt"], r["author"], r["body"], r["summary"]) for r in rows],
                     )
             for number, rows in delta.claims.items():
                 if number in known:
@@ -640,8 +638,8 @@ class CachedRemoteStore:
         self.check_remote_ids([out["id"]])
         with conn:
             conn.execute(
-                "INSERT INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (out["id"], task_id, out["at"], row.status, row.kind, row.attempt, row.author, row.body),
+                "INSERT INTO results (id, task_id, at, status, kind, attempt, author, body, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (out["id"], task_id, out["at"], row.status, row.kind, row.attempt, row.author, row.body, row.summary),
             )
         return out
 
@@ -657,8 +655,8 @@ class CachedRemoteStore:
             high = conn.execute("SELECT MAX(id) FROM local_results").fetchone()[0]
             new = max(last, high or LOCAL_RESULT_BASE) + 1
             after = conn.execute("SELECT MAX(id) FROM results WHERE id < ?", (LOCAL_RESULT_BASE,)).fetchone()[0] or 0
-            out = {"id": new, "task_id": task_id, "at": now(), "status": row.status, "kind": row.kind, "attempt": row.attempt, "author": row.author, "body": row.body}
-            conn.execute("INSERT INTO results (id, task_id, at, status, kind, attempt, author, body) VALUES (:id, :task_id, :at, :status, :kind, :attempt, :author, :body)", out)
+            out = {"id": new, "task_id": task_id, "at": now(), "status": row.status, "kind": row.kind, "attempt": row.attempt, "author": row.author, "body": row.body, "summary": row.summary}
+            conn.execute("INSERT INTO results (id, task_id, at, status, kind, attempt, author, body, summary) VALUES (:id, :task_id, :at, :status, :kind, :attempt, :author, :body, :summary)", out)
             conn.execute("INSERT INTO local_results (id, after) VALUES (?, ?)", (new, after))
             put_state(conn, "local_result_id", new)
         return out

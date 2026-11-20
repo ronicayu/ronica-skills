@@ -234,3 +234,30 @@ def test_store_errors_carry_their_details():
     assert isinstance(limited, RemoteError) and limited.reset_at == "2026-11-08T10:00:00Z"
     lost = ClaimLost("#3 is claimed by ann", "ann", 42)
     assert isinstance(lost, StoreError) and (lost.winner, lost.winner_comment_id) == ("ann", 42)
+
+
+def test_a_lost_migration_race_counts_as_done(tmp_path):
+    from tgstore.sqlite import add_column, connect
+
+    class Stale:
+        """A connection that reads the table before another process added the column."""
+
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA table_info"):
+                return []
+            return self.conn.execute(sql, *args)
+
+        def __enter__(self):
+            return self.conn.__enter__()
+
+        def __exit__(self, *exc):
+            return self.conn.__exit__(*exc)
+
+    with closing(connect(tmp_path / "t.db")) as conn:
+        add_column(Stale(conn), "results", "summary", "TEXT NOT NULL DEFAULT ''")
+        add_column(Stale(conn), "tasks", "parent_id", "INTEGER REFERENCES tasks(id)")
+        with pytest.raises(sqlite3.OperationalError):
+            add_column(conn, "nope", "x", "TEXT")

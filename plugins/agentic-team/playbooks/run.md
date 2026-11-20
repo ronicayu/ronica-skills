@@ -261,6 +261,16 @@ every report, and on every wake (step 6).
    no steer and no ask, and a task with no live worker refuses a steer: put the text in the task notes for the next brief.
    `"${CLAUDE_PLUGIN_ROOT}/scripts/run" inbox <id>` shows the thread and each message's delivery state.
 
+**Notify** after each drain, before the reply: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" notify-queue`. Events queue
+their notices as they happen (`decision`, `abandon`, `push-failed`, `pr-closed`; you add `all-done` and `blocked` with
+`notify-queue --add <event> "<one line>" [--do "<what the operator can do>"]`). If it prints only
+`notify-queue: empty`, send nothing. Otherwise write one message with one plain line per item (what happened, what the
+operator can do; for a decision also its default and its deadline), send it once through `notifications.skill` (without
+one, put it at the top of the reply), then run `notify-queue --clear`. Never send one message per event. If
+`notifications.digest` is `daily`, run `notify-queue --digest` too: it prints the digest once a day (what happened since
+the last digest that you marked as sent) and nothing more that day; add it to the same message. After you send the message,
+run `notify-queue --digest --sent`; until then the digest is not counted as made, and the next call prints it again. A periodic brief is not needed when the events and the daily digest are on.
+
 **Reply** at the end of each drain: counts by state, what changed, open
 decisions, branches ready to merge and the tasks that wait on them,
 worktrees kept, and whether a `wait` runs. Use the report playbook for anything longer.

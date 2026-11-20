@@ -49,6 +49,9 @@ Usage:
                    passes; it writes nothing
     notify-to      set, clear, or show the session name that each new brief
                    tells its session to message after its result
+    notify-queue   show the operator notices that events queued, or clear
+                   them (--clear), queue one (--add), or print the daily
+                   digest (--digest); it sends nothing
     answer <id>    answer a worker's ask (--file, --default or --decision); files
                    an answer row and rings the worker's doorbell
     steer <id>     send a running worker a steer; --interrupt stops and resumes it
@@ -128,6 +131,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -135,8 +139,10 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
-from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
-                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles)
+from events import EVENTS  # noqa: E402
+from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
+                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
+from report_summary import SECTION_PATTERN, sections as report_parse, summary_problem, summarize  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -183,13 +189,7 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 RUN_LINE = re.compile(r"(?m)^Run:\s*(\S+)")
 OVERRIDE_RANK = {"verify-blocked": 0, "check-only": 1, "test-verified": 2, "artifact-verified": 3}
 EVIDENCE = re.compile(r"https?://\S+|\b\d{6,}\b")
-REPORT_LABEL = re.compile(r"(?m)^(Task|Status|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Files|Issues|Asked|Deviations|Follow-ups|"
-                          r"Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason):")
-# The labels that start a report section at column 0: those of REPORT_LABEL, those of the verifier and the project's own
-# `Needs CI`. Any other `Word:` line, such as `Note:` or `Changed:`, continues the section above it.
-SECTION_LINE = re.compile(r"^(Task|Status|Revision|Verdict|Branch|Head|Worktree|Ran|Evidence|Acceptance evidence|Files|Issues|Asked|Findings|"
-                          r"Deviations|Follow-ups|Checkpoint|Session|Stopped|Workflow|Run|Conclusion|Overrides|Reason|Needs CI):"
-                          r"(?:[ \t]|$)")
+SECTION_LINE = re.compile(r"^(" + SECTION_PATTERN + r"):(?:[ \t]|$)")  # the labels that start a report section at column 0 (report_summary.SECTION_LABELS)
 PRIORITY = ("Status", "Asked", "Head", "Branch", "Files", "Issues", "Findings", "Follow-ups", "Deviations", "Evidence")  # kept first when a report is cut
 # The end of the Ran block in a Ran section: right after a blank line, outside a ``` fence, a line at column 0 (no list
 # marker, quote, heading, table bar or backtick first) that reads `<label>:`: up to 40 characters with no colon, then a
@@ -236,6 +236,16 @@ REPORT_EXCLUDE = f"/{REPORT_DIR}/"  # the line in info/exclude that ignores it i
 SCRATCH_DIR = ".agentic-team-scratch"  # in a worktree, the one folder for a session's temporary files
 SCRATCH_EXCLUDE = f"/{SCRATCH_DIR}/"
 VERIFIER_QUIET_MINUTES = 30  # a verifier in no final state counts as ended after this long with no activity
+NOTIFY_QUEUE = "notify-queue.jsonl"  # in the run directory: operator notices that events queued and the Manager has not sent
+NOTIFY_SENT = "notify-sent"  # in the run directory: the key of each notice that was sent, one per line, so an event never notifies twice
+NOTIFY_DIGEST = "notify-digest"  # in the run directory: when the last daily digest was made and sent (ISO time, UTC)
+NOTIFY_DIGEST_PENDING = "notify-digest.pending"  # in the run directory: when the printed digest was made; `--digest --sent` makes it the last
+NOTIFY_LOCK = "notify-queue.lock"  # in the run directory: held while the queue is read, appended to or cleared
+NOTIFY_OF_EMIT = {"abandoned": "abandon", "push-failed": "push-failed", "pr-closed": "pr-closed"}  # emit event -> notifications.events name
+NOTIFY_LEAD = {"abandon": "Task #{task} abandoned {detail}", "push-failed": "Task #{task}: {detail}", "pr-closed": "Task #{task}: {detail}"}
+NOTIFY_DO = {"abandon": "decide whether to redo the task or drop it, and tell the Manager",
+             "push-failed": "fix the push on the machine, or tell the Manager to retry",
+             "pr-closed": "reopen the request on the host, or tell the Manager to redo or drop the task"}
 NOTIFY_FILE = "notify-to"  # in the run directory: the session name that sessions message after their result
 MANAGER_SESSION = "manager-session"  # in the run directory: the Manager's session id, for the compaction hook
 MANAGER_ADDR = "manager.addr"  # in the run directory: the Manager's inbox socket, for the workers' notify step
@@ -338,6 +348,7 @@ class Run:
         self.root = os.path.abspath(args.root)
         self.json = args.json
         self.events = []
+        self.dry_run = bool(getattr(args, "dry_run", False))
         self.payload = None  # `status` prints this instead of the events
         self.text = None
         top = sh(["git", "-C", self.root, "rev-parse", "--show-toplevel"])
@@ -460,8 +471,11 @@ class Run:
         task.setdefault("meta", {}).update(meta)
 
     def add_result(self, tid, kind, attempt, by, status, body):
+        """File a result row. A report, a revision mark or a long ask or answer also gets the short summary that
+        Taskgraph shows on the issue comment (report_summary.summarize)."""
+        summary = summarize(kind, status, body)
         return self.tg("result", "add", str(tid), "--kind", kind, "--attempt", str(attempt), "--by", by,
-                       "--status", status, "--body-file", "-", input=body)
+                       "--status", status, *([f"--summary={summary}"] if summary else []), "--body-file", "-", input=body)
 
     def edit_meta(self, tid, **meta):
         self.tg("edit", str(tid), "--meta", *[meta_arg(k, v) for k, v in meta.items()])
@@ -611,8 +625,12 @@ class Run:
     # --- output
 
     def emit(self, event, task=None, attempt=None, session=None, detail="", next=None):
+        assert event in EVENTS, f"event {event!r} is not in scripts/events.py"
         self.events.append({"event": event, "task": task, "attempt": attempt, "session": session,
                             "detail": detail, "next": next})
+        if (kind := NOTIFY_OF_EMIT.get(event)) and task is not None:
+            queue_notice(self, kind, task, attempt, NOTIFY_LEAD[kind].format(task=task, detail=detail),
+                         NOTIFY_DO[kind])
 
     def flush(self):
         if self.json:
@@ -863,12 +881,12 @@ def revision_rows(rows, attempt, revision):
     """The rows of `attempt` filed in its revision `revision` (0: before the first `revise` row), or None when the
     attempt has no such revision."""
     mine = [r for r in rows if r.get("attempt") == attempt]
-    marks = sorted(r["id"] for r in mine if r["kind"] == REVISE and r.get("author") == "manager")
+    marks = [i for i, r in enumerate(mine) if r["kind"] == REVISE and r.get("author") == "manager"]
     if revision > len(marks):
         return None
-    start = marks[revision - 1] if revision else 0
-    end = marks[revision] if revision < len(marks) else None
-    return [r for r in mine if r["id"] > start and (end is None or r["id"] < end)]
+    start = marks[revision - 1] + 1 if revision else 0
+    end = marks[revision] if revision < len(marks) else len(mine)
+    return mine[start:end]
 
 
 def turn_ended(s, rows, attempt):
@@ -1375,6 +1393,7 @@ ROLE_INHERITED = ("fits", "tier", "verify_kind", "skills")
 ROLE_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?")  # `plugin:skill`, or a bare name
 ROLE_NAME = re.compile(r"[a-z0-9-]+")
 ROLE_ITEM = re.compile(r"([1-9][0-9]*)\. ")  # a numbered item of Method or Review starts at column 0
+CHECK_WAIT_MARGIN = 60  # seconds added to the sum of the check timeouts in the worker brief
 ROLE_WORDS_MAX = 600  # Method plus Review; a longer role gets a warning, never a refusal
 STORED = ("role", "tier", "verify_kind")  # what launch and adopt store in the attempt's `sessions` entry
 
@@ -1706,6 +1725,26 @@ def role_section(role, kind, variables=None):
         parts.append(f"Load these skills with the Skill tool before you start: {', '.join(role.skills)}. If one does not "
                      "load, say so under Deviations: and follow the method below.")
     return "\n\n".join(parts + [fill(role.method, variables)])
+
+
+TIER_NOTES = {
+    "judgement": ("For reading or searching code, start a non-fork Sonnet subagent with a narrow question and use its "
+                  "answer; do not read large files yourself."),
+}
+
+
+def tier_note(role_text, tier, rounding=False, config=None):
+    """The ROLE section of a worker brief with the judgement note after the role text; none in a round. The note goes to
+    the judgement tier, and to a [models.overrides] key whose model is Opus or Fable (the expensive readers)."""
+    note = TIER_NOTES.get(tier)
+    if note is None and config is not None and any(k.strip().lower() == str(tier).strip().lower()
+                                                   for k in config["models"]["overrides"]):
+        model = str(resolve_model(config, tier).get("model") or "").lower()
+        if "opus" in model or "fable" in model:
+            note = TIER_NOTES["judgement"]
+    if rounding or not note:
+        return role_text
+    return note if role_text == "None." else f"{role_text}\n\n{note}"
 
 
 def cmd_roles(run, args):
@@ -2246,10 +2285,18 @@ def mailbox_section(run, tid, attempt, session, cap, to, revisions=False):
     return "\n".join(lines)
 
 
-def result_command(py, tg, db, project, task_id, kind, attempt, session, report):
-    """The command the session runs last. It fills in only the status; the body comes from the report file."""
-    return (f"{quote(py)} {quote(tg)} --db {quote(db)} --project {shlex.quote(project)} "
-            f"result add {task_id} --kind {kind} --attempt {attempt} --by {shlex.quote(session)} "
+SUMMARY_LANGUAGES = {"en": "English", "zh": "Chinese"}  # [report] summary_lang: the language of the Summary: line
+
+
+def summary_language(run):
+    return f"Write the `Summary:` line in {SUMMARY_LANGUAGES[run.config['report']['summary_lang']]}."
+
+
+def result_command(py, tg, db, project, task_id, attempt, session, report):
+    """The command the verifier runs last. It fills in only the status; the body comes from the report file. It
+    files the `tg result add` row with the report's summary (mailbox.py file-verify)."""
+    return (f"{quote(py)} {quote(mailbox_script())} file-verify --tg {quote(tg)} --db {quote(db)} "
+            f"--project {shlex.quote(project)} --task {task_id} --attempt {attempt} --by {shlex.quote(session)} "
             f"--status <STATUS> --body-file {quote(report)}")
 
 
@@ -2314,11 +2361,13 @@ def task_own_base(run, task, base):
     return str((task.get("meta") or {}).get("base") or base or "")
 
 
-def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None):
+def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None,
+           tier=None):
     """The brief text. Taskgraph is the only source of task content. `role` is the task's role, or the round kind's role
     in a round: its Method goes into a worker brief and its Review into a verifier brief, with the {{NAME}} variables of
     the task and the round filled in. `seat` is the verifier's folder: its own (the default, the session name), or the
-    task worktree (#127), where it is read only and keeps its scratch files in the run directory."""
+    task worktree (#127), where it is read only and keeps its scratch files in the run directory. `tier` is the tier
+    of a worker attempt that launch has chosen; without it, the tier that the task names."""
     tid = task["id"]
     meta = task.get("meta") or {}
     tg_cmd = f"{quote(sys.executable)} {quote(run.tg_path)} --db {quote(run.db)} --project {shlex.quote(run.project)}"
@@ -2348,9 +2397,23 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
     worker_args = (f" --mailbox {quote(attempt_file(run, tid, attempt, 'ctx.json'))} --acceptance {len(acceptance)}"
                    if kind != "verify" else "")
     verifier_arg = " --verifier" if kind == "verify" else ""
+    checks_note = ""
     if kind != "verify":
         for prefix in ([] if in_round(task) else config["report"]["require_ran"].get(verify_kind(run, task, strict=False), [])):
             worker_args += f" --require-ran {quote(prefix)}"
+        checks = [] if in_round(task) else report_checks(config, verify_kind(run, task, strict=False))
+        for command in checks:
+            worker_args += f" --check={quote(command)}"
+        if checks:
+            limit = config['report']['check_timeout_seconds']
+            worker_args += f" --check-timeout {limit}"
+            wait = len(checks) * limit + CHECK_WAIT_MARGIN
+            checks_note = (f" The report checks can run long. Run this command with a Bash timeout of at least {wait} "
+                           f"seconds (the sum of the check timeouts, {len(checks) * limit}, plus {CHECK_WAIT_MARGIN} "
+                           "seconds of margin), or in the background and watch it with Monitor"
+                           + ("; Bash allows 600 seconds in the foreground at most, so use the background here" if wait > 600 else "")
+                           + ". It also refuses a `PASS` while the worktree has uncommitted changes, before the checks "
+                           "run (commit first) and after them (a check left files behind).")
         if own_base := task_own_base(run, task, base):
             worker_args += f" --base {own_base}"
             if target := check_target(run, task):
@@ -2375,10 +2438,11 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                        "`Evidence:` lines than ACCEPTANCE lines, a path in backticks under `Files:`, `Evidence:` or "
                        "`Ran:` that does not exist in your worktree, a `PASS` report whose `Files:` leaves out a file "
                        "that your commits changed, a `PASS` report with no `Ran:` line for a prefix that the project "
-                       "requires, and an `ISSUES` or `BLOCKED` report with no "
-                       "`Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." if kind != "verify" else
+                       "requires, a `PASS` report while one of the project's report checks fails, and an `ISSUES` or `BLOCKED` "
+                       "report with no `Asked:` line (the ask ids it relied on, or `none: <one-line reason>`)." + checks_note
+                       if kind != "verify" else
                        " It also names an `ISSUES` report with an `Issues:` line that does not start with `blocking:`."),
-        "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, kind, attempt, session,
+        "RESULT_COMMAND": (result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, session,
                                           report) if kind == "verify" else
                            # the same `tg result add`, behind a check that no steer of the attempt is unacked
                            mailbox_command(run, tid, attempt, "report", "--status", "<STATUS>", "--body-file", quote(report))),
@@ -2462,7 +2526,9 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                 "is a blocking issue." if adjacent_text(config) else ""),
             "AUTONOMY": "- None. You judge the output; you decide nothing.",
             "REPORT_NOTE": ("Add a `Verdict:` line after `Status:`: artifact-verified, test-verified, check-only, "
-                            "verify-blocked, or verify-failed."),
+                            "verify-blocked, or verify-failed. Add a `Summary:` line after `Verdict:`: whether the behaviour "
+                            "change is confirmed, and for verify-failed the main problem, in plain words (1-3 lines, no "
+                            "statistics). " + summary_language(run)),
         })
     else:
         rows = run.results_for(tid)
@@ -2536,9 +2602,15 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                       f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."),
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
+            "ROLE": tier_note(values["ROLE"], tier or (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier,
+                              rounding, run.config),
+            "VERIFY": values["VERIFY"] + self_review_text(verify_kind(run, task, strict=False), rounding),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
                          f"- Always pause for: {'; '.join(autonomy['always_pause']) or 'None'}"),
-            "REPORT_NOTE": "",
+            "REPORT_NOTE": ("Add a `Summary:` line after `Status:` (after `Revision:` in a revision's report): 1-3 lines "
+                            "that say what behaviour changed, as a user or developer would notice it, ideally as before "
+                            "-> now; for `ISSUES` or `BLOCKED`, what is wrong, in plain words. No statistics, no file "
+                            "lists. The issue comment shows it above the full report. " + summary_language(run)),
         })
     path = os.path.join(PLUGIN_ROOT, "templates", "task-brief.md")
     with open(path) as fh:
@@ -3127,7 +3199,7 @@ def cmd_launch(run, args):
     tier = picked.tier
     role_size_warning(run, task, picked.role, nxt)
     cap = asks_cap(run, task, tier)
-    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
+    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role, tier=tier)
     check_cap(run, getattr(args, "dry_run", False))
     model, effort, profile = worker_model(run, args, tier)
     worktree = f"task-{tid}"
@@ -3146,13 +3218,13 @@ def cmd_launch(run, args):
             shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
             notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
                             "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
-            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
         if run.pr_mode:
             moved = restack(run, task, branch, base, then=f"run.py launch {tid} --attempt {nxt}")
             if moved != base:
                 notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
                 base = moved
-                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
     elif mode == "reattach":
         if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
             raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
@@ -3171,7 +3243,7 @@ def cmd_launch(run, args):
             if moved != base:
                 notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
                 base = moved
-                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
     else:
         add_worktree(run, worktree, base)
     created = mode in ("first", "base", "head")
@@ -3408,7 +3480,32 @@ def refuse_unless_running(run, task):
     if meta.get("abandoned"):
         raise Refused(f"#{tid} is abandoned ({meta['abandoned']})")
     refuse_closed(run, task)
+    refuse_revision_gap(run, task)
     return wanted_attempt(task)
+
+
+def revision_gap(run, task):
+    """(attempt, wanted, have) when the task's `revision` meta counts revisions that this machine has no `revise` row for,
+    else None: the rows of the attempt would read as one revision, with the old verify-failed report as the current
+    verdict. It happens when the Taskgraph GitHub backend keeps `revise` local (results.local) and the cache is lost or
+    another machine ran the revise."""
+    attempt, wanted = wanted_attempt(task), revision_of(task)
+    if not wanted or attempt is None:
+        return None
+    have = len([r for r in task_rows(run.results_for(task["id"]), attempt, REVISE, history=True) if r.get("author") == "manager"])
+    return (attempt, wanted, have) if have < wanted else None
+
+
+GAP_FIX = ("the rows of a result kind in `results.local` stay in the machine's Taskgraph cache. Run run.py on the machine "
+           "that ran `revise`, and take `revise` out of `results.local` in .taskgraph.toml "
+           "(see docs/github-backend.md, When the local cache is lost)")
+
+
+def refuse_revision_gap(run, task):
+    """Refuse a task with a revision gap (revision_gap)."""
+    if gap := revision_gap(run, task):
+        attempt, wanted, have = gap
+        raise Refused(f"#{task['id']} attempt {attempt} is in revision {wanted}, but this machine has {have} `revise` row(s): {GAP_FIX}")
 
 
 def worker_for(run, tid, attempt, result_id=None, task=None):
@@ -3501,7 +3598,8 @@ def cmd_verify(run, args):
         k += 1
     name = f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "")
     folder = f"task-{tid}" if seat == "task" else (reuse or name)
-    verifier = run.config["models"]["verifier"]
+    tier = (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier
+    verifier = verifier_model(run.config, tier)  # verifier_by_tier[tier], else verifier
     profile = pick_profile(run, tier_profiles(verifier), args.profile)
     if args.model:
         model, effort = args.model, args.effort
@@ -3684,6 +3782,10 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
     if ci:
         push_ci_ref(run, task, attempt, ref, args.dry_run)
     text = render_revision(run, task, attempt, revision, name, folder, old, ref, worker, judged[-1] if judged else None, role)
+    kept = entry.get("model") or session_model(task, entry.get("id")) or "unknown"
+    if getattr(args, "model", None) or run.config["models"]["verifier_by_tier"]:
+        print(f"note: the resumed verifier keeps model {kept}; --model and [models.verifier_by_tier] choose the model of a "
+              f"new verifier only (run.py verify {tid} --again starts one)", file=sys.stderr)
     brief = f"task-{tid}-{attempt}-verify-r{revision}.md"
     if args.dry_run:
         print(f"claude --bg --resume {entry.get('sessionId')} --name {name}-r{revision} <pointer to {brief}>", file=sys.stderr)
@@ -3718,7 +3820,7 @@ def verify_resume(run, args, task, attempt, rows, worker, ref, entry, role, ci=F
 
 def render_revision(run, task, attempt, revision, name, folder, old, new, worker, findings, role):
     """The brief of a resumed verifier: the old and the new head, the diff, the worker's new report, the verifier's own
-    earlier findings, and the order to run the full method again on the new head."""
+    earlier findings, and the order to recheck: the fixed findings, every VERIFY command and the code the diff touched."""
     tid = task["id"]
     meta = task.get("meta") or {}
     why, acceptance = parse_notes(task.get("notes"))
@@ -3742,19 +3844,20 @@ def render_revision(run, task, attempt, revision, name, folder, old, new, worker
              *([f"- {ci_ref_text(run, ci_entry)}"] if (ci_entry := ci_ref_for(task, attempt, new)) else []),
              f"- A CI run counts only for the commit it ran on: a run of the old head, or of any commit but `{new}`, "
              "proves nothing about the new head.",
-             "- First check that each of your findings below is fixed. Then run the full method of your first brief again "
-             "on the new head: every VERIFY command, the project verify skill, and every ACCEPTANCE line, not only the "
-             "findings. A fix can break a line that passed before.",
+             "- Rerun every VERIFY command and every `Checks` command of the project verify skill "
+             "(`.claude/skills/verify/SKILL.md`: lint, type check, tests) at the new head. Then check that each of your "
+             "findings below is fixed, and check the code that the diff above touched. Do not run the rest of the method "
+             "again: a line that the diff does not touch keeps your earlier result.",
              "- Your rules from the first brief stand: read only, scratch files only where it said.", "",
              "## ACCEPTANCE", "", "\n".join(f"- {item}" for item in acceptance), "",
              "## VERIFY", "", str(meta.get("verify", "")).strip(), "",
              "\n\n".join(carried), "",
              "## REPORT", "",
              f"Write a new, complete report with the Write tool to `{report}`, in the format of your first brief, with "
-             "a `Verdict:` line after `Status:`. Check it with:", "",
+             "a `Verdict:` line and a `Summary:` line after `Status:` (" + summary_language(run) + "). Check it with:", "",
              f"`{quote(sys.executable)} {quote(os.path.join(PLUGIN_ROOT, 'scripts', 'run.py'))} check-report {quote(report)} --verifier`",
              "", "Then run this one command, once, with `<STATUS>` replaced:", "", "```sh",
-             result_command(sys.executable, run.tg_path, run.db, run.project, tid, "verify", attempt, name, report), "```"]
+             result_command(sys.executable, run.tg_path, run.db, run.project, tid, attempt, name, report), "```"]
     notify = notify_step(notify_target(run), tid, "verify", attempt)
     return "\n".join(lines) + (notify or "") + "\n"
 
@@ -4800,6 +4903,11 @@ def record_arrived(run, snap, task, attempt, result):
         run.emit("arrived", tid, attempt, None, f"BLOCKED by {result.get('author') or 'unknown'} (result #{result['id']})",
                  f"decision #{answered[0]} answered; " + retry_next(tid, attempt, task=task))
         return
+    if status == "PASS" and result.get("kind") == "task":
+        failed_checks = recheck_pass(run, task, attempt, result)
+        if failed_checks:  # the report checks of a PASS that its worker did not run: the PASS becomes an ISSUES row
+            result = failed_checks
+            status = result["status"]
     detail = f"{status} by {result.get('author') or 'unknown'} (result #{result['id']})"
     if status == "PASS":
         carried = round_carry(run, task, tail_or_none(HEAD_ANY.search(result.get("body") or "")))
@@ -4817,6 +4925,54 @@ def record_arrived(run, snap, task, attempt, result):
         nxt = (retry_next(tid, attempt, before="answer it and ", task=task) + ', or run.py add "<question>" --type decision '
                f"--meta decider=operator --blocks {tid}")
     run.emit("arrived", tid, attempt, None, detail, nxt)
+
+
+def recheck_pass(run, task, attempt, result):
+    """record: a worker PASS is checked against the project's [report] checks, so that a worker that left out the
+    check-report flags (or never ran it) does not get through. The checks run in the task worktree at the Head of the
+    report, under the clean-tree rule of check_problems. A failure files an ISSUES row by the Manager (the row that salvage
+    files for a report it recovers: it carries the worker's report with its Status replaced) and returns it; a pass or
+    a check that cannot run here returns None. Each PASS row is checked once: its id is kept in the attempt's
+    `checked` file of the inbox folder."""
+    tid = task["id"]
+    checks = [] if in_round(task) else report_checks(run.config, verify_kind(run, task, strict=False))
+    marker = attempt_file(run, tid, attempt, "checked")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            if fh.read().strip() == str(result["id"]):
+                return None
+    except OSError:
+        pass
+    if not checks:
+        return None
+    path, body = task_worktree(run, tid), result.get("body") or ""
+    head = tail_or_none(HEAD_ANY.search(body))
+    if any(s.live and s.status == "busy" for s in own_sessions(run, tid, "task", attempt)):
+        return None  # the worker still works in the worktree: the checks wait for the next record
+    reason = None
+    if not os.path.isdir(path):
+        reason = "the task worktree is gone"
+    elif not is_sha(head) or run.git("rev-parse", "HEAD", cwd=path, check=False).stdout.strip() != commit_of(run, head):
+        reason = f"the task worktree is not at the reported Head {str(head)[:7]}"
+    if reason:
+        run.emit("checks-skipped", tid, attempt, None, f"result #{result['id']}: {reason}, so the report checks did not run")
+        return None
+    problems = check_problems(checks, path, run.config["report"]["check_timeout_seconds"])
+    if not problems:
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(str(result["id"]))
+        return None
+    text = problems[0].replace("\n", "\n  ")
+    filed = STATUS_LINE.sub("Status: ISSUES\nAsked: none: filed by run.py record, not by the worker\n"
+                            f"Issues: blocking: record ran the [report] checks at {str(head)[:7]} and refused the PASS: {text}",
+                            body, count=1)
+    added = run.add_result(tid, "task", attempt, "manager", "ISSUES", filed)
+    carry_thread(run, task, attempt)
+    run.emit("checks-failed", tid, attempt, None,
+             f"result #{result['id']} said PASS, but the report checks fail at {str(head)[:7]}; filed ISSUES (result #{added['id']})")
+    return added
 
 
 def round_carry(run, task, head):
@@ -5322,7 +5478,12 @@ def host_guard(run, task, fn, *args):
 
 def record_task(run, snap, task, unmanaged):
     """record's part for one task in progress: settle the phase, then the request of a round, then follow the rows, then
-    stop the kept sessions that no revision will use."""
+    stop the kept sessions that no revision will use. A task with a revision gap (revision_gap) gets one line and nothing
+    else: no salvage, DIED or other row is filed on rows that this machine cannot read as the revision's."""
+    if gap := revision_gap(run, task):
+        run.emit("revision-gap", task["id"], gap[0], None,
+                 f"revision {gap[1]}, but this machine has {gap[2]} `revise` row(s); record takes no action on it", GAP_FIX)
+        return
     if settle_phase(run, snap, task) and not awaiting(task):  # the backfill can find a closed 0.18.0 task
         if in_round(task) and record_round(run, snap, task):
             return
@@ -5602,6 +5763,160 @@ def cmd_notify_to(run, args):
     sock = manager_socket(run)
     run.emit("notify-to", None, None, None, f"{name}; new briefs tell each session to message it after its result"
              + (f", at uds:{sock}" if sock else ""))
+
+
+# ----------------------------------------------------------- operator notices
+
+def notice_key(event, task, attempt, line):
+    return hashlib.sha1(f"{event}\0{task}\0{attempt}\0{line}".encode()).hexdigest()[:16]
+
+
+def read_queue(run):
+    """The queued notices, oldest first. A line that is not a JSON object is skipped."""
+    items = []
+    try:
+        with open(os.path.join(run.run_dir, NOTIFY_QUEUE), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict) and "key" in item:
+                    items.append(item)
+    except OSError:
+        pass
+    return items
+
+
+def sent_keys(run):
+    try:
+        with open(os.path.join(run.run_dir, NOTIFY_SENT), encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
+def notify_lock(run):
+    return mbx.locked(os.path.join(run.run_dir, NOTIFY_LOCK))
+
+
+def queue_notice(run, event, task, attempt, line, do, default=None, due=None, once=True):
+    """Queue one operator notice. Nothing is queued in a dry run, for an event that notifications.events leaves out,
+    or for a key already queued. With `once`, a key that an earlier clear recorded as sent is skipped too; the
+    key covers the event, task, attempt and line, so a new failure (a new head, a new reason) notifies again.
+    Returns True when it queued the notice. run.py sends nothing: the Manager sends the queue (run playbook, step 6)."""
+    if run.dry_run or event not in run.config["notifications"]["events"]:
+        return False
+    key = notice_key(event, task, attempt, line)
+    os.makedirs(run.run_dir, exist_ok=True)
+    with notify_lock(run):  # the check and the append are one step: two commands never queue the same notice, and a clear never drops one
+        if key in {i["key"] for i in read_queue(run)} or (once and key in sent_keys(run)):
+            return False
+        with open(os.path.join(run.run_dir, NOTIFY_QUEUE), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"key": key, "event": event, "task": task, "attempt": attempt, "line": line, "do": do,
+                                 "default": default, "due": due, "at": run.now()}, ensure_ascii=False) + "\n")
+    return True
+
+
+def notice_next(item):
+    """What the operator can do, as the `next` of a printed notice; a decision adds its default and its deadline."""
+    if item["event"] != "decision":
+        return item.get("do") or None
+    return (f"{item['do']}; default if no answer: {item.get('default') or 'none set'}; "
+            f"answer by: {item.get('due') or 'no deadline'}")
+
+
+def digest_text(day, payload, cap=10):
+    """The daily digest from the payload of a status report (sections done, in_flight, decisions): what merged, what is
+    in flight, and the decisions that wait. At most `cap` rows of each; the rest is a count."""
+    def part(title, rows, label):
+        shown = "; ".join(f"{r[label]} {r.get('Title', '')}".strip() for r in rows[:cap])
+        more = f"; and {len(rows) - cap} more" if len(rows) > cap else ""
+        return f"{title}: {len(rows)}" + (f" ({shown}{more})" if rows else "")
+    decisions = [{**d, "Title": f"by {d['By']}" if d.get("By") else "no deadline"} for d in payload["decisions"]]
+    return "\n".join([f"Daily digest {day}",
+                      part("Merged or done in the last day", payload["done"], "Task"),
+                      part("In flight", payload["in_flight"], "Task"),
+                      part("Decisions waiting", decisions, "Decision")])
+
+
+def digest_moment(path):
+    """The time written in a digest file (an aware datetime), or None when the file is missing or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            moment = datetime.datetime.fromisoformat(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
+
+
+def cmd_notify_queue(run, args):
+    """Show the queued notices, or --clear them (they count as sent), --add an all-done or blocked notice, or print
+    the --digest. It sends nothing: the Manager sends the notices through notifications.skill."""
+    modes = [bool(args.add), args.clear, args.digest]
+    if sum(modes) > 1:
+        raise Refused("give one of --add, --clear and --digest")
+    if args.do and not args.add:
+        raise Refused("--do goes with --add")
+    if args.sent and not args.digest:
+        raise Refused("--sent goes with --digest")
+    if args.add:
+        event, line = args.add
+        if event not in ("all-done", "blocked"):
+            raise Refused("--add takes all-done or blocked; the other events are queued by the command that causes them")
+        if args.dry_run or event not in run.config["notifications"]["events"]:
+            run.emit("notify-queue", None, None, None, f"{event} is not in notifications.events, or a dry run: not queued")
+        # a blocked line notifies once, so a drain that finds the same blocker again stays quiet; a new reason notifies
+        elif queue_notice(run, event, None, None, line, args.do or "", once=event == "blocked"):
+            run.emit("notify-queue", None, None, None, f"queued {event}")
+        else:
+            run.emit("notify-queue", None, None, None, f"{event} with this line is already queued")
+        return
+    if args.digest:
+        digest_command(run, args)
+        return
+    if args.clear:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with notify_lock(run):  # the notices it prints are exactly the notices it clears: none queued meanwhile is lost
+            items = read_queue(run)
+            with open(os.path.join(run.run_dir, NOTIFY_SENT), "a", encoding="utf-8") as fh:
+                fh.writelines(i["key"] + "\n" for i in items)
+            open(os.path.join(run.run_dir, NOTIFY_QUEUE), "w").close()
+    else:
+        items = read_queue(run)
+    for item in items:
+        run.emit("notify", item.get("task"), item.get("attempt"), None, f"[{item['event']}] {item['line']}", notice_next(item))
+    if not items:
+        run.emit("notify-queue", None, None, None, "empty")
+
+
+def digest_command(run, args):
+    """--digest: print the digest of what happened since the last sent digest (the last day on the first run), once a day.
+    The digest counts as made only after the Manager sends it and runs `--digest --sent`."""
+    done, pending = os.path.join(run.run_dir, NOTIFY_DIGEST), os.path.join(run.run_dir, NOTIFY_DIGEST_PENDING)
+    if run.config["notifications"]["digest"] != "daily":
+        run.emit("notify-digest", None, None, None, "off; set notifications.digest = \"daily\" to get one")
+        return
+    if args.sent:
+        if not os.path.isfile(pending):
+            raise Refused("no digest waits to be marked as sent; run `notify-queue --digest` first")
+        os.replace(pending, done)
+        run.emit("notify-digest", None, None, None, "marked as sent")
+        return
+    zone = ZoneInfo(run.config["sessions"]["timezone"])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    last = digest_moment(done)
+    today = now.astimezone(zone).date().isoformat()
+    if last and last.astimezone(zone).date().isoformat() == today:
+        run.emit("notify-digest", None, None, None, f"already made for {today}")
+        return
+    cmd_status(run, argparse.Namespace(since=last.isoformat() if last else "1d", limit=10, mark=False, brief=False))
+    payload, run.payload, run.text = run.payload, None, None
+    if not run.dry_run:
+        os.makedirs(run.run_dir, exist_ok=True)
+        with open(pending, "w", encoding="utf-8") as fh:
+            fh.write(now.isoformat(timespec="seconds") + "\n")
+    run.emit("notify-digest", None, None, None, digest_text(today, payload), "send it, then run `run.py notify-queue --digest --sent`")
 
 
 # ----------------------------------------------------------------- cleanup
@@ -6218,17 +6533,13 @@ def request_body(run, task, head):
 
 
 def report_fields(body, name):
-    """The texts of the `<name>:` fields of a report, in order: each is the rest of its line and the lines up to the next
-    label, stripped. The first field counts; a later one counts only when it follows a field of the same name at once,
-    as a verifier's `Issues:` line per finding does. A `Files:` line inside `Deviations:` is text of that field."""
-    body = body or ""
-    own = re.compile(rf"(?m)^{re.escape(name)}:")
-    marks = sorted({(m.start(), m.end(), m.group(1) if m.re is REPORT_LABEL else name)
-                    for m in [*REPORT_LABEL.finditer(body), *own.finditer(body)]})
+    """The texts of the `<name>:` fields of a report, in order (report_summary.sections: comments dropped, a ``` fence is
+    text): each is the rest of its line and the lines up to the next label, stripped. The first field counts; a later one
+    counts only when it follows a field of the same name at once, as a verifier's `Issues:` line per finding does."""
     found, previous = [], None
-    for i, (start, end, label) in enumerate(marks):
+    for label, text in report_parse(body):
         if label == name and (not found or previous == name):
-            found.append(body[end:marks[i + 1][0] if i + 1 < len(marks) else len(body)].strip())
+            found.append(text)
         previous = label
     return found
 
@@ -7538,6 +7849,77 @@ def transcript_usage(path, skip=frozenset()):
     return tuple(sum(u[key] for u in usage) for key in USAGE_KEYS)
 
 
+# platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-20. USD per million tokens, by model family and
+# version: (input, cache write, cache read, output). Cache write is the 5-minute price (1.25x input); transcripts do not
+# say which TTL was used. Cache read is 0.1x input, except Fable 5.1 and later (0.025x) and Opus 5.5 and Sonnet 5.5
+# (0.05x). Haiku 5.5 is the price for prompts up to 100k tokens; it pays $0.50/$0.625/$0.05/$2.50 above that, which a
+# summed usage cannot tell. A version that is not listed has no price: the cost shows the `+` marker.
+MODEL_PRICES = {
+    "fable": {(5, 2): (8.0, 10.0, 0.20, 40.0), (5, 1): (10.0, 12.5, 0.25, 50.0), (5, 0): (10.0, 12.5, 1.0, 50.0)},
+    "opus": {(5, 5): (4.0, 5.0, 0.20, 20.0), **{v: (5.0, 6.25, 0.50, 25.0) for v in ((5, 0), (4, 8), (4, 7), (4, 6), (4, 5))},
+             (4, 1): (15.0, 18.75, 1.50, 75.0), (4, 0): (15.0, 18.75, 1.50, 75.0)},
+    "sonnet": {(5, 5): (2.0, 2.5, 0.10, 10.0), (5, 0): (2.0, 2.5, 0.20, 10.0), (4, 6): (3.0, 3.75, 0.30, 15.0),
+               (4, 5): (3.0, 3.75, 0.30, 15.0), (4, 0): (3.0, 3.75, 0.30, 15.0)},
+    "haiku": {(5, 5): (0.10, 0.125, 0.01, 0.50), (4, 5): (1.0, 1.25, 0.10, 5.0)},
+}
+# A bare alias names the family's current model.
+CURRENT_MODEL = {"fable": (5, 2), "opus": (5, 5), "sonnet": (5, 5), "haiku": (5, 5)}
+MODEL_VERSION = re.compile(r"(?:(\d{1,2})-(\d{1,2})-)?(fable|opus|sonnet|haiku)(?:[-. ]?(\d{1,2})(?:[-.](\d{1,2})(?!\d))?)?")
+
+
+def model_version(model):
+    """(family, (major, minor)) of a model alias or id: `opus[1m]` is the family's current model, `claude-sonnet-5-5` is
+    (sonnet, (5, 5)), `claude-opus-4-20250514` is (opus, (4, 0)), `claude-3-5-haiku-20241022` is (haiku, (3, 5)). None
+    when it names no family."""
+    found = MODEL_VERSION.search(str(model or "").lower())
+    if not found:
+        return None
+    old_major, old_minor, family, major, minor = found.groups()
+    if old_major:
+        return family, (int(old_major), int(old_minor))
+    if major is None:
+        return family, CURRENT_MODEL[family]
+    return family, (int(major), int(minor or 0))
+
+
+def model_price(model):
+    """The (input, cache write, cache read, output) price of a model alias or id, or None for a family or version that
+    MODEL_PRICES does not list."""
+    found = model_version(model)
+    return MODEL_PRICES[found[0]].get(found[1]) if found else None
+
+
+def usage_cost(usage, model):
+    """The estimated USD of a `sessions` entry's `usage` at the list price of its model, or None for an unknown model."""
+    price = model_price(model)
+    if price is None:
+        return None
+    return (usage.get("in", 0) * price[0] + usage.get("cache_write", 0) * price[1]
+            + usage.get("cache_read", 0) * price[2] + usage.get("out", 0) * price[3]) / 1e6
+
+
+def task_cost(task):
+    """(USD, complete) of a task: the `usage` of every `sessions` entry that has one (each message id once, see
+    fill_usage), priced by the entry's model. `complete` is False when an entry with usage has a model that has no price,
+    and it adds nothing. None when no entry has usage."""
+    total, known, complete = 0.0, False, True
+    for e in recorded_sessions(task):
+        usage = e.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        known = True
+        cost = usage_cost(usage, e.get("model"))
+        if cost is None:
+            complete = False
+        else:
+            total += cost
+    return (total, complete) if known else None
+
+
+def cost_text(cost):
+    return None if cost is None else f"${cost[0]:.2f}" + ("" if cost[1] else "+")
+
+
 def entry_transcript(run, task, e, listed=None):
     """(path of the transcript of a `sessions` entry, None), or (None, the reason there is none). `listed` is the rows
     of `claude agents` by id: its row knows the full session id and the profile when the entry does not."""
@@ -8368,6 +8750,10 @@ def cmd_add(run, args):
              f"blocks {', '.join('#%d' % i for i in args.blocks)}" if args.blocks else "",
              f"independent: {independent}" if independent is not None else ""]
     run.emit("added", tid, None, None, f"{args.title} ({'; '.join(l for l in links if l) or 'no links'})")
+    if is_decision and meta_pairs(args.meta).get("decider") == "operator":
+        queue_notice(run, "decision", tid, None, f"Decision #{tid} needs you: {args.title}",
+                     "answer it" + ("; " + ", ".join(f"#{b}" for b in args.blocks) + " wait for it" if args.blocks else ""),
+                     meta_pairs(args.meta).get("default"), args.due)
     for _, task, reasons, weak in found:
         run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
 
@@ -8454,6 +8840,10 @@ def cmd_check_report(args):
     if not CHECKPOINT_LINE.search(body):
         problems.append("no `Checkpoint:` line")
     status = STATUS_LINE.search(body)
+    if status and not report_field(body, "Summary"):
+        problems.append(SUMMARY_PROBLEM.format(status=status.group(1)))
+    elif status and (long := summary_problem(report_field(body, "Summary"))):
+        problems.append(long)
     if args.acceptance is not None and status and status.group(1) == "PASS":
         found = len(evidence_lines(body))
         if found < args.acceptance:
@@ -8482,6 +8872,8 @@ def cmd_check_report(args):
         for field, token, line in missing_paths(body, os.getcwd()):
             problems.append(f"`{token}` under {field} is not a path in this worktree (line: {line}); correct the "
                             "path, or say on that line that it was deleted or removed")
+    if args.check and not args.verifier and status and status.group(1) == "PASS" and not problems:
+        problems += check_problems(args.check, os.getcwd(), args.check_timeout)
     waiting, rows = unacked_steers_of(args.mailbox)
     for row in waiting:
         problems.append(f"{mbx.unacked_text(row, rows)}: run the inbox command in MAILBOX, act on it and ack it, "
@@ -8493,6 +8885,139 @@ def cmd_check_report(args):
         print("\n".join(f"run.py: {p}" for p in problems), file=sys.stderr)
         sys.exit(2)
     print("ok")
+
+
+SUMMARY_PROBLEM = ("a {status} report needs a non-empty `Summary:` line, 1-3 lines of plain words: what behaviour changed, "
+                   "as a user or developer would notice it (before -> now); or, for a report that found a problem, what is "
+                   "wrong. No statistics, no file lists. The issue comment shows it above the full report")
+
+
+def report_checks(config, kind):
+    """The [report] commands that check-report runs before it accepts a PASS of a task of verify kind `kind`: checks,
+    then checks_by_kind[kind]."""
+    return list(config["report"]["checks"]) + list(config["report"]["checks_by_kind"].get(kind, []))
+
+
+CHECK_TAIL_LINES = 20
+CHECK_REAP_SECONDS = 5  # how long cleanup waits for a killed check's shell
+
+
+def descendants(pid):
+    """The pids of the processes below `pid`, by `ps` parent links (a child that ran setsid left its process group, so
+    only the parent links find it). Empty when ps cannot say."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, todo = [], [pid]
+    while todo:
+        for child in children.get(todo.pop(), []):
+            if child not in found:
+                found.append(child)
+                todo.append(child)
+    return found
+
+
+def kill_check(proc):
+    """Kill a check's whole tree: its process group, and every descendant that left the group with setsid."""
+    below = descendants(proc.pid)
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    for pid in below:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.SubprocessError, OSError):
+        proc.wait(timeout=CHECK_REAP_SECONDS)
+
+
+def run_check(command, cwd, timeout):
+    """Run one check through the shell in `cwd`. (exit code or None for a timeout, the last lines of its output). The output
+    goes to a temp file, not a pipe, so a grandchild that keeps it open cannot hold this call: after a timeout, SIGTERM or
+    SIGINT the whole tree is killed and the file is read as it is."""
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+        def stop(signum, _frame):
+            kill_check(proc)
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            sys.exit(128 + signum)
+
+        saved = {}
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(ValueError):  # not the main thread: no handler
+                saved[signum] = signal.signal(signum, stop)
+        try:
+            try:
+                proc.wait(timeout=timeout)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                kill_check(proc)
+                code = None
+            out.seek(0)
+            tail = "\n".join(out.read().decode("utf-8", "replace").rstrip().splitlines()[-CHECK_TAIL_LINES:])
+        finally:
+            for signum, handler in saved.items():
+                signal.signal(signum, handler)
+    return code, tail
+
+
+def dirty_files(cwd):
+    """The paths that `git status --porcelain` lists in `cwd` (changed or untracked, not ignored); [] when git cannot say."""
+    out = git_ok(cwd, "status", "--porcelain")
+    return [line[3:] for line in (out or "").splitlines()]
+
+
+def check_problems(commands, cwd, timeout):
+    """The [report] checks rule of a worker PASS report: each command runs in `cwd` through the shell, with `timeout`
+    seconds; the first that exits non-zero or times out is one problem naming it, with the last lines of its output.
+    The tree must be clean (`git status --porcelain`) before the checks run, so that they judge committed code, and
+    after they ran, so that a check that leaves files behind is named."""
+    before = dirty_files(cwd)
+    if before:
+        return [f"the worktree has uncommitted changes ({files_text(before, 5)}); the report checks judge committed code: "
+                "commit them (or remove what is not part of the change), then run check-report again"]
+    for command in commands:
+        code, tail = run_check(command, cwd, timeout)
+        if code is None:
+            return [f"report check `{command}` timed out after {timeout} seconds (the project's [report] checks); "
+                    "fix the cause and run check-report again, or report ISSUES"]
+        if code:
+            return [f"report check `{command}` exited {code} (the project's [report] checks); PASS needs "
+                    "it to exit 0. Fix the cause, or report ISSUES. Last lines of its output:\n" + tail]
+        after = dirty_files(cwd)
+        if after:
+            return [f"report check `{command}` left files behind in the worktree ({files_text(after, 5)}); a check must "
+                    "change nothing that git does not ignore. Fix the check, or add the files to .gitignore, "
+                    "then run check-report again"]
+    return []
+
+
+SELF_REVIEW = {
+    "design-doc": (
+        "Before PASS, start a read-only Sonnet subagent with the Agent tool (not a fork). Give it the document and ask "
+        "it to check for internal contradictions, non-deterministic wording, and every statement about the current code "
+        "(`git grep`, or the cited lines). Paste its findings under `Ran:` as `self-check:` lines, and fix each false "
+        "one before PASS."),
+    "code": (
+        "Before PASS, run guard mutations: break the code under test on purpose. Mutate the file in place, run the "
+        "covering tests and confirm that they fail, restore the file with `git checkout -- <file>`, and confirm that "
+        "`git status` is clean before you go on. Paste each mutation and its red run under `Ran:` as `mutation:` "
+        "lines."),
+}
+
+
+def self_review_text(kind, rounding=False):
+    """The self-review step that a worker brief adds to VERIFY (agents/worker.md, Self-review before PASS); none in a
+    round, which changes no content."""
+    text = SELF_REVIEW.get(kind)
+    return "" if rounding or not text else "\n\n### Self-review before PASS\n\n" + text
 
 
 FILES_DIR_LIMIT = 20  # more changed files than this: a directory entry under `Files:` covers the files under it
@@ -8659,6 +9184,7 @@ def cmd_status(run, args):
     summary = {} if args.brief else run.tg("report", "--since", since.date().isoformat()) or {}  # brief: no report
     done, in_flight, waiting, failed, closing, unmerged_rows, attempts = [], [], [], [], [], [], []
     flight_profiles = []  # the Claude profile of each in-flight row; the table shows the column when one is not default
+    costs = {}  # "#<id>" -> estimated cost text of each task whose usage is known; the tables show the column when any is
     gitlab = (run.pr_mode and any(unmerged(t) and (t.get("meta") or {}).get("pr") for t in snap.closed)
               and run.host_class()[0].prefix == "!")
     for task in [] if args.brief else snap.done:  # brief: done work is not computed
@@ -8672,6 +9198,7 @@ def cmd_status(run, args):
             if attempt:
                 attempts.append(attempt)
             verifiers = task_rows(snap.rows(task["id"]), attempt, "verify")
+            costs[tid] = cost_text(task_cost(task))
             tokens = " / ".join(str(meta["tokens"]).split("/", 1)) if meta.get("tokens") else None
             done.append((tid, task["title"], run.zone_time(meta.get("started_at")), run.zone_time(task.get("done_at")), tokens,
                          meta.get("verdict"), verifiers[-1]["author"] if verifiers else None))
@@ -8686,6 +9213,7 @@ def cmd_status(run, args):
     for task in snap.in_progress:
         meta = task.get("meta") or {}
         tid = f"#{task['id']}"
+        costs[tid] = cost_text(task_cost(task))
         rows = snap.rows(task["id"])
         listed = [r for r in rows if r["kind"] not in RECORD_KINDS]
         last = result_label(listed[-1]) if listed else None
@@ -8734,8 +9262,14 @@ def cmd_status(run, args):
     if any(p != DEFAULT_PROFILE for p in flight_profiles):  # a project without profiles keeps its table as it was
         flight_headers.append("Profile")
         in_flight = [(*row, None if p == DEFAULT_PROFILE else p) for row, p in zip(in_flight, flight_profiles)]
+    done_headers = ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"]
+    if any(costs.values()):  # a project whose usage is unknown keeps its tables as they were
+        done_headers.append("Est. cost")
+        done = [(*row, costs.get(row[0])) for row in done]
+        flight_headers.append("Est. cost")
+        in_flight = [(*row, costs.get(row[0])) for row in in_flight]
     sections = [
-        ("done", "Done since last report", ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"], done),
+        ("done", "Done since last report", done_headers, done),
         ("in_flight", "In flight", flight_headers, in_flight),
         ("waiting", "Waiting for verification or triage", ["Task", "Title", "Result", "Session", "Checkpoint"], waiting),
         ("verdict_not_closed", "Verdict recorded, not closed", ["Task", "Title", "Verdict", "Attempt", "Last result"], closing),
@@ -8766,7 +9300,9 @@ def cmd_status(run, args):
         items = summary.get(key) or []
         if items:
             out.append(f"Taskgraph {key}: {len(items)}. See `tg report`.")
-    out.append("Token counts cover each session's own transcript only, not its sub-agents.")
+    out.append("Token counts cover each session's own transcript only, not its sub-agents."
+               + (" Est. cost prices each session's tokens at the list price of its model family (MODEL_PRICES in run.py); "
+                  "a `+` means a session with no known price is left out." if any(costs.values()) else ""))
     run.text = "\n".join(out) + "\n"
     run.payload = {"project": run.project, "overall": overall, "since": since.isoformat(), "changes": changes,
                    **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in sections},
@@ -8786,10 +9322,10 @@ def build_parser():
     parser.add_argument("--tg", help="path to tg.py (default: $TASKGRAPH_TG, else scripts/tg-path.sh)")
     parser.add_argument("--run-dir", help="default: <root>/.agentic-team")
     parser.add_argument("--json", action="store_true", help="print events as one JSON array")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,answer,steer,inbox,depcheck,triage}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{add,launch,adopt,verify,record,close,revise,round,merged,repoint,stop,abandon,status,roles,check-report,wait,notify-to,notify-queue,answer,steer,inbox,depcheck,triage}")
 
     p = sub.add_parser("launch", help="start a worker for a task")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--keyword", help="one or two hyphenated words added to the session name")
     p.add_argument("--tier", help="a tier or a models.overrides key (overrides the task's tier meta)")
     p.add_argument("--model", help="model alias (overrides the tier)")
@@ -8802,41 +9338,41 @@ def build_parser():
                    "(default: derived from the state of the attempt before it)")
 
     p = sub.add_parser("adopt", help="bring a branch started outside run.py under the Manager")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--branch", required=True, help="the local branch that holds the work")
     p.add_argument("--head", required=True, help="the branch tip (7 to 40 hex characters)")
     p.add_argument("--pr", type=int, help="its open pull or merge request (merge.mode = pr)")
     p.add_argument("--base", help="the commit the work started from (default: the merge base with the target)")
 
     p = sub.add_parser("verify", help="start a verifier for a PASS result")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--ref", help="the output under review (default: the result's Head:)")
     p.add_argument("--result", type=int, help="worker result id (default: the latest for the current attempt)")
-    p.add_argument("--model")
-    p.add_argument("--effort")
+    p.add_argument("--model", help="model alias (overrides the tier)")
+    p.add_argument("--effort", help="effort level (with --model, or to override the tier's)")
     p.add_argument("--profile", help="Claude profile of the verifier: a name from [profiles], or default (overrides the tier)")
     p.add_argument("--again", action="store_true", help="start a new verifier after a verify-blocked verdict or a no-verdict line")
     p.add_argument("--ci-ref", action="store_true",
                    help="push the worker's head to the scratch branch <[verify] ci_ref_prefix><id>-<attempt> (not the "
                         "request's branch) so the verifier judges its CI runs; merge.mode = pr")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
 
     sub.add_parser("record", help="read the queue and print one line per event")
 
     p = sub.add_parser("revise", help="after a verifier's verify-failed verdict, send its blocking findings to the same "
                                       "worker session, which fixes them in the same attempt (a revision)")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
 
     p = sub.add_parser("close", help="record the verdict and tokens, merge or open a request; done once merged")
-    p.add_argument("id", type=int)
-    p.add_argument("--verdict", choices=VERDICTS)
-    p.add_argument("--ref")
+    p.add_argument("id", type=int, help="the task id")
+    p.add_argument("--verdict", choices=VERDICTS, help="the verdict to record, when no verifier gave one (or to override it with --override-verifier)")
+    p.add_argument("--ref", help="the output the verdict is about (default: the Head: of the worker's result)")
     p.add_argument("--ran", help="what you ran and saw (stored in your verify result)")
     p.add_argument("--override-verifier", metavar="REASON", help="change the verifier's verdict; an upgrade needs a run id or link in --ran")
 
     p = sub.add_parser("round", help="start a new attempt of a task that waits for its merge, on the same branch and request; "
                                      "--cancel ends it")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("kind", nargs="?", choices=sorted(ROUND_KINDS), help="what the round is for; its role file has this name")
     p.add_argument("--cancel", action="store_true", help="end the round: the task waits again at its verified head")
     p.add_argument("--keyword", help="one or two hyphenated words added to the session name")
@@ -8848,42 +9384,43 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="print the brief and the claude command; write nothing")
 
     p = sub.add_parser("merged", help="record that a task branch is merged")
-    p.add_argument("id", type=int)
-    p.add_argument("--by", choices=("operator", "manager"), default="operator")
+    p.add_argument("id", type=int, help="the task id")
+    p.add_argument("--by", choices=("operator", "manager"), default="operator", help="who merged it")
 
     p = sub.add_parser("repoint", help="pr mode: let a task that waits for its merge follow another request that "
                                        "carries its change")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--pr", type=int, required=True, help="the number of the request to follow (another task's)")
     p.add_argument("--keep-old", action="store_true", help="leave the task's own request open (default: close it with "
                    "a comment that names the new one)")
 
     p = sub.add_parser("add", help="create a task with its dependencies settled: --depends/--blocks or --independent")
-    p.add_argument("title")
+    p.add_argument("title", help="the task title")
     p.add_argument("--depends", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks this one needs first")
     p.add_argument("--blocks", type=int, nargs="+", action="extend", default=[], metavar="ID", help="tasks that need this one first")
     p.add_argument("--independent", metavar="REASON", help="no task is related; recorded as meta independent=<reason>")
-    p.add_argument("--notes", default="")
-    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE")
+    p.add_argument("--notes", default="", help="the task notes: purpose and acceptance criteria (passed to tg add)")
+    p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE",
+                   help="meta pairs for the task, such as scope=, verify= and tier= (passed to tg add)")
     for flag in ("type", "parent", "start", "due", "promised", "priority"):
-        p.add_argument("--" + flag, type=int if flag == "parent" else None)
+        p.add_argument("--" + flag, type=int if flag == "parent" else None, help=f"passed to tg add --{flag}")
 
     p = sub.add_parser("stop", help="stop a worker for a pause")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
 
     p = sub.add_parser("abandon", help="abandon a task after attempt 3 failed")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("mode", choices=ABANDON_MODES, metavar="reason", help="the reason code: " + ", ".join(ABANDON_MODES))
     p.add_argument("--why", help="one line of free text: what happened and why the task is dropped (required)")
 
     p = sub.add_parser("depcheck", help="record the verdict of the dependency check before a launch as a `check` row")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--verdict", required=True, choices=DEPCHECK_VERDICTS, help="the subagent's verdict: ok, missing (a "
                    "`missing:` line) or not-checked (a `not checked:` or `ask:` line)")
     p.add_argument("--body-file", required=True, help="the subagent's answer")
 
     p = sub.add_parser("triage", help="record where a Follow-ups line of a result went, as a `triage` row")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--row", required=True, metavar="RESULT#LINE", help="a result id and the number of one of its Follow-ups lines, 3352#2")
     p.add_argument("--to", required=True, nargs="+", metavar="KIND [ID]", help="`task <id>`, `issue <n>` or `dismissed`")
     p.add_argument("--why", help="the reason (required for dismissed)")
@@ -8908,6 +9445,11 @@ def build_parser():
                    "under Evidence:, one for each ACCEPTANCE line of the task")
     p.add_argument("--require-ran", action="append", default=[], metavar="PREFIX", help="a worker PASS report needs "
                    "a `Ran:` line that starts with PREFIX (repeat it; the brief passes [report] require_ran)")
+    p.add_argument("--check", action="append", default=[], metavar="COMMAND", help="a worker PASS report needs this "
+                   "command to exit 0 in the worktree (repeat it; the brief passes [report] checks)")
+    p.add_argument("--check-timeout", type=int, default=SCHEMA["report"]["check_timeout_seconds"][1], metavar="SECONDS",
+                   help="the time each --check command may take (default: the [report] check_timeout_seconds default; "
+                   "the brief passes the project's value)")
     p.add_argument("--base", metavar="SHA", help="the commit the task's own change starts from: a worker PASS report "
                    "must name under `Files:` each file that `git diff --name-only <start>...HEAD` lists, <start> being "
                    "the newer of SHA and the merge base of HEAD with --target")
@@ -8926,24 +9468,34 @@ def build_parser():
                         "the host limits its rate, so keep the default)")
 
     p = sub.add_parser("answer", help="answer a worker's ask: the answer is a Taskgraph row, and a doorbell wakes the worker")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--ask", type=int, help="the ask row id (default: the newest open ask of the current attempt)")
     how = p.add_mutually_exclusive_group(required=True)
     how.add_argument("--file", help="the answer text")
     how.add_argument("--default", action="store_true", help="answer with the ask's own Default line")
     how.add_argument("--decision", type=int, help="a decision that is done and has --meta ask=<ask id>: its notes are the answer")
     p.add_argument("--supersede", action="store_true", help="answer an ask that is already answered")
-    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="who sends it, as the row's author")
 
     p = sub.add_parser("steer", help="send a running worker a message: change its focus, order or approach inside SCOPE")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
     p.add_argument("--file", required=True, help="the steer text")
-    p.add_argument("--kind", choices=("info", "redirect", "wrap-up", "finding"), default="info")
+    p.add_argument("--kind", choices=("info", "redirect", "wrap-up", "finding"), default="info",
+                   help="info, redirect or wrap-up; finding is refused here, because only revise files it")
     p.add_argument("--interrupt", action="store_true", help="stop the worker and resume it with the doorbell, even when busy")
-    p.add_argument("--by", choices=("manager", "operator"), default="manager")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="who sends it, as the row's author")
 
     p = sub.add_parser("inbox", help="show the messages of a task: asks, answers, steers, acks and their delivery state")
-    p.add_argument("id", type=int)
+    p.add_argument("id", type=int, help="the task id")
+
+    p = sub.add_parser("notify-queue", help="show or clear the operator notices that events queued; it sends nothing")
+    p.add_argument("--clear", action="store_true", help="show the notices, then count them as sent and empty the queue")
+    p.add_argument("--add", nargs=2, metavar=("EVENT", "LINE"),
+                   help="queue a notice for an event that has no run.py line: all-done or blocked, with one plain line")
+    p.add_argument("--do", help="with --add: what the operator can do")
+    p.add_argument("--digest", action="store_true", help="print the daily digest once a day when notifications.digest is daily")
+    p.add_argument("--sent", action="store_true", help="with --digest: the digest was sent; count it as made")
+    p.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("notify-to", help="set, clear, or show the session that sessions message after their result")
     p.add_argument("name", nargs="?", help="the bare session name from the first line of ListAgents")
@@ -8954,7 +9506,7 @@ def build_parser():
 COMMANDS = {"launch": cmd_launch, "adopt": cmd_adopt, "verify": cmd_verify, "record": cmd_record, "close": cmd_close,
             "round": cmd_round, "revise": cmd_revise,
             "merged": cmd_merged, "add": cmd_add, "repoint": cmd_repoint, "stop": cmd_stop, "abandon": cmd_abandon, "status": cmd_status,
-            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
+            "roles": cmd_roles, "depcheck": cmd_depcheck, "triage": cmd_triage, "wait": cmd_wait, "notify-to": cmd_notify_to, "notify-queue": cmd_notify_queue, "answer": cmd_answer, "steer": cmd_steer, "inbox": cmd_inbox}
 
 
 ADDR_COMMANDS = ("record", "launch", "round", "revise", "notify-to")  # the only commands that note the Manager's socket: the Manager runs them, and

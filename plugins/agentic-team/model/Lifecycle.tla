@@ -966,7 +966,7 @@ StoppedIdleNeverRefuses ==
   [][(Hint = "launch" /\ EarlyChecks /\ LaunchStopsIdle /\ LateChecks /\ (Launch \/ LaunchStopsIdleThenRefuses))
        => attempt' = attempt + 1]_vars
 
-\* 0.19.0 (#97): "A task is done only when its change is merged" (README, Task lifecycle). The other way round holds
+\* 0.19.0 (#97): "A task is done only when its change is merged" (docs/lifecycle.md, Task lifecycle). The other way round holds
 \* too: every merge record runs `tg done` (mark_merged), and record finishes one that stopped between the two writes.
 \* With REGRESS_97 a passing close marks the task done before the merge, and this breaks.
 DoneOnlyWhenMerged == (status = "done") <=> merged
@@ -974,7 +974,7 @@ DoneOnlyWhenMerged == (status = "done") <=> merged
 \* cmd_launch line 2530: "Never unset pr, pr_branch, pushed or target: one request per task across attempts."
 OneRequestPerTask == [][pr # "none" => pr' # "none"]_vars
 
-\* 0.18.0 (#89 rule 1, README "Blocking and non-blocking findings", manager.md "No follow-up dropped"): a fix
+\* 0.18.0 (#89 rule 1, docs "Blocking and non-blocking findings", manager.md "No follow-up dropped"): a fix
 \* round is opened only for a blocking finding; non-blocking findings never open one. In the model's words: when
 \* a verifier's verify-failed verdict drives the next step (a fix round, or abandon at the cap), its report has
 \* a `blocking:` line. A Manager's own verify-failed (close --verdict) is not a verifier's finding. Since
