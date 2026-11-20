@@ -262,6 +262,29 @@ A stage with `split: true` may be split into parts before its first attempt, nor
 
 `run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` is required and fixes the order of the options; the same seed gives the same order, and another seed may give another. A broken workflow file is left out of the prompt, with a `warn:` line on stderr (a `warnings` list with `--json`); a broken `stages.toml` stops the command.
 
+Two answers, then one workflow. The Manager's own typed answer comes first; one non-fork Sonnet subagent gives the second, from the same prompt rendered with seed `n+1`. `run.py add "<title>" --pick "<a>,<b>" --seed <n> ...` (leave out `--workflow`) resolves them, and `run.py workflows --resolve "<a>,<b>"` shows the result without creating anything. Each answer is a workflow name or `unsure`.
+
+| Answers | Result |
+|---------|--------|
+| the same name | that workflow |
+| two different names | the one with fewer required stages, then fewer stages with an approval, then the name; `heavier` takes the other |
+| a name and `unsure` | the name |
+| both `unsure` | `figure-it-out`; `heavier` takes the heaviest workflow |
+
+`figure-it-out` is outside the light-to-heavy order: it wins only when both answers name it or both are `unsure`, and a named workflow beats it. `[workflow_policy] when_unsure` is `lighter` (the default), `heavier` or `figure-it-out`; with `figure-it-out`, every row that has an `unsure` or a disagreement takes it. The Manager never asks the owner which workflow to use.
+
+The record of the instance (`workflow_record.pick`) holds both answers, the seeds, the workflow resolved, the resolution rule (`agree`, `fewer-stages`, `more-stages`, `name-over-unsure`, `named-over-deciding`, `both-unsure`, `when-unsure-<mode>`; `named` for `--workflow`) and `unsure`. `add` prints a `workflow-picked` line and the pick in its `workflow-added` line. The unsure picks and rule changes of a period are in the Workflow picks section of `run.py status` and in the daily digest. `notifications.events` may list `workflow-pick`, which queues one notice for each of them; it is not in the default list. The owner overrides a choice with `run.py stage <instance> rechoose <workflow> --by operator [--note "<why>"]`, which replaces the stages while no stage has started, applies the rules again and is recorded under `overrides`.
+
+### Hard rules
+
+A `[[workflow_rule]]` with `require_stage = "spec"` matches the SCOPE write paths of the instance (`match_paths`, globs) or its `area` meta (`match_area`), never the words of the title. When a rule matches:
+- the required stage is optional in the picked workflow: `add` forces it on, as if `--with` named it (a billing fix becomes `fix --with spec`);
+- the picked workflow has no such stage: the work moves to the lightest workflow that has one for every matching rule (fewest stages, then fewest approvals, then name);
+- `--skip` of a stage that a rule requires is refused; nothing skips it later;
+- the picked workflow decides its own stages (`figure-it-out`): the rule is recorded as `deferred-to-expand` and applies when the stages are created.
+
+Each match is a `workflow-rule` line and a row in `workflow_record.rules` (`rule`, `action`: `satisfied`, `forced-with`, `moved` with `from` and `to`, `matched`, `deferred-to-expand`, `recheck-satisfied` or `recheck-missing`). `run.py stage <instance> recheck` matches the rules again against the paths of the stages and the `area`; run it after the SCOPE of a stage changes (`stage split` does it for the part it adds). A rule that is new to the record gets a line, and one whose stage the instance lacks gets the way out: `rechoose` while no stage has started, otherwise a note in the report (the escalation command comes with a later phase). The approval and risk of tasks that already exist are not raised by a late match.
+
 ## Judgement-tier brief
 
 The ROLE section of a worker brief for a task on the `judgement` tier ends with one line: for reading or searching code,

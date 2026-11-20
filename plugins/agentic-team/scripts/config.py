@@ -155,6 +155,7 @@ def system_timezone():
 
 
 NOTIFY_EVENTS = ("decision", "abandon", "push-failed", "pr-closed", "all-done", "blocked")  # the default of notifications.events
+NOTIFY_OPTIONAL = ("workflow-pick",)  # valid in notifications.events, not in its default: one notice for each unsure pick or rule change
 
 # Every project setting: section -> key -> (type, default). Merge,
 # validation, defaults, and `show` all read this table; add new keys here.
@@ -209,6 +210,7 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "manager_due_hours": ("posint", 2),
         "human_due_hours": ("posint", 48),
         "approval_floor": ("floormap", {}),
+        "when_unsure": ("choice:lighter,heavier,figure-it-out", "lighter"),
     },
     "scope": {"adjacent": ("adjacent", [])},
     "report": {
@@ -259,7 +261,7 @@ TYPE_NAMES = {
     "patterns": "a list of path patterns",
     "commands": "a list of command prefixes or globs, none empty",
     "adjacent": "a list of adjacent-change kinds",
-    "events": "a list of notification events: " + ", ".join(f'"{e}"' for e in NOTIFY_EVENTS),
+    "events": "a list of notification events: " + ", ".join(f'"{e}"' for e in NOTIFY_EVENTS + NOTIFY_OPTIONAL),
     "ranmap": 'a table of verify kind = list of line prefixes, for example { "code" = ["reuse:"] }',
     "cmdlist": "a list of non-empty one-line shell commands",
     "cmdmap": 'a table of verify kind = list of shell commands, for example { "design-doc" = ["python docs/check_refs.py"] }',
@@ -394,6 +396,11 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "approval_floor": ("The lowest approval of a stage by its verify kind, for example `{ schema = \"manager\" }`: a stage whose "
          "verify kind is `schema` then needs at least a `manager` approval. The approval of a stage is the highest of its workflow "
          "value, the `approval` of a matching `[[workflow_rule]]` and this floor."),
+        "when_unsure": ("What `add --pick` does when the two answers do not agree on one workflow. `\"lighter\"` (the default): two different "
+         "names take the one with fewer required stages, a name with `unsure` takes the name, and two `unsure` take `figure-it-out`. "
+         "`\"heavier\"`: two different names take the heavier one, and two `unsure` take the heaviest. `\"figure-it-out\"`: every row "
+         "that has an `unsure` or a disagreement takes `figure-it-out`. The Manager never asks the owner; the choice is in the "
+         "`workflow_record` and in the status report. See [Workflows](roles-and-briefs.md#workflows)."),
     },
     "scope": {
         "adjacent": ("Kinds of change outside a task's SCOPE that a worker may make without `BLOCKED`. `\"lower-ratchet\"`: only "
@@ -669,7 +676,7 @@ def type_ok(kind, value):
     if kind == "adjacent":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if kind == "events":
-        return isinstance(value, list) and all(isinstance(v, str) and v in NOTIFY_EVENTS for v in value)
+        return isinstance(value, list) and all(isinstance(v, str) and v in NOTIFY_EVENTS + NOTIFY_OPTIONAL for v in value)
     if kind == "commands":
         return isinstance(value, list) and all(isinstance(v, str) and v.strip() and v == v.strip() for v in value)
     if kind == "ranmap":

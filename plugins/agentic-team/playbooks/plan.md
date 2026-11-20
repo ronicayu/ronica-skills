@@ -42,10 +42,37 @@ adds what Taskgraph cannot decide.
      migration steps, and a closed checklist for the coders who follow. The checklist
      refers to no git-ignored scratch file; census scripts go into the repository.
    **With workflows on** (`[workflow_policy] enabled = true`): create the work with
-   `run.py add "<title>" --workflow <name> [--with <stage>] [--skip <stage>] ...`
-   instead of one task per stage. Read `run.py workflows` for the descriptions
-   and pick the workflow whose "When to use" fits; take the lighter one when
-   unsure. The workflow sets each stage's role, verify kind, estimate, SCOPE,
+   `run.py add "<title>" --pick "<answer 1>,<answer 2>" --seed <n> ...` instead of one
+   task per stage. Pick the workflow in four moves, for each piece of work:
+   1. Write the notes to a scratch file. Render the prompt with
+      `run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file>
+      --scope "<paths or area>"`. Use any whole number for `n`, and another for each item.
+   2. **Answer 1 is yours.** Read the prompt and type the answer in its format, for
+      example `PICK: fix`, before you start the subagent. It is a workflow name or
+      `unsure`; answer `unsure` when no description fits or you cannot tell.
+   3. **Answer 2 is the subagent's.** Render the same prompt with `--seed <n+1>`. Start
+      one non-fork subagent with the Agent tool: `subagent_type: "Explore"`,
+      `model: "sonnet"`. Its prompt is the rendered text and nothing else: not your
+      answer, your reasons or the workflow you favour. With several items, send all
+      their prompts in one call, each under its own heading, and read one answer for
+      each. The agent type exists already, so no restart is needed.
+   4. Resolve and add: `run.py add "<title>" --pick "<yours>,<subagent's>" --seed <n>
+      --notes ... --meta scope=... verify=... (--depends ... | --independent ...)`.
+      Do not pass `--workflow`: the same name wins, two names take the one with fewer
+      stages, a name beside `unsure` takes the name, two `unsure` take `figure-it-out`
+      (`run.py workflows --resolve "<a>,<b>"` shows the result without adding). Pass
+      `--with <stage>` or `--skip <stage>` for an optional stage as the workflow's
+      "Steps" say.
+   Never ask the owner which workflow to use. A `[[workflow_rule]]` that matches the
+   SCOPE paths or the `area` forces its stage on, or moves the work to the lightest
+   workflow that has it, and a stage that a rule requires cannot be skipped. The
+   `workflow-picked` and `workflow-rule` lines of the add show what was chosen: list
+   every unsure pick and every rule change in your next report. After you change the
+   SCOPE of a stage, run `run.py stage <instance> recheck`. The owner overrides with
+   `run.py stage <instance> rechoose <workflow> --by operator`, before any stage has
+   started. Read `run.py workflows` for the descriptions; with a workflow named by hand
+   (`--workflow <name>`, no pick), take the lighter one when unsure. The workflow sets each
+   stage's role, verify kind, estimate, SCOPE,
    dependencies and approval: set a meta key yourself only to depart from it.
    The notes you give need a why sentence and `- [ ]` acceptance lines, and
    `--meta scope=` and `verify=` are the instance's. A stage whose approval is

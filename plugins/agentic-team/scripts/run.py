@@ -1798,6 +1798,13 @@ def cmd_workflows(run, args):
     only the problems are printed; with --pick-prompt, the pick prompt."""
     catalog = load_workflows(run)
     problems = catalog.problems
+    if args.resolve:
+        if problems:
+            raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(problems), 1)
+        answers, res = answers_of(run, catalog, args.resolve)
+        run.emit("workflow-picked", None, None, None, f"answers {answers[0]} and {answers[1]} resolve to {res.workflow} by {res.rule}"
+                 + (f"; unsure, so {run.config['workflow_policy']['when_unsure']}" if res.unsure else "") + " (nothing recorded)")
+        return
     if args.pick_prompt:
         if args.seed is None:
             raise Refused("--pick-prompt needs --seed <n>: the same seed gives the same order of the options")
@@ -5916,10 +5923,13 @@ def digest_text(day, payload, cap=10):
         more = f"; and {len(rows) - cap} more" if len(rows) > cap else ""
         return f"{title}: {len(rows)}" + (f" ({shown}{more})" if rows else "")
     decisions = [{**d, "Title": f"by {d['By']}" if d.get("By") else "no deadline"} for d in payload["decisions"]]
-    return "\n".join([f"Daily digest {day}",
-                      part("Merged or done in the last day", payload["done"], "Task"),
-                      part("In flight", payload["in_flight"], "Task"),
-                      part("Decisions waiting", decisions, "Decision")])
+    lines = [f"Daily digest {day}",
+             part("Merged or done in the last day", payload["done"], "Task"),
+             part("In flight", payload["in_flight"], "Task"),
+             part("Decisions waiting", decisions, "Decision")]
+    if payload.get("workflow_picks"):
+        lines.append(part("Workflow picks and rule changes", [{**p, "Title": f"{p['Workflow']}: {p['Choice']}"} for p in payload["workflow_picks"]], "Instance"))
+    return "\n".join(lines)
 
 
 def digest_moment(path):
@@ -8823,7 +8833,7 @@ def cmd_add(run, args):
 
     A workflow calls this for each task it creates, with the internal attributes `settled` (the gate ran once for the whole
     instance), `quiet` (no candidate lines) and `approval_for` (a decision that blocks nothing yet)."""
-    if getattr(args, "workflow", None):
+    if getattr(args, "workflow", None) or getattr(args, "pick", None):
         return add_workflow(run, args)
     is_decision = args.type == "decision"
     if is_decision and not args.blocks and not getattr(args, "approval_for", None):
@@ -8925,17 +8935,16 @@ def add_workflow(run, args):
     catalog = load_workflows(run)
     if catalog.problems:
         raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(catalog.problems))
-    wf = catalog.workflows.get(args.workflow)
+    pick = resolve_choice(run, catalog, args)
+    wf = catalog.workflows.get(pick["resolved"])
     if wf is None:
-        raise Refused(f"no workflow named {args.workflow!r}; available workflows: {', '.join(sorted(catalog.workflows)) or 'none'}")
-    try:
-        plan = wfl.build_plan(wf, args.with_, args.skip)
-    except ValueError as exc:
-        raise Refused(str(exc))
-    if any(s.decides for s in plan.stages) and len(plan.stages) > 1:
-        raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
+        raise Refused(f"no workflow named {pick['resolved']!r}; available workflows: {', '.join(sorted(catalog.workflows)) or 'none'}")
     meta = meta_pairs(args.meta)
     scope, verify = str(meta.get("scope") or "").strip(), str(meta.get("verify") or "").strip()
+    rules = matching_rules(run, scope, meta.get("area"))
+    wf, plan, applied = plan_with_rules(catalog, wf, rules, args.with_, args.skip)
+    if any(s.decides for s in plan.stages) and len(plan.stages) > 1:
+        raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
     why, acceptance = parse_notes(args.notes)
     if not (why and acceptance):
         raise Refused("the notes need a sentence on why the work is needed and `- [ ]` acceptance lines: every stage task starts "
@@ -8946,7 +8955,6 @@ def add_workflow(run, args):
         if stage.verify != "design-doc" and not (verify or stage.verify_cmd):
             raise Refused(f'stage {stage.id} needs a VERIFY: add --meta verify="<exact commands or checks>"')
     independent, _, link_of = link_gate(run, args, False)
-    rules = [r for r in run.config.get("workflow_rule") or [] if wfl.rule_matches(r, write_paths(scope), meta.get("area"))]
     risk = max((r["risk"] for r in rules if r.get("risk")), key=lambda v: RISK_RANK[v], default=None)
     design_dir = policy["design_dir"]
     base = wfl.slug(args.title)
@@ -8957,6 +8965,7 @@ def add_workflow(run, args):
     with workflow_lock(run):
         try:
             record = {"workflow": wf.name, "version": version, "optional": plan.optional, "rule": rules[0]["name"] if rules else None,
+                      "pick": pick, "rules": applied, "picked_at": run.now(), "overrides": [],
                       "adjustments": [], "ended": None, "scope": scope, "verify": verify, "stages": entries}
             instance = cmd_add(run, argparse.Namespace(
                 title=args.title, notes=args.notes, depends=[], blocks=args.blocks, independent=args.independent, parent=args.parent,
@@ -8977,12 +8986,92 @@ def add_workflow(run, args):
     approvals = ", ".join(f"{e['id']} {e['approval']}" for e in entries if e["approval"] != "auto")
     roots = [created[s.id] for s in plan.stages if not plan.after[s.id]]
     listed = ", ".join(f"{e['id']} #{e['task']}" for e in entries)
+    report_choice(run, instance, wf, args.title, pick, applied)
     run.emit("workflow-added", instance, None, None,
              f"{wf.name}: {args.title}; stages {listed}"
              + (f"; left out: {skipped}" if skipped else "") + (f"; approvals: {approvals}" if approvals else "")
-             + (f"; rule {rules[0]['name']}" if rules else ""),
+             + choice_text(pick, applied),
              f"run.py launch {roots[0]}" if roots else None)
     return instance
+
+
+def answers_of(run, catalog, text):
+    """([answer 1, answer 2], resolution) of `--pick "<a>,<b>"`: each answer is a workflow name or `unsure`."""
+    names = sorted(n for n, w in catalog.workflows.items() if not w.errors)
+    parts = (text or "").split(",")
+    if len(parts) != 2:
+        raise Refused('--pick takes two answers, the Manager\'s and the subagent\'s, as "<name|unsure>,<name|unsure>"')
+    try:
+        answers = [wfl.parse_answer(part, names) for part in parts]
+    except ValueError as exc:
+        raise Refused(f"--pick: {exc}")
+    return answers, wfl.resolve_pick(catalog.workflows, *answers, run.config["workflow_policy"]["when_unsure"])
+
+
+def resolve_choice(run, catalog, args):
+    """The `pick` of a workflow record: how the workflow was chosen. `--pick` resolves the two answers; `--workflow` names it."""
+    if not getattr(args, "pick", None):
+        return {"answers": None, "seeds": None, "resolved": args.workflow, "rule": "named", "unsure": False,
+                "when_unsure": run.config["workflow_policy"]["when_unsure"]}
+    if args.workflow:
+        raise Refused("--pick chooses the workflow from two answers; leave out --workflow, or leave out --pick to name it yourself")
+    if getattr(args, "seed", None) is None:
+        raise Refused("--pick needs --seed <n>, the seed of the Manager's own prompt; the subagent's prompt used n+1")
+    answers, res = answers_of(run, catalog, args.pick)
+    return {"answers": answers, "seeds": [args.seed, args.seed + 1], "resolved": res.workflow, "rule": res.rule, "unsure": res.unsure,
+            "when_unsure": run.config["workflow_policy"]["when_unsure"]}
+
+
+def matching_rules(run, scope, area):
+    """The `[[workflow_rule]]` tables whose `match_paths` fit a write path of the SCOPE, or whose `match_area` names the area."""
+    return [r for r in run.config.get("workflow_rule") or [] if wfl.rule_matches(r, write_paths(scope), area)]
+
+
+def plan_with_rules(catalog, wf, rules, with_ids, skip_ids):
+    """(workflow, plan, applications): the plan of `wf` after the hard rules. A rule's stage that is optional is forced on
+    (--with); one that `wf` lacks moves the work to the lightest workflow that has it; a rule's stage in --skip is refused."""
+    try:
+        moved, with_ids, applied = wfl.apply_rules(catalog.workflows, wf, rules, list(with_ids), list(skip_ids))
+    except ValueError as exc:
+        raise Refused(str(exc))
+    try:
+        return moved, wfl.build_plan(moved, with_ids, skip_ids), applied
+    except ValueError as exc:
+        named = next((a["rule"] for a in applied if a["action"] == "moved"), None)
+        raise Refused((f"rule {named} moved the work from {wf.name} to {moved.name}: " if named else "") + str(exc))
+
+
+def choice_text(pick, applied):
+    """The choice as a clause of the `workflow-added` line: the pick, and each rule that changed the work."""
+    parts = []
+    if pick["answers"]:
+        parts.append(f"pick {'/'.join(pick['answers'])} -> {pick['resolved']} ({pick['rule']}" +
+                     (f"; unsure -> {pick['when_unsure']}" if pick["unsure"] else "") + ")")
+    for app in applied:
+        if app["action"] == "moved":
+            parts.append(f"rule {app['rule']} moved the work from {app['from']} to {app['to']} (stage {app['stage']} on)")
+        elif app["action"] == "forced-with":
+            parts.append(f"rule {app['rule']} forced stage {app['stage']} on")
+        else:
+            parts.append(f"rule {app['rule']}: {app['action']}")
+    return "".join(f"; {p}" for p in parts)
+
+
+def report_choice(run, instance, wf, title, pick, applied):
+    """Say after the fact how the workflow was chosen: a `workflow-picked` line for a pick, a `workflow-rule` line for each rule
+    that matched, and, for an unsure pick or a rule that changed the work, one `workflow-pick` notice when notifications ask for it."""
+    changed = [a for a in applied if a["action"] in ("moved", "forced-with")]
+    if pick["answers"]:
+        run.emit("workflow-picked", instance, None, None,
+                 f"{wf.name}: answers {pick['answers'][0]} and {pick['answers'][1]} (seeds {pick['seeds'][0]}, {pick['seeds'][1]}); "
+                 f"resolved by {pick['rule']}" + (f"; unsure, so {pick['when_unsure']}" if pick["unsure"] else ""))
+    for app in applied:
+        run.emit("workflow-rule", instance, None, None, f"{app['rule']}: {app['action']}"
+                 + (f" stage {app['stage']}" if app.get("stage") else "")
+                 + (f", {app['from']} -> {app['to']}" if app["action"] == "moved" else ""))
+    if pick["unsure"] or changed:
+        queue_notice(run, "workflow-pick", instance, None, f"Workflow of #{instance} {title}: {wf.name}{choice_text(pick, applied)}",
+                     "nothing to do: the Manager chose; override with run.py stage <instance> rechoose <workflow> --by operator")
 
 
 def create_stage(run, args, wf, stage, plan, instance, created, decisions, entries, passed, risk, rules, scope, verify, why,
@@ -9023,7 +9112,7 @@ def create_stage(run, args, wf, stage, plan, instance, created, decisions, entri
     tid = cmd_add(run, argparse.Namespace(
         title=f"{args.title} — {stage.id}", notes=notes, depends=depends, blocks=[], independent=None if depends else root_note,
         parent=instance, type=None, start=None, due=None, promised=None, priority=args.priority, workflow=None, quiet=True, meta=pairs))
-    entry = {"id": stage.id, "task": tid, "approval": level, "approval_id": None, "split": stage.split, "after": plan.after[stage.id]}
+    entry = {"id": stage.id, "type": stage.type, "task": tid, "approval": level, "approval_id": None, "split": stage.split, "after": plan.after[stage.id]}
     entries.append(entry)
     if level != "auto":
         hold = on_timeout == "hold"
@@ -9177,9 +9266,12 @@ def untriaged_decisions(run, tid):
 
 
 def cmd_stage(run, args):
-    """`stage <instance> approve|split <stage>`: answer a stage's approval, or split a splittable stage into parts."""
+    """`stage <instance> approve|split <stage>`: answer a stage's approval, or split a splittable stage into parts.
+    `recheck` matches the hard rules again; `rechoose <workflow>` replaces the stages that have not started."""
+    if args.action != "recheck" and not args.stage:
+        raise Refused(f"stage {args.action} needs a {'workflow name' if args.action == 'rechoose' else 'stage id'}")
     with workflow_lock(run):
-        {"approve": stage_approve, "split": stage_split}[args.action](run, args)
+        {"approve": stage_approve, "split": stage_split, "recheck": stage_recheck, "rechoose": stage_rechoose}[args.action](run, args)
 
 
 def stage_node(run, args, found):
@@ -9239,6 +9331,113 @@ def stage_approve(run, args):
     run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by {args.by}")
 
 
+def instance_scope_paths(node, record, found):
+    """The write paths of an instance now: the SCOPE of its record and the SCOPE of every stage task that is not skipped."""
+    paths = set(write_paths(record.get("scope")))
+    for tasks in found.values():
+        for task in tasks:
+            if (task.get("meta") or {}).get("stage_state") != "skipped":
+                paths |= write_paths((task.get("meta") or {}).get("scope"))
+    return paths
+
+
+def recheck_rules(run, tid):
+    """Match the hard rules again against the paths and the `area` of a running instance. A rule that matches and is not in the
+    record is written to it, with a `workflow-rule` line. A rule whose stage the instance lacks is reported with the way
+    out. Returns the new applications."""
+    node, record, found = instance_stages(run, argparse.Namespace(id=tid))
+    paths = instance_scope_paths(node, record, found)
+    area = (node.get("meta") or {}).get("area")
+    known = {a["rule"] for a in record.get("rules") or []}
+    have = [e for e in record.get("stages") or []]
+    started = any(wanted_attempt(t) is not None or t["status"] != "open" for ts in found.values() for t in ts)
+    new = []
+    for rule in run.config.get("workflow_rule") or []:
+        if rule["name"] in known or not wfl.rule_matches(rule, paths, area):
+            continue
+        kind = rule.get("require_stage")
+        app = {"rule": rule["name"], "at": run.now(), "action": "matched"}
+        hint = None
+        if kind:
+            present = next((e["id"] for e in have if e["id"] == kind or e.get("type") == kind), None)
+            app.update(stage=present or kind, action="recheck-satisfied" if present else "recheck-missing")
+            if not present:
+                hint = ("no stage has started: run.py stage %d rechoose <workflow> --by manager re-expands it with the stage" % tid
+                        if not started else
+                        f"a stage has started, so no stage can be put in front of it by rechoose; hold the next launch and put the "
+                        f"missing {kind} stage in the report (the escalation command comes with phase W4)")
+        new.append(app)
+        record.setdefault("rules", []).append(app)
+        run.emit("workflow-rule", tid, None, None,
+                 f"{rule['name']}: newly matches the SCOPE or area of #{tid}; " +
+                 (f"stage {app['stage']} {'is there' if app['action'] == 'recheck-satisfied' else 'is missing'}" if kind else
+                  "it asks no stage"), hint)
+    if new:
+        run.edit_meta(tid, workflow_record=record)
+    return new
+
+
+def stage_recheck(run, args):
+    if not recheck_rules(run, args.id):
+        run.emit("workflow-rule", args.id, None, None, "no hard rule matches that the record does not hold")
+
+
+def stage_rechoose(run, args):
+    """The owner's override: replace the stages with those of another workflow. Only while no stage has started. The rules
+    apply again, so a rule's stage stays. It is recorded as an override and does not count as an adjustment."""
+    node, record, found = instance_stages(run, args)
+    policy = run.config["workflow_policy"]
+    catalog = load_workflows(run)
+    if catalog.problems:
+        raise Refused("fix the workflow files first (`run.py workflows --check`):\n  " + "\n  ".join(catalog.problems))
+    wf = catalog.workflows.get(args.stage)
+    if wf is None:
+        raise Refused(f"no workflow named {args.stage!r}; available workflows: {', '.join(sorted(catalog.workflows)) or 'none'}")
+    for sid, tasks in found.items():
+        for task in tasks:
+            if wanted_attempt(task) is not None or task["status"] != "open":
+                raise Refused(f"stage {sid} (#{task['id']}) has started; rechoose replaces stages only before the first attempt")
+    children = run.tg("ls", "--parent", str(args.id), "--status", "open", "in_progress", "done", "ready", "blocked") or []
+    child_ids = {c["id"] for c in children}
+    stage_tasks = [t for ts in found.values() for t in ts]
+    external, independent = [], None
+    for task in stage_tasks:
+        full = run.show(task["id"])
+        outside = [d["id"] if isinstance(d, dict) else d for d in full.get("depends_on") or []]
+        outside = [d for d in outside if d not in child_ids]
+        external += [d for d in outside if d not in external]
+        independent = independent or (full.get("meta") or {}).get("independent")
+    why, acceptance = parse_notes(node.get("notes"))
+    meta_node = node.get("meta") or {}
+    scope, verify = str(record.get("scope") or ""), str(record.get("verify") or "")
+    rules = matching_rules(run, scope, meta_node.get("area"))
+    wf, plan, applied = plan_with_rules(catalog, wf, rules, args.with_, args.skip)
+    if any(s.decides for s in plan.stages) and len(plan.stages) > 1:
+        raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
+    for stage in plan.stages:
+        if stage.scope == "instance" and not scope:
+            raise Refused(f"stage {stage.id} writes the instance SCOPE, and the instance has none")
+    risk = max((r["risk"] for r in rules if r.get("risk")), key=lambda v: RISK_RANK[v], default=None)
+    passed = [meta_arg(k, v) for k, v in meta_node.items() if k not in ("workflow", "workflow_record", "risk", "independent", "stage")]
+    old = record.get("workflow")
+    for task in sorted(children, key=lambda c: -c["id"]):
+        run.tg("rm", str(task["id"]))
+    created, decisions, entries = {}, {}, []
+    root_note = independent if independent is not None and not external else f"root stage of workflow instance #{args.id}"
+    maker = argparse.Namespace(title=node["title"], depends=external, priority=node.get("priority"))
+    for stage in plan.stages:
+        created[stage.id] = create_stage(run, maker, wf, stage, plan, args.id, created, decisions, entries, passed, risk, rules, scope,
+                                         verify, why, acceptance, policy["design_dir"], wfl.slug(node["title"]), root_note)
+    record.update(workflow=wf.name, version=wfl.file_version(wf.path), optional=plan.optional, rule=rules[0]["name"] if rules else None,
+                  rules=applied, stages=entries)
+    record.setdefault("overrides", []).append({"from": old, "to": wf.name, "by": args.by, "why": (args.note or "").strip(), "at": run.now()})
+    run.tg("edit", str(args.id), "--meta", meta_arg("workflow", wf.name))
+    run.edit_meta(args.id, workflow_record=record)
+    run.emit("workflow-rechosen", args.id, None, None,
+             f"{old} -> {wf.name} by {args.by}; stages " + ", ".join(f"{e['id']} #{e['task']}" for e in entries) + choice_text({"answers": None}, applied),
+             f"run.py launch {created[plan.stages[0].id]}" if plan.stages else None)
+
+
 def stage_split(run, args):
     node, record, found = instance_stages(run, args)
     stage = stage_node(run, args, found)
@@ -9287,6 +9486,7 @@ def stage_split(run, args):
         run.emit("split", tid, None, None, f"{args.stage} of #{args.id}: part {number} is #{tid}: {args.part.strip()}")
     entry["parts"] = parts_ids
     run.edit_meta(args.id, workflow_record=record)
+    recheck_rules(run, args.id)  # a part may write paths that a rule matches and the instance SCOPE did not
 
 
 def cmd_abandon(run, args):
@@ -9704,6 +9904,26 @@ def result_label(row):
     return row["status"] if row["kind"] == "task" else f"{row['kind']} {row['status']}"
 
 
+def workflow_picks(run, since):
+    """Rows (instance, workflow, how it was chosen) of the workflow instances picked since `since` whose pick was unsure, whose
+    rule changed the work, or that the owner overrode: what the operator reads after the fact."""
+    rows = []
+    for task in sorted(run.tg("ls") or [], key=lambda t: t["id"]):  # not --status: a parent has a computed status that the filter skips
+        record = (task.get("meta") or {}).get("workflow_record")
+        if not (is_instance(task) and isinstance(record, dict) and record.get("picked_at")):
+            continue
+        if datetime.datetime.fromisoformat(record["picked_at"].replace("Z", "+00:00")) < since:
+            continue
+        pick = record.get("pick") or {}
+        changed = [a for a in record.get("rules") or [] if a.get("action") in ("moved", "forced-with")]
+        if not (pick.get("unsure") or changed or record.get("overrides")):
+            continue
+        text = choice_text(pick, record.get("rules") or []).lstrip("; ") + "".join(
+            f"; overridden {o['from']} -> {o['to']} by {o['by']}" for o in record.get("overrides") or [])
+        rows.append((f"#{task['id']}", f"{record.get('workflow')} {task['title']}", text))
+    return rows
+
+
 BRIEF_SECTIONS = ("in_flight", "waiting", "verdict_not_closed", "failed", "awaiting_merge", "decisions")  # status --brief: work not yet closed, and open decisions
 
 
@@ -9799,6 +10019,7 @@ def cmd_status(run, args):
         done = [(*row, costs.get(row[0])) for row in done]
         flight_headers.append("Est. cost")
         in_flight = [(*row, costs.get(row[0])) for row in in_flight]
+    picks = [] if args.brief else workflow_picks(run, since)
     sections = [
         ("done", "Done since last report", done_headers, done),
         ("in_flight", "In flight", flight_headers, in_flight),
@@ -9810,6 +10031,8 @@ def cmd_status(run, args):
         ("ready", "Ready", ["Task", "Title"], ready),
         ("follow_ups", "Follow-ups by label", ["Label", "Lines"], follow),
     ]
+    if picks:  # shown only when a workflow was picked or changed in the period, so a project without workflows sees no change
+        sections.append(("workflow_picks", "Workflow picks and rule changes", ["Instance", "Workflow", "Choice"], picks))
     overall = str(summary.get("overall", "unknown")).upper()
     out = [f"# Status: {run.project}\n"]
     if not args.brief:
@@ -9937,6 +10160,9 @@ def build_parser():
         p.add_argument("--" + flag, type=int if flag == "parent" else None, help=f"passed to tg add --{flag}")
     p.add_argument("--workflow", metavar="NAME", help="create one task for each stage of this workflow, under an instance task "
                    "(`run.py workflows` lists them); --meta scope= and verify= are the instance's")
+    p.add_argument("--pick", metavar="A,B", help="choose the workflow from two typed answers, the Manager's and the subagent's "
+                   '("feature,unsure"); needs --seed; leave out --workflow (`run.py workflows --pick-prompt` makes the prompts)')
+    p.add_argument("--seed", type=int, help="with --pick: the seed of the Manager's own prompt; the subagent's prompt used seed+1")
     p.add_argument("--with", dest="with_", nargs="+", action="extend", default=[], metavar="STAGE",
                    help="with --workflow: create this optional stage (it is left out otherwise)")
     p.add_argument("--skip", nargs="+", action="extend", default=[], metavar="STAGE",
@@ -9978,14 +10204,20 @@ def build_parser():
     p.add_argument("--title", help="with --pick-prompt: the title of the work")
     p.add_argument("--notes-file", metavar="FILE", help="with --pick-prompt: a file that holds the notes of the work")
     p.add_argument("--scope", help="with --pick-prompt: the SCOPE paths or areas of the work")
+    p.add_argument("--resolve", metavar="A,B", help="resolve two typed answers (names or unsure) to one workflow, as `add --pick` does; "
+                   "read only")
 
     p = sub.add_parser("stage", help="answer the approval of a workflow stage, or split a stage into parts")
     p.add_argument("id", type=int, help="the id of the workflow instance task")
-    p.add_argument("action", choices=("approve", "split"), help="approve: answer the stage's approval decision; split: add a part to a stage that may be split")
-    p.add_argument("stage", help="the stage id, for example spec or impl")
+    p.add_argument("action", choices=("approve", "split", "recheck", "rechoose"),
+                   help="approve: answer the stage's approval decision; split: add a part to a stage that may be split; recheck: match "
+                   "the hard rules again; rechoose: replace the stages with those of another workflow, before any stage has started")
+    p.add_argument("stage", nargs="?", help="the stage id, for example spec or impl (rechoose: the workflow name; recheck: none)")
+    p.add_argument("--with", dest="with_", nargs="+", action="extend", default=[], metavar="STAGE", help="rechoose: create this optional stage")
+    p.add_argument("--skip", nargs="+", action="extend", default=[], metavar="STAGE", help="rechoose: leave this optional stage out")
     p.add_argument("--default", action="store_true", help="approve: apply the default of an approval that is past its due time")
-    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="approve: who answers; a `human` approval needs operator")
-    p.add_argument("--note", help="approve: one line for the decision's notes")
+    p.add_argument("--by", choices=("manager", "operator"), default="manager", help="approve: who answers; a `human` approval needs operator. rechoose: who overrides")
+    p.add_argument("--note", help="approve: one line for the decision's notes; rechoose: why")
     p.add_argument("--decline-split", metavar="REASON", help="approve: one line on why a splittable stage after this one is not split")
     p.add_argument("--part", metavar="TITLE", help="split: the title of the part; the first call names part 1, the stage's own task")
     p.add_argument("--meta", nargs="+", action="extend", default=[], metavar="KEY=VALUE", help="split: meta of the part; scope= is required")

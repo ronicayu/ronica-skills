@@ -16,7 +16,9 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
      "Taskgraph's own estimate in hours. The worker's timebox is twice it."),
     (("workflow", "workflow_record"), "`add --workflow`",
      ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule`, "
-      "`adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `task`, `approval`, `approval_id`, `split`, "
+      "`pick`: the two answers, their seeds, the workflow resolved, the resolution rule and whether it was unsure; `rules`: each "
+      "hard rule that matched, with what it did; `picked_at`, `overrides`, "
+      "`adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `type`, `task`, `approval`, `approval_id`, `split`, "
       "`after` and `parts`). The instance is never launched; its status is the derived status of its stages.")),
     (("stage", "stage_part", "stage_origin", "split_declined", "workflow_notes"), "`add --workflow`, `stage split`, `stage approve`",
      ("On a stage task: its stage id; the part number of a split stage; how it came to exist (`expand`, `with` or `split`); "
@@ -342,7 +344,14 @@ COMMAND_DOCS: dict[str, str] = {
      "gets a document path under `[workflow_policy] design_dir`. The notes need a why sentence and `- [ ]` acceptance "
      "lines. A stage whose approval is `manager` or `human` also gets a decision under the instance, due once the stage "
      "merges (see `stage`). One `workflow-added` line lists the stages, the stages left out and the approvals. "
-     "`--with` and `--skip` name optional stages only. See [Workflows](roles-and-briefs.md#workflows)."),
+     "`--with` and `--skip` name optional stages only. `--pick \"<a>,<b>\" --seed <n>` replaces `--workflow`: the two typed "
+     "answers (a workflow name or `unsure`; the Manager's, then the subagent's from the prompt of seed n+1) resolve to one "
+     "workflow: the same name wins; two names take the one with fewer required stages; a name beside `unsure` takes the name; "
+     "two `unsure` take `figure-it-out`; `[workflow_policy] when_unsure` changes the unsure rows. The answers, seeds and rule "
+     "go into the record, with a `workflow-picked` line. A matching `[[workflow_rule]]` that has `require_stage` forces that "
+     "stage on (`--with`), or moves the work to the lightest workflow that has it, and refuses `--skip` of it; each match is a "
+     "`workflow-rule` line and a row of the record. An unsure pick or a rule change queues a `workflow-pick` notice when "
+     "`notifications.events` lists it, and shows in `status` and the daily digest. See [Workflows](roles-and-briefs.md#workflows)."),
     "stage": ("`approve`: answers the approval decision of a stage of a workflow instance. It refuses while the stage is not "
      "merged. A `manager` approval checks workflow facts only: every `decision:` follow-up of the stage is triaged "
      "(`triage`), and each splittable stage after it is split (`split`) or declined with `--decline-split \"<one line>\"`. "
@@ -352,7 +361,11 @@ COMMAND_DOCS: dict[str, str] = {
      "part to a stage whose workflow sets `split: true`, before the stage has an attempt. The first call re-titles the stage's "
      "own task as part 1; each later call creates a part with the same upstream dependencies, and every later stage then "
      "depends on all parts. `--meta scope=` is required. A part whose files overlap a sibling's must name it with "
-     "`--depends`. See [Workflows](roles-and-briefs.md#workflows)."),
+     "`--depends`. `recheck`: matches the `[[workflow_rule]]` tables again against the SCOPE paths of the stages and the `area` "
+     "(a part added by `split` does it too); a rule that is new to the record gets a `workflow-rule` line, and one whose stage "
+     "is missing gets the way out. `rechoose <workflow>` (`--by operator`, `--note`, `--with`, `--skip`): the owner's override; "
+     "it replaces the stages with those of another workflow, with the rules applied again, only while no stage has started. "
+     "It is recorded under `overrides` and is not an adjustment. See [Workflows](roles-and-briefs.md#workflows)."),
     "status": ("Prints the status report as Markdown tables. Options: `--since`, `--limit`, `--mark`. A task that waits for its "
      "merge is listed under \"Closed, awaiting merge\" (`awaiting_merge` in `--json`), not under \"In flight\"; it is "
      "listed as done once merged. It also counts the `Follow-ups:` lines of the worker reports filed in the period by "
@@ -375,7 +388,8 @@ COMMAND_DOCS: dict[str, str] = {
      "runs when `[workflow_policy] enabled` is true or the project has workflow files. `--pick-prompt` prints the prompt that "
      "asks which workflow fits a piece of work (`--title`, `--notes-file`, `--scope`): the task text and the workflows as "
      "`A. <name>: <description>`, with `unsure` among them, in an order that `--seed` fixes; the same seed gives the same "
-     "order. See [Workflows](roles-and-briefs.md#workflows)."),
+     "order. `--resolve \"<a>,<b>\"` prints which workflow two typed answers resolve to, and records nothing. "
+     "See [Workflows](roles-and-briefs.md#workflows)."),
     "check-report": ("Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a "
      "`Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and "
      "`leftover ...` lines pass. With `--acceptance <n>`, a `PASS` report also needs at least `<n>` non-empty lines "

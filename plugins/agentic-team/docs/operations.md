@@ -132,12 +132,13 @@ The operator hears from the Manager on events, not on a schedule. `run.py` never
 | `pr-closed` | A request was closed without a merge (the `pr-closed` line, from `record`, `repoint` or a round). |
 | `all-done` | The Manager adds it with `notify-queue --add all-done "<line>"` when all work is complete. |
 | `blocked` | The Manager adds it with `notify-queue --add blocked "<line>"` when it is blocked. The same line notifies once; a new reason notifies again. |
+| `workflow-pick` | Not in the default list. `run.py add --pick` or a hard rule chose an unsure workflow or changed the work (the `workflow-picked` and `workflow-rule` lines); the notice is for information, the owner is never asked. |
 
 A notice always carries the operator-facing text of its event as its `next:` (what the operator can do), never the Manager's command hint that the same event prints in the `run.py` output. The queue is guarded by a lock (`notify-queue.lock`): `--clear` clears exactly the notices it prints.
 
 `[notifications] events` lists the events that notify; a notice for an event that is not listed is never queued. Each notice has a key (event, task, attempt and text): one that is queued or was cleared as sent is not queued again, so a `pr-closed` line that every `record` repeats notifies once, and a new failure (a new head, a new reason) notifies again. `all-done` and `blocked` dedup only against the queue, since the same words can be true again later.
 
-With `digest = "daily"`, `run.py notify-queue --digest` prints one digest a day (the first call of each day in the project time zone): what merged or finished since the last digest that was sent (the last day on the first run), what is in flight, and the decisions waiting. The Manager adds it to the same message, then runs `notify-queue --digest --sent`; the digest counts as made only then, so a digest that was printed and never sent is printed again. With events and the daily digest on, a periodic brief is not needed; a project's own cron is the project's choice.
+With `digest = "daily"`, `run.py notify-queue --digest` prints one digest a day (the first call of each day in the project time zone): what merged or finished since the last digest that was sent (the last day on the first run), what is in flight, the decisions waiting, and, when there are any, the workflow picks that were unsure or changed by a rule. The Manager adds it to the same message, then runs `notify-queue --digest --sent`; the digest counts as made only then, so a digest that was printed and never sent is printed again. With events and the daily digest on, a periodic brief is not needed; a project's own cron is the project's choice.
 
 ## Cost in status
 

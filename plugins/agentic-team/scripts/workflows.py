@@ -813,3 +813,137 @@ def rule_matches(rule: dict[str, Any], paths: set[str], area: Any) -> bool:
         if any(regex.fullmatch(p) or regex.fullmatch(p.rstrip("/") + "/x") for p in paths):
             return True
     return False
+
+
+# ------------------------------------------------------------------- the pick
+
+def weight(wf: Workflow) -> tuple[int, int, str]:
+    """The order of the workflows from light to heavy: required stages, then stages whose approval is not `auto`, then name."""
+    return (sum(1 for s in wf.stages if not s.optional), sum(1 for s in wf.stages if s.approval != "auto"), wf.name)
+
+
+def usable(workflows: dict[str, Workflow]) -> dict[str, Workflow]:
+    return {n: w for n, w in workflows.items() if not w.errors}
+
+
+def deciding(workflows: dict[str, Workflow]) -> list[str]:
+    """The names of the workflows with a `decides` stage (figure-it-out): outside the light-to-heavy order."""
+    return sorted(n for n, w in usable(workflows).items() if any(s.decides for s in w.stages))
+
+
+def parse_answer(text: str, names: list[str]) -> str:
+    """The workflow name, or `unsure`, in one typed answer: `feature`, `PICK: feature` or a `PICK:` line inside more text.
+    ValueError names what is wrong."""
+    raw = (text or "").strip()
+    line = next((l for l in raw.splitlines() if re.match(r"(?i)\s*pick\s*:", l)), raw.splitlines()[0] if raw else "")
+    value = re.sub(r"(?i)^\s*pick\s*:", "", line).strip().strip("`*\"'. ").lower()
+    if value == "unsure" or value in names:
+        return value
+    raise ValueError(f"{value or 'an empty answer'!r} is not a workflow name or unsure; the workflows are {', '.join(sorted(names))}")
+
+
+@dataclasses.dataclass
+class Resolution:
+    """`workflow`: the chosen name. `rule`: why (agree, fewer-stages, more-stages, name-over-unsure, named-over-deciding,
+    both-unsure, when-unsure-<mode>). `unsure`: True when the answers did not simply agree on a name."""
+    workflow: str
+    rule: str
+    unsure: bool
+
+
+def resolve_pick(workflows: dict[str, Workflow], first: str, second: str, when_unsure: str = "lighter") -> Resolution:
+    """Resolve the two typed answers (names or `unsure`), as the spec's table says.
+    - Both name the same workflow: it.
+    - Two different names: the lighter by `weight`; `heavier` takes the heavier; `figure-it-out` takes the deciding workflow.
+      A deciding workflow loses to a named one that is not deciding.
+    - A name and `unsure`: the name; `figure-it-out` takes the deciding workflow.
+    - Both `unsure`: the deciding workflow (`heavier` takes the heaviest, and so does the lightest when none decides)."""
+    pool = usable(workflows)
+    decides = deciding(workflows)
+    plain = {n: w for n, w in pool.items() if n not in decides}
+    ordered = sorted(plain.values(), key=weight)
+    if first == second and first != "unsure":
+        return Resolution(first, "agree", False)
+    if when_unsure == "figure-it-out" and decides:
+        return Resolution(decides[0], "when-unsure-figure-it-out", True)
+    if first == "unsure" and second == "unsure":
+        if when_unsure == "heavier" and ordered:
+            return Resolution(ordered[-1].name, "when-unsure-heavier", True)
+        if decides:
+            return Resolution(decides[0], "both-unsure", True)
+        return Resolution(ordered[0].name, "both-unsure-lightest", True)
+    if "unsure" in (first, second):
+        return Resolution(first if second == "unsure" else second, "name-over-unsure", True)
+    named = [n for n in (first, second) if n in plain]
+    if len(named) == 1:
+        return Resolution(named[0], "named-over-deciding", True)
+    if not named:
+        return Resolution(sorted((first, second))[0], "both-deciding", True)
+    if when_unsure == "heavier":
+        return Resolution(max(named, key=lambda n: weight(plain[n])), "more-stages", True)
+    return Resolution(min(named, key=lambda n: weight(plain[n])), "fewer-stages", True)
+
+
+# ------------------------------------------------------------------- hard rules
+
+def rule_kind(wf: Workflow, kind: str) -> Stage | None:
+    """The stage of `wf` that a rule's `require_stage` names: a stage whose id or type is `kind`."""
+    return next((s for s in wf.stages if s.id == kind or s.type == kind), None)
+
+
+def lightest_with(workflows: dict[str, Workflow], kinds: list[str]) -> Workflow | None:
+    """The lightest workflow that has a stage for every kind in `kinds` (the stage is forced on when optional): fewest stages
+    in the plan, then fewest approvals, then name. A deciding workflow never qualifies."""
+    best: tuple[tuple[int, int, str], Workflow] | None = None
+    for name, wf in usable(workflows).items():
+        if any(s.decides for s in wf.stages):
+            continue
+        found = [rule_kind(wf, k) for k in kinds]
+        if any(s is None for s in found):
+            continue
+        plan = build_plan(wf, [s.id for s in found if s and s.optional], [])
+        key = (len(plan.stages), sum(1 for s in plan.stages if s.approval != "auto"), name)
+        if best is None or key < best[0]:
+            best = (key, wf)
+    return best[1] if best else None
+
+
+def apply_rules(workflows: dict[str, Workflow], wf: Workflow, rules: list[dict[str, Any]], with_ids: list[str],
+                skip_ids: list[str]) -> tuple[Workflow, list[str], list[dict[str, Any]]]:
+    """(workflow, with_ids, applications) after the hard rules that matched (`rules`). Each application is a dict with the rule
+    name, `action` and, for a `require_stage`, the stage id:
+    - `satisfied`: the workflow requires the stage already;
+    - `forced-with`: the stage is optional, and is now in `with_ids`;
+    - `moved`: the workflow had no such stage; the work moved to the lightest one that has a stage for every rule (`from`, `to`);
+    - `matched`: the rule asks no stage (it raises an approval or sets a risk);
+    - `deferred-to-expand`: the workflow decides its own stages; `run.py stage expand` applies the rules.
+    ValueError: a rule's stage is in `skip_ids`, or no workflow has the stages that the rules need."""
+    if any(s.decides for s in wf.stages):
+        return wf, with_ids, [{"rule": r["name"], "action": "deferred-to-expand"} for r in rules]
+    kinds = [r["require_stage"] for r in rules if r.get("require_stage")]
+    original, target = wf, wf
+    if any(rule_kind(wf, k) is None for k in kinds):
+        found = lightest_with(workflows, kinds)
+        if found is None:
+            raise ValueError(f"the rules that match need a stage of each of {', '.join(sorted(set(kinds)))}, and no workflow has them all")
+        target = found
+    forced = list(with_ids)
+    applied: list[dict[str, Any]] = []
+    for rule in rules:
+        kind = rule.get("require_stage")
+        if not kind:
+            applied.append({"rule": rule["name"], "action": "matched"})
+            continue
+        stage = rule_kind(target, kind)
+        assert stage is not None
+        if stage.id in skip_ids:
+            raise ValueError(f"--skip {stage.id}: rule {rule['name']} requires stage {stage.id}; a stage that a rule requires cannot be skipped")
+        app: dict[str, Any] = {"rule": rule["name"], "stage": stage.id}
+        if rule_kind(original, kind) is None:
+            app.update(action="moved", **{"from": original.name, "to": target.name})
+        else:
+            app["action"] = "forced-with" if stage.optional and stage.id not in forced else "satisfied"
+        if stage.optional and stage.id not in forced:
+            forced.append(stage.id)
+        applied.append(app)
+    return target, forced, applied
