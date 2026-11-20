@@ -18,7 +18,8 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
      ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule` (the first matching rule), "
       "`pick`: the two answers, their seeds, the workflow resolved, the resolution rule and whether it was unsure; `rules`: each "
       "hard rule that matched, with what it did; `picked_at`, `overrides`, "
-      "`adjustments` (one row for each `stage escalate` and `stage downgrade`: `kind`, `stage`, `type`, `before`, `why`, `row`, `rule`, `at`), "
+      "`adjustments` (one row for each `stage escalate`, `downgrade`, `replace` and `cancel`: `kind`, `stage`, `type`, `before`, `why`, `row`, `rule`, `at`, `by`, and "
+      "`trigger`, the retro category: `verifier` or `worker` (the kind of the `--from-row` result), `rule`, `manager`, or `orphan` for a replace or cancel; only an escalate and a downgrade count toward `max_adjustments`), "
       "`ended` (set by `stage cancel`: `kind`, `why`, `at`, and the tasks it abandoned, skipped and closed), `expanded` (set by "
       "`stage expand`: the workflow, the report row, the stage ids), `scope`, `verify`, and `stages`: each stage's `id`, `type`, `task`, "
       "`approval`, `approval_id`, `split`, `after`, `parts`, and `escalated`, `before`, `skipped`, `replaced`, `replaced_tasks` where they apply). "
@@ -31,12 +32,15 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
       "with no attempt, and run.py never derives a merge for it. `replaced_from` is on the task that `stage replace` made, and "
       "`replaced_by` on the abandoned task it took the place of, which leaves the instance.")),
     (("approval_id",), "`add --workflow`", "On a stage task that has an approval: the id of its decision."),
-    (("approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default"),
+    (("approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default",
+      "opened_at", "approval_outcome", "approved_by", "answered_at"),
      "`add --workflow`, the merge record, `record`, `stage approve`",
      ("On an approval decision: the stage task and stage id it answers, its level (`manager` or `human`), its state (`pending` "
       "until the stage merges, `open`, `done`; `skipped` or `cancelled` for a decision that ended with its stage), what happens at the due time (`on_timeout`: `approve` or `hold`), the due time "
       "(`due_at`, UTC; `decide_by` is its date for Taskgraph) and the `default` that `record` applies. A `human` decision has "
-      "`decider=manager` until the stage merges, then `operator`.")),
+      "`decider=manager` until the stage merges, then `operator`. `opened_at` is when it opened; the answer writes `approval_outcome` (`approved`, "
+      "`defaulted` when `record` or `--default` applied it, or `held` when it had no deadline and the owner answered), `approved_by` and `answered_at`; "
+      "`workflows --stats` reads them.")),
     (("verify_mode",), "plan",
      ("`session` (the default) or `ci:<name>`. `ci:<name>`: the CI run on the pushed head is the verifier. GitHub: "
       "`<name>` is a workflow file name or workflow name. GitLab: `pipeline` for the whole pipeline, or a job name.")),
@@ -207,7 +211,7 @@ META_WHY: list[tuple[tuple[str, ...], str]] = [
      "Written by `tg gate`, not `--meta`; the issue shows the open merge gate."),
     (("workflow", "workflow_record", "stage", "stage_part", "stage_origin", "split_declined", "workflow_notes", "approval_id",
       "approval_for", "approval_stage", "approval_level", "approval_state", "on_timeout", "due_at", "decide_by", "default",
-      "stage_state", "skipped_why", "replaced_from", "replaced_by"),
+      "opened_at", "approval_outcome", "approved_by", "answered_at", "stage_state", "skipped_why", "replaced_from", "replaced_by"),
      "Another machine must see the workflow and where each stage and approval stands; none of them is local."),
 ]
 
@@ -418,6 +422,9 @@ COMMAND_DOCS: dict[str, str] = {
      "asks which workflow fits a piece of work (`--title`, `--notes-file`, `--scope`): the task text and the workflows as "
      "`A. <name>: <description>`, with `unsure` among them, in an order that `--seed` fixes; the same seed gives the same "
      "order. `--resolve \"<a>,<b>\"` prints which workflow two typed answers resolve to, and records nothing. "
+     "`--stats [--since <date>] [--json]` is the workflow retro: it reads the workflow records from Taskgraph (no model) and prints, per workflow and stage, "
+     "instance, completion, adjustment, first-pass verify, stage-time, approval and pick figures, then candidate changes with their evidence; nothing is applied "
+     "(see [Running a workflow retro](operations.md#running-a-workflow-retro)). "
      "See [Workflows](roles-and-briefs.md#workflows)."),
     "check-report": ("Checks a report file before a session files it: a `Status:` line with `PASS`, `ISSUES` or `BLOCKED`, a "
      "`Checkpoint:` line, and a label on each `Follow-ups:` line. A leading `- ` or `* ` is ignored; `None` and "

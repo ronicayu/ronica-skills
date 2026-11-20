@@ -179,6 +179,20 @@ A workflow is a markdown playbook for one kind of work: a frontmatter that lists
 
 Five workflows ship with the plugin, in [templates/workflows/](../templates/workflows/): `hotfix` (`impl → test`), `fix` (`spec? → impl → test`), `change` (`prd → impl → test`), `feature` (`prd → ux? → spec → impl* → test`) and `figure-it-out` (`investigate`, which decides the rest). `?` marks an optional stage and `*` a stage that may be split. `run.py workflows` lists the workflows a project has.
 
+### The commands
+
+| Command | Use | Section |
+|---|---|---|
+| `run.py workflows [--check]` | List the workflows and their stages; check the files | [Where workflow files are found](#where-workflow-files-are-found) |
+| `run.py workflows --pick-prompt --seed <n> ...` | Print the prompt that asks which workflow fits a piece of work | [Picking a workflow](#picking-a-workflow) |
+| `run.py workflows --resolve "<a>,<b>"` | Show how two answers resolve; creates nothing | [Picking a workflow](#picking-a-workflow) |
+| `run.py add --workflow <name>` or `--pick "<a>,<b>" --seed <n>` | Create an instance and its stage tasks | [Adding work with a workflow](#adding-work-with-a-workflow) |
+| `run.py stage <instance> approve <stage>` | Answer a stage's approval (`--by operator`, `--default`, `--decline-split`) | [Approvals](#approvals) |
+| `run.py stage <instance> split <stage> --part ...` | Split a splittable stage into parts | [Splitting a stage](#splitting-a-stage) |
+| `run.py stage <instance> recheck` / `rechoose <workflow>` | Match the hard rules again; the owner's override of the pick | [Hard rules](#hard-rules) |
+| `run.py stage <instance> escalate / downgrade / replace / cancel / expand` | Change an instance in flight | [Changes in flight](#changes-in-flight) |
+| `run.py workflows --stats [--since <date>] [--json]` | The retro read of the workflow records, with candidate changes | [Running a workflow retro](operations.md#running-a-workflow-retro) |
+
 ### Where workflow files are found
 
 | What | Plugin default | Project override (track it in git) |
@@ -299,6 +313,38 @@ Four commands change an instance after it started; `run.py stage <instance> <act
 `escalate` refuses a stage with a busy session, a verifier that has filed no row, a merged part or one that waits for its merge, an abandoned part, a stage in a round, and an instance that ended. When a part has reported, the escalation stops its idle sessions (a revision can no longer follow), commits its WIP and files one `STOPPED` row with the `Head:` and `Reason: escalated`. `record` reads that row before the verifier and verdict rows, and its next step is `launch`, which waits for the new stage and its approval. That launch does not use an attempt of the 3-attempt cap: `refuse_past_cap` reads the row (not `--cause escalated`, which only records why the attempt starts). A failed verdict keeps the task's phase `verdict_failed`; a `reported` or `verifying` task goes to `stopped`.
 
 `figure-it-out` has no other stage until the investigation is done. `run.py stage <instance> expand --from-row <result id>` reads the `workflow-plan` block of the merged investigate stage's report (`workflow: <name>`, or `stages: [{id: spec}, {id: impl, after: [spec]}]` for an ad-hoc plan, recorded as workflow `adhoc`), applies the hard rules that were deferred to it, and creates the stages: every first stage depends on the investigate stage and on its approval. `expand --workflow <name>` does the same without a plan row. An ad-hoc plan that lacks a stage a rule requires is refused. An instance expands once.
+
+### An example flow
+
+A bug in the export code, on a project that has a billing rule. Every command is one the Manager runs; the owner sees the lines it reports.
+
+```
+# 1. Pick. Print the prompt, answer it yourself (PICK: fix), and give the same prompt with seed 8 to one Sonnet subagent (it says: unsure).
+run.py workflows --pick-prompt --seed 7 --title "Export drops rows" --notes-file notes.md --scope "src/export/"
+
+# 2. Add. "fix" and "unsure" resolve to fix; the record keeps both answers, the seeds, the rule and unsure = true.
+run.py add "Export drops rows" --pick "fix,unsure" --seed 7 --notes "$(cat notes.md)" \
+    --meta scope="src/export/" verify="pytest tests/test_export.py" --independent "bug report"
+#   -> workflow-added #41 fix: stages impl #42, test #43 (pick fix/unsure -> fix (name-over-unsure; unsure -> lighter))
+
+# 3. Run impl as any task (launch, verify, close). The verifier files `blocking[design]: the row model is undefined`.
+#    record prints an escalation-hint whose next step is the command in 4.
+# 4. Escalate. A spec stage and its approval go in front of impl. The attempt that had reported is stopped and does not count
+#    toward the 3-attempt cap.
+run.py stage 41 escalate spec --before impl --from-row 812 --why "the row model is undefined"
+
+# 5. Run spec, merge it, then approve it. Manager approval checks workflow facts only.
+run.py stage 41 approve spec --by manager
+# 6. Split, in a feature instance #50 (only a stage with split: true can be split; fix has none). After the spec's approval, the Manager
+#    follows the spec's phase table, one part for each phase after the first:
+run.py stage 50 split impl --part "Phase 2: export writer" --meta scope=src/export/writer.py
+
+# 7. If a stage's session is abandoned for good, record prints stage-orphaned. Replace it once, or cancel the instance.
+run.py stage 41 replace impl
+run.py stage 41 cancel --why "the export moves to the new service"
+```
+
+After step 2 the owner's reply or digest lists the pick. An owner who disagrees runs `run.py stage 41 rechoose change --by operator` before any stage starts; that is recorded as an override. The retro reads all of this: [Running a workflow retro](operations.md#running-a-workflow-retro).
 
 ## Judgement-tier brief
 

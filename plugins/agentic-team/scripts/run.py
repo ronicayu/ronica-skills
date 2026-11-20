@@ -143,6 +143,7 @@ VERIFY_SKILL = os.path.join(".claude", "skills", "verify", "SKILL.md")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import workflows as wfl  # noqa: E402
+import workflow_stats as wst  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from events import EVENTS  # noqa: E402
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, SCHEMA, ConfigError, load, problems as config_problems,  # noqa: E402
@@ -1800,9 +1801,71 @@ def workflow_problems(run):
     return load_workflows(run).problems
 
 
+def stage_dict(run, task, decisions):
+    """One stage task as the retro reads it: its place, its times, its attempts and revisions, its verifier verdicts and the
+    categories of the blocking findings that failed it, and the outcome of its approval. Everything comes from Taskgraph."""
+    meta = task.get("meta") or {}
+    rows = sorted(run.results_for(task["id"]), key=lambda r: r["id"])
+    verifiers = [r for r in rows if r["kind"] == "verify" and r.get("author") not in ("manager", "ci")]
+    verdicts = [v for v in (verdict_of(r) for r in verifiers) if v]
+    failed = [(m.group(1) or "uncategorised") for r in verifiers if verdict_of(r) == "verify-failed"
+              for line in issue_lines(r.get("body") or "") if (m := BLOCKING_LINE.match(line))]
+    attempts = [r["attempt"] for r in rows if r["kind"] == "task" and r.get("attempt")]
+    node = decisions.get(meta.get("approval_id"))
+    approval = None
+    if node:
+        am = node.get("meta") or {}
+        approval = {"level": am.get("approval_level"), "outcome": am.get("approval_outcome"), "by": am.get("approved_by"),
+                    "state": am.get("approval_state"), "on_timeout": am.get("on_timeout"), "opened_at": am.get("opened_at"),
+                    "answered_at": am.get("answered_at")}
+    return {"id": meta.get("stage"), "task": task["id"], "state": meta.get("stage_state"), "origin": meta.get("stage_origin"),
+            "status": task["status"], "created_at": task.get("created_at"), "done_at": task.get("done_at"),
+            "attempts": max(attempts, default=0), "revisions": sum(1 for r in rows if r["kind"] == REVISE and r.get("author") == "manager"),
+            "verdicts": verdicts, "failed": failed, "approval": approval}
+
+
+def collect_stats(run, since):
+    """The instance dicts of `workflow_stats` for the instances created since `since` (None: all)."""
+    tasks = run.tg("ls", "--status", *STAGE_STATUSES) or []
+    decisions = {t["id"]: t for t in run.tg("ls", "--type", "decision", "--status", *STAGE_STATUSES) or []}
+    children: dict = {}
+    for t in tasks:
+        if (t.get("meta") or {}).get("stage") and t.get("parent") is not None and t["type"] == "task":
+            children.setdefault(t["parent"], []).append(t)
+    found = []
+    for t in sorted(tasks, key=lambda x: x["id"]):
+        meta = t.get("meta") or {}
+        record = meta.get("workflow_record")
+        if not (is_instance(t) and isinstance(record, dict)):
+            continue
+        made = wst.parse_time(t.get("created_at"))
+        if since is not None and (made is None or made < since):
+            continue
+        found.append({"id": t["id"], "title": t["title"], "created_at": t.get("created_at"), "record": record,
+                      "stages": [stage_dict(run, c, decisions) for c in sorted(children.get(t["id"], []), key=lambda x: x["id"])]})
+    return found
+
+
+def workflow_stats_command(run, args):
+    """`workflows --stats [--since <date>] [--json]`: the retro read of the workflow records. Read only, deterministic, no model."""
+    since = parse_since(args.since, run.run_dir) if args.since else None
+    instances = collect_stats(run, since)
+    stats = wst.compute(instances)
+    proposals = wst.propose(instances, stats)
+    label = since.date().isoformat() if since else None
+    if run.json:
+        run.payload = {"since": label, "stats": stats, "proposals": proposals}
+    else:
+        run.text = wst.render(stats, proposals, label)
+
+
 def cmd_workflows(run, args):
     """List every workflow with its source, description and stages. Read only. Exits 1 when a file is broken. With --check
     only the problems are printed; with --pick-prompt, the pick prompt."""
+    if args.stats_json:
+        run.json = True
+    if args.stats:
+        return workflow_stats_command(run, args)
     catalog = load_workflows(run)
     problems = catalog.problems
     if args.resolve:
@@ -9332,7 +9395,7 @@ def open_approval(run, stage, node=None):
             return
         policy, level = run.config["workflow_policy"], nmeta.get("approval_level")
         hold = level == "human" and nmeta.get("on_timeout") == "hold"
-        fields = {"approval_state": "open"}
+        fields = {"approval_state": "open", "opened_at": run.now()}
         due = None
         if not hold:
             due = hours_from_now(policy["human_due_hours"] if level == "human" else policy["manager_due_hours"])
@@ -9353,10 +9416,13 @@ def open_approval(run, stage, node=None):
                      nmeta.get("default") or "approve", fields.get("due_at"))
 
 
-def close_approval(run, node, text, state="done"):
+def close_approval(run, node, text, state="done", outcome=None, by=None):
     """Answer an approval decision: its notes hold the answer (a downstream brief pastes them), then `tg done`. `state` is
     the `approval_state` it keeps: `done`, or `skipped` and `cancelled` for a decision that ends with its stage."""
-    run.write_meta(node, approval_state=state)
+    fields = {"approval_state": state}
+    if outcome:
+        fields.update(approval_outcome=outcome, approved_by=by, answered_at=run.now())
+    run.write_meta(node, **fields)
     run.tg("edit", str(node["id"]), "--notes", text)
     run.tg("done", str(node["id"]))
     node["status"] = "done"
@@ -9389,7 +9455,8 @@ def approve_due(run, snap):
             nmeta = node.get("meta") or {}
             answered = node["status"] == "done" or nmeta.get("approval_state") != "open"
             if not answered:
-                close_approval(run, node, f"Approved by default at {run.now()}: nobody answered by {nmeta['due_at']}.")
+                close_approval(run, node, f"Approved by default at {run.now()}: nobody answered by {nmeta['due_at']}.",
+                               outcome="defaulted", by="run.py")
         snap.decisions.remove(d)
         if not answered:
             run.emit("approval-due", d["id"], None, None,
@@ -9474,7 +9541,8 @@ def stage_approve(run, args):
                           f"run.py stage {args.id} approve {args.stage} --by operator once the owner has")
         if minutes_since(dmeta.get("due_at") or "") <= 0:
             raise Refused(f"the approval of {args.stage} is due {dmeta.get('due_at') or 'at an unknown time'}; --default applies after it")
-        close_approval(run, decision, f"Approved by default at {run.now()}: nobody answered by {dmeta['due_at']}.")
+        close_approval(run, decision, f"Approved by default at {run.now()}: nobody answered by {dmeta['due_at']}.",
+                       outcome="defaulted", by="run.py")
         run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by default")
         return
     if level == "human" and args.by != "operator":
@@ -9503,7 +9571,9 @@ def stage_approve(run, args):
     if args.decline_split and not declined:
         run.emit("warn", did, None, None, f"--decline-split ignored: no stage after {args.stage} may be split and is not split yet")
     note = (args.note or "").strip()
-    close_approval(run, decision, f"Approved by {args.by} at {run.now()}" + (f": {note}" if note else "."))
+    held = dmeta.get("on_timeout") == "hold" and level == "human"  # it had no deadline: it waited for the owner
+    close_approval(run, decision, f"Approved by {args.by} at {run.now()}" + (f": {note}" if note else "."),
+                   outcome="held" if held else "approved", by=args.by)
     run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by {args.by}")
 
 
@@ -9864,6 +9934,22 @@ def refuse_past_limit(run, record, tid, what):
                       "in the report: the Manager never asks the owner about it")
 
 
+def trigger_of(run, found, row, rule=None):
+    """The retro category of what made an adjustment: `rule` (a hard rule that matched late), `verifier` or `worker` (the kind of
+    the --from-row result), else `manager` (the Manager's own reading)."""
+    if rule:
+        return "rule"
+    if not row:
+        return "manager"
+    wanted = int(row.partition("#")[0])
+    for tasks in found.values():
+        for t in tasks:
+            for r in run.results_for(t["id"]):
+                if r["id"] == wanted:
+                    return "verifier" if r["kind"] == "verify" else "worker"
+    return "manager"
+
+
 def check_from_row(run, args, found):
     """--from-row is `<result id>` or `<result id>#<line>`: a row of one of the instance's stage tasks."""
     row = (args.from_row or "").strip()
@@ -10051,7 +10137,8 @@ def stage_escalate(run, args):
     if target_entry is not None:
         target_entry["after"] = [*(target_entry.get("after") or []), new_id]
     record.setdefault("adjustments", []).append({"kind": "escalate", "type": kind, "stage": new_id, "before": target, "why": why,
-                                                 "row": row, "rule": args.rule, "at": run.now(), "by": "manager"})
+                                                 "row": row, "rule": args.rule, "at": run.now(), "by": "manager",
+                                                 "trigger": trigger_of(run, found, row, args.rule)})
     run.edit_meta(args.id, workflow_record=record)
     for part, check in checks:
         if check and check["row"]:
@@ -10143,7 +10230,8 @@ def stage_downgrade(run, args):
         if sid in (other.get("after") or []):
             other["after"] = [a for a in other["after"] if a != sid] + [a for a in entry.get("after") or [] if a not in other["after"]]
     record.setdefault("optional", {})[sid] = "downgraded"
-    record.setdefault("adjustments", []).append({"kind": "downgrade", "stage": sid, "why": why, "row": row, "at": run.now(), "by": "manager"})
+    record.setdefault("adjustments", []).append({"kind": "downgrade", "stage": sid, "why": why, "row": row, "at": run.now(), "by": "manager",
+                                                   "trigger": trigger_of(run, found, row)})
     run.edit_meta(args.id, workflow_record=record)
     run.emit("downgraded", args.id, None, None,
              f"stage {sid} ({', '.join('#%d' % i for i in owners)}) is skipped: {why}; "
@@ -10204,6 +10292,8 @@ def stage_replace(run, args):
         entry["parts"] = [new if p == old["id"] else p for p in entry["parts"]]
     entry["replaced"] = (entry.get("replaced") or 0) + 1
     entry.setdefault("replaced_tasks", []).append(old["id"])
+    record.setdefault("adjustments", []).append({"kind": "replace", "stage": sid, "task": old["id"], "new": new, "why": ometa.get("abandoned_why"),
+                                                 "row": None, "at": run.now(), "by": "manager", "trigger": "orphan"})
     run.edit_meta(args.id, workflow_record=record)
     run.emit("stage-replaced", args.id, None, None,
              f"stage {sid}: #{new} replaces the abandoned #{old['id']}; it has the same dependencies"
@@ -10244,6 +10334,8 @@ def stage_cancel(run, args):
                 approvals.append(dec["id"])
     waiting = [b for b in ref_ids(run.show(args.id).get("blocks")) if run.show(b)["status"] != "done"]
     record["ended"] = {"kind": "cancelled", "why": why, "at": run.now(), "abandoned": abandoned, "skipped": skipped, "approvals": approvals}
+    record.setdefault("adjustments", []).append({"kind": "cancel", "stage": None, "why": why, "row": None, "at": record["ended"]["at"],
+                                                 "by": "manager", "trigger": "orphan"})
     run.edit_meta(args.id, workflow_record=record, abandoned=CANCELLED, abandoned_why=why)
     ids = lambda rows: ", ".join(f"#{i}" for i in rows) or "none"
     run.emit("workflow-cancelled", args.id, None, None,
@@ -11111,6 +11203,11 @@ def build_parser():
     p.add_argument("--title", help="with --pick-prompt: the title of the work")
     p.add_argument("--notes-file", metavar="FILE", help="with --pick-prompt: a file that holds the notes of the work")
     p.add_argument("--scope", help="with --pick-prompt: the SCOPE paths or areas of the work")
+    p.add_argument("--stats", action="store_true", help="the retro read of the workflow records: per workflow and stage, instances, "
+                   "completion, escalations, first-pass verify, stage time, approvals and pick accuracy, then the candidate changes "
+                   "that follow (nothing is applied); read only, no model")
+    p.add_argument("--since", help="with --stats: only instances created since 30d, 4w, or an ISO date (default: all)")
+    p.add_argument("--json", dest="stats_json", action="store_true", help="with --stats: print the statistics and proposals as JSON")
     p.add_argument("--resolve", metavar="A,B", help="resolve two typed answers (names or unsure) to one workflow, as `add --pick` does; "
                    "read only")
 

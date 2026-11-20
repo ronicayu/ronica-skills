@@ -19,7 +19,7 @@ The Manager picks the workflow by reading the descriptions. It gives a typed ans
 
 None of this is visible in a retro as stage data.
 
-**Goals and measurable outcomes.** Each is measured by `run.py retro --workflows` (section 10). A baseline comes from vmt's four weeks before rollout.
+**Goals and measurable outcomes.** Each is measured by `run.py workflows --stats` (section 10). A baseline comes from vmt's four weeks before rollout.
 
 | # | Outcome | Measure | Target after the first retro tune |
 |---|---|---|---|
@@ -54,7 +54,7 @@ flowchart LR
     ADD["add --workflow: rules, expansion"]
     STG["stage: escalate, downgrade, split, expand, replace"]
     REC["record: escalation hints, stage-orphaned"]
-    RETRO["retro --workflows"]
+    RETRO["workflows --stats"]
   end
   TG[("Taskgraph<br/>instance, stage tasks, approval decisions")]
   LIB --> WFS
@@ -483,7 +483,7 @@ stateDiagram-v2
 - `triage` rows give where follow-ups went;
 - approval decisions give their wait time and whether the default was applied.
 
-**`run.py retro --workflows [--since <date>]`** prints:
+**`run.py workflows --stats [--since <date>] [--json]`** prints:
 
 | Query | Feeds |
 |---|---|
@@ -610,7 +610,7 @@ The estimates are worker-task hours. Each phase is one PR on one branch, and the
 | W3 | Pick resolution, `when_unsure`, `[[workflow_rule]]`, rule re-check on scope change, `rechoose` | 8 |
 | W4 | `escalate`, `downgrade`, `replace`, `cancel`, `expand`; `design:` label and `blocking[design]` category; record hints; limits; skipped handling in `derive_phase` | 14 |
 | W5 | `Workflow.tla`, configs, regress checks, NOTES.md, statechart render | 10 |
-| W6 | `retro --workflows`, docs (reference regenerated, lifecycle, roles-and-briefs), CHANGELOG | 8 |
+| W6 | `workflows --stats`, docs (reference regenerated, lifecycle, roles-and-briefs), CHANGELOG | 8 |
 | W7 | vmt rollout: project overrides, rules, first retro | 4, plus a retro after about 20 instances |
 
 Total: about 70 worker hours. W5 runs alongside W2-W4 and should land before W4 merges, because the model is the check on escalation and orphans. Each phase needs a design-doc verify for W5, and a code verify by risk for the others.
