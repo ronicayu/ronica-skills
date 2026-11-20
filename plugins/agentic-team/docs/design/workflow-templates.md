@@ -351,7 +351,7 @@ A failure becomes a task or a decision, not a rejection loop.
 
 **Human approval** happens only where a hard rule or the workflow raises it.
 
-The due time is set when the stage merges, not at creation, so a long stage does not make the deadline pass early. `record` prints `approval-due` when a decision passes its due time. The Manager applies the default with `run.py stage <inst> approve <stage> --default`, which writes the decision's notes and runs `tg done`. `on_timeout = "hold"` is allowed only in config, per rule. A held approval appears in every digest until the owner answers, so it is visible but may wait (G5 counts it separately).
+The due time is set when the stage merges, not at creation, so a long stage does not make the deadline pass early. `record` applies the default itself when a decision passes its due time: it writes the decision's notes, runs `tg done` and prints `approval-due`. `run.py stage <inst> approve <stage> --default` does the same by hand for a Manager that has not run `record`; it refuses before the due time and changes nothing then. A stage that is split has one approval for all its parts: the approval opens, and can be answered, only when every part is merged. `on_timeout = "hold"` is allowed only in config, per rule. A held approval appears in every digest until the owner answers, so it is visible but may wait (G5 counts it separately).
 
 **Conditions.** A stage's approval is the highest of three values: its frontmatter value, the `approval` of any matching rule, and `[workflow_policy] approval_floor` for a verify kind (for example `schema = "manager"`). Nothing lowers an approval during a run.
 

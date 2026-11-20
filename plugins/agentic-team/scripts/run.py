@@ -4149,6 +4149,8 @@ def minutes_since(stamp):
         then = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except ValueError:
         return 0
+    if then.tzinfo is None:  # a time with no zone is read as UTC
+        then = then.replace(tzinfo=datetime.timezone.utc)
     return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds() / 60
 
 
@@ -5677,9 +5679,12 @@ def cmd_record(run, args):
         if task["status"] != "done":
             fill_usage(run, task)
     approve_due(run, snap)
+    for task in snap.in_progress:
+        if note := orphan_note(run, task):
+            run.emit("stage-orphaned", task["id"], None, None, *note)
     if run.marked_done:  # a merge recorded here makes its dependents ready
         snap.ready = run.tg("ready") or []
-    for d in sorted(snap.decisions, key=lambda t: t["id"]):
+    for d in sorted(shown_decisions(snap.decisions), key=lambda t: t["id"]):
         blocks = [b for b in d.get("blocks") or [] if b not in snap.by_id or snap.by_id[b]["status"] != "done"]
         run.emit("decision", d["id"], None, None,
                  f'"{d["title"]}" decider {(d.get("meta") or {}).get("decider") or "none"} '
@@ -8899,18 +8904,19 @@ def workflow_lock(run):
 
 def stage_approval(run, stage, rules, path_set, area):
     """(approval level, on_timeout) of a stage: the highest of its workflow value, the `approval` of each matching rule and
-    the `approval_floor` of its verify kind. A `human` approval holds when a matching rule says so."""
+    the `approval_floor` of its verify kind. A `human` approval holds only when a rule that asks this stage for `human` says so."""
     level = stage.approval
     floor = run.config["workflow_policy"]["approval_floor"].get(stage.verify)
     if floor and LEVEL[floor] > LEVEL[level]:
         level = floor
-    hold = False
     for rule in rules:
         asked = (rule.get("approval") or {}).get(stage.id) or (rule.get("approval") or {}).get(stage.type)
         if asked and LEVEL[asked] > LEVEL[level]:
             level = asked
-        hold = hold or rule.get("on_timeout") == "hold"
-    return level, "hold" if hold and level == "human" else "approve"
+    hold = level == "human" and any(
+        rule.get("on_timeout") == "hold" and ((rule.get("approval") or {}).get(stage.id) or (rule.get("approval") or {}).get(stage.type)) == "human"
+        for rule in rules)  # only a rule that asks this stage for `human` may hold it
+    return level, "hold" if hold else "approve"
 
 
 def approval_notes(stage_id, level, hold):
@@ -8947,14 +8953,14 @@ def add_workflow(run, args):
         raise Refused(f"workflow {wf.name} decides its remaining stages; run.py stage <instance> expand creates them")
     why, acceptance = parse_notes(args.notes)
     if not (why and acceptance):
-        raise Refused("the notes need a sentence on why the work is needed and `- [ ]` acceptance lines: every stage task starts "
-                      "from them")
+        raise Refused("the notes need a sentence on why the work is needed and acceptance lines, written as `- [ ] <line>` or "
+                      "`Acceptance: <line>` (a numbered list does not count): every stage task starts from them")
     for stage in plan.stages:
         if stage.scope == "instance" and not scope:
             raise Refused(f'stage {stage.id} writes the instance SCOPE: add --meta scope="<paths it may write; paths it may not>"')
         if stage.verify != "design-doc" and not (verify or stage.verify_cmd):
             raise Refused(f'stage {stage.id} needs a VERIFY: add --meta verify="<exact commands or checks>"')
-    independent, _, link_of = link_gate(run, args, False)
+    independent, found_candidates, link_of = link_gate(run, args, False)
     risk = max((r["risk"] for r in rules if r.get("risk")), key=lambda v: RISK_RANK[v], default=None)
     design_dir = policy["design_dir"]
     base = wfl.slug(args.title)
@@ -8962,6 +8968,7 @@ def add_workflow(run, args):
     version = wfl.file_version(wf.path)
     created, decisions, entries, root_note = {}, {}, [], None
     instance = None
+    mark = len(run.events)
     with workflow_lock(run):
         try:
             record = {"workflow": wf.name, "version": version, "optional": plan.optional, "rule": rules[0]["name"] if rules else None,
@@ -8978,9 +8985,7 @@ def add_workflow(run, args):
                 created[stage.id] = created_id
             run.edit_meta(instance, workflow_record=record)
         except BaseException:
-            if instance is not None:
-                with contextlib.suppress(Refused):
-                    run.tg("rm", str(instance), "--recursive")
+            roll_back(run, instance, mark)
             raise
     skipped = ", ".join(f"{k} ({'--skip' if v == 'skipped' else 'not asked for'})" for k, v in plan.optional.items() if v != "with")
     approvals = ", ".join(f"{e['id']} {e['approval']}" for e in entries if e["approval"] != "auto")
@@ -8992,7 +8997,36 @@ def add_workflow(run, args):
              + (f"; left out: {skipped}" if skipped else "") + (f"; approvals: {approvals}" if approvals else "")
              + choice_text(pick, applied),
              f"run.py launch {roots[0]}" if roots else None)
+    for _, task, reasons, weak in found_candidates:
+        run.emit("candidate", task["id"], None, None, candidate_detail(task, reasons, weak, link_of(task)))
     return instance
+
+
+def roll_back(run, instance, mark):
+    """`add --workflow` failed: remove what it created and say so. The `added` lines of the tasks already made are dropped
+    from the output; one `workflow-rollback` line lists what was removed and what could not be."""
+    del run.events[mark:]
+    if instance is None:
+        return
+    try:
+        kids = [c["id"] for c in run.tg("ls", "--parent", str(instance)) or []]
+    except Refused:
+        kids = []
+    removed, failed = [], []
+    try:
+        run.tg("rm", str(instance), "--recursive")
+        removed = sorted(kids) + [instance]
+    except Refused:
+        for tid in sorted(kids, reverse=True) + [instance]:
+            try:
+                run.tg("rm", str(tid))
+                removed.append(tid)
+            except Refused as exc:
+                failed.append(f"#{tid} ({exc})")
+    run.emit("workflow-rollback", instance, None, None,
+             "the instance was not created; removed " + (", ".join(f"#{t}" for t in removed) or "nothing")
+             + (f"; could not remove {', '.join(failed)}" if failed else ""),
+             f"remove them by hand: tg rm <id>" if failed else None)
 
 
 def answers_of(run, catalog, text):
@@ -9159,7 +9193,8 @@ def workflow_context(run, task):
         body = found[-1].get("body") or ""
         bits = [short_field(body, "Summary"), f"Files: {short_field(body, 'Files')}" if short_field(body, "Files") else "",
                 f"Head {short_field(body, 'Head')[:7]}" if short_field(body, "Head") else ""]
-        text += f"\n- Upstream {node['meta']['stage']} #{dep['id']}: " + "; ".join(b for b in bits if b)
+        if any(bits):
+            text += f"\n- Upstream {node['meta']['stage']} #{dep['id']}: " + "; ".join(b for b in bits if b)
     if meta.get("workflow_notes"):
         text += "\n- Workflow notes: " + str(meta["workflow_notes"]).replace("\n", "\n  ")
     return "\n" + text
@@ -9171,27 +9206,57 @@ def hours_from_now(hours):
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)
 
 
+STAGE_STATUSES = ("open", "in_progress", "done", "ready", "blocked")
+
+
+def stage_parts_of(run, stage):
+    """Every task of the stage of `stage` under its instance: the stage task, and the parts that `stage split` made."""
+    sid, parent = (stage.get("meta") or {}).get("stage"), stage.get("parent")
+    if not sid or parent is None:
+        return [stage]
+    return [t for t in run.tg("ls", "--parent", str(parent), "--status", *STAGE_STATUSES) or []
+            if (t.get("meta") or {}).get("stage") == sid and t["type"] == "task"]
+
+
+def due_time(run, value, tid):
+    """The due time of an approval as an aware datetime, or None when it cannot be read. A time with no zone is read as UTC."""
+    try:
+        due = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=datetime.timezone.utc)
+        run.emit("warn", tid, None, None, f"the due time {value} of decision #{tid} has no time zone; read as UTC")
+    return due
+
+
 def open_approval(run, stage, node=None):
-    """A stage merged: its approval decision becomes due. A `manager` decision gets its due time (`manager_due_hours`); a
-    `human` one turns into an operator decision with its due time (`human_due_hours`, or none when it holds), and the
-    owner is told once, through the notify queue. A decision that is open already, or done, is left as it is."""
+    """A stage merged: its approval decision becomes due, once every part of the stage is merged. A `manager` decision gets its due
+    time (`manager_due_hours`); a `human` one turns into an operator decision with its due time (`human_due_hours`, or none when it
+    holds), and the owner is told once, through the notify queue. A decision that is open already, or done, is left as it is."""
     meta = stage.get("meta") or {}
-    if run.dry_run or not meta.get("approval_id") or meta.get("stage_state") == "skipped":
+    if run.dry_run or meta.get("stage_state") == "skipped" or not (meta.get("approval_id") or meta.get("stage_part")):
         return
-    node = node or run.show(meta["approval_id"])
-    nmeta = node.get("meta") or {}
-    if node["status"] == "done" or nmeta.get("approval_state") != "pending":
+    parts = stage_parts_of(run, stage)
+    did = next((t["meta"]["approval_id"] for t in parts if (t.get("meta") or {}).get("approval_id")), None)
+    if not did or any(t["status"] != "done" for t in parts):
         return
-    policy, level = run.config["workflow_policy"], nmeta.get("approval_level")
-    hold = level == "human" and nmeta.get("on_timeout") == "hold"
-    fields = {"approval_state": "open"}
-    due = None
-    if not hold:
-        due = hours_from_now(policy["human_due_hours"] if level == "human" else policy["manager_due_hours"])
-        fields.update(due_at=due.strftime("%Y-%m-%dT%H:%M:%SZ"), decide_by=due.date().isoformat())
-    if level == "human":
-        fields["decider"] = "operator"
-    run.write_meta(node, **fields)
+    with workflow_lock(run):
+        node = run.show(did)  # read again inside the lock: a manual approve may have answered it
+        nmeta = node.get("meta") or {}
+        if node["status"] == "done" or nmeta.get("approval_state") != "pending":
+            return
+        policy, level = run.config["workflow_policy"], nmeta.get("approval_level")
+        hold = level == "human" and nmeta.get("on_timeout") == "hold"
+        fields = {"approval_state": "open"}
+        due = None
+        if not hold:
+            due = hours_from_now(policy["human_due_hours"] if level == "human" else policy["manager_due_hours"])
+            local = due.astimezone(ZoneInfo(run.config["sessions"]["timezone"]))
+            fields.update(due_at=due.strftime("%Y-%m-%dT%H:%M:%SZ"), decide_by=local.date().isoformat())
+        if level == "human":
+            fields["decider"] = "operator"
+        run.write_meta(node, **fields)
     waits = [b["id"] if isinstance(b, dict) else b for b in node.get("blocks") or []]
     when = "no deadline: it waits for you" if hold else f"due {fields['due_at']}, default {nmeta.get('default') or 'approve'}"
     run.emit("approval-opened", node["id"], None, None,
@@ -9231,13 +9296,17 @@ def approve_due(run, snap):
         meta = d.get("meta") or {}
         if meta.get("approval_state") != "open" or not meta.get("due_at") or meta.get("on_timeout") == "hold" and meta.get("approval_level") == "human":
             continue
-        try:
-            due = datetime.datetime.fromisoformat(str(meta["due_at"]).replace("Z", "+00:00"))
-        except ValueError:
+        due = due_time(run, meta["due_at"], d["id"])
+        if due is None or now < due:
             continue
-        if now >= due:
-            close_approval(run, d, f"Approved by default at {run.now()}: nobody answered by {meta['due_at']}.")
-            snap.decisions.remove(d)
+        with workflow_lock(run):
+            node = run.show(d["id"])  # read again inside the lock: `stage approve` may have answered it since the list was read
+            nmeta = node.get("meta") or {}
+            answered = node["status"] == "done" or nmeta.get("approval_state") != "open"
+            if not answered:
+                close_approval(run, node, f"Approved by default at {run.now()}: nobody answered by {nmeta['due_at']}.")
+        snap.decisions.remove(d)
+        if not answered:
             run.emit("approval-due", d["id"], None, None,
                      f"the {meta.get('approval_level')} approval of {meta.get('approval_stage')} passed its due time {meta['due_at']}; "
                      "applied the default: approve")
@@ -9291,14 +9360,14 @@ def stage_approve(run, args):
     if decision["status"] == "done":
         run.emit("approved", did, None, None, f"{args.stage} of #{args.id} is approved already")
         return
-    if run.show(stage["id"])["status"] != "done":
-        raise Refused(f"stage {args.stage} (#{stage['id']}) is not merged yet; its approval opens when it merges")
+    unmerged_parts = [t["id"] for t in found[args.stage] if t["status"] != "done"]
+    if unmerged_parts:
+        raise Refused(f"stage {args.stage} ({', '.join('#%d' % i for i in unmerged_parts)}) is not merged yet; its approval opens "
+                      "when every part of it has merged")
     level = dmeta.get("approval_level")
     if args.default:
         if dmeta.get("approval_state") != "open":
-            open_approval(run, stage, decision)
-            decision = run.show(did)
-            dmeta = decision.get("meta") or {}
+            raise Refused(f"the approval of {args.stage} is not open, so it is not due: run.py record opens it when it sees the merge")
         if dmeta.get("on_timeout") == "hold" and level == "human":
             raise Refused(f"the approval of {args.stage} holds until the owner answers (its rule sets on_timeout = \"hold\"); "
                           f"run.py stage {args.id} approve {args.stage} --by operator once the owner has")
@@ -9310,9 +9379,12 @@ def stage_approve(run, args):
     if level == "human" and args.by != "operator":
         raise Refused(f"the approval of {args.stage} is the owner's: run.py stage {args.id} approve {args.stage} --by operator "
                       "once the owner has answered, or --default after the due time")
+    declined = False
+    if args.by == "operator" and level == "manager":
+        run.emit("warn", did, None, None, f"--by operator answers the manager approval of {args.stage} without the triage and split checks")
     if args.by == "manager":
-        problems = [f"decision follow-up {row} is not triaged (run.py triage {stage['id']} --row {row} --to ...)"
-                    for row in untriaged_decisions(run, stage["id"])]
+        problems = [f"decision follow-up {row} is not triaged (run.py triage {part['id']} --row {row} --to ...)"
+                    for part in found[args.stage] for row in untriaged_decisions(run, part["id"])]
         later = [b["id"] if isinstance(b, dict) else b for b in decision.get("blocks") or []]
         entries = {e["id"]: e for e in record.get("stages") or []}
         for tid in later:
@@ -9321,11 +9393,14 @@ def stage_approve(run, args):
                     and not (found[sid][0].get("meta") or {}).get("split_declined"):
                 if args.decline_split:
                     run.edit_meta(found[sid][0]["id"], split_declined=args.decline_split.strip())
+                    declined = True
                 else:
                     problems.append(f"stage {sid} may be split and is not: run.py stage {args.id} split {sid} --part \"<title>\" "
                                     f"--meta scope=..., or --decline-split \"<one line>\"")
         if problems:
             raise Refused(f"the approval of {args.stage} cannot be answered yet:\n  " + "\n  ".join(problems))
+    if args.decline_split and not declined:
+        run.emit("warn", did, None, None, f"--decline-split ignored: no stage after {args.stage} may be split and is not split yet")
     note = (args.note or "").strip()
     close_approval(run, decision, f"Approved by {args.by} at {run.now()}" + (f": {note}" if note else "."))
     run.emit("approved", did, None, None, f"{args.stage} of #{args.id}: approved by {args.by}")
@@ -9476,7 +9551,9 @@ def stage_split(run, args):
                 if k in (first.get("meta") or {})]
         tid = cmd_add(run, argparse.Namespace(
             title=title, notes=(first.get("notes") or "") + f"\nPart {number} of stage {args.stage}: {args.part.strip()}.", depends=upstream + extra,
-            blocks=[], independent=None, parent=args.id, type=None, start=None, due=None, promised=None, priority=None, workflow=None,
+            blocks=[], independent=None if upstream + extra else ((first.get("meta") or {}).get("independent")
+                                                                  or f"root stage of workflow instance #{args.id}"),
+            parent=args.id, type=None, start=None, due=None, promised=None, priority=None, workflow=None,
             meta=[*keep, meta_arg("scope", scope), meta_arg("stage_part", number), meta_arg("stage_origin", "split")]))
         followers = [b["id"] if isinstance(b, dict) else b for b in first.get("blocks") or []]
         for later in followers:
@@ -9487,6 +9564,24 @@ def stage_split(run, args):
     entry["parts"] = parts_ids
     run.edit_meta(args.id, workflow_record=record)
     recheck_rules(run, args.id)  # a part may write paths that a rule matches and the instance SCOPE did not
+
+
+def orphan_note(run, task):
+    """(detail, next) for an abandoned stage task whose dependents wait for it forever, or None. The commands that replace the
+    stage or cancel the instance come with a later phase; until then the Manager reports it."""
+    meta = task.get("meta") or {}
+    if not (meta.get("abandoned") and meta.get("stage") and task.get("parent") is not None):
+        return None
+    waiting = []
+    for b in run.show(task["id"]).get("blocks") or []:
+        node = run.show(b["id"] if isinstance(b, dict) else b)
+        if node["status"] != "done":
+            waiting.append(f"#{node['id']} ({(node.get('meta') or {}).get('stage') or 'approval of ' + str((node.get('meta') or {}).get('approval_stage'))})")
+    if not waiting:
+        return None
+    return (f"stage {meta['stage']} of #{task['parent']} (#{task['id']}) was abandoned; {', '.join(waiting)} wait for it and never start",
+            f"put it in the report; run.py stage replace and cancel come with a later phase: until then create the stage again "
+            f"(run.py add --parent {task['parent']}), move the dependents with tg dep add and tg dep rm, or remove the instance with tg rm {task['parent']} --recursive")
 
 
 def cmd_abandon(run, args):
@@ -9546,6 +9641,8 @@ def cmd_abandon(run, args):
     run.emit("abandoned", tid, attempt, None,
              f"({args.mode}: {why}): worktrees kept: {', '.join(sorted(names)) or 'none'}; "
              "list them in the report for the operator to remove" + request)
+    if note := orphan_note(run, run.show(tid)):
+        run.emit("stage-orphaned", tid, None, None, *note)
 
 
 # ------------------------------------------------------------------ status
@@ -9904,6 +10001,11 @@ def result_label(row):
     return row["status"] if row["kind"] == "task" else f"{row['kind']} {row['status']}"
 
 
+def shown_decisions(decisions):
+    """The decisions to list as open: an approval that waits for its stage to merge (`pending`) is not one yet."""
+    return [d for d in decisions if (d.get("meta") or {}).get("approval_state") != "pending"]
+
+
 def workflow_picks(run, since):
     """Rows (instance, workflow, how it was chosen) of the workflow instances picked since `since` whose pick was unsure, whose
     rule changed the work, or that the owner overrode: what the operator reads after the fact."""
@@ -9993,7 +10095,7 @@ def cmd_status(run, args):
     change_text = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in changes.items() if v) or "no changes"
     decisions = [(f"#{d['id']} {d['title']}", (d.get("meta") or {}).get("decider"), d.get("due"),
                   ids_text([b for b in d.get("blocks") or [] if b not in snap.by_id or snap.by_id[b]["status"] != "done"]))
-                 for d in snap.decisions]
+                 for d in shown_decisions(snap.decisions)]
     free, waits = snap.ready_tasks()
     ready = [(f"#{i}", snap.by_id[i]["title"] if i in snap.by_id else "") for i in free]
     ready += [(f"#{c}", f"waits: dependency #{d} not merged") for c, d in waits]

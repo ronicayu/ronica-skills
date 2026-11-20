@@ -15,7 +15,7 @@ META_KEYS: list[tuple[tuple[str, ...], str, str]] = [
     (("estimate",), "plan",
      "Taskgraph's own estimate in hours. The worker's timebox is twice it."),
     (("workflow", "workflow_record"), "`add --workflow`",
-     ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule`, "
+     ("On a workflow instance task: the workflow's name, and its record as JSON (`workflow`, `version`, `optional`, `rule` (the first matching rule), "
       "`pick`: the two answers, their seeds, the workflow resolved, the resolution rule and whether it was unsure; `rules`: each "
       "hard rule that matched, with what it did; `picked_at`, `overrides`, "
       "`adjustments`, `ended`, `scope`, `verify`, and `stages`: each stage's `id`, `type`, `task`, `approval`, `approval_id`, `split`, "
@@ -357,7 +357,7 @@ COMMAND_DOCS: dict[str, str] = {
      "(`triage`), and each splittable stage after it is split (`split`) or declined with `--decline-split \"<one line>\"`. "
      "A `human` approval needs `--by operator`, after the owner has answered. `--default` applies the default (approve) of an "
      "approval that is past its due time; it refuses an approval that holds (`on_timeout = \"hold\"`). `record` applies the same "
-     "default itself at the due time (`approval-due`), so `--default` is for a Manager that runs it by hand. `split`: adds a "
+     "default itself at the due time (`approval-due`), so `--default` is for a Manager that runs it by hand; it refuses before the due time and changes nothing. A split stage has one approval for all its parts: it opens, and can be answered, only when every part has merged, and the triage check reads every part. `--by operator` on a `manager` approval skips the triage and split checks and prints a `warn` line. `split`: adds a "
      "part to a stage whose workflow sets `split: true`, before the stage has an attempt. The first call re-titles the stage's "
      "own task as part 1; each later call creates a part with the same upstream dependencies, and every later stage then "
      "depends on all parts. `--meta scope=` is required. A part whose files overlap a sibling's must name it with "

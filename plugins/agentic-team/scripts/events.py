@@ -24,6 +24,8 @@ EVENTS: dict[str, str] = {
     "workflow-picked": "The two typed answers of a workflow pick, their seeds and the resolution (`add --pick`; `workflows --resolve` records nothing).",
     "workflow-rule": "A hard rule matched an instance: forced a stage on, moved the work to another workflow, or matched again after the SCOPE changed.",
     "workflow-rechosen": "`stage rechoose` replaced the stages of an instance that had not started with those of another workflow.",
+    "workflow-rollback": "`add --workflow` failed after it created tasks: what was removed, and what could not be.",
+    "stage-orphaned": "An abandoned stage task has stages or an approval that wait for it and never start.",
     "approval-opened": "A stage merged and its approval decision is open: its due time and default; a `human` one is now the owner's.",
     "approval-due": "An approval decision passed its due time and `record` applied its default (approve).",
     "approved": "A stage approval was answered: by the Manager, the owner or the default.",

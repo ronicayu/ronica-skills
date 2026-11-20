@@ -13,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import zoneinfo
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -52,9 +53,9 @@ class Base(unittest.TestCase):
                     "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "CLAUDE_CONFIG_DIR": os.path.join(self.home, "claude")}
         self.env.pop("TASKGRAPH_TG", None)
 
-    def config(self, extra, enabled=True):
+    def config(self, extra, enabled=True, timezone="UTC"):
         with open(os.path.join(self.root, ".agentic-team.toml"), "w") as fh:
-            fh.write('[taskgraph]\nproject = "demo"\n[sessions]\ntimezone = "UTC"\n'
+            fh.write('[taskgraph]\nproject = "demo"\n[sessions]\ntimezone = "%s"\n' % timezone +
                      f"[workflow_policy]\nenabled = {str(enabled).lower()}\n" + textwrap.dedent(extra))
 
     def project_workflow(self, name, text):
@@ -510,6 +511,271 @@ class RuleConfigTest(Base):
         for expected in ("approval_floor must be", "name must be lowercase", "needs match_paths or match_area", "risk must be one of",
                          "on_timeout must be one of", "approval must be a table", "unknown key colour"):
             self.assertIn(expected, text)
+
+
+SPLITTY = """\
+    ---
+    name: splitty
+    description: impl splits, manager approval on impl.
+    stages:
+      - {id: impl, split: true, approval: manager}
+      - {id: test, after: [impl]}
+    ---
+    ## When to use
+    Always.
+    """
+LATER = """\
+    ---
+    name: later
+    description: spec, then an impl that splits with a manager approval.
+    stages:
+      - {id: spec}
+      - {id: impl, after: [spec], split: true, approval: manager}
+      - {id: test, after: [impl]}
+    ---
+    ## When to use
+    Always.
+    """
+WRAPPER = """\
+import os, subprocess, sys
+args = sys.argv[1:]
+words = [a for a in args if not a.startswith("-")]
+count = os.environ["WRAP_COUNT"]
+if "add" in words[:3] and "result" not in words[:3]:
+    n = int(open(count).read()) + 1 if os.path.exists(count) else 1
+    open(count, "w").write(str(n))
+    if n == int(os.environ["WRAP_FAIL_ADD"]):
+        sys.stderr.write("boom\\n")
+        sys.exit(1)
+if "rm" in words[:3] and os.environ.get("WRAP_FAIL_RM"):
+    sys.stderr.write("cannot remove\\n")
+    sys.exit(1)
+sys.exit(subprocess.run([sys.executable, os.environ["WRAP_TG"], *args]).returncode)
+"""
+
+
+class ReviewFixTest(Base):
+    """The fixes of the W2 review: split approvals, locks, hold, pending decisions, rollback, orphans and small points."""
+
+    def split_two(self, workflow="splitty"):
+        self.project_workflow(workflow, SPLITTY if workflow == "splitty" else LATER)
+        inst = self.instance(self.add(workflow))
+        stages = self.stages(inst)
+        if "spec" in stages:
+            self.merge(stages["spec"])
+        self.events("stage", str(inst), "split", "impl", "--part", "api", "--meta", "scope=src/api/")
+        events = self.events("stage", str(inst), "split", "impl", "--part", "web", "--meta", "scope=src/web/")
+        return inst, stages, next(e["task"] for e in events if e["event"] == "split")
+
+    def test_a_root_stage_can_be_split_and_part_two_copies_the_independent_reason(self):
+        inst, stages, second = self.split_two()
+        self.assertEqual(self.meta(second)["independent"], self.meta(stages["impl"])["independent"])
+        self.assertEqual(self.meta(second)["stage_part"], 2)
+
+    def test_the_approval_of_a_split_stage_opens_only_when_every_part_has_merged(self):
+        inst, stages, second = self.split_two()
+        dec = self.approval(inst, "impl")
+        self.merge(stages["impl"])
+        self.assertEqual(self.meta(dec)["approval_state"], "pending")
+        self.events("record")
+        self.assertEqual(self.meta(dec)["approval_state"], "pending")
+        self.assertIn("is not merged yet", self.refused("stage", str(inst), "approve", "impl"))
+        self.tg("edit", str(dec), "--meta", f'due_at="{stamp(-datetime.timedelta(minutes=1))}"')
+        self.events("record")
+        self.assertNotEqual(self.node(dec)["status"], "done")  # a stale due time on a pending approval is no default
+        self.merge(second)
+        self.assertEqual(self.meta(dec)["approval_state"], "open")
+        self.events("stage", str(inst), "approve", "impl", "--decline-split", "nothing to split")
+        self.assertEqual(self.node(dec)["status"], "done")
+
+    def test_the_part_that_merges_last_opens_the_approval_and_a_default_waits_for_every_part(self):
+        inst, stages, second = self.split_two()
+        dec = self.approval(inst, "impl")
+        self.merge(second)
+        self.assertEqual(self.meta(dec)["approval_state"], "pending")
+        self.merge(stages["impl"])
+        self.assertEqual(self.meta(dec)["approval_state"], "open")
+
+    def test_the_triage_check_reads_the_decision_follow_ups_of_every_part(self):
+        inst, stages, second = self.split_two()
+        self.merge(stages["impl"])
+        self.merge(second)
+        self.report(second, "Status: PASS\nHead: " + SHA + "\nFollow-ups: decision: which port: owner call\n")
+        message = self.refused("stage", str(inst), "approve", "impl")
+        self.assertIn(f"run.py triage {second} --row", message)
+
+    def test_a_default_that_is_not_due_changes_nothing_and_queues_nothing(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        dec = self.approval(inst, "prd")
+        self.tg("edit", str(dec), "--meta", 'approval_state="pending"')
+        self.assertIn("is not open", self.refused("stage", str(inst), "approve", "prd", "--default"))
+        self.assertEqual(self.meta(dec)["approval_state"], "pending")
+        self.assertEqual([e for e in self.queue() if e["event"] == "notify"], [])
+
+    def test_a_default_that_record_applies_is_not_applied_over_a_manual_answer(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        dec = self.approval(inst, "prd")
+        self.tg("edit", str(dec), "--meta", f'due_at="{stamp(-datetime.timedelta(minutes=1))}"')
+        real = runner.due_time
+        env = dict(self.env)
+
+        def answered_meanwhile(run, value, tid):
+            self.tg("edit", str(tid), "--notes", "Approved by manager: checked", "--meta", 'approval_state="done"')
+            self.tg("done", str(tid))
+            return real(run, value, tid)
+
+        args = runner.build_parser().parse_args(["--root", self.root, "--tg", TG, "record"])
+        old_env = dict(os.environ)
+        os.environ.update(env)
+        runner.due_time = answered_meanwhile
+        try:
+            run = runner.Run(args)
+            snap = runner.Snapshot(run)
+            runner.approve_due(run, snap)
+            self.assertEqual([e["event"] for e in run.events if e["event"] == "approval-due"], [])
+        finally:
+            runner.due_time = real
+            os.environ.clear()
+            os.environ.update(old_env)
+        self.assertEqual(self.node(dec)["notes"], "Approved by manager: checked")
+
+    def test_a_hold_rule_holds_only_the_approval_it_raised(self):
+        self.config("""
+            [[workflow_rule]]
+            name = "a"
+            match_paths = ["src/**"]
+            approval = { prd = "human" }
+            [[workflow_rule]]
+            name = "b"
+            match_area = ["billing"]
+            approval = { impl = "manager" }
+            on_timeout = "hold"
+            """)
+        inst = self.instance(self.add("change", "T", meta=("scope=src/export/", "verify=make test", "area=billing")))
+        meta = self.meta(self.approval(inst, "prd"))
+        self.assertEqual((meta["approval_level"], meta["on_timeout"], meta["default"]), ("human", "approve", "approve"))
+        record = self.meta(inst)["workflow_record"]
+        self.assertEqual(record["rule"], "a")
+        self.assertEqual([r["rule"] for r in record["rules"]], ["a", "b"])
+
+    def test_a_pending_approval_is_not_listed_as_an_open_decision(self):
+        inst = self.instance(self.add("feature", "F", "--with", "ux"))
+        events = self.events("record")
+        self.assertEqual([e for e in events if e["event"] == "decision"], [])
+        status = json.loads(self.run_cmd("--json", "status").stdout)
+        self.assertEqual(status["decisions"], [])
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        self.assertEqual(len(json.loads(self.run_cmd("--json", "status").stdout)["decisions"]), 1)
+
+    def test_a_failed_add_rolls_back_and_prints_no_added_lines(self):
+        wrap = os.path.join(self.dir, "tgwrap.py")
+        with open(wrap, "w") as fh:
+            fh.write(WRAPPER)
+        self.env.update(WRAP_COUNT=os.path.join(self.dir, "count"), WRAP_TG=TG, WRAP_FAIL_ADD="4")
+        ext = self.tg("add", "External", "--meta", 'independent="x"')["id"]
+        out = subprocess.run([sys.executable, RUN, "--root", self.root, "--tg", wrap, "add", "Add export", "--workflow", "change", "--notes",
+                              NOTES, "--meta", "scope=src/export/", "verify=make test", "--blocks", str(ext)],
+                             capture_output=True, text=True, cwd=self.dir, env=self.env)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)  # the failed tg call
+        self.assertIn("workflow-rollback", out.stdout)
+        self.assertIn("the instance was not created; removed", out.stdout)
+        self.assertNotIn("added #", out.stdout)
+        self.assertEqual([t["title"] for t in self.tg("ls")], ["External"])
+        self.assertEqual(self.node(ext)["depends_on"], [])
+
+    def test_a_rollback_that_cannot_remove_says_what_is_left(self):
+        wrap = os.path.join(self.dir, "tgwrap.py")
+        with open(wrap, "w") as fh:
+            fh.write(WRAPPER)
+        self.env.update(WRAP_COUNT=os.path.join(self.dir, "count"), WRAP_TG=TG, WRAP_FAIL_ADD="3", WRAP_FAIL_RM="1")
+        out = subprocess.run([sys.executable, RUN, "--root", self.root, "--tg", wrap, "add", "Add export", "--workflow", "change", "--notes",
+                              NOTES, "--meta", "scope=src/export/", "verify=make test", "--independent", "alone"],
+                             capture_output=True, text=True, cwd=self.dir, env=self.env)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)  # the failed tg call
+        self.assertIn("could not remove", out.stdout)
+        self.assertIn("tg rm <id>", out.stdout)
+
+    def test_an_abandoned_stage_names_what_waits_for_it_in_the_abandon_and_in_record(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.tg("edit", str(stages["prd"]), "--meta", "attempt=1", "sessions=[]")
+        self.tg("start", str(stages["prd"]))
+        events = self.events("abandon", str(stages["prd"]), "superseded", "--why", "dropped")
+        line = next(e for e in events if e["event"] == "stage-orphaned")
+        self.assertIn(f"#{stages['impl']}", line["detail"])
+        self.assertIn(f"#{self.approval(inst, 'prd')}", line["detail"])
+        self.assertIn("never start", line["detail"])
+        again = [e for e in self.events("record") if e["event"] == "stage-orphaned"]
+        self.assertEqual(len(again), 1)
+
+    def test_decide_by_is_the_date_in_the_project_time_zone(self):
+        self.config("", timezone="Pacific/Kiritimati")
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        meta = self.meta(self.approval(inst, "prd"))
+        due = datetime.datetime.strptime(meta["due_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        expected = due.astimezone(zoneinfo.ZoneInfo("Pacific/Kiritimati")).date().isoformat()
+        self.assertEqual(meta["decide_by"], expected)
+
+    def test_a_due_time_without_a_zone_is_read_as_utc_and_does_not_crash_record_or_approve(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        dec = self.approval(inst, "prd")
+        self.tg("edit", str(dec), "--meta", 'due_at="2020-01-01T00:00:00"')
+        self.events("stage", str(inst), "approve", "prd", "--default")
+        self.assertEqual(self.node(dec)["status"], "done")
+        inst2 = self.instance(self.add("change", "Second"))
+        stages2 = self.stages(inst2)
+        self.merge(stages2["prd"])
+        dec2 = self.approval(inst2, "prd")
+        self.tg("edit", str(dec2), "--meta", 'due_at="2020-01-01T00:00:00"')
+        events = self.events("record")
+        self.assertTrue([e for e in events if e["event"] == "warn" and "no time zone" in e["detail"]])
+        self.assertEqual(self.node(dec2)["status"], "done")
+
+    def test_the_relay_leaves_out_an_upstream_line_with_no_fields(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.report(stages["prd"], "Status: PASS\n")
+        self.merge(stages["prd"])
+        self.events("stage", str(inst), "approve", "prd")
+        text = self.run_cmd("launch", str(stages["impl"]), "--dry-run").stdout
+        self.assertNotIn("- Upstream prd", text)
+
+    def test_the_notes_check_names_what_it_accepts(self):
+        refused = self.run_cmd("add", "N", "--workflow", "change", "--notes", "Why: x\n1. works\n2. also", "--meta", "scope=src/",
+                               "verify=make", "--independent", "a")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("`- [ ] <line>` or `Acceptance: <line>`", refused.stderr)
+        ok = self.run_cmd("add", "N", "--workflow", "change", "--notes", "Users need it.\nAcceptance: it works", "--meta", "scope=src/",
+                          "verify=make", "--independent", "a")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_add_workflow_lists_the_candidates_of_the_gate(self):
+        self.tg("add", "Export module work", "--notes", "x", "--meta", 'scope="src/export/"', 'independent="x"')
+        events = self.add("hotfix")
+        self.assertTrue([e for e in events if e["event"] == "candidate"])
+
+    def test_an_operator_answer_of_a_manager_approval_warns_that_the_checks_are_skipped(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        events = self.events("stage", str(inst), "approve", "prd", "--by", "operator")
+        self.assertTrue([e for e in events if e["event"] == "warn" and "without the triage and split checks" in e["detail"]])
+
+    def test_decline_split_with_nothing_to_split_warns(self):
+        inst = self.instance(self.add("change"))
+        stages = self.stages(inst)
+        self.merge(stages["prd"])
+        events = self.events("stage", str(inst), "approve", "prd", "--decline-split", "no need")
+        self.assertTrue([e for e in events if e["event"] == "warn" and "--decline-split ignored" in e["detail"]])
 
 
 class PlanTest(unittest.TestCase):
