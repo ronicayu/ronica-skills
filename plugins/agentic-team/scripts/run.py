@@ -136,7 +136,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import host as codehost  # noqa: E402
 import mailbox as mbx  # noqa: E402  (the plugin's own scripts/mailbox.py, found first on the path)
 from config import (ADJACENT_KINDS, DEFAULT_PROFILE, DISPOSABLE_DEFAULT, ConfigError, load, problems as config_problems,  # noqa: E402
-                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles)
+                    manager_version, profile_path, resolve_model, taskgraph_store, tier_profiles, verifier_model)
 from zoneinfo import ZoneInfo  # noqa: E402
 
 # ------------------------------------------------------------------ common
@@ -1707,6 +1707,20 @@ def role_section(role, kind, variables=None):
     return "\n\n".join(parts + [fill(role.method, variables)])
 
 
+TIER_NOTES = {
+    "judgement": ("For reading or searching code, start a non-fork Sonnet subagent with a narrow question and use its "
+                  "answer; do not read large files yourself."),
+}
+
+
+def tier_note(role_text, tier, rounding=False):
+    """The ROLE section of a worker brief with the note of its tier (TIER_NOTES) after the role text; none in a round."""
+    note = TIER_NOTES.get(tier)
+    if rounding or not note:
+        return role_text
+    return note if role_text == "None." else f"{role_text}\n\n{note}"
+
+
 def cmd_roles(run, args):
     """List every role file with its source and defaults. Read only. Exits 1 when a file is broken."""
     found, rows, broken = role_files(run), [], 0
@@ -2272,11 +2286,13 @@ def task_own_base(run, task, base):
     return str((task.get("meta") or {}).get("base") or base or "")
 
 
-def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None):
+def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, retry=False, cap=0, role=None, seat=None,
+           tier=None):
     """The brief text. Taskgraph is the only source of task content. `role` is the task's role, or the round kind's role
     in a round: its Method goes into a worker brief and its Review into a verifier brief, with the {{NAME}} variables of
     the task and the round filled in. `seat` is the verifier's folder: its own (the default, the session name), or the
-    task worktree (#127), where it is read only and keeps its scratch files in the run directory."""
+    task worktree (#127), where it is read only and keeps its scratch files in the run directory. `tier` is the tier
+    of a worker attempt that launch has chosen; without it, the tier that the task names."""
     tid = task["id"]
     meta = task.get("meta") or {}
     tg_cmd = f"{quote(sys.executable)} {quote(run.tg_path)} --db {quote(run.db)} --project {shlex.quote(run.project)}"
@@ -2499,6 +2515,8 @@ def render(run, task, kind, attempt, session, ref=None, worker=None, base=None, 
                       f"`git rev-parse HEAD` is not `{base}`, report BLOCKED and change nothing."),
             "CHECKPOINT": checkpoint,
             "UPSTREAM": "\n\n".join(upstream),
+            "ROLE": tier_note(values["ROLE"], tier or (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier,
+                              rounding),
             "VERIFY": values["VERIFY"] + self_review_text(verify_kind(run, task, strict=False), rounding),
             "AUTONOMY": (f"- Standing grant: {autonomy['grant'] or 'None. Report product decisions as BLOCKED.'}\n"
                          f"- Always pause for: {'; '.join(autonomy['always_pause']) or 'None'}"),
@@ -3091,7 +3109,7 @@ def cmd_launch(run, args):
     tier = picked.tier
     role_size_warning(run, task, picked.role, nxt)
     cap = asks_cap(run, task, tier)
-    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role)
+    text = render(run, task, "task", nxt, session, base=base, retry=continuing, cap=cap, role=picked.role, tier=tier)
     check_cap(run, getattr(args, "dry_run", False))
     model, effort, profile = worker_model(run, args, tier)
     worktree = f"task-{tid}"
@@ -3110,13 +3128,13 @@ def cmd_launch(run, args):
             shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
             notes.insert(0, f"committed {len(porcelain)} uncommitted files of attempt {current} as {base[:7]} ({shown}); "
                             "this includes every untracked file that is not ignored, and in pr mode it is pushed with the branch")
-            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+            text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
         if run.pr_mode:
             moved = restack(run, task, branch, base, then=f"run.py launch {tid} --attempt {nxt}")
             if moved != base:
                 notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
                 base = moved
-                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
     elif mode == "reattach":
         if os.path.realpath(wt) in worktree_locks(run):  # prune skips a locked registration
             raise Refused(f"{rel} is a stale worktree registration that is locked; run git worktree unlock {rel}, "
@@ -3135,7 +3153,7 @@ def cmd_launch(run, args):
             if moved != base:
                 notes.append(f"rebased {branch} onto the target: {base[:7]} -> {moved[:7]}")
                 base = moved
-                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role)
+                text = render(run, task, "task", nxt, session, base=base, retry=True, cap=cap, role=picked.role, tier=tier)
     else:
         add_worktree(run, worktree, base)
     created = mode in ("first", "base", "head")
@@ -3465,7 +3483,8 @@ def cmd_verify(run, args):
         k += 1
     name = f"verify-{tid}-{attempt}" + (f"-{k}" if k > 1 else "")
     folder = f"task-{tid}" if seat == "task" else (reuse or name)
-    verifier = run.config["models"]["verifier"]
+    tier = (stored_choice(task) or {}).get("tier") or choose(run, task, strict=False).tier
+    verifier = verifier_model(run.config, tier)  # verifier_by_tier[tier], else verifier
     profile = pick_profile(run, tier_profiles(verifier), args.profile)
     if args.model:
         model, effort = args.model, args.effort
@@ -7500,6 +7519,54 @@ def transcript_usage(path, skip=frozenset()):
     return tuple(sum(u[key] for u in usage) for key in USAGE_KEYS)
 
 
+# platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-18. USD per million tokens, by model family:
+# (input, cache write, cache read, output). Cache write is the 5-minute price; transcripts do not say which TTL was used.
+MODEL_PRICES = {
+    "opus": (4.0, 5.0, 0.20, 20.0),
+    "sonnet": (2.0, 2.5, 0.10, 10.0),
+    "haiku": (0.10, 0.125, 0.01, 0.50),  # prompts up to 100k tokens
+    "fable": (8.0, 10.0, 0.20, 40.0),
+}
+
+
+def model_family(model):
+    """The MODEL_PRICES key that a model alias or id names (`opus[1m]`, `claude-sonnet-5-5`), else None."""
+    text = str(model or "").lower()
+    return next((family for family in MODEL_PRICES if family in text), None)
+
+
+def usage_cost(usage, model):
+    """The estimated USD of a `sessions` entry's `usage` at the price of its model's family, or None for an unknown model."""
+    family = model_family(model)
+    if family is None:
+        return None
+    price = MODEL_PRICES[family]
+    return (usage.get("in", 0) * price[0] + usage.get("cache_write", 0) * price[1]
+            + usage.get("cache_read", 0) * price[2] + usage.get("out", 0) * price[3]) / 1e6
+
+
+def task_cost(task):
+    """(USD, complete) of a task: the `usage` of every `sessions` entry that has one (each message id once, see
+    fill_usage), priced by the entry's model. `complete` is False when an entry with usage has a model that has no price,
+    and it adds nothing. None when no entry has usage."""
+    total, known, complete = 0.0, False, True
+    for e in recorded_sessions(task):
+        usage = e.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        known = True
+        cost = usage_cost(usage, e.get("model"))
+        if cost is None:
+            complete = False
+        else:
+            total += cost
+    return (total, complete) if known else None
+
+
+def cost_text(cost):
+    return None if cost is None else f"${cost[0]:.2f}" + ("" if cost[1] else "+")
+
+
 def entry_transcript(run, task, e, listed=None):
     """(path of the transcript of a `sessions` entry, None), or (None, the reason there is none). `listed` is the rows
     of `claude agents` by id: its row knows the full session id and the profile when the entry does not."""
@@ -8673,6 +8740,7 @@ def cmd_status(run, args):
     summary = {} if args.brief else run.tg("report", "--since", since.date().isoformat()) or {}  # brief: no report
     done, in_flight, waiting, failed, closing, unmerged_rows, attempts = [], [], [], [], [], [], []
     flight_profiles = []  # the Claude profile of each in-flight row; the table shows the column when one is not default
+    costs = {}  # "#<id>" -> estimated cost text of each task whose usage is known; the tables show the column when any is
     gitlab = (run.pr_mode and any(unmerged(t) and (t.get("meta") or {}).get("pr") for t in snap.closed)
               and run.host_class()[0].prefix == "!")
     for task in [] if args.brief else snap.done:  # brief: done work is not computed
@@ -8686,6 +8754,7 @@ def cmd_status(run, args):
             if attempt:
                 attempts.append(attempt)
             verifiers = task_rows(snap.rows(task["id"]), attempt, "verify")
+            costs[tid] = cost_text(task_cost(task))
             tokens = " / ".join(str(meta["tokens"]).split("/", 1)) if meta.get("tokens") else None
             done.append((tid, task["title"], run.zone_time(meta.get("started_at")), run.zone_time(task.get("done_at")), tokens,
                          meta.get("verdict"), verifiers[-1]["author"] if verifiers else None))
@@ -8700,6 +8769,7 @@ def cmd_status(run, args):
     for task in snap.in_progress:
         meta = task.get("meta") or {}
         tid = f"#{task['id']}"
+        costs[tid] = cost_text(task_cost(task))
         rows = snap.rows(task["id"])
         listed = [r for r in rows if r["kind"] not in RECORD_KINDS]
         last = result_label(listed[-1]) if listed else None
@@ -8748,8 +8818,14 @@ def cmd_status(run, args):
     if any(p != DEFAULT_PROFILE for p in flight_profiles):  # a project without profiles keeps its table as it was
         flight_headers.append("Profile")
         in_flight = [(*row, None if p == DEFAULT_PROFILE else p) for row, p in zip(in_flight, flight_profiles)]
+    done_headers = ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"]
+    if any(costs.values()):  # a project whose usage is unknown keeps its tables as they were
+        done_headers.append("Est. cost")
+        done = [(*row, costs.get(row[0])) for row in done]
+        flight_headers.append("Est. cost")
+        in_flight = [(*row, costs.get(row[0])) for row in in_flight]
     sections = [
-        ("done", "Done since last report", ["Task", "Title", "Started", "Done", "Tokens out / in", "Verdict", "Verified by"], done),
+        ("done", "Done since last report", done_headers, done),
         ("in_flight", "In flight", flight_headers, in_flight),
         ("waiting", "Waiting for verification or triage", ["Task", "Title", "Result", "Session", "Checkpoint"], waiting),
         ("verdict_not_closed", "Verdict recorded, not closed", ["Task", "Title", "Verdict", "Attempt", "Last result"], closing),
@@ -8780,7 +8856,9 @@ def cmd_status(run, args):
         items = summary.get(key) or []
         if items:
             out.append(f"Taskgraph {key}: {len(items)}. See `tg report`.")
-    out.append("Token counts cover each session's own transcript only, not its sub-agents.")
+    out.append("Token counts cover each session's own transcript only, not its sub-agents."
+               + (" Est. cost prices each session's tokens at the list price of its model family (MODEL_PRICES in run.py); "
+                  "a `+` means a session with no known price is left out." if any(costs.values()) else ""))
     run.text = "\n".join(out) + "\n"
     run.payload = {"project": run.project, "overall": overall, "since": since.isoformat(), "changes": changes,
                    **{key: [dict(zip(headers, row)) for row in rows] for key, _, headers, rows in sections},

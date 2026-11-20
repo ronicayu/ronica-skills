@@ -6220,7 +6220,7 @@ class RoleTest(Base):
         self.role_file("child", fits=None, extends="base", verify_kind="design-doc", review=None)
         role = self.section(self.brief(self.add_task(role="child")), "ROLE")
         self.assertIn("Load these skills with the Skill tool before you start: a:b.", role)
-        self.assertTrue(role.endswith("Method text of base.\n\nMethod text of child."), role)
+        self.assertTrue(role.split("\n\nFor reading or searching code", 1)[0].endswith("Method text of base.\n\nMethod text of child."), role)
         self.assertEqual(self.section(self.verify_text(self.running_task(role="child")), "ROLE").split("\n\n", 1)[1],
                          "Review text of base.")
         row = next(r for r in json.loads(self.ok("roles", pre=["--json"]).stdout) if r["name"] == "child")
@@ -6517,6 +6517,78 @@ class Issue89Test(Base):
         self.assertIn("`mutation:` lines", code)
         self.assertNotIn("`self-check:`", code)
         self.assertNotIn("Self-review before PASS", self.brief(self.add_task(verify_kind="schema")))
+
+    # --- cost defaults
+
+    def verifier_model_of(self, config_text="", **meta):
+        self.fresh()
+        self.write_config(config_text)
+        task = self.running_task(**meta)
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        return re.search(r"--model (\S+)", self.run_cmd("verify", str(task), "--dry-run").stderr).group(1)
+
+    def test_the_verifier_model_comes_from_verifier_by_tier_then_verifier(self):
+        by_tier = ('[models]\nverifier = "haiku"\n[models.verifier_by_tier]\nimplementation = "sonnet"\n'
+                   'judgement = "opus"\n"data migration" = "fable"\n[models.overrides]\n'
+                   '"data migration" = "opus"\n')
+        for name, config_text, meta, want in (
+                ("a tier of the table", by_tier, {}, "sonnet"),
+                ("another tier of the table", by_tier, {"tier": "judgement"}, "opus"),
+                ("an override key of the table", by_tier, {"tier": "data migration"}, "fable"),
+                ("a tier the table lacks falls back to verifier", by_tier, {"tier": "mechanical"}, "haiku"),
+                ("no table: verifier", '[models]\nverifier = "haiku"\n', {}, "haiku"),
+                ("neither: the model that differs from the worker's", "", {"model": "opus"}, "sonnet"),
+                ("neither, the worker on sonnet", "", {"model": "sonnet"}, "opus")):
+            with self.subTest(name):
+                self.assertEqual(self.verifier_model_of(config_text, **meta), want)
+
+    def test_the_model_flag_beats_verifier_by_tier(self):
+        self.write_config('[models.verifier_by_tier]\nimplementation = "sonnet"\n')
+        task = self.running_task()
+        self.add_result(task, "PASS", f"Task: {task}\nStatus: PASS\nHead: {self.git('rev-parse', 'HEAD')}\n")
+        self.assertIn("--model haiku", self.run_cmd("verify", str(task), "--dry-run", "--model", "haiku").stderr)
+
+    def test_the_judgement_brief_tells_the_worker_to_read_code_through_a_sonnet_subagent(self):
+        note = ("For reading or searching code, start a non-fork Sonnet subagent with a narrow question and use its "
+                "answer; do not read large files yourself.")
+        self.assertIn(note, self.section(self.brief(self.add_task(tier="judgement")), "ROLE"))
+        self.assertNotIn(note, self.brief(self.add_task(tier="implementation")))
+        self.assertNotIn(note, self.verify_text(self.running_task(tier="judgement")))
+
+    GB = 1_000_000
+
+    def usage_entry(self, entry, model, **over):
+        usage = {"out": self.GB, "in": self.GB, "cache_read": self.GB, "cache_write": self.GB}
+        return {**entry, "model": model, "usage": {**usage, **over}}
+
+    def test_status_shows_the_estimated_cost_of_each_task_when_usage_is_known(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"),
+                             self.usage_entry(self.entry(task, 1, "verify"), "opus[1m]"))
+        flight = self.status_sections()["In flight"]
+        self.assertIn("| Checkpoint | Est. cost |", flight)
+        self.assertIn("| $43.80 |", flight)  # sonnet 2 + 2.5 + 0.1 + 10, opus 4 + 5 + 0.2 + 20, per million tokens
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$43.80")
+
+    def test_status_has_no_cost_column_when_no_usage_is_known(self):
+        self.running_task()
+        self.assertNotIn("Est. cost", self.status_sections()["In flight"])
+        self.assertNotIn("Est. cost", json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0])
+
+    def test_status_marks_a_cost_that_leaves_out_a_model_with_no_price(self):
+        task = self.running_task(sessions=[])
+        self.record_sessions(task, self.usage_entry(self.entry(task, 1), "sonnet"),
+                             self.usage_entry(self.entry(task, 1, "verify"), "mystery"))
+        self.assertEqual(json.loads(self.ok("status", pre=["--json"]).stdout)["in_flight"][0]["Est. cost"], "$14.60+")
+
+    def test_the_price_table_prices_a_family_by_substring(self):
+        import run as runner
+        self.assertEqual([runner.model_family(m) for m in ("opus", "opus[1m]", "claude-haiku-4-5-20251001",
+                                                           "claude-sonnet-5-5", "fable", "gpt", None)],
+                         ["opus", "opus", "haiku", "sonnet", "fable", None, None])
+        self.assertAlmostEqual(runner.usage_cost({"out": 100, "in": 200, "cache_read": 300, "cache_write": 400}, "sonnet"),
+                               (200 * 2.0 + 400 * 2.5 + 300 * 0.1 + 100 * 10.0) / 1e6)
+        self.assertIsNone(runner.usage_cost({"out": 1}, "mystery"))
 
     # --- Files: against git
 

@@ -30,6 +30,13 @@ always_pause = []           # decisions that always need the operator
 # mechanical = { model = "haiku", profile = "api" }
 # implementation = { model = "sonnet", effort = "high", profile = ["default", "api"] }
 
+# A verifier per tier (a tier or a [models.overrides] key); it wins over `verifier`. Recommended: Sonnet verifies
+# implementation work at half the price, Opus verifies judgement work. Unset: today's `verifier` rule.
+# [models.verifier_by_tier]
+# implementation = "sonnet"
+# judgement = "opus"
+# mechanical = "sonnet"
+
 # [models.overrides]
 # "data migration" = { model = "opus", effort = "high" }   # use as a task's `tier`
 

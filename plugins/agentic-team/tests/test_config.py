@@ -296,6 +296,33 @@ class ConfigTest(unittest.TestCase):
                 self.write(MINIMAL + f"[report]\n{bad}\n")
                 self.assertEqual(len(config.problems(config.load(self.root))), 1)
 
+    def test_verifier_by_tier_maps_tiers_and_override_keys_to_models(self):
+        self.write(MINIMAL)
+        self.assertEqual(config.load(self.root)["models"]["verifier_by_tier"], {})
+        self.assertIsNone(config.verifier_model(config.load(self.root), "implementation"))
+        self.write(MINIMAL + '[models]\nverifier = "haiku"\n[models.overrides]\n"Data Migration" = "opus"\n'
+                   '[models.verifier_by_tier]\nimplementation = "sonnet"\njudgement = { model = "opus", effort = "high" }\n'
+                   '"data migration" = "fable"\n')
+        loaded = config.load(self.root)
+        self.assertEqual(config.problems(loaded), [])
+        for tier, want in (("implementation", "sonnet"), ("Implementation ", "sonnet"), ("judgement", "opus"),
+                           ("DATA MIGRATION", "fable"), ("mechanical", "haiku"), (None, "haiku")):
+            self.assertEqual(config.verifier_model(loaded, tier)["model"], want, tier)
+        self.assertEqual(config.verifier_model(loaded, "judgement")["effort"], "high")
+
+    def test_verifier_by_tier_rejects_unknown_keys_and_bad_models(self):
+        self.write(MINIMAL + '[models.verifier_by_tier]\nimplementaton = "sonnet"\n')
+        self.assertEqual(config.problems(config.load(self.root)), [
+            'models.verifier_by_tier: "implementaton" is not a tier or a models.overrides key; choose from: mechanical, '
+            "implementation, judgement (did you mean implementation?)"])
+        self.write(MINIMAL + '[models.verifier_by_tier]\nverifier = "sonnet"\n')
+        self.assertEqual(len(config.problems(config.load(self.root))), 1)
+        self.write(MINIMAL + '[models.verifier_by_tier]\njudgement = ""\n')
+        self.assertIn("models.verifier_by_tier must be a table of tier or models.overrides key = model",
+                      config.problems(config.load(self.root))[0])
+        self.write(MINIMAL + '[models.verifier_by_tier]\njudgement = { model = "opus", profile = "nope" }\n')
+        self.assertIn("models.verifier_by_tier.judgement uses profile 'nope'", config.problems(config.load(self.root))[0])
+
     def test_toml_syntax_error(self):
         self.write(MINIMAL + "sessions.max_parallel = \n")
         found = config.problems(config.load(self.root))
