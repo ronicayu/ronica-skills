@@ -64,13 +64,21 @@ CREATE INDEX IF NOT EXISTS idx_results_task ON results(task_id, id);
 """
 
 
+def add_column(conn, table, column, definition):
+    # Two processes may open an old database at once; the one that loses the race finds the column there.
+    if column in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+        return
+    try:
+        with conn:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
+
 def migrate(conn):
-    if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
-        with conn:
-            conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id)")
-    if "summary" not in {r["name"] for r in conn.execute("PRAGMA table_info(results)")}:
-        with conn:
-            conn.execute("ALTER TABLE results ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+    add_column(conn, "tasks", "parent_id", "INTEGER REFERENCES tasks(id)")
+    add_column(conn, "results", "summary", "TEXT NOT NULL DEFAULT ''")
 
 
 def connect(path):

@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from tgstore.base import ResultInput  # noqa: E402
+from tgstore.base import ResultInput, StoreError  # noqa: E402
 from tgstore.github.body import LIMIT  # noqa: E402
 from tgstore.github.comments import join_parts, parse_comment, render_claim, render_result, split_text  # noqa: E402
 
@@ -125,9 +127,36 @@ def test_the_fence_is_longer_than_any_run_of_backticks_in_the_body():
     assert "\n````\na ``` b\n\n````\n\n</details>" in body
 
 
-def test_a_body_with_a_very_long_backtick_run_goes_in_without_a_fence():
-    [body] = render_result(ResultInput("PASS", "task", 1, "w", "`" * 40, "s"), AT)
-    assert body.endswith("<details><summary>Full result</summary>\n\n" + "`" * 40 + "\n\n</details>")
+def test_a_very_long_backtick_run_gets_a_longer_fence():
+    text = "`" * 40 + "\n"
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", text, "s"), AT)
+    assert f"\n{'`' * 41}\n{text}\n{'`' * 41}\n\n</details>" in body
+    assert results([body])[0]["body"] == text
+
+
+def test_a_summary_with_html_is_shown_escaped_and_kept_exact():
+    summary = "a <!-- b --> <script>x</script> & c"
+    [body] = render_result(ResultInput("PASS", "task", 1, "w", "text", summary), AT)
+    visible = body.partition("\n")[2]
+    assert "<!--" not in visible and "<script>" not in visible
+    assert visible.startswith("a &lt;!-- b --&gt; &lt;script&gt;x&lt;/script&gt; &amp; c\n\n<details>")
+    [out] = results([body])
+    assert out["summary"] == summary and out["body"] == "text"
+
+
+def test_a_comment_whose_line_ends_became_crlf_still_unwraps():
+    row = ResultInput("PASS", "task", 1, "w", "a\n\nb\n", "sum <x>")
+    [body] = render_result(row, AT)
+    first, _, rest = body.partition("\n")
+    [out] = results([first + "\n" + rest.replace("\n", "\r\n")])
+    assert out["summary"] == "sum <x>" and out["body"] == "a\r\n\r\nb\r\n"
+
+
+def test_a_summary_that_leaves_no_room_is_refused_and_does_not_loop():
+    with pytest.raises(StoreError, match="no room"):
+        render_result(ResultInput("PASS", "task", 1, "w", "text", "s" * 300_000), AT)
+    with pytest.raises(StoreError):
+        split_text("abc", 0)
 
 
 def test_a_comment_edited_on_github_is_read_as_it_stands():

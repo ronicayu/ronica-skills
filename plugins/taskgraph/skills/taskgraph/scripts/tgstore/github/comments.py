@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 
+from tgstore.base import StoreError
 from tgstore.github.body import LIMIT, dumps
 
 MARKER = re.compile(r"^<!-- taskgraph:(result|claim|void) v1 (\{.*\}) -->\r?$")
@@ -16,6 +17,8 @@ def marker(kind, data):
 
 def split_text(text, size):
     # Parts end at line ends; one line longer than `size` bytes is cut at a character boundary. "".join(parts) == text.
+    if size <= 0:
+        raise StoreError("no room for text in a comment: the summary is too large")
     parts, cur, used = [], [], 0
     for line in LINE.findall(text):
         while len(line.encode("utf-8")) > size:
@@ -36,26 +39,31 @@ def split_text(text, size):
     return parts
 
 
-MAX_FENCE = 16  # a body with a longer run of backticks goes into the details as it is, without a fenced block
 DETAILS_END = "</details>"
 
 
 def fence_for(body):
     longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
-    n = max(3, longest + 1)
-    return n if n <= MAX_FENCE else 0
+    return max(3, longest + 1)
 
 
 def details_label(part, parts):
     return "Full result" if parts == 1 else f"Full result (part {part} of {parts})"
 
 
-def details_edges(summary, part, parts, fence):
-    """The text before and after a part's chunk when the result has a summary. fence is the backtick count, 0 for none."""
-    lead = f"{summary}\n\n" if part == 1 else ""
+def visible(summary):
+    # The summary is shown as Markdown: "<!--" or a tag in it would hide or change the rest of the comment.
+    return summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def details_edges(summary, part, parts, fence, eol="\n"):
+    """The text before and after a part's chunk when the result has a summary. fence is the backtick count, 0 for none.
+    `summary` is the exact text; the edges show it escaped. eol is the line break (GitHub gives \r\n after a browser edit)."""
+    lead = f"{visible(summary)}\n\n" if part == 1 else ""
     mark = "`" * fence
     open_ = f"{lead}<details><summary>{details_label(part, parts)}</summary>\n\n" + (f"{mark}\n" if fence else "")
-    return open_, (f"\n{mark}" if fence else "") + f"\n\n{DETAILS_END}"
+    close = (f"\n{mark}" if fence else "") + f"\n\n{DETAILS_END}"
+    return open_.replace("\n", eol), close.replace("\n", eol)
 
 
 def render_result(row, at, key=None):
@@ -93,9 +101,10 @@ def unwrap(text, data):
     fence = data.get("fence")
     if not isinstance(fence, int) or fence < 0:
         return text
-    before, after = details_edges(data.get("summary") or "", data["part"], data["parts"], fence)
-    if text.startswith(before) and text.endswith(after) and len(text) >= len(before) + len(after):
-        return text[len(before): len(text) - len(after)]
+    for eol in ("\n", "\r\n"):
+        before, after = details_edges(data.get("summary") or "", data["part"], data["parts"], fence, eol)
+        if text.startswith(before) and text.endswith(after) and len(text) >= len(before) + len(after):
+            return text[len(before): len(text) - len(after)]
     return text
 
 

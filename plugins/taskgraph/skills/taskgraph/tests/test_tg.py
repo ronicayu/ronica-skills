@@ -1760,6 +1760,13 @@ def test_result_summary_options_are_checked(fail, tg, tmp_path):
     assert tg("result", "ls", str(t)) == []
 
 
+def test_a_summary_over_the_limit_is_refused(fail, tg):
+    t = add(tg, "A")
+    fail("result", "add", str(t), "--status", "PASS", "--summary", "x" * 2001)
+    tg("result", "add", str(t), "--status", "PASS", "--summary", "x" * 2000)
+    assert len(tg("result", "ls", str(t))[0]["summary"]) == 2000
+
+
 def test_a_long_body_with_a_summary_reads_back_exact_on_every_backend(tg, raw, tmp_path):
     t = add(tg, "A")
     body = "line\n" * 120_000

@@ -45,6 +45,7 @@ CHANGE_BUCKETS = {
 }
 VENDOR = Path(__file__).parent / "vendor"
 DEFAULT_GRAPH = Path.home() / ".taskgraph" / "graph.html"
+SUMMARY_MAX = 2000
 RESULT_COLUMNS = ("id", "task_id", "at", "status", "kind", "attempt", "author", "body", "summary")
 
 
@@ -1369,6 +1370,8 @@ def cmd_result_add(store, conn, args):
         raise Fail("--body-file and --summary-file cannot both read stdin")
     body = read_text_option(args, "body")
     summary = read_text_option(args, "summary").strip()
+    if len(summary) > SUMMARY_MAX:
+        raise Fail(f"--summary has {len(summary):,} characters; the limit is {SUMMARY_MAX:,}. A summary is a few lines.")
     row = store.add_result(conn, args.id, ResultInput(status, kind, args.attempt, args.by, body, summary))
     suffix = f", attempt {row['attempt']}" if row["attempt"] is not None else ""
     emit(args, without_body(row) if args.brief else row, f"result #{row['id']} added to #{args.id} ({kind} {status}{suffix})")
