@@ -25,6 +25,7 @@ export const glossary = {
   "close_failed": "Event: the Manager closes the task on a verdict that does not pass; the verdict is recorded and the task stays open.",
   "close_waits": "Event: the Manager closes the task on a passing verdict; the merge has not happened yet.",
   "close_waits, merged": "Event: the Manager closes the task on a passing verdict and the branch merges in the same step (two writes of run.py).",
+  "escalated": "Event: the Manager escalates the stage after a report: it adds a design stage before it, stops the idle sessions and records why; the next attempt waits for the new stage and does not count toward the cap.",
   "died": "Event: the Manager's record marks the attempt DIED: the task session ended without a report.",
   "abandon": "Event: the Manager abandons the task.",
   "round": "Event: the Manager starts a round: a new attempt of a task that waits for its merge, on the same request (#119).",
@@ -69,6 +70,7 @@ export const step = (action, from, to) => {
       if (before === "awaiting_merge") return "merged"; // resume_close: the merge is recorded (mark_merged)
       return after === "merged" ? "close_waits, merged" : "close_waits";
     case "Stop": return "stopped";
+    case "Escalate": return "escalated"; // `stage escalate` (W4): the worker's report stays, the sessions stop, a STOPPED row says why
     case "Abandon": return "abandon";
     case "Merged": return "merged";
     case "StartRound": return "round";

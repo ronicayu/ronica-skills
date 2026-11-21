@@ -53,6 +53,7 @@ Match the situation to a playbook. Read it at `${CLAUDE_PLUGIN_ROOT}/playbooks/<
 | Situation | Playbook |
 |-----------|----------|
 | New work, or results that change scope | `plan` |
+| New work, workflows on (`[workflow_policy] enabled`) | `run workflows --pick-prompt`, your answer, one Sonnet subagent's answer, then `run add --pick "<a>,<b>" --seed <n>` (`plan`, step 2a); list unsure picks and rule changes in your report, never ask the owner; answer each stage's approval with `run stage <instance> approve <stage>`. An `escalation-hint` (a `design:` follow-up, a `blocking[design]` finding, a rule that matched late) is yours to run at once: `run stage <instance> escalate spec --before <stage> --from-row <row> --why "<one line>"`; never ask the owner. Past the limit it is a line in your report |
 | Anything in flight: drain, act, verify, close, launch | `run` |
 | The operator asks for status, or all work is done | `report` |
 | The operator asks to pause | `pause` |

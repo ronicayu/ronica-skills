@@ -88,6 +88,9 @@ CLI". The Manager runs the steps below; you can run any of them yourself with
    checkout; in `pr` mode (`[merge] mode = "pr"`) it pushes the branch and opens
    a pull request. The task is done when its change is merged.
 
+For work that needs a design first, turn on `[workflow_policy] enabled` and use `run add --workflow`; see
+[Workflows](docs/roles-and-briefs.md#workflows).
+
 When a verifier finds blocking problems, `run revise 1` sends them to the same
 worker, which fixes them in place. A worker that needs an answer files an `ask`;
 you or the Manager answer with `run answer`.
@@ -109,7 +112,7 @@ you or the Manager answer with `run answer`.
 | Merge through pull or merge requests, handle conflicts and restacks | [docs/merge.md](docs/merge.md) |
 | Let workers ask questions and let the Manager steer them | [docs/messaging.md](docs/messaging.md) |
 | Tune report checks, worker hooks, notifications, cost and the run directory | [docs/operations.md](docs/operations.md) |
-| Shape briefs and task roles | [docs/roles-and-briefs.md](docs/roles-and-briefs.md) |
+| Shape briefs and task roles, or plan new work with workflows (stages, approvals, a pick) | [docs/roles-and-briefs.md](docs/roles-and-briefs.md) |
 | Run the project on the Taskgraph GitHub backend | [docs/github-backend.md](docs/github-backend.md) |
 | Read the config, pick verifier models, or use more than one Claude profile | [docs/configuration.md](docs/configuration.md) |
 | See how the parts fit, the file layout, and how to extend the plugin | [docs/architecture.md](docs/architecture.md) |

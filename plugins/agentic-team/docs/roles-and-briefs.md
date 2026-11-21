@@ -173,6 +173,179 @@ The `launched` line says where the tier came from, for example `tier judgement (
 
 A role's `skills` are loaded by the worker with the Skill tool, as its brief tells it. Skills belong to a Claude profile, so a worker on another profile may not have them. The brief tells the worker to say so under `Deviations:` when a skill does not load, and to follow the Method text instead. The Method must therefore work without the skills. `run.py` does not check that a profile has them.
 
+## Workflows
+
+A workflow is a markdown playbook for one kind of work: a frontmatter that lists its stages (prd, spec, impl, test, ...) with their roles, verify kinds, approval levels and order, and a prose body that tells the Manager when to use it. The design is in [docs/design/workflow-templates.md](design/workflow-templates.md). Workflows are off by default (`[workflow_policy] enabled = false`).
+
+Five workflows ship with the plugin, in [templates/workflows/](../templates/workflows/): `hotfix` (`impl → test`), `fix` (`spec? → impl → test`), `change` (`prd → impl → test`), `feature` (`prd → ux? → spec → impl* → test`) and `figure-it-out` (`investigate`, which decides the rest). `?` marks an optional stage and `*` a stage that may be split. `run.py workflows` lists the workflows a project has.
+
+### The commands
+
+| Command | Use | Section |
+|---|---|---|
+| `run.py workflows [--check]` | List the workflows and their stages; check the files | [Where workflow files are found](#where-workflow-files-are-found) |
+| `run.py workflows --pick-prompt --seed <n> ...` | Print the prompt that asks which workflow fits a piece of work | [Picking a workflow](#picking-a-workflow) |
+| `run.py workflows --resolve "<a>,<b>"` | Show how two answers resolve; creates nothing | [Picking a workflow](#picking-a-workflow) |
+| `run.py add --workflow <name>` or `--pick "<a>,<b>" --seed <n>` | Create an instance and its stage tasks | [Adding work with a workflow](#adding-work-with-a-workflow) |
+| `run.py stage <instance> approve <stage>` | Answer a stage's approval (`--by operator`, `--default`, `--decline-split`) | [Approvals](#approvals) |
+| `run.py stage <instance> split <stage> --part ...` | Split a splittable stage into parts | [Splitting a stage](#splitting-a-stage) |
+| `run.py stage <instance> recheck` / `rechoose <workflow>` | Match the hard rules again; the owner's override of the pick | [Hard rules](#hard-rules) |
+| `run.py stage <instance> escalate / downgrade / replace / cancel / expand` | Change an instance in flight | [Changes in flight](#changes-in-flight) |
+| `run.py workflows --stats [--since <date>] [--json]` | The retro read of the workflow records, with candidate changes | [Running a workflow retro](operations.md#running-a-workflow-retro) |
+
+### Where workflow files are found
+
+| What | Plugin default | Project override (track it in git) |
+|---|---|---|
+| Workflows | `templates/workflows/<name>.md` | `.claude/agentic-team/workflows/<name>.md` |
+| Stage library | `templates/workflows/stages.toml` | `.claude/agentic-team/workflows/stages.toml` |
+
+The project folder is the one that holds the project's roles. The workflows a project has are the union of both folders, and a project file replaces a plugin file of the same name, unless it sets `extends`. A project `stages.toml` adds stage types or overrides fields of a shipped type.
+
+### The stage library
+
+`stages.toml` has one table per stage type, `[stage.<type>]`, read with `tomllib`. Keys: `role`, `verify` (`code`, `schema` or `design-doc`), `approval` (`auto`, `manager` or `human`), `estimate` (hours), `scope` (`"instance"`, or a path template with `{design_dir}` and `{slug}`), `verify_cmd` and `acceptance` (a list of lines). A new type needs `role`, `verify` and `approval`. The shipped types are `investigate`, `prd`, `ux`, `spec`, `impl` and `test`; `{design_dir}` is `[workflow_policy] design_dir`.
+
+### The file format
+
+```markdown
+---
+name: feature                 # the file name, without .md
+description: One or two sentences, at most 300 characters. The Manager reads it to pick a workflow.
+extends: other                # optional; project files only
+stages:
+  - {id: prd}
+  - {id: ux, optional: true, after: [prd]}
+  - {id: spec, after: [prd, ux]}
+  - {id: impl, after: [spec], split: true, estimate: 4}
+---
+
+## When to use
+...
+
+## Steps
+...
+```
+
+There is no YAML library. The frontmatter is flat `key: value` lines (split at the first colon) and one `stages:` key whose items are flow maps, one per line. A stage takes these fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | Required. Lowercase letters, digits and `-`, unique in the workflow. It names a library type unless `type` is given |
+| `type` | A library type, so that one type can appear twice (`impl-api`, `impl-web`) |
+| `role`, `verify`, `approval`, `estimate` | Override the library values. The role must exist and not be broken |
+| `after` | A list of stage ids that come before, `[]` for a root stage. The graph must have no cycle |
+| `optional` | `true` or `false` (default). A workflow needs at least one required stage |
+| `split` | `true` lets the Manager split the stage into parts. Only for a stage whose verify kind is `code` |
+| `decides` | `true` on the only stage of a workflow, a root stage whose result names the remaining stages |
+
+A project workflow with `extends: <name>` takes the stages of that workflow (with `extends: <its own name>`, the plugin's), then lays its own over them: a stage with the same `id` overrides the parent's fields, a new `id` is appended. It cannot remove a stage or make a required stage optional, and the parent may not extend another workflow. To remove a stage, replace the file.
+
+A file with an unknown key, a missing `name` or `description`, a `name` that is not the file name, a stage with an unknown field or an id that is not a library type, a `role`, `verify` or `approval` that is not valid, an `after` that names no stage, or a cycle is broken. Each problem is one line, `<file>:<line>: <problem>`. `run.py workflows` lists a broken file with its problems and exits 1, and so does a broken `stages.toml`. `run.py workflows --check` prints only the problems, or one `workflows-checked` line. `config.py check` runs the same check when `[workflow_policy] enabled` is true or the project has a workflow file. It also needs the stage type `spec` in the library and one workflow that has it, because a hard rule forces a spec stage.
+
+The body is prose for the Manager: `## When to use`, `## Steps` and an optional `## Stage notes` with one `### <id>` subsection per stage. It is not checked, except that a body over 600 words gets a `warn` line.
+
+### Adding work with a workflow
+
+With `[workflow_policy] enabled = true`, `run.py add "<title>" --workflow <name> [--with <stage>]... [--skip <stage>]... --notes "..." --meta scope=... verify=... (--depends ids | --blocks ids | --independent "<reason>")` creates one piece of work in one locked run:
+
+- **The instance**: a parent task with your title and notes, and the meta `workflow` and `workflow_record` (the stages, what happened to each optional stage, the rule that applied). It is never launched, `record` leaves it out of `unmanaged`, and its status is the derived status of its stages. A task that `--blocks` waits for the instance, so for every stage.
+- **One task for each required stage and each `--with` stage**, under the instance, titled `<title> — <stage id>`, with the stage's role, verify kind, estimate and a SCOPE and VERIFY: a code stage takes the instance's `scope=` and `verify=`; a design stage writes one document, `<design_dir>/<title slug>-<stage id>.md`. Each carries the workflow's `### <stage id>` notes as `Workflow notes`. The notes you give must hold a why sentence and acceptance lines (`- [ ] <line>` or `Acceptance: <line>`): an impl or test stage carries them, and a design stage must cover each of them.
+- **Real dependencies.** A root stage takes the external `--depends` (or your `--independent` reason). Every other stage depends on each upstream stage and on that stage's approval decision, so `launch` refuses it until both are done. An optional stage that is in neither `--with` nor `--skip` is left out like a skipped one (the lighter choice); a stage that came after it depends on its upstream stages instead, so nothing waits for a stage that does not exist. `--with` and `--skip` name optional stages only.
+- **The brief** of a stage names its place (`Workflow: feature #41, stage impl (4 of 5)`), and for each upstream stage its `Summary:`, the `Files:` that name its documents and its `Head`, and the answer in the approval decision. A downstream brief already carries the upstream report; the line points at what to read first.
+
+### Approvals
+
+A stage whose `approval` is `manager` or `human` gets a decision under the instance that depends on the stage, and the next stage depends on it. The approval is the highest of the stage's workflow value, the `approval` of a `[[workflow_rule]]` that matches the instance's SCOPE write paths or `area` meta (`match_paths`, `match_area`; a rule also sets `risk` on every stage task), and `[workflow_policy] approval_floor` for the stage's verify kind. Nothing lowers an approval during a run.
+
+| Approval | Decider | Due | At the due time |
+|---|---|---|---|
+| `auto` | none | none | none |
+| `manager` | The Manager: `run.py stage <instance> approve <stage>` | `manager_due_hours` (2) after the stage merges | `record` approves it by default |
+| `human` | The owner: the decision is created with `decider=manager`, and the merge record turns it into `decider=operator`, queues one `decision` notice and sets the due time | `human_due_hours` (48) after the stage merges | `record` approves it by default, unless the rule that raised it sets `on_timeout = "hold"`: it then has no due time and waits for the owner |
+
+The due time starts when the stage merges, not when the decision is created. It is stored as `due_at` (UTC) on the decision, and as `decide_by`, its date, for Taskgraph. `record` applies the default of every decision that is past `due_at` (`approval-due`): it writes the answer into the decision's notes, which a downstream brief pastes, and marks it done. A held approval stays in every digest until the owner answers; `stage approve <stage> --by operator` records that answer.
+
+A `manager` approval checks workflow facts only, never the work: the stage is merged, every `decision:` follow-up of the stage is triaged (`run.py triage`), and a stage after it that may be split is split or declined (`--decline-split "<one line>"`). A failed check is a task or a decision, not a rejection. A split stage has one approval for all its parts: it opens, and can be answered, only when every part has merged, and the triage check reads every part. An abandoned stage task prints `stage-orphaned` with the stages and the approval that wait for it (`abandon`, and `record` on every run); `run.py stage <instance> replace <stage>` and `cancel` answer it (see [Changes in flight](#changes-in-flight)). `add --workflow` that fails after it created tasks removes them and prints one `workflow-rollback` line, with no `added` lines.
+
+### Splitting a stage
+
+A stage with `split: true` may be split into parts before its first attempt, normally at the spec approval, along the spec's phase table: `run.py stage <instance> split <stage> --part "<title>" --meta scope=<the part's files>`. The first call names part 1, the stage's own task; each later call creates a part with the same upstream dependencies, and every stage after it then depends on all parts. A part whose files overlap a sibling's must name it with `--depends <id>`. Do not split by estimate alone.
+
+### Picking a workflow
+
+`run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file> [--scope "<paths>"]` prints the prompt that asks which workflow fits a piece of work: the task text, the workflows as `A. <name>: <description>` with `unsure` among them, and the answer format `PICK: <name|unsure>`, `WHY: <one line>`. `--seed` is required and fixes the order of the options; the same seed gives the same order, and another seed may give another. A broken workflow file is left out of the prompt, with a `warn:` line on stderr (a `warnings` list with `--json`); a broken `stages.toml` stops the command.
+
+Two answers, then one workflow. The Manager's own typed answer comes first; one non-fork Sonnet subagent gives the second, from the same prompt rendered with seed `n+1`. `run.py add "<title>" --pick "<a>,<b>" --seed <n> ...` (leave out `--workflow`) resolves them, and `run.py workflows --resolve "<a>,<b>"` shows the result without creating anything. Each answer is a workflow name or `unsure`.
+
+| Answers | Result |
+|---------|--------|
+| the same name | that workflow |
+| two different names | the one with fewer required stages, then fewer stages with an approval, then the name; `heavier` takes the other |
+| a name and `unsure` | the name |
+| both `unsure` | `figure-it-out`; `heavier` takes the heaviest workflow |
+
+`figure-it-out` is outside the light-to-heavy order: it wins only when both answers name it or both are `unsure`, and a named workflow beats it. `[workflow_policy] when_unsure` is `lighter` (the default), `heavier` or `figure-it-out`; with `figure-it-out`, every row that has an `unsure` or a disagreement takes it. The Manager never asks the owner which workflow to use.
+
+The record of the instance (`workflow_record.pick`) holds both answers, the seeds, the workflow resolved, the resolution rule (`agree`, `fewer-stages`, `more-stages`, `name-over-unsure`, `named-over-deciding`, `both-unsure`, `when-unsure-<mode>`; `named` for `--workflow`) and `unsure`. `add` prints a `workflow-picked` line and the pick in its `workflow-added` line. The unsure picks and rule changes of a period are in the Workflow picks section of `run.py status` and in the daily digest. `notifications.events` may list `workflow-pick`, which queues one notice for each of them; it is not in the default list. The owner overrides a choice with `run.py stage <instance> rechoose <workflow> --by operator [--note "<why>"]`, which replaces the stages while no stage has started, applies the rules again and is recorded under `overrides`.
+
+### Hard rules
+
+A `[[workflow_rule]]` with `require_stage = "spec"` matches the SCOPE write paths of the instance (`match_paths`, globs) or its `area` meta (`match_area`), never the words of the title. When a rule matches:
+- the required stage is optional in the picked workflow: `add` forces it on, as if `--with` named it (a billing fix becomes `fix --with spec`);
+- the picked workflow has no such stage: the work moves to the lightest workflow that has one for every matching rule (fewest stages, then fewest approvals, then name);
+- `--skip` of a stage that a rule requires is refused; nothing skips it later;
+- the picked workflow decides its own stages (`figure-it-out`): the rule is recorded as `deferred-to-expand` and applies when the stages are created.
+
+Each match is a `workflow-rule` line and a row in `workflow_record.rules` (`rule`, `action`: `satisfied`, `forced-with`, `moved` with `from` and `to`, `matched`, `deferred-to-expand`, `recheck-satisfied` or `recheck-missing`). `run.py stage <instance> recheck` matches the rules again against the paths of the stages and the `area`; run it after the SCOPE of a stage changes (`stage split` does it for the part it adds). A rule that is new to the record gets a line, and one whose stage the instance lacks gets the way out: `rechoose` while no stage has started, otherwise the escalation command (`run.py stage <instance> escalate <type> --before <stage> --rule <name>`, see [Changes in flight](#changes-in-flight)). `recheck` raises the approvals that are not done to the level of a rule that matched late, and sets its risk on the stages that have not started; a stage whose approval was `auto` and that a rule raises gets its approval decision at that moment (pending, or open when every part has merged), and the stages after it that have not started wait for it.
+
+### Changes in flight
+
+Four commands change an instance after it started; `run.py stage <instance> <action>` runs each. They bound each other (no flapping): at most `[workflow_policy] max_adjustments` (default 2) escalations plus downgrades per instance (the owner's `rechoose` does not count), one escalation per stage type, and at most `max_replacements` (default 1) replacements per stage. Past a limit the command is refused with the need named; the Manager puts it in its report and never asks the owner. `TLA+`: `model/Workflow.tla` checks these rules; `model/NOTES.md` ("Guidance for W4") says what each command must keep.
+
+| Command | When | Effect |
+|---|---|---|
+| `escalate <type> --before <stage> --why "..." [--from-row R] [--rule <name>]` | `record` prints an `escalation-hint`: a worker's `Follow-ups:` line labelled `design:` (any status), or a verifier's `blocking[design]:` finding, on a stage task. A rule that matched late (`recheck-missing`) names it too. The Manager runs the hint itself, with no question to the owner | A new stage (normally `spec`, from the stage library, `stage_origin=escalate`) with its approval decision goes in front of the stage. It depends on the stage's upstream; the stage, and every part of it, now also depends on the new stage and its approval. |
+| `downgrade <stage> --why "..."` | The stage is optional (made by `--with`) and has no attempt; no rule requires it and no escalation added it | The stage's upstream tasks and approval decisions move to the stages after it (as `add` does for a stage it leaves out), its approval closes (`skipped`), and the stage is done with `stage_state=skipped`. Marking it done alone would let a stage after it start before the skipped stage's upstream was approved. |
+| `replace <stage>` | Only after `stage-orphaned`: a task of the stage was abandoned | A new task for the stage, with the same dependencies and approval decision; the tasks that waited for the abandoned one wait for it; the abandoned one leaves the instance. |
+| `cancel --why "..."` | Only after `stage-orphaned` | Every stage that has not started is skipped, every stage that has, in a parallel branch too, is abandoned (marked `abandoned=cancelled`, its sessions stop), every approval closes, and the instance is marked ended. A task that waits for the instance never starts; the `workflow-cancelled` line lists it, the queued `decision` notices of the closed approvals are dropped, and one `workflow-cancelled` notice (when `notifications.events` lists it) names the waiting tasks. |
+
+`escalate` refuses a stage with a busy session, an attempt with a passing verdict (`close` it), an attempt at the 3-attempt cap whose newest row is a failure (the next launch would be refused, and `launch --attempt 4` would run without the new stage: the Manager runs `abandon <stage task> superseded`, then `stage <instance> replace <stage>`, then `escalate` again, and asks no one), a `--rule` that is not a configured rule, a verifier that has filed no row, a merged part or one that waits for its merge, an abandoned part, a stage in a round, and an instance that ended. When a part has reported, the escalation stops its idle sessions (a revision can no longer follow), commits its WIP and files one `STOPPED` row with the `Head:` and `Reason: escalated`. `record` reads that row before the verifier and verdict rows, and its next step is `launch`, which waits for the new stage and its approval. That launch does not use an attempt of the 3-attempt cap: `refuse_past_cap` reads the row (not `--cause escalated`, which only records why the attempt starts). A failed verdict keeps the task's phase `verdict_failed`; a `reported` or `verifying` task goes to `stopped`.
+
+`figure-it-out` has no other stage until the investigation is done. `run.py stage <instance> expand --from-row <result id>` reads the `workflow-plan` block of the merged investigate stage's report (`workflow: <name>`, or `stages: [{id: spec}, {id: impl, after: [spec]}]` for an ad-hoc plan, recorded as workflow `adhoc`), applies the hard rules that were deferred to it (whatever SCOPE `--meta scope=` names now; the deferred row gets a `resolved` entry) and the rules that match the paths of the instance, and creates the stages: every first stage depends on the investigate stage and on its approval. `expand --workflow <name>` does the same without a plan row. An ad-hoc plan that lacks a stage a rule requires is refused. An instance expands once.
+
+### An example flow
+
+A bug in the export code. Every command is one the Manager runs; the owner sees the lines it reports.
+
+```
+# 1. Pick. Print the prompt, answer it yourself (PICK: fix), and give the same prompt with seed 8 to one Sonnet subagent (it says: unsure).
+run.py workflows --pick-prompt --seed 7 --title "Export drops rows" --notes-file notes.md --scope "src/export/"
+
+# 2. Add. "fix" and "unsure" resolve to fix; the record keeps both answers, the seeds, the rule and unsure = true.
+run.py add "Export drops rows" --pick "fix,unsure" --seed 7 --notes "$(cat notes.md)" \
+    --meta scope="src/export/" verify="pytest tests/test_export.py" --independent "bug report"
+#   -> workflow-added #41 fix: stages impl #42, test #43 (pick fix/unsure -> fix (name-over-unsure; unsure -> lighter))
+
+# 3. Run impl as any task (launch, verify). The verifier fails it and files `blocking[design]: the row model is undefined`.
+#    record prints an escalation-hint whose next step is the command in 4.
+# 4. Escalate. A spec stage and its approval go in front of impl. The attempt that had reported is stopped and does not count
+#    toward the 3-attempt cap.
+run.py stage 41 escalate spec --before impl --from-row 812 --why "the row model is undefined"
+
+# 5. Run spec, merge it, then approve it. Manager approval checks workflow facts only.
+run.py stage 41 approve spec --by manager
+# 6. Split, in a feature instance #50 (only a stage with split: true can be split; fix has none). After the spec's approval, the Manager
+#    follows the spec's phase table, one part for each phase after the first:
+run.py stage 50 split impl --part "Phase 2: export writer" --meta scope=src/export/writer.py
+
+# 7. If a stage's session is abandoned for good, record prints stage-orphaned. Replace it once, or cancel the instance.
+run.py stage 41 replace impl
+run.py stage 41 cancel --why "the export moves to the new service"
+```
+
+After step 2 the owner's reply or digest lists the pick. An owner who disagrees runs `run.py stage 41 rechoose change --by operator` before any stage starts; that is recorded as an override. The retro reads all of this: [Running a workflow retro](operations.md#running-a-workflow-retro).
+
 ## Judgement-tier brief
 
 The ROLE section of a worker brief for a task on the `judgement` tier ends with one line: for reading or searching code,

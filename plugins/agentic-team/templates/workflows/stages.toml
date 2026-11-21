@@ -1,0 +1,67 @@
+# The stage library: one table per stage type. A workflow stage takes these values and may override them.
+# `scope` is a path template ({design_dir}, {slug}) or "instance" for the instance's SCOPE.
+
+[stage.investigate]
+role = "architect"
+verify = "design-doc"
+approval = "manager"
+estimate = 1
+scope = "{design_dir}/{slug}.md"
+acceptance = [
+  "The investigation is read only: it changes no code.",
+  "States what done means as a check that can fail, and the size of the work.",
+  "Lists the riskiest unknown first, with the fact or test that settles it.",
+]
+
+[stage.prd]
+role = "architect"
+verify = "design-doc"
+approval = "manager"
+estimate = 1
+scope = "{design_dir}/{slug}.md"
+acceptance = [
+  "States the problem and the outcome as behaviour a user can see, with acceptance lines that can be checked.",
+  "Names no file or function.",
+  "Lists what is out of scope.",
+]
+
+[stage.ux]
+role = "architect"
+verify = "design-doc"
+approval = "manager"
+estimate = 1
+scope = "{design_dir}/{slug}.md"
+acceptance = [
+  "Describes each flow, screen and state the user meets, including empty, loading and error states.",
+  "Covers every acceptance line of the instance.",
+]
+
+[stage.spec]
+role = "architect"
+verify = "design-doc"
+approval = "manager"
+estimate = 2
+scope = "{design_dir}/{slug}.md"
+acceptance = [
+  "States the problem with measurable outcomes and ranks the quality goals.",
+  "Compares the options, including do nothing, and says why each lost.",
+  "Specifies every interface: inputs, outputs and errors.",
+  "Says what happens when a call fails, times out, retries or runs twice.",
+  "Gives the migration steps and what happens when it is half done or rolled back.",
+  "Gives a phase table: for each phase, its files and a check that fails when the phase is wrong.",
+  "Ends with a closed checklist for the coders who follow, and covers every acceptance line of the instance.",
+]
+
+[stage.impl]
+role = "software-engineer"
+verify = "code"
+approval = "auto"
+estimate = 3
+scope = "instance"
+
+[stage.test]
+role = "software-engineer"
+verify = "code"
+approval = "auto"
+estimate = 1
+scope = "instance"

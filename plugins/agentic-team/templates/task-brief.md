@@ -15,7 +15,7 @@ Time zone: {{TIMEZONE}}
 
 - Task: `{{TASKGRAPH_COMMAND}} show {{TASK_ID}}` (read only)
 - {{SETUP}}
-- Last checkpoint: {{CHECKPOINT}}
+- Last checkpoint: {{CHECKPOINT}}{{WORKFLOW}}
 
 {{UPSTREAM}}
 

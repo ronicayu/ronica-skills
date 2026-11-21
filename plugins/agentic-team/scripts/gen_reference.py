@@ -168,7 +168,8 @@ def run_section():
         ("Phases", ", ".join(f"`{v}`" for v in run.PHASES)),
         ("Verify kinds", ", ".join(f"`{v}`" for v in config.VERIFY_KINDS)),
         ("Model tiers", ", ".join(f"`{v}`" for v in config.TIERS)),
-        ("Notification events", ", ".join(f"`{v}`" for v in config.NOTIFY_EVENTS)),
+        ("Notification events", ", ".join(f"`{v}`" for v in config.NOTIFY_EVENTS)
+         + "; also `" + "`, `".join(config.NOTIFY_OPTIONAL) + "` when listed in `notifications.events`"),
         ("Adjacent change kinds (`[scope] adjacent`)", ", ".join(f"`{v}`" for v in config.ADJACENT_KINDS)),
     ])]
     return "\n".join(out)

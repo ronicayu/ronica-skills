@@ -132,12 +132,14 @@ The operator hears from the Manager on events, not on a schedule. `run.py` never
 | `pr-closed` | A request was closed without a merge (the `pr-closed` line, from `record`, `repoint` or a round). |
 | `all-done` | The Manager adds it with `notify-queue --add all-done "<line>"` when all work is complete. |
 | `blocked` | The Manager adds it with `notify-queue --add blocked "<line>"` when it is blocked. The same line notifies once; a new reason notifies again. |
+| `workflow-cancelled` | Not in the default list. `run.py stage <instance> cancel` ended an instance; the notice names the tasks that wait for it and never start. |
+| `workflow-pick` | Not in the default list. `run.py add --pick` or a hard rule chose an unsure workflow or changed the work (the `workflow-picked` and `workflow-rule` lines); the notice is for information, the owner is never asked. |
 
 A notice always carries the operator-facing text of its event as its `next:` (what the operator can do), never the Manager's command hint that the same event prints in the `run.py` output. The queue is guarded by a lock (`notify-queue.lock`): `--clear` clears exactly the notices it prints.
 
 `[notifications] events` lists the events that notify; a notice for an event that is not listed is never queued. Each notice has a key (event, task, attempt and text): one that is queued or was cleared as sent is not queued again, so a `pr-closed` line that every `record` repeats notifies once, and a new failure (a new head, a new reason) notifies again. `all-done` and `blocked` dedup only against the queue, since the same words can be true again later.
 
-With `digest = "daily"`, `run.py notify-queue --digest` prints one digest a day (the first call of each day in the project time zone): what merged or finished since the last digest that was sent (the last day on the first run), what is in flight, and the decisions waiting. The Manager adds it to the same message, then runs `notify-queue --digest --sent`; the digest counts as made only then, so a digest that was printed and never sent is printed again. With events and the daily digest on, a periodic brief is not needed; a project's own cron is the project's choice.
+With `digest = "daily"`, `run.py notify-queue --digest` prints one digest a day (the first call of each day in the project time zone): what merged or finished since the last digest that was sent (the last day on the first run), what is in flight, the decisions waiting, and, when there are any, the workflow picks that were unsure or changed by a rule. The Manager adds it to the same message, then runs `notify-queue --digest --sent`; the digest counts as made only then, so a digest that was printed and never sent is printed again. With events and the daily digest on, a periodic brief is not needed; a project's own cron is the project's choice.
 
 ## Cost in status
 
@@ -153,6 +155,40 @@ input / output tokens for a request whose prompt is over 100,000 tokens (the usu
 estimate uses the lower price, because a summed usage cannot tell which request was long. Subagent costs are not counted:
 the self-check of a `design-doc` task, the Sonnet reads of a `judgement` task and any other subagent a session starts bill
 under their own transcripts, which `record` does not read.
+
+## Running a workflow retro
+
+Each workflow instance writes its own history: the pick (both answers, the seeds, the rule, `unsure`), the hard rules that applied, the owner's overrides, each adjustment (escalate, downgrade, replace, cancel) with its trigger (`verifier`, `worker`, `rule`, `manager` or `orphan`) and the row that caused it, and, on each stage task and approval decision, the attempts, revisions, verdicts, blocking findings by category, the time from created to merged, and how the approval ended (`approved`, `defaulted` or `held`, by whom, when). Nothing else needs to be kept. The retro reads Taskgraph only, needs no model, and changes nothing.
+
+```
+run.py workflows --stats                  # all instances
+run.py workflows --stats --since 2026-12-01 --json
+```
+
+Run it after about 20 instances, then every month or so. It prints, for each workflow and each of its stages:
+
+| Group | What it shows | What it tells you |
+|---|---|---|
+| Instances | merged, cancelled and running counts; completion and cancel rates | whether the workflow ends |
+| Adjustments | escalations, downgrades, replacements, and `kind:trigger` counts; the instances escalated | the workflow was too light (escalations) or too heavy (downgrades) |
+| Pick | instances picked with `--pick`; agreement rate of the two answers; `unsure` rate; owner overrides; escalations after the pick; accuracy (instances neither overridden nor escalated) | whether the descriptions separate the workflows |
+| Stage | tasks, merged, skipped; mean attempts and revisions; first-pass verify rate (the first verifier verdict is not `verify-failed` or `verify-blocked`); blocking findings by category; median hours from the start of the stage's latest attempt to its merge (waiting for upstream stages is not counted); a split stage counts once for each instance in the rates | where a stage is weak or slow |
+| Approval | answered of total; outcomes; default rate; hold rate; median wait | whether the due times and levels fit |
+
+Then it prints candidate changes. A rate rule needs a minimum of data and at least 2 instances that hit it (`min_hits`), so one bad instance proposes nothing. Each proposal names its evidence: the instance ids and `count of N`.
+
+| Proposal | When it fires (defaults) | What it suggests |
+|---|---|---|
+| `escalation` | a workflow escalated to one stage type in at least 30% of at least 3 instances | add that stage to the workflow as a required stage, add a hard rule for the paths, or tighten the workflow's When-to-use |
+| `drop-stage` | an optional stage that was skipped or downgraded in at least 90% of at least 3 ended instances that decided it (an instance that left it out by default, or escalated to it, does not count) | drop it from the workflow |
+| `auto-approval` | a stage with a `manager` approval passed its first verify in at least 95% of at least 4 verified stages | set `approval = "auto"` |
+| `weak-stage` | a stage failed its first verify in at least 50% of at least 4 verified stages | tighten its Stage notes or split it; the top category is named |
+| `approval-defaults` | an approval was applied by default in at least 50% of at least 4 answers | make it `manager`, or raise `human_due_hours` |
+| `pick-unsure` | at least 40% of at least 3 picks had an `unsure` answer | sharpen the When-to-use of the workflow |
+| `pick-corrected` | at least 20% of at least 3 instances were overridden, or escalated by a verifier, worker or the Manager (not by a hard rule), after the pick | sharpen its When-to-use |
+| `cancels` | at least 20% of at least 3 instances were cancelled | read the `why` lines; fix the stage that orphaned them |
+
+The owner approves each proposal once, at retro time. Nothing applies by itself: each approved change becomes one task that edits a workflow file under `.claude/agentic-team/workflows/` or a `[[workflow_rule]]`. Declined proposals appear again at the next retro if the evidence still holds. The thresholds are in `THRESHOLDS` in `scripts/workflow_stats.py`; the statistics are `compute` and the proposals `propose` there, over data that `run.py` reads from Taskgraph.
 
 ## Run directory
 

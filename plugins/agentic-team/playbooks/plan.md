@@ -41,6 +41,51 @@ adds what Taskgraph cannot decide.
      rejected alternative of each decision, failure modes (half-migrated, rolled back),
      migration steps, and a closed checklist for the coders who follow. The checklist
      refers to no git-ignored scratch file; census scripts go into the repository.
+   **With workflows on** (`[workflow_policy] enabled = true`): create the work with
+   `run.py add "<title>" --pick "<answer 1>,<answer 2>" --seed <n> ...` instead of one
+   task per stage. Pick the workflow in four moves, for each piece of work:
+   1. Write the notes to a scratch file. Render the prompt with
+      `run.py workflows --pick-prompt --seed <n> --title "<title>" --notes-file <file>
+      --scope "<paths or area>"`. Use any whole number for `n`, and another for each item.
+   2. **Answer 1 is yours.** Read the prompt and type the answer in its format, for
+      example `PICK: fix`, before you start the subagent. It is a workflow name or
+      `unsure`; answer `unsure` when no description fits or you cannot tell.
+   3. **Answer 2 is the subagent's.** Render the same prompt with `--seed <n+1>`. Start
+      one non-fork subagent with the Agent tool: `subagent_type: "Explore"`,
+      `model: "sonnet"`. Its prompt is the rendered text and nothing else: not your
+      answer, your reasons or the workflow you favour. With several items, send all
+      their prompts in one call, each under its own heading, and read one answer for
+      each. The agent type exists already, so no restart is needed.
+   4. Resolve, then add. First run `run.py workflows --resolve "<yours>,<subagent's>"`:
+      it shows the workflow that the two answers give and adds nothing (the same name
+      wins, two names take the one with fewer stages, a name beside `unsure` takes the
+      name, two `unsure` take `figure-it-out`). Read that workflow's "Steps" and choose
+      `--with <stage>` or `--skip <stage>` for its optional stages. Then add:
+      `run.py add "<title>" --pick "<yours>,<subagent's>" --seed <n> [--with ...]
+      [--skip ...] --notes ... --meta scope=... verify=... (--depends ... | --independent ...)`.
+      Do not pass `--workflow`: `--pick` replaces it.
+   Never ask the owner which workflow to use. A `[[workflow_rule]]` that matches the
+   SCOPE paths or the `area` forces its stage on, or moves the work to the lightest
+   workflow that has it, and a stage that a rule requires cannot be skipped. The
+   `workflow-picked` and `workflow-rule` lines of the add show what was chosen: list
+   every unsure pick and every rule change in your next report. After you change the
+   SCOPE of a stage, run `run.py stage <instance> recheck`. The owner overrides with
+   `run.py stage <instance> rechoose <workflow> --by operator`, before any stage has
+   started. Read `run.py workflows` for the descriptions; with a workflow named by hand
+   (`--workflow <name>`, no pick), take the lighter one when unsure. The workflow sets each
+   stage's role, verify kind, estimate, SCOPE,
+   dependencies and approval: set a meta key yourself only to depart from it.
+   The notes you give need a why sentence and `- [ ]` acceptance lines, and
+   `--meta scope=` and `verify=` are the instance's. A stage whose approval is
+   `manager` gets a decision after it merges: answer it with
+   `run.py stage <instance> approve <stage>` once the stage's `decision:`
+   follow-ups are triaged. At the approval of a `spec` stage, split a stage that
+   may be split along the spec's phase table (`run.py stage <instance> split
+   <stage> --part "<title>" --meta scope=...`, one call for each part), or
+   decline the split in one line (`approve --decline-split "<why>"`). A `human`
+   approval is the owner's: it turns into an owner decision when its stage
+   merges, and `record` approves it by default at its due time. Hand-planned
+   tasks keep working beside workflow instances.
 3. **Separate shared writes.** First try to give each task its own files. When
    tasks must write the same file or area, record the order as a dependency.
    Record only a dependency that is real, and split a task that is too large to

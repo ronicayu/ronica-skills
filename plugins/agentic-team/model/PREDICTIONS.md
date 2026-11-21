@@ -298,3 +298,79 @@ at a verifier row that no `verifierAt` update covers (a salvaged row: `Record` s
 `NoSessionLeftAtEnd` at an end step that leaves a `*Kept` flag; a dead end with hint `revise` means `Revise`'s guard
 differs from `RevisionOK`. A count change in a 0.23.0 config means a new variable moved from `Init` there: find the action
 that writes it without `REVISION_CAP > 0`.
+
+# Workflow templates W5 (Workflow.tla, and the W4 escalation in Lifecycle.tla)
+
+Written with the model, on the workflow-templates branch after W3 (2d61d1e). The first runs were made while the model was
+written, so this section records what each config must show and then the results; the changes that the first runs led to
+are named. TLC 2.19 (tla2tools 1.7.4), `-workers 8`, on the Mac Studio; times are wall clock of a run that shared the
+machine with one other TLC run.
+
+## Expect
+
+| Config | Expect |
+|---|---|
+| wf-check.cfg, wf-feature.cfg | Every rule holds, no dead end. |
+| wf-hold.cfg | As wf-check; fewer states (a held approval has no due time and no default). |
+| wf-overview.cfg | Every rule holds, under the chart budget of 500 states. |
+| wf-code-fixed.cfg | Every rule holds; far fewer states (no W4). |
+| regress-wf-sink-orphan.cfg | A dead end: the last stage (test, auto) is abandoned and no `stage-orphaned` hint is printed. |
+| regress-wf-rechoose-rules.cfg | RuleStagesKept in 2 steps: split (a late rule on ux), rechoose without ux. |
+| regress-wf-split-approval.cfg | SplitApprovalAfterAllParts: part 1 of impl merges while part 2 has not. |
+| regress-wf-skip-rule.cfg | RuleStagesKept in 1 step: downgrade spec. |
+| regress-wf-escalate-loop.cfg | AdjBound in 3 steps: downgrade, escalate, downgrade the escalated stage. |
+| regress-wf-no-contract.cfg | NoGhostDeps in the initial state (ux left out, spec still after it). |
+| regress-wf-downgrade-done-only.cfg | NoBypass in 2 steps: downgrade ux before prd has run, launch spec. |
+| regress-wf-insert-running.cfg | NoBypass (or NoInsertIntoBusy): escalate before impl while it runs. |
+| regress-wf-no-default.cfg | Liveness: the human approval of spec is open and past due, and the owner never answers. |
+| every Lifecycle config of 0.24.0, with `ESCALATIONS = FALSE` | The same distinct states and the same first break as before the change: `Escalate` is disabled, the new `RecInProgress` branch needs `stopReason = "escalated"`, which nothing else writes. |
+| escalate.cfg, escalate-revise.cfg | Every rule holds, `EscalationKeepsAttempt` included; no dead end. |
+| regress-esc-cap.cfg | NoDeadlock: an escalation at the cap, then launch refused. |
+
+## Results (2026-11-20)
+
+The first model had no approval on check's impl, so `regress-wf-split-approval.cfg` held (a split stage without an
+approval cannot show the bug); check's impl now has `approval: manager`. The first `escalate.cfg` run broke
+`PausedWipCommitted` (9 states deep: the escalated STOPPED row over a dirty worktree), and `escalate-revise.cfg` and
+`regress-esc-cap.cfg` broke `VerdictNotLost` (an idle verifier with no row stopped by the escalation). `Escalate` now
+commits the WIP and needs `vfiled`; both are W4 requirements (NOTES.md). `Cancel` now abandons stages that still run
+(`NoSessionAfterEnd`, added with it).
+
+| Config | Result | Distinct states | Depth | Time |
+|---|---|---|---|---|
+| wf-check.cfg | every rule holds | 2,739,280 (5,434,903 generated) | 60 | 54 s alone, 115 s shared |
+| wf-feature.cfg | every rule holds | 934,448 | 57 | 24 s |
+| wf-hold.cfg | every rule holds | 925,912 | 59 | 23 s |
+| wf-overview.cfg | every rule holds | 298 (the chart: 27 states, 44 arrows) | 24 | 1 s |
+| wf-code-fixed.cfg | every rule holds | 8,894 | 34 | 1 s |
+| regress-wf-sink-orphan.cfg (was wf-code-orphan.cfg) | **dead end**, 15 steps (prd, spec, impl merged and approved; test launched and abandoned) | 1,333 at the stop | 19 | 1 s |
+| regress-wf-rechoose-rules.cfg (was wf-code-rechoose.cfg) | **RuleStagesKept**, 2 steps (Split, Rechoose) | 53 | 7 | 1 s |
+| regress-wf-split-approval.cfg | breaks SplitApprovalAfterAllParts, 14 steps (prd, spec approved; split impl; part 1 merges; the approval opens) | 3,397 | 15 | 1 s |
+| regress-wf-skip-rule.cfg | breaks RuleStagesKept, 1 step | 26 | 4 | 0 s |
+| regress-wf-escalate-loop.cfg | breaks AdjBound, 3 steps | 137 | 7 | 0 s |
+| regress-wf-no-contract.cfg | breaks NoGhostDeps in the initial state | 2 | 1 | 0 s |
+| regress-wf-downgrade-done-only.cfg | breaks NoBypass, 2 steps | 64 | 5 | 0 s |
+| regress-wf-insert-running.cfg | breaks NoBypass, 11 steps (escalate while impl runs); with NoBypass left out, NoInsertIntoBusy at the same step | 1,936 | 13 | 0 s |
+| regress-wf-no-default.cfg | breaks Liveness (the spec approval open and past due; stutter) | 176,601 at the stop | - | 3 s |
+| (scratch) wf-check with `REGRESS_SINK_ORPHAN = TRUE` | dead end, 15 steps, as regress-wf-sink-orphan: W4 does not help while the hint is missing | 7,263 | 17 | 1 s |
+
+Lifecycle, every config of 0.24.0 with `ESCALATIONS = FALSE`, compared with the same configs run on the committed model
+(HEAD 2d61d1e) the same day: every config that holds has the same distinct states (check 63,272; check-pr 333,260; pause
+185,356; pause-pr 894,808; peel-1 44,552; faults 178,208; faults-pr 922,640; overview 286; overview-pr 1,054;
+overview-revise 928; check-revise 549,352; check-revise-pr 2,979,244; check-revise-own 623,656), and each regress config
+breaks the same rule as before (42 VerdictNotLost, 54 PauseFinishedFirst, 56/58/61/62/65 deadlock, 57 NoSessionLeftAtEnd,
+59 AttemptCap, 65b StoppedIdleNeverRefuses, 89 and 89-revise FixRoundNeedsBlocking, 97 DoneOnlyWhenMerged, 119
+NoHintAbandonsWaitingWork, 127a/127c/127h/127w their #127 rules; the state counts at the stop differ run to run with 8
+workers). The phase-edges test passes (`TransitionTest.test_the_table_has_the_edges_of_the_model`).
+
+| Config | Result | Distinct states | Depth | Time |
+|---|---|---|---|---|
+| escalate.cfg | every rule holds, EscalationKeepsAttempt included | 72,227 | 30 | 2 s |
+| escalate-revise.cfg | every rule holds | 620,963 | 48 | 11 s |
+| regress-esc-cap.cfg | breaks NoDeadlock, 7 steps (launch, the worker fails, record files DIED, launch attempt 2, PASS, the worker fails, escalate; launch refused at the cap) | 1,198 at the stop | 9 | 1 s |
+
+# Workflow templates W4 (the escalation lands in run.py)
+
+| Prediction | Result |
+|---|---|
+| `phase-edges.json` regenerated from `check.cfg`, `check-pr.cfg`, `overview-revise.cfg` and `escalate.cfg` differs from the W5 fixture by exactly two edges, `reported, escalated, stopped` and `verifying, escalated, stopped`; a failed verdict keeps `verdict_failed`, so it adds no edge. | Confirmed: the three old configs alone reproduce the old file byte for byte (TLC 2.x, Java 27), and `escalate.cfg` adds those two edges (72,227 distinct states, 2 s). The test `test_the_table_has_the_edges_of_the_model` passes with the two `TRANSITIONS` rows. No exclusion entry was needed. |
