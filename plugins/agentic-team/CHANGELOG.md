@@ -2,6 +2,20 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.31.1
+
+Upgrading from 0.31.0.
+
+Version 0.31.1 is a patch release for the worker hooks (`[hooks] enabled = true`). It fixes the defects found in the first real trial of the hooks (task 1011 of video-making-tools). With hooks off nothing changes. No migration, no new setting; a project that raised `passthrough_chars` to 40000 because of the lossy output can set it back to the default (20000) if it wants more reduction, and the saved file still has everything.
+
+- **`docker logs` was not reduced.** Cause: for a log command the reducer used the failure rules, and the postgres lines (`2026-11-21 04:12:12.456 UTC [201] ERROR:  duplicate key ...`) matched no error rule. A log with exit 0 and no error line was then treated as pass-through: the reducer printed the whole log and deleted the saved file. Now `ERROR:`, `FATAL:`, `PANIC:` (also with two spaces), `LOG:  ... error` and `level=error` lines are error lines in a log; the `DETAIL`, `HINT`, `CONTEXT` and `STATEMENT` lines after one are kept; a log with no error line shows its last 30 lines and a pointer instead of the whole log. A reduction of a 562 KB log takes about 0.15 s.
+- **Log commands are found with options anywhere:** `docker logs --tail 3000 name`, `docker compose [-f file] logs`, `docker-compose logs`, `podman logs`, `kubectl -n ns logs pod`, `journalctl`, `gh run view --log`. `docker compose logs -f`, `kubectl -n ns logs -f` and `journalctl -f` are never wrapped, because they follow.
+- **The saved file survives every fallback**, and a fallback that prints the full output says why in one line: `the reducer timed out after 5 s`, `the reducer failed (<error>)`, `no reduction rule matched this output`, or, when the interpreter itself failed, `the reducer did not run`. An output above `passthrough_chars` is never deleted any more.
+- **Distinct failing tests no longer merge.** Only identical lines merge into one line with `(×N)`. A line that names a test or a place never merges with a different one, so every distinct `FAILED` test id stays (up to 200). Only when more than 60 error lines are left, lines that differ in digits and name no test or place merge too, shown as `(×N similar)`.
+- **Detail blocks.** For the first 8 failures (at most 200 lines) the reducer keeps the vitest `- Expected / + Received` diff (at most 30 lines) and the source frame after it, and for Playwright the `Locator:` and `Timeout:` lines, the call log (at most 15 lines), the source frame and the attachment lines. It says how many failures were cut.
+- **Review fixes.** The reduced text is capped at 20,000 characters (detail blocks go first, then ids and error lines, then line width; the first line says what was cut). In a log, `ERROR:` lines are error lines, not test ids. A group of similar lines shows each distinct variant up to 3, so `('127.0.0.1', 5432)` and `6379` both show. `journalctl -fu` and `-xef` are not wrapped. A pattern such as `kubectl logs` or `docker compose logs` matches commands with options before `logs`. `gh run view --log-failed` is a default command. eslint stylish error rows are kept with their file name. A failing log with no error line shows its last lines. The failure count in the detail-block line counts all failures. `--follow=false` and names with `watch` are wrapped. The wrapper tells "did not run" from "ran and failed (exit N)". A second timestamp and zones other than UTC are ignored in a log.
+- **Docs.** [Worker hooks](docs/operations.md#worker-hooks) says what is kept, the fallback line, the log commands and how a project can add `ruff`, `eslint`, `tsc`, `pnpm typecheck` and `pnpm lint` to `commands` (not a default).
+
 ## 0.31.0
 
 Upgrading from 0.30.0.

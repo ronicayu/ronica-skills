@@ -247,7 +247,8 @@ SCHEMA: dict[str, dict[str, tuple[str, object]]] = {
         "large_chars": ("posint", 100000),
         "summarize_seconds": ("posint", 30),
         "commands": ("commands", ["make test*", "pytest", "python* -m pytest*", "uv run pytest", "vitest", "npx vitest",
-                                  "pnpm test*", "playwright", "npx playwright", "gh run view --log", "docker logs"]),
+                                  "pnpm test*", "playwright", "npx playwright", "gh run view --log", "gh run view --log-failed",
+                                  "docker logs"]),
     },
     "rounds": {
         "cap": ("posint", 3),
