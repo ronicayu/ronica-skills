@@ -260,7 +260,11 @@ class Layered(unittest.TestCase):
         done = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True,
                               env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
         self.assertTrue(done.stdout.startswith(NOTICE))
-        self.assertEqual((done.returncode, done.stdout.strip().split("\n", 1)[1]), (1, PYTEST_FAIL.strip()))
+        notice, why, rest = done.stdout.strip().split("\n", 2)
+        self.assertIn("the reducer did not run", why)
+        self.assertIn(os.path.join(self.dir, "out", "toolu_01.txt"), why)
+        self.assertEqual((done.returncode, rest), (1, PYTEST_FAIL.strip()))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "out", "toolu_01.txt")))
 
     # --- the policy, on text
 
@@ -387,7 +391,7 @@ class Layered(unittest.TestCase):
         slow = os.path.join(self.dir, "slow.py")
         with open(slow, "w") as fh:
             fh.write("import sys, time\nsys.path.insert(0, %r)\nimport layered\nlayered.REDUCE_SECONDS = 1\n"
-                     "layered.extract = lambda lines: time.sleep(30)\nsys.exit(layered.main())\n" % HOOKS)
+                     "layered.extract = lambda *a: time.sleep(30)\nsys.exit(layered.main())\n" % HOOKS)
         wrapped = wrapped.replace(os.path.join(HOOKS, "layered.py"), slow)
         started = time.time()
         done = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True,
@@ -395,6 +399,8 @@ class Layered(unittest.TestCase):
         self.assertLess(time.time() - started, 10)
         self.assertEqual(done.returncode, 1)
         self.assertIn(PYTEST_FAIL.strip(), done.stdout)
+        self.assertIn("the reducer timed out after 1 s", done.stdout)
+        self.assertTrue(os.path.exists(os.path.join(cfg["saved_dir"], "toolu_01.txt")))
 
     def test_errexit_in_the_shell_does_not_hide_the_output_or_the_code(self):
         self.tool("pytest", PYTEST_FAIL, 4)
@@ -485,12 +491,11 @@ class Layered(unittest.TestCase):
         self.assertIn("o.txt", done.stdout)
 
     def test_repeated_key_lines_collapse_and_a_root_cause_in_the_middle_survives(self):
-        flood = "".join(f"ERROR tests/t_{i}.py::t_{i} fixture failed\n" for i in range(45))
+        flood = "ERROR fixture failed: pool is closed\n" * 45
         text = flood + "Caused by: ConnectionRefusedError: db is down\n" + flood.replace("ERROR", "ERROR  ") + "=== 90 errors ===\n"
-        text += "".join(f"ERROR other {i}\n" for i in range(0, 0))
         out = self.kept(text)
         self.assertIn("Caused by: ConnectionRefusedError: db is down", out)
-        self.assertIn("(×45)", out)
+        self.assertIn("ERROR fixture failed: pool is closed (×45)", out)
         self.assertLessEqual(out.count("fixture failed"), 17)  # one per group, and the 15 last lines
 
     def test_the_first_root_cause_line_is_kept_even_when_unique_keys_exceed_the_budget(self):
@@ -519,6 +524,222 @@ class Layered(unittest.TestCase):
         os.utime(old, (1, 1))
         layered.prune(out)
         self.assertEqual(os.listdir(out), ["new.txt"])
+
+
+    # --- log commands (a postgres log from `docker logs`), saved files, and the time limit
+
+    def pg_log(self, lines=300, pad=60):
+        out = []
+        for i in range(lines):
+            ts = f"2026-11-21 04:{i // 60 % 60:02d}:{i % 60:02d}.{100 + i % 900} UTC [{50 + i % 300}]"
+            k = i % 20
+            if k == 0:
+                out += [f'{ts} ERROR:  duplicate key value violates unique constraint "uq_user_phone_{i % 3}"',
+                        f"{ts} DETAIL:  Key (phone)=(139****{i:04d}) already exists.",
+                        f"{ts} STATEMENT:  INSERT INTO users (id, phone) VALUES ($1, $2) -- " + "x" * pad]
+            elif k == 5:
+                out += [f"{ts} LOG:  checkpoint starting: time", f"{ts} LOG:  checkpoint complete: wrote {i} buffers (0.1%)"]
+            elif k == 7:
+                out.append(f"{ts} FATAL:  terminating connection due to administrator command")
+            elif k == 9:
+                out.append(f"{ts} LOG:  could not receive data from client: connection reset by peer, error {i}")
+            else:
+                out += [f"{ts} LOG:  execute <unnamed>: SELECT id, name FROM workspaces WHERE id = $1 -- " + "y" * pad,
+                        f"{ts} DETAIL:  parameters: $1 = '{i * 7919 % 1000003}'"]
+        return "\n".join(out) + "\n"
+
+    def test_a_postgres_log_keeps_its_error_lines(self):
+        text = self.pg_log()
+        out, how = self.reduce(text, 0, log=True, passthrough_chars=5000)
+        self.assertEqual(how, "fail-rules")
+        self.assertLess(len(out), len(text) // 4)
+        self.assertIn('ERROR:  duplicate key value violates unique constraint "uq_user_phone_1"', out)
+        self.assertIn('ERROR:  duplicate key value violates unique constraint "uq_user_phone_0"', out)
+        self.assertIn("(×15)", out)  # 15 identical lines once the time and the process number are ignored
+        self.assertIn("Key (phone)=(139****0000) already exists.", out)  # the DETAIL line after the first error
+        self.assertIn("STATEMENT:  INSERT INTO users", out)
+        self.assertIn("FATAL:  terminating connection due to administrator command", out)
+        self.assertIn("LOG:  could not receive data from client: connection reset by peer, error", out)
+        self.assertLessEqual(out.count("checkpoint starting"), 1)  # not a key line: only the last lines can show one
+
+    def test_a_log_with_no_error_line_shows_its_last_lines_and_keeps_the_file(self):
+        text = "".join(f"2026-11-21 04:00:{i % 60:02d}.001 UTC [7] LOG:  connection received {i}\n" for i in range(400))
+        out, how = self.reduce(text, 0, log=True, passthrough_chars=500)
+        self.assertEqual(how, "log-tail")
+        self.assertIn("no error line matched", out)
+        self.assertIn("connection received 399", out)
+        self.assertNotIn("connection received 10\n", out)
+        self.assertIn("full.txt", out)
+
+    def test_log_commands_are_found_with_options_anywhere(self):
+        for cmd in ("docker logs web", "docker logs --tail 3000 vmt-postgres-test", "docker logs --since 10m --tail=50 -t web",
+                    "docker compose logs db", "docker compose -f ci.yml logs --no-color db", "docker-compose logs db",
+                    "docker container logs web", "podman logs web", "kubectl logs pod-1", "kubectl -n prod logs deploy/api --tail 200",
+                    "kubectl logs -n prod pod-1", "journalctl -u pg --since today", "journalctl -n 500", "gh run view 123 --log",
+                    "gh run view --log 123"):
+            self.assertTrue(layered.is_log(cmd), cmd)
+            self.assertFalse(layered.never_ends(cmd), cmd)
+        for cmd in ("docker ps", "docker exec web logs", "docker compose up", "kubectl get pods", "kubectl describe pod logs",
+                    "pytest tests/logs", "gh run list", "git log"):
+            self.assertFalse(layered.is_log(cmd), cmd)
+        for cmd in ("docker logs -f web", "docker compose logs -f db", "kubectl -n x logs -f pod", "docker logs -tf web",
+                    "journalctl -f", "journalctl -u pg --follow"):
+            self.assertTrue(layered.never_ends(cmd), cmd)
+
+    def test_tail_with_a_number_is_parsed_and_the_command_is_still_wrapped(self):
+        cfg = config(self.dir, commands=COMMANDS + ["docker compose logs", "kubectl logs", "journalctl"])
+        for cmd in ("docker logs --tail 3000 vmt-postgres-test", "docker compose logs --tail 300 db",
+                    "kubectl logs --tail 100 pod-1", "journalctl -n 3000"):
+            wrapped = layered.wrap(cmd, cfg, "toolu_01")
+            self.assertIsNotNone(wrapped, cmd)
+            self.assertIn(" --log", wrapped.split("reduce", 1)[1], cmd)
+        self.assertNotIn(" --log", layered.wrap("pytest --tail 3", cfg, "t").split("reduce", 1)[1])
+
+    def test_docker_logs_in_the_session_is_reduced_and_the_full_log_is_saved(self):
+        text = self.pg_log(1500, pad=100)
+        self.tool("docker", text.rstrip("\n"), 0)
+        out, code = self.run_wrapped("docker logs --tail 3000 vmt-postgres-test", passthrough_chars=20000)
+        self.assertEqual(code, 0)
+        self.assertIn("ERROR:  duplicate key value violates unique constraint", out)
+        self.assertIn("FATAL:  terminating connection", out)
+        self.assertLess(len(out), len(text) // 5)
+        saved = os.path.join(self.dir, "out", "toolu_01.txt")
+        with open(saved) as fh:
+            self.assertEqual(fh.read().strip(), text.strip())
+        self.assertIn(saved, out)
+
+    def test_an_error_free_docker_log_is_reduced_too_and_its_file_stays(self):
+        text = "".join(f"2026-11-21T04:00:00.{i % 1000:03d}Z GET /health 200 {i}ms\n" for i in range(800))
+        self.tool("docker", text.rstrip("\n"), 0)
+        out, code = self.run_wrapped("docker logs web", passthrough_chars=1000)
+        self.assertIn("no error line matched", out)
+        self.assertLess(len(out), len(text) // 5)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "out", "toolu_01.txt")))
+
+    def test_an_unreduced_output_says_why_and_the_saved_file_stays(self):
+        self.tool("pytest", "noise line\n" * 100, 1)
+        out, code = self.run_wrapped("pytest", passthrough_chars=200)
+        self.assertEqual(code, 1)
+        lines = out.splitlines()
+        self.assertIn("no reduction rule matched this output", lines[1])
+        self.assertIn(os.path.join(self.dir, "out", "toolu_01.txt"), lines[1])
+        self.assertEqual([ln for ln in lines[2:] if ln], ["noise line"] * 100)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "out", "toolu_01.txt")))
+
+    def test_a_562_kb_log_is_reduced_well_inside_the_time_limit(self):
+        text = self.pg_log(2000, pad=120)
+        while len(text) < 562160:
+            text += self.pg_log(300, pad=120)
+        path = os.path.join(self.dir, "big.txt")
+        with open(path, "w") as fh:
+            fh.write(text)
+        cfg = config(self.dir, passthrough_chars=20000)
+        started = time.time()
+        done = subprocess.run([sys.executable, "-S", os.path.join(HOOKS, "layered.py"), "reduce", "--config", cfg["config_file"],
+                               "--file", path, "--rc", "0", "--cmd-b64", "eA==", "--log"], capture_output=True, text=True)
+        took = time.time() - started
+        self.assertLess(took, layered.REDUCE_SECONDS / 2)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("ERROR:  duplicate key value violates unique constraint", done.stdout)
+        self.assertNotIn("the reducer", done.stdout)
+        self.assertLess(len(done.stdout), 20000)
+        self.assertTrue(os.path.exists(path))
+
+    # --- above the limit, a failure keeps every test id and its detail
+
+    def test_distinct_failing_tests_are_never_merged_even_when_they_differ_only_by_digits(self):
+        pytest_text = "".join(f"FAILED tests/test_zz_fail.py::test_big_fail[{i}] - AssertionError: payload mismatch for case {i}\n"
+                              for i in range(60))
+        pytest_text += ("E       AssertionError: payload mismatch for case 7\n" * 3 + "tests/test_zz_fail.py:8: AssertionError\n" * 60
+                        + "FAILED tests/test_zz_fail.py::test_unique_needle_failure - RuntimeError: UNIQUE_NEEDLE\n"
+                        + "=== 61 failed in 3.1s ===\n")
+        out, how = self.reduce(pytest_text, 1, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        for i in range(60):
+            self.assertIn(f"FAILED tests/test_zz_fail.py::test_big_fail[{i}] - AssertionError: payload mismatch for case {i}\n", out)
+        self.assertIn("test_unique_needle_failure", out)
+        self.assertIn("tests/test_zz_fail.py:8: AssertionError (×60)\n", out)  # identical lines still merge
+        self.assertIn("E       AssertionError: payload mismatch for case 7 (×3)\n", out)
+        vitest = "".join(f"   × case {i} mismatch 3ms\n FAIL  src/test/zz.test.ts > case {i}\n" for i in range(40))
+        out, _ = self.reduce(vitest + " Tests  40 failed (40)\n", 1, passthrough_chars=500)
+        for i in range(40):
+            self.assertIn(f"   × case {i} mismatch 3ms\n", out)
+            self.assertIn(f" FAIL  src/test/zz.test.ts > case {i}\n", out)
+        self.assertNotIn("(×", out)
+
+    def test_similar_messages_that_name_no_test_merge_only_when_there_are_too_many(self):
+        text = "".join(f"E   AssertionError: payload mismatch for case {i}\n" for i in range(100))
+        out, _ = self.reduce(text + "FAILED t::t\n", 1, passthrough_chars=500)
+        self.assertIn("(×100 similar)", out)
+        few = "".join(f"E   AssertionError: payload mismatch for case {i}\n" for i in range(5))
+        out, _ = self.reduce(few + "FAILED t::t\n" + "x\n" * 300, 1, passthrough_chars=500)
+        self.assertIn("mismatch for case 4\n", out)
+        self.assertNotIn("similar", out)
+
+    def vitest_failure(self, i, diff_lines=4):
+        return [f" FAIL  src/test/zz.test.ts > case {i}",
+                f"AssertionError: expected {{ key_0: 'value-{i}-0', …(11) }} to deeply equal {{ key_0: 'value-{i}-0', …(11) }}",
+                "", "- Expected", "+ Received", "", "  {"] + [
+                f'-   "key_{k}": "value-{i}-{k}",' if k % 2 == 0 else f'+   "key_{k}": "value-{i}-{k + 1}",'
+                for k in range(diff_lines)] + ["  }", "", f" ❯ src/test/zz.test.ts:{9 + i}:20",
+                                               "      7|   const expected = { ...base }", f"      8|   const actual = {{ ...expected, key_5: {i} }}",
+                                               f"      9|   expect(actual).toEqual(expected)", "       |                    ^", ""]
+
+    def test_the_vitest_diff_block_of_a_failure_is_kept(self):
+        text = "\n".join(sum((self.vitest_failure(i) for i in range(3)), []) + [" Test Files  1 failed (1)", "      Tests  3 failed (3)", ""])
+        out, how = self.reduce(text, 1, passthrough_chars=100)
+        self.assertEqual(how, "fail-rules")
+        for i in range(3):
+            self.assertIn('-   "key_0": "value-%d-0",\n+   "key_1": "value-%d-2",\n' % (i, i), out)
+        self.assertIn("- Expected\n+ Received\n", out)
+        self.assertIn("      8|   const actual = { ...expected, key_5: 1 }\n", out)  # the source frame follows the diff
+
+    def test_a_diff_block_is_capped_and_only_the_first_failures_keep_theirs(self):
+        text = "\n".join(sum((self.vitest_failure(i, diff_lines=60) for i in range(12)), []) + ["      Tests  12 failed (12)", ""])
+        out, _ = self.reduce(text, 1, passthrough_chars=100)
+        first = out.split(" FAIL  src/test/zz.test.ts > case 1\n")[0]
+        self.assertLessEqual(first.count('"key_'), layered.DIFF_LINES)
+        self.assertGreater(first.count('"key_'), 20)
+        self.assertIn("the detail blocks are kept for the first", out)
+        self.assertIn("of 12 failures", out)
+        for i in range(12):  # every failure is still named
+            self.assertIn(f" FAIL  src/test/zz.test.ts > case {i}\n", out)
+        self.assertLess(len(out.splitlines()), 300)
+
+    PW_FAILURE = [
+        "  1) [chromium] › e2e/auth.spec.ts:13:7 › 认证 › 短信登录 ──────────────────────",
+        "", "    Error: expect(locator).toHaveCount(expected) failed", "",
+        "    Locator: getByRole('complementary').getByRole('button', { name: '我的积分' })",
+        "    Expected: 5", "    Received: 0", "    Timeout:  2000ms", "", "    Call log:",
+        '      - Expect "toHaveCount" with timeout 2000ms',
+        "      - waiting for getByRole('complementary').getByRole('button', { name: '我的积分' })",
+        "        21 × locator resolved to 0 elements", '          - unexpected value "0"', "",
+        "      28 |     await page.goto('/')", "      29 |", "    > 30 |     await expect(page.locator('aside')).toHaveCount(5, { timeout: 2000 })",
+        "         |                                                              ^", "      31 |", "      32 |   })", "",
+        "        at /w/e2e/auth.spec.ts:30:62", "",
+        "    attachment #1: screenshot (image/png) ────────", "    test-results/auth-1/test-failed-1.png", "", ""]
+
+    def test_playwright_keeps_the_locator_call_log_and_source_frame(self):
+        text = "\n".join(["  ✓  1 [chromium] › e2e/home.spec.ts:3:1 › home loads (1.1s)"] * 30 + ["  1 failed"] + self.PW_FAILURE
+                         + ["  1 failed", "  30 passed (9.0s)"])
+        out, how = self.reduce(text, 1, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        for line in ("    Locator: getByRole('complementary').getByRole('button', { name: '我的积分' })", "    Timeout:  2000ms",
+                     "    Call log:", '      - Expect "toHaveCount" with timeout 2000ms', "        21 × locator resolved to 0 elements",
+                     "      28 |     await page.goto('/')",
+                     "    > 30 |     await expect(page.locator('aside')).toHaveCount(5, { timeout: 2000 })",
+                     "         |                                                              ^", "      32 |   })",
+                     "    test-results/auth-1/test-failed-1.png"):
+            self.assertIn(line + "\n", out)
+        self.assertLess(out.count("home loads"), 2)
+
+    def test_the_call_log_and_frame_are_capped_per_failure(self):
+        long = list(self.PW_FAILURE)
+        at = long.index("    Call log:")
+        long[at + 1:at + 1] = [f"      - step {i}" for i in range(80)]
+        out, _ = self.reduce("\n".join(long), 1, passthrough_chars=100)
+        self.assertLessEqual(out.count("      - step "), layered.CALL_LOG_LINES)
+        self.assertGreater(out.count("      - step "), 5)
 
 
 BRIEF = """# Task 7 — Fix the cart total

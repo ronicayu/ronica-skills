@@ -13,12 +13,17 @@ PostToolUseFailure, which cannot replace the output. The command runs in the ses
 its environment, functions and `cd` stay as they are.
 
 Policy: output below passthrough_chars is left unchanged. A pass (exit 0) keeps the result lines. A failure keeps the
-FAILED lines and the assert, error, crash and linker lines first, then file:line references, then the last lines, all
-copied from the full output; a count says how many matching lines were left out. The same rules run at exit 0 when a
-FAILED or error line matches, and always for log commands (`gh run view --log`, `docker logs`), which exit 0 whatever the
-log says. When no rule matches and the output is above large_chars, summarize_fallback (default off) asks Haiku. The full
-output stays in a file whose path the reduced text names. `pre` fails safe: any error prints nothing and exits 0.
-`reduce` prints nothing and exits 1 on an error or after REDUCE_SECONDS, and the wrapper then prints the file.
+FAILED lines (every distinct test id) and the assert, error, crash and linker lines, then file:line references, then the last
+lines, all copied from the full output; a count says how many matching lines were left out. Only identical lines merge
+into one line with a count (`(×N)`); lines that name different tests never do. For the first failures it also keeps the
+detail block: the vitest `- Expected / + Received` diff, and the Playwright locator, call log and source frame. The same
+rules run at exit 0 when a FAILED or error line matches, and always for log commands (`gh run view --log`, `docker logs`,
+`docker compose logs`, `kubectl logs`, `journalctl`), which exit 0 whatever the log says; for those, `ERROR:`, `FATAL:`,
+`PANIC:` and `LOG: ... error` lines (the postgres style) are error lines too, and a log with no error line shows its last
+lines. When no rule matches and the output is above large_chars, summarize_fallback (default off) asks Haiku. The full
+output stays in a file whose path the reduced text names; it is never deleted when it is above passthrough_chars. `pre` fails
+safe: any error prints nothing and exits 0. When `reduce` cannot reduce (an error, no matching rule, or REDUCE_SECONDS
+passed) it prints one line that says why and then the full output.
 """
 
 import argparse
@@ -39,13 +44,22 @@ WRAPPERS = ("with-slot.sh", "env", "time")  # words that start a command and lea
 GLOB_CHARS = "*?["
 KEEP_DAYS = 3
 LINE_CAP = 2000  # a line is read, matched and shown up to this length: no pattern runs on more
-KEY_MAX = 60  # the FAILED and error lines kept (the first half and the last half when there are more)
-MAX_LINES = 90  # all matching lines kept; the rest of the room goes to file:line references
+KEY_MAX = 60  # the error lines kept (the first half and the last half when there are more)
+ID_MAX = 200  # the distinct FAILED lines (test ids) kept, the same way
+MAX_LINES = 90  # error lines and file:line references kept; FAILED lines come first, the rest of the room goes to references
+DIFF_LINES = 30  # per failure: the vitest diff block
+CALL_LOG_LINES = 15  # per failure: the Playwright call log
+FRAME_LINES = 12  # per failure: the source frame
+BLOCK_FAILURES = 8  # detail blocks are kept for this many failures; the rest are counted
+BLOCK_LINES = 200  # and for at most this many lines in all
 TAIL_LINES = 15
 RESULT_LINES = 5
 REDUCE_SECONDS = 5
 FILE_CAP = 20 * 1024 * 1024  # the saved output is cut to its head and tail above this size
-LOG_COMMANDS = (("gh", "run", "view"), ("docker", "logs"), ("kubectl", "logs"), ("journalctl",))
+DOCKER_LIKE = ("docker", "podman", "nerdctl", "docker-compose", "podman-compose")
+DOCKER_SUBCOMMANDS = ("compose", "container", "service", "stack")
+VALUE_FLAGS = ("-n", "--namespace", "--context", "-H", "--host", "-f", "--file", "-p", "--project-name", "--profile",
+               "--env-file", "--kubeconfig", "-c", "--container", "--config")  # global options before `logs` that take a word
 FOLLOWING = ("--watch", "--follow", "--ui", "show-report", "--debug", "--watchAll")  # never end, or wait for a person
 
 RESULT = re.compile(
@@ -58,6 +72,9 @@ ERROR = re.compile(
     r"^error(\[\w+\])?:|\berror TS\d+|^make[^:\n]*: \*\*\*|: (fatal )?error:|: ERROR:|\bld: |linker command failed|"
     r"undefined reference|symbol\(s\) not found|Segmentation fault|Fatal Python error|\bKilled\b|\bAborted\b|core dumped|"
     r"##\[error\]|Test timeout of")
+LOG_ERROR = re.compile(  # postgres `ERROR:  ` (two spaces), `FATAL:`, `PANIC:`, `LOG:  ... error`, and logfmt or JSON levels
+    r"(?:^|[\s\]])(?:ERROR|FATAL|PANIC):|\bLOG:\s.*\b[Ee]rror\b|\blevel[=\"': ]+(?:error|fatal|panic|critical)\b")
+LOG_CONTEXT = re.compile(r"^(DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION):")
 PASSED_LINE = re.compile(r"^\s*(✓|✔|√)|^\S+::\S+ PASSED\b")
 FILE_LINE = re.compile(r"[\w./\\-]+\.(py|js|jsx|ts|tsx|mjs|cjs|rs|go|java|kt|rb|c|cc|cpp|h|swift):\d+")
 
@@ -184,12 +201,43 @@ def never_ends(target):
         return True
     if "pytest" in words_of and any(w in ("-f", "--looponfail", "--pdb", "--trace") for w in words_of):
         return True
-    return "-f" in words_of and "logs" in words_of[:3]
+    if os.path.basename(words_of[0]) == "journalctl" and "-f" in words_of:
+        return True
+    if "logs" in words_of:  # `-f` before `logs` is a compose file, after it the follow flag (also as `-tf`)
+        return any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", w) for w in words_of[words_of.index("logs") + 1:])
+    return False
+
+
+def positional(words_of):
+    """The words that are not options or the values of the options in VALUE_FLAGS."""
+    found, skip = [], False
+    for w in words_of:
+        if skip:
+            skip = False
+        elif w in VALUE_FLAGS:
+            skip = True
+        elif not w.startswith("-"):
+            found.append(w)
+    return found
 
 
 def is_log(target):
-    words_of = tuple(target.split())
-    return any(words_of[:len(c)] == c for c in LOG_COMMANDS)
+    """A command whose output is a log: it exits 0 whatever the log says. Options may stand anywhere, so
+    `docker logs --tail 3000 name` and `kubectl -n ns logs pod` both count."""
+    words_of = target.split()
+    if not words_of:
+        return False
+    if "logs" in words_of:
+        before = positional(words_of[:words_of.index("logs")])
+        prog = os.path.basename(before[0]) if before else ""
+        if prog in DOCKER_LIKE:
+            return all(w in DOCKER_SUBCOMMANDS for w in before[1:])
+        if prog in ("kubectl", "oc"):
+            return len(before) == 1
+    first = positional(words_of)
+    if first[:1] and os.path.basename(first[0]) == "journalctl":
+        return True
+    return [os.path.basename(first[0])] + first[1:3] == ["gh", "run", "view"] if first else False
 
 
 def wrap(cmd, cfg, tool_use_id):
@@ -204,7 +252,8 @@ def wrap(cmd, cfg, tool_use_id):
               + (" --log" if is_log(target) else ""))
     notice = q(f"[agentic-team hook: the full output is saved to {out} when the output is reduced]")
     return (f"printf '%s\\n' {notice}; __at_rc=0; {{ {cmd}\n}} > {q(out)} 2>&1 || __at_rc=$?; "
-            f"{reduce} || cat {q(out)}; (exit \"$__at_rc\")")
+            f"{reduce} || {{ printf '%s\\n' {q('[agentic-team hook: the reducer did not run; the full output follows and stays in ' + out + ']')}; "
+            f"cat {q(out)}; }}; (exit \"$__at_rc\")")
 
 
 def read_lines(path):
@@ -225,51 +274,165 @@ def read_lines(path):
         return [ln if len(ln) <= LINE_CAP else ln[:LINE_CAP] + " [line cut]" for ln in fh.read().splitlines()]
 
 
-LOG_PREFIX = re.compile(r"^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?")
-
-
+LOG_PREFIX = re.compile(r"^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\d[T ][\d:.]+(?:Z| ?UTC)? ?)?(?:\[\d+\] )?")
 ROOT = re.compile(r"^E\s|Error:|Traceback|Caused by")
-SAME = re.compile(r"\d+|(?:[\w.-]*/)+[\w.-]*")
+DIGITS = re.compile(r"\d+")
+NAMES_A_PLACE = re.compile(  # a line that names a test or a place: it never merges with a line that differs
+    r"::|\btest_|_test\b|\.(test|spec)\.[jt]sx?|[\w./\\-]+\.\w+:\d+|\(\d+,\d+\)| › | > ")
+DIFF_START = re.compile(r"^\s*-\s*Expected\b")
+DIFF_HEADER_END = re.compile(r"^\s*\+\s*Received\b")
+DETAIL_STOP = re.compile(r"^\s*(❯|⎯|FAIL\b|[✓×✗✔✘])")
+GROUP_START = re.compile(r"^\s*(\d+\) \[|FAIL\s+\S)")
+FRAME_START = re.compile(r"^\s*(>\s*)?\d+ ?\|")
+FRAME = re.compile(r"^\s*(>\s*)?\d+ ?\||^\s+\|\s")  # a code line, or the line with the ^ pointer
+PW_FIELD = re.compile(r"^\s+(Locator|Timeout):")
+CALL_LOG = re.compile(r"^\s+Call log:")
+ATTACHMENT = re.compile(r"^\s+attachment #\d+")
+
+
+def detail_groups(lines):
+    """For each failure, the indexes of its detail lines: the vitest diff block (`- Expected` to the blank line after the
+    changes, at most DIFF_LINES), and the Playwright `Locator:` and `Timeout:` lines, the call log (CALL_LOG_LINES), the
+    source frame (FRAME_LINES) and the attachment lines. A failure starts at a `FAIL  file > test` or `N) [project] ›` line."""
+    groups, cur, i, n = [], None, 0, len(lines)
+
+    while i < n:
+        text = lines[i][:LINE_CAP]
+        if GROUP_START.match(text):
+            cur = []
+            groups.append(cur)
+        elif DIFF_START.match(text):
+            take, j, started, header = [i], i + 1, False, False
+            while j < n and len(take) < DIFF_LINES and not DETAIL_STOP.match(lines[j]):
+                if header and started and not lines[j].strip():
+                    break
+                if header and lines[j].strip():
+                    started = True
+                header = header or bool(DIFF_HEADER_END.match(lines[j]))
+                take.append(j)
+                j += 1
+            if cur is None:
+                cur = []
+                groups.append(cur)
+            cur.extend(take)
+            i = j
+            continue
+        elif cur is not None and PW_FIELD.match(text):
+            cur.append(i)
+        elif cur is not None and CALL_LOG.match(text):
+            j = i + 1
+            while j < n and lines[j].strip() and j - i <= CALL_LOG_LINES:
+                j += 1
+            cur.extend(range(i, j))
+            i = j
+            continue
+        elif cur is not None and FRAME_START.match(text):
+            j = i
+            while j < n and j - i < FRAME_LINES and FRAME.match(lines[j]):
+                j += 1
+            cur.extend(range(i, j))
+            i = j
+            continue
+        elif cur is not None and ATTACHMENT.match(text):
+            cur.extend(range(i, min(i + 2, n)))
+            i += 2
+            continue
+        i += 1
+    return [g for g in groups if g]
+
+
+def collapse(indexes, norm, heads):
+    """Group the line indexes by norm(index): ({first index: count}, the first indexes whose group holds different lines)."""
+    first, counts, varied = {}, {}, set()
+    for i in indexes:
+        at = first.setdefault(norm(i), i)
+        counts[at] = counts.get(at, 0) + 1
+        if heads[i] != heads[at]:
+            varied.add(at)
+    return counts, varied
+
+
+def halves(found, limit, keep_extra=None):
+    """`found` (sorted indexes) cut to its first and last half when over `limit`; `keep_extra` always stays."""
+    if len(found) <= limit:
+        return found
+    keep = found[:limit // 2] + found[-(limit // 2):] + ([keep_extra] if keep_extra in found else [])
+    return sorted(set(keep))
 
 
 def extract(lines, log=False):
-    """(kept, omitted, key, useful, summary). `kept` is the lines to show in their order: the FAILED and error lines first (at
-    most KEY_MAX), then file:line references up to MAX_LINES, then the last TAIL_LINES lines. `omitted` counts the
-    matching lines left out; `key` is the number of FAILED and error lines kept, `useful` those and the references.
+    """(kept, omitted, key, useful, summary). `kept` is the lines to show in their order: the FAILED lines (each distinct test
+    id), the error lines (at most KEY_MAX), the detail blocks of the first failures, then file:line references up to
+    MAX_LINES, then the last TAIL_LINES lines. Only identical lines merge, with a count; when there are still more than
+    KEY_MAX error lines, lines that differ only in digits and name no test or place merge too (`similar`). `omitted` counts
+    the matching lines left out; `key` is the number of FAILED and error lines kept, `useful` those and the references.
     `summary` holds the result lines at the end."""
-    keys, refs, root = [], [], None
+    ids, keys, refs, root, heads = [], [], [], None, {}
     for i, line in enumerate(lines):
         head = line[:LINE_CAP]
         if log:  # `gh run view --log` puts job and step columns and a timestamp before the text
             head = head[LOG_PREFIX.match(head).end():]
+        heads[i] = head
         if PASSED_LINE.search(head):
             continue
-        if FAILED.search(head) or ERROR.search(head):
+        if FAILED.search(head):
+            ids.append(i)
+        elif ERROR.search(head) or (log and LOG_ERROR.search(head)):
             keys.append(i)
-            if root is None and ROOT.search(head):
-                root = i
-        elif FILE_LINE.search(head):
-            refs.append(i)
-    total = len(keys) + len(refs)
-    first, counts = {}, {}  # near-duplicate key lines (digits and paths normalised) count once, with their number
-    for i in keys:
-        same = SAME.sub("#", lines[i][:LINE_CAP])
-        first.setdefault(same, i)
-        counts[first[same]] = counts.get(first[same], 0) + 1
-    keys = sorted(counts)
-    if len(keys) > KEY_MAX:
-        keep = keys[:KEY_MAX // 2] + keys[-(KEY_MAX // 2):] + ([root] if root in counts else [])
-        keys = sorted(set(keep))
-    refs = refs[:max(MAX_LINES - len(keys), 0)]
-    chosen = sorted(set(keys + refs) | set(range(max(len(lines) - TAIL_LINES, 0), len(lines))))
+        else:
+            if FILE_LINE.search(head):
+                refs.append(i)
+            continue
+        if root is None and ROOT.search(head):
+            root = i
+    total = len(ids) + len(keys) + len(refs)
+
+    def exact(i):
+        return heads[i]
+
+    def loose(i):
+        head = heads[i]
+        return head if NAMES_A_PLACE.search(head) else DIGITS.sub("#", head)
+
+    id_counts, _ = collapse(ids, exact, heads)
+    key_counts, varied = collapse(keys, exact, heads)
+    if len(key_counts) > KEY_MAX:
+        key_counts, varied = collapse(keys, loose, heads)
+    counts = {**id_counts, **key_counts}
+    id_list = halves(sorted(id_counts), ID_MAX)
+    key_list = halves(sorted(key_counts), KEY_MAX, root)
+    shown_keys = id_list + key_list
+    refs = refs[:max(MAX_LINES - len(key_list) - len(id_list), 0)]
+    extra = set()  # a postgres error line is followed by its DETAIL, HINT, CONTEXT and STATEMENT lines
+    if log:
+        for i in shown_keys:
+            j = i + 1
+            while j < len(lines) and j - i <= 3 and LOG_CONTEXT.match(heads[j]):
+                extra.add(j)
+                j += 1
+    groups = detail_groups(lines)
+    blocks, used = set(), 0
+    for group in groups[:BLOCK_FAILURES]:
+        if used and used + len(group) > BLOCK_LINES:
+            break
+        blocks.update(group)
+        used += len(group)
+    cut_groups = len(groups) - sum(1 for g in groups if blocks.issuperset(g))
+    chosen = sorted(set(shown_keys + refs) | extra | blocks | set(range(max(len(lines) - TAIL_LINES, 0), len(lines))))
     seen, kept = set(), []
     for i in chosen:
-        if lines[i] not in seen:
+        if i in blocks or i in extra:
+            kept.append(lines[i])
+        elif lines[i] not in seen:
             seen.add(lines[i])
-            kept.append(lines[i] + (f" (×{counts[i]})" if counts.get(i, 1) > 1 else ""))
-    useful = len(set(keys + refs))
-    shown = sum(counts.get(i, 1) for i in keys) + len(refs)
-    return kept, total - shown, len(keys), useful, [ln for ln in lines[::-1] if RESULT.search(ln)][:RESULT_LINES][::-1]
+            n = counts.get(i, 1)
+            kept.append(lines[i] + ((f" (×{n} similar)" if i in varied else f" (×{n})") if n > 1 else ""))
+    if cut_groups:
+        kept.insert(0, f"[agentic-team hook: the detail blocks are kept for the first {len(groups) - cut_groups} of "
+                       f"{len(groups)} failures; the other {cut_groups} are in the full output]")
+    useful = len(set(shown_keys + refs))
+    shown = sum(counts.get(i, 1) for i in shown_keys) + len(refs)
+    return kept, total - shown, len(shown_keys), useful, [ln for ln in lines[::-1] if RESULT.search(ln)][:RESULT_LINES][::-1]
 
 
 def summarize(text, cmd, seconds=30):
@@ -291,8 +454,9 @@ def reduce_output(lines, size, rc, cfg, cmd, path, log=False):
     if rc == 0 and not key and not log:
         shown = summary or lines[-3:]
         return "[agentic-team hook: exit 0; result lines only]\n" + "\n".join(shown) + "\n" + pointer, "pass"
-    if rc == 0 and not key:
-        return None, "pass-through"
+    if rc == 0 and not key:  # a log with no error line: its last lines, not the whole log
+        return (f"[agentic-team hook: exit 0; no error line matched in the log; the last lines]\n"
+                + "\n".join(lines[-2 * TAIL_LINES:]) + "\n" + pointer), "log-tail"
     if useful and (key or rc != 0):
         copied = "lines below are verbatim from the full output" if not omitted else (
             f"lines below are copied from the full output; {omitted} matching lines omitted")
@@ -350,6 +514,16 @@ def too_slow(signum, frame):
     raise TimeoutError("reduce took too long")
 
 
+def print_full(path, why):
+    """The reducer's fallback: one line that says why, then the full output. The file stays."""
+    sys.stdout.write(f"[agentic-team hook: {why}; the full output follows and stays in {path}]\n")
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        shutil.copyfileobj(fh, sys.stdout)
+
+
+NOT_REDUCED = {"fail-unchanged": "no reduction rule matched this output"}
+
+
 def cmd_reduce(args):
     signal.signal(signal.SIGALRM, too_slow)
     signal.alarm(REDUCE_SECONDS)
@@ -360,13 +534,17 @@ def cmd_reduce(args):
             sys.stdout.write(fh.read())
         os.remove(args.file)
         return
-    lines = read_lines(args.file)
-    out, _ = reduce_output(lines, os.path.getsize(args.file), args.rc, cfg, cmd, args.file, args.log)
-    signal.alarm(0)
+    try:
+        lines = read_lines(args.file)
+        out, how = reduce_output(lines, os.path.getsize(args.file), args.rc, cfg, cmd, args.file, args.log)
+        signal.alarm(0)
+        why = NOT_REDUCED.get(how, "the output was not reduced")
+    except Exception as err:  # the full output is better than none, and the file stays
+        signal.alarm(0)
+        out, why = None, (f"the reducer timed out after {REDUCE_SECONDS} s" if isinstance(err, TimeoutError)
+                          else f"the reducer failed ({type(err).__name__})")
     if out is None:
-        with open(args.file, encoding="utf-8", errors="replace") as fh:
-            shutil.copyfileobj(fh, sys.stdout)
-        os.remove(args.file)
+        print_full(args.file, why)
         return
     sys.stdout.write(out if out.endswith("\n") else out + "\n")
 
