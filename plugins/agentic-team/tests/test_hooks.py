@@ -261,7 +261,7 @@ class Layered(unittest.TestCase):
                               env=dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"]))
         self.assertTrue(done.stdout.startswith(NOTICE))
         notice, why, rest = done.stdout.strip().split("\n", 2)
-        self.assertIn("the reducer did not run", why)
+        self.assertIn("the reducer ran and failed (exit 2)", why)
         self.assertIn(os.path.join(self.dir, "out", "toolu_01.txt"), why)
         self.assertEqual((done.returncode, rest), (1, PYTEST_FAIL.strip()))
         self.assertTrue(os.path.exists(os.path.join(self.dir, "out", "toolu_01.txt")))
@@ -740,6 +740,141 @@ class Layered(unittest.TestCase):
         out, _ = self.reduce("\n".join(long), 1, passthrough_chars=100)
         self.assertLessEqual(out.count("      - step "), layered.CALL_LOG_LINES)
         self.assertGreater(out.count("      - step "), 5)
+
+
+    # --- review fixes: size cap, variants, follow flags, matching, defaults, eslint, nits
+
+    def test_the_reduced_text_stays_under_the_cap_for_600_failing_tests(self):
+        text = "".join(f"FAILED tests/test_zz_fail.py::test_big_fail[{i}] - AssertionError: " + "payload mismatch " * 12 + f"{i}\n"
+                       for i in range(600)) + "=== 600 failed in 9s ===\n"
+        out, how = self.reduce(text, 1, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        self.assertLess(len(out), layered.REDUCED_MAX_CHARS)
+        self.assertIn("the text was cut to fit", out)
+        self.assertIn("test_big_fail[0]", out)
+        self.assertIn("matching lines omitted", out)  # how many were cut
+        self.assertIn("=== 600 failed in 9s ===", out)
+
+    def test_the_detail_blocks_go_before_the_ids_when_the_cap_is_hit(self):
+        text = "\n".join(sum((self.vitest_failure(i, diff_lines=30) for i in range(8)), []) + [" Tests  8 failed (8)", ""])
+        with unittest.mock.patch.object(layered, "REDUCED_MAX_CHARS", 4000):
+            out, _ = self.reduce(text, 1, passthrough_chars=100)
+        self.assertIn("the detail blocks are dropped", out)
+        self.assertNotIn("- Expected", out)
+        for i in range(8):
+            self.assertIn(f" FAIL  src/test/zz.test.ts > case {i}\n", out)
+
+    def test_a_thousand_distinct_postgres_errors_stay_small_and_are_errors_not_ids(self):
+        text = "".join(f'2026-11-21 04:00:{i % 60:02d}.000 UTC [{i}] ERROR:  relation "batch_{i}" does not exist\n'
+                       f"2026-11-21 04:00:00.000 UTC [{i}] STATEMENT:  SELECT * FROM batch_{i} WHERE x = '" + "a" * 80 + "'\n"
+                       for i in range(1000))
+        out, how = self.reduce(text, 0, log=True, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        self.assertLess(len(out), 8000)
+        self.assertIn("similar", out)
+        kept, _, key, _, _ = layered.extract(text.splitlines(), True)
+        self.assertLessEqual(key, layered.KEY_MAX)  # error lines, so the KEY_MAX budget applies, not the 200 of test ids
+
+    def test_similar_errors_show_each_distinct_variant(self):
+        flood = ([f"E   ConnectionRefusedError: [Errno 61] Connect call failed ('127.0.0.1', {5432 if i < 40 else 6379})" for i in range(80)]
+                 + [f"E   ValueError: bad id {i}" for i in range(70)] + ["FAILED t::a", "FAILED t::b"] + ["tail"] * 20)
+        out, _ = self.reduce("\n".join(flood) + "\n", 1, passthrough_chars=500)
+        self.assertIn("('127.0.0.1', 5432) (×40 similar)", out)
+        self.assertIn("('127.0.0.1', 6379) (×40 similar)", out)
+        self.assertIn("E   ValueError: bad id 0 (×70 similar)", out)
+        many = [f"E   Boom: code {i % 3} part {i % 2} at row {i}" for i in range(140)] + ["FAILED t::a"] + ["tail"] * 20
+        out, _ = self.reduce("\n".join(many) + "\n", 1, passthrough_chars=500)
+        self.assertEqual(out.count("E   Boom: code"), 3)
+        self.assertIn("more similar lines in 3 other variants", out)
+
+    def test_journalctl_follow_in_a_flag_cluster_is_not_wrapped(self):
+        cfg = config(self.dir, commands=COMMANDS + ["journalctl"])
+        for cmd in ("journalctl -fu pg", "journalctl -xef", "journalctl -f -u pg", "journalctl -u pg --follow"):
+            self.assertTrue(layered.never_ends(cmd), cmd)
+            self.assertIsNone(layered.wrap(cmd, cfg, "t"), cmd)
+        for cmd in ("journalctl -u pg -n 500", "journalctl -xe"):
+            self.assertIsNotNone(layered.wrap(cmd, cfg, "t"), cmd)
+
+    def test_log_patterns_wrap_commands_with_options_before_logs(self):
+        cfg = config(self.dir, commands=["kubectl logs", "docker compose logs"])
+        for cmd in ("kubectl -n ns logs pod", "kubectl logs -n ns pod --tail 100", "docker compose -f a.yml logs svc",
+                    "docker compose --project-name x -f a.yml logs --tail 50 svc"):
+            wrapped = layered.wrap(cmd, cfg, "toolu_01")
+            self.assertIsNotNone(wrapped, cmd)
+            self.assertIn(" --log", wrapped.split("reduce", 1)[1], cmd)
+        for cmd in ("kubectl -n ns get pods", "docker compose -f a.yml up", "kubectl -n ns logs -f pod", "docker compose -f a.yml logs -f"):
+            self.assertIsNone(layered.wrap(cmd, cfg, "t"), cmd)
+
+    def test_log_failed_is_a_default_command_and_is_wrapped(self):
+        spec = importlib.util.spec_from_file_location("hook_config", os.path.join(os.path.dirname(HERE), "scripts", "config.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        default = module.SCHEMA["hooks"]["commands"][1]
+        self.assertIn("gh run view --log-failed", default)
+        cfg = config(self.dir, commands=default)
+        wrapped = layered.wrap("gh run view 123 --log-failed", cfg, "t")
+        self.assertIsNotNone(wrapped)
+        self.assertIn(" --log", wrapped.split("reduce", 1)[1])
+
+    def test_eslint_stylish_error_rows_are_kept_under_their_file(self):
+        rows = []
+        for f in range(40):
+            rows += [f"/w/src/file{f}.ts", f"  {f + 2}:12  error  'x{f}' is not defined  no-undef",
+                     f"  {f + 3}:1   warning  Unexpected console statement  no-console", ""]
+        text = "\n".join(rows + ["✖ 80 problems (40 errors, 40 warnings)", ""])
+        out, how = self.reduce(text, 1, passthrough_chars=500)
+        self.assertEqual(how, "fail-rules")
+        self.assertIn("/w/src/file0.ts\n  2:12  error  'x0' is not defined  no-undef\n", out)
+        self.assertIn("  41:12  error  'x39' is not defined  no-undef\n", out)  # rows never merge
+        self.assertIn("✖ 80 problems (40 errors, 40 warnings)", out)
+
+    def test_a_failing_log_with_no_error_line_shows_the_last_lines(self):
+        text = "".join(f"GET /health 200 {i}ms\n" for i in range(500))
+        out, how = self.reduce(text, 3, log=True, passthrough_chars=500)
+        self.assertEqual(how, "log-tail")
+        self.assertIn("exit 3; no error line matched", out)
+        self.assertIn("499ms", out)
+        self.assertNotIn("GET /health 200 10ms", out)
+
+    def test_the_failure_count_counts_failures_without_detail_blocks(self):
+        text = "\n".join(sum((self.vitest_failure(i, diff_lines=60) for i in range(12)), [])
+                         + [f" FAIL  src/test/other{i}.test.ts > no diff here\\n" for i in range(5)] + [" Tests  17 failed", ""])
+        out, _ = self.reduce(text, 1, passthrough_chars=100)
+        self.assertRegex(out, r"first [0-9]+ of 17 failures; the other 7")
+
+    def test_follow_false_and_names_with_watch_do_not_block_wrapping(self):
+        cfg = config(self.dir)
+        for cmd in ("docker logs --follow=false web", "docker logs --tail 5 watchtower", "docker logs vmt-filewatcher"):
+            self.assertIsNotNone(layered.wrap(cmd, cfg, "t"), cmd)
+        for cmd in ("docker logs --follow=true web", "docker logs --follow web", "docker logs --watch web"):
+            self.assertIsNone(layered.wrap(cmd, cfg, "t"), cmd)
+        self.assertIsNone(layered.wrap("make test-watch", cfg, "t"))
+
+    def test_the_wrapper_tells_did_not_run_from_ran_and_failed_and_prints_once(self):
+        self.tool("pytest", PYTEST_FAIL, 1)
+        cfg = config(self.dir)
+        os.makedirs(cfg["saved_dir"], exist_ok=True)
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"])
+        wrapped = layered.wrap("pytest", cfg, "toolu_01")
+        done = subprocess.run(["bash", "-c", wrapped.replace(sys.executable, "/nonexistent/python")], capture_output=True, text=True, env=env)
+        self.assertIn("the reducer did not run", done.stdout)
+        self.assertEqual(done.stdout.count("test_total_is_right"), done.stdout.count("test_total_is_right"))
+        self.assertEqual(done.stdout.count("=== FAILURES"), 1)
+        self.assertEqual(done.returncode, 1)
+        crash = os.path.join(self.dir, "crash.py")
+        with open(crash, "w") as fh:
+            fh.write("import sys\nsys.stdout.write('partial')\nsys.exit(3)\n")
+        done = subprocess.run(["bash", "-c", wrapped.replace(os.path.join(HOOKS, "layered.py"), crash)], capture_output=True, text=True, env=env)
+        self.assertIn("the reducer ran and failed (exit 3)", done.stdout)
+        self.assertEqual(done.stdout.count("=== FAILURES"), 1)
+
+    def test_a_second_timestamp_and_other_time_zones_are_ignored_when_lines_are_compared(self):
+        for prefix in ("2026-11-21 12:00:{s}.000 CST [{i}] ", "2026-11-21T04:00:{s}.123456789Z 2026-11-21 04:00:{s}.000 UTC [{i}] ",
+                       "2026-11-21 12:00:{s} +0800 [{i}] ", "2026-11-21T04:00:{s}Z 2026-11-21 04:00:{s} GMT [{i}] "):
+            text = "".join(prefix.format(s=f"{i % 60:02d}", i=i) + 'ERROR:  duplicate key value violates unique constraint "k"\n'
+                            for i in range(300)) + "end\n" * 30
+            out, _ = self.reduce(text, 0, log=True, passthrough_chars=500)
+            self.assertIn('constraint "k" (×300)', out, prefix)
 
 
 BRIEF = """# Task 7 — Fix the cart total
