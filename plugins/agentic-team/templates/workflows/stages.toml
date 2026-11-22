@@ -14,7 +14,7 @@ acceptance = [
 ]
 
 [stage.prd]
-role = "architect"
+role = "product-manager"
 verify = "design-doc"
 approval = "manager"
 estimate = 1
@@ -26,7 +26,7 @@ acceptance = [
 ]
 
 [stage.ux]
-role = "architect"
+role = "ux-designer"
 verify = "design-doc"
 approval = "manager"
 estimate = 1

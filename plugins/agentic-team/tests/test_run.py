@@ -6191,8 +6191,8 @@ class RoleTest(Base):
         self.assertTrue(self.section(self.brief(self.add_task(role="solo")), "ROLE").endswith("Method text of solo."))
         rows = {r["name"]: r for r in json.loads(self.ok("roles", pre=["--json"]).stdout)}
         self.assertEqual({n: r["source"] for n, r in rows.items()},
-                         {"architect": "project, overrides plugin", "rebase": "plugin", "solo": "project",
-                          "software-engineer": "plugin"})
+                         {"architect": "project, overrides plugin", "product-manager": "plugin", "rebase": "plugin",
+                          "solo": "project", "software-engineer": "plugin", "ux-designer": "plugin"})
         self.assertEqual(rows["architect"]["fits"], "the project's own architect")
         text = self.ok("roles").stdout
         self.assertIn("role: architect (project, overrides plugin); fits: the project's own architect; tier -; verify kind -; skills -", text)
@@ -6210,7 +6210,7 @@ class RoleTest(Base):
         task = self.add_task(role="nosuch")
         err = self.refused("launch", str(task))
         self.assertIn("no role named 'nosuch'", err)
-        self.assertIn("available roles: architect (plugin), known (project), rebase (plugin), software-engineer (plugin)", err)
+        self.assertIn("available roles: architect (plugin), known (project), product-manager (plugin), rebase (plugin), software-engineer (plugin), ux-designer (plugin)", err)
         self.assertEqual(self.calls("--bg"), [])
         running = self.running_task(role="nosuch")
         self.pass_report(running)
@@ -6407,7 +6407,7 @@ class RoleTest(Base):
         self.add_result(running, "PASS", f"Task: {running}\nStatus: PASS\nHead: {SHA_A}\n")
         verifying = self.events("verify", str(running), "--dry-run")
         self.assertEqual(len(self.named(verifying, "warn")), 1)
-        for name in ("architect", "software-engineer"):
+        for name in ("architect", "product-manager", "software-engineer", "ux-designer"):
             events = self.events("launch", str(self.add_task(role=name)), "--dry-run")
             self.assertEqual(self.named(events, "warn"), [], name)
 
@@ -6416,7 +6416,7 @@ class RoleTest(Base):
         fake = types.SimpleNamespace(config=config.load(self.root))
         folder = os.path.join(os.path.dirname(os.path.dirname(RUN)), "templates", "roles")
         names = sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md"))
-        self.assertEqual(names, ["architect", "rebase", "software-engineer"])
+        self.assertEqual(names, ["architect", "product-manager", "rebase", "software-engineer", "ux-designer"])
         for name in names:
             with self.subTest(name):
                 role = runner.Role(name, os.path.join(folder, name + ".md"), "plugin")

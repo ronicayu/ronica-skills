@@ -714,7 +714,8 @@ class ShippedTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.catalog = wf.load(PLUGIN, tmp.name, ROLES)
+        shipped = {n[:-3]: None for n in os.listdir(os.path.join(PLUGIN, "templates", "roles")) if n.endswith(".md")}
+        self.catalog = wf.load(PLUGIN, tmp.name, shipped)
 
     def test_every_shipped_file_passes_the_check(self):
         self.assertEqual(self.catalog.problems, [])
@@ -747,8 +748,8 @@ class ShippedTest(unittest.TestCase):
     def test_the_library_has_the_six_types_with_the_spec_values(self):
         types = self.catalog.library.types
         self.assertEqual(sorted(types), ["impl", "investigate", "prd", "spec", "test", "ux"])
-        for kind in ("investigate", "prd", "ux", "spec"):
-            self.assertEqual((types[kind]["role"], types[kind]["verify"], types[kind]["approval"]), ("architect", "design-doc", "manager"))
+        for kind, role in (("investigate", "architect"), ("prd", "product-manager"), ("ux", "ux-designer"), ("spec", "architect")):
+            self.assertEqual((types[kind]["role"], types[kind]["verify"], types[kind]["approval"]), (role, "design-doc", "manager"))
         for kind in ("impl", "test"):
             self.assertEqual((types[kind]["role"], types[kind]["verify"], types[kind]["approval"], types[kind]["scope"]),
                              ("software-engineer", "code", "auto", "instance"))
