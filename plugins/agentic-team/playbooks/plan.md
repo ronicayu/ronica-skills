@@ -36,7 +36,8 @@ adds what Taskgraph cannot decide.
      verifier recomputes numbers and runs the DDL. `design-doc`: an ADR, RFC or
      architecture document; the verifier checks sources, completeness and
      contradictions. Only `artifact-verified` closes these two kinds. A `design-doc` task's
-     ACCEPTANCE lists the full template in round 1: the problem statement with measurable
+     ACCEPTANCE lists the full template in round 1, unless its role names its own structure
+     (`product-manager`, `ux-designer`): the problem statement with measurable
      outcomes, ranked quality goals, options with "do nothing" and why each lost, the
      rejected alternative of each decision, failure modes (half-migrated, rolled back),
      migration steps, and a closed checklist for the coders who follow. The checklist

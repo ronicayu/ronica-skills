@@ -6,8 +6,8 @@ Each entry says what a version changes and, where it needs one, how to upgrade f
 
 Upgrading from 0.31.1.
 
-- **Two new roles: `product-manager` and `ux-designer`.** `product-manager` writes PRDs, scope and acceptance criteria, and task breakdowns; `ux-designer` writes user flows, screens with every state, copy and accessibility notes. Each has a Method for the worker and a Review for the verifier, and a default document structure that a project template replaces. Neither lists a skill: the plugin does not manage skills. A project adds its own PRD or UX skill with an extending role (see [Extending a role](docs/roles-and-briefs.md#extending-a-role)).
-- **The workflow stages `prd` and `ux` use the new roles** instead of `architect`. Stage tasks that already exist keep the role they were created with; a stage task created after the upgrade (`add --workflow`, `stage expand`, an escalation) gets the new role. A project that wants the old behaviour sets `role: architect` on those stages in its workflow file.
+- **Two new roles: `product-manager` and `ux-designer`.** `product-manager` writes PRDs, scope and acceptance criteria, and task breakdowns; `ux-designer` writes user flows, screens with every state, copy and accessibility notes. Each has a Method for the worker and a Review for the verifier, and a default document structure that a project template replaces. The design-doc verifier now takes a role's own structure, or a template in ACCEPTANCE, in place of its default completeness list. Neither lists a skill: the plugin does not manage skills. A project adds its own PRD or UX skill with an extending role (see [Extending a role](docs/roles-and-briefs.md#extending-a-role)).
+- **The workflow stages `prd` and `ux` use the new roles** instead of `architect`. Stage tasks that already exist keep the role they were created with; a stage task created after the upgrade (`add --workflow`, `stage expand`, an escalation) gets the new role. `stage replace` keeps the role of the task it replaces; set `--meta role=` on the new task to change it. A project that wants the old behaviour sets `role: architect` on those stages in its workflow file.
 
 ## 0.31.1
 

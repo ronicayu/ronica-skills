@@ -95,8 +95,8 @@ Shipped types:
 | Type | Role | Verify | Approval | Scope |
 |---|---|---|---|---|
 | `investigate` | `architect` | `design-doc` | `manager` | the design dir |
-| `prd` | `architect` | `design-doc` | `manager` | the design dir |
-| `ux` | `architect` | `design-doc` | `manager` | the design dir |
+| `prd` | `product-manager` | `design-doc` | `manager` | the design dir |
+| `ux` | `ux-designer` | `design-doc` | `manager` | the design dir |
 | `spec` | `architect` | `design-doc` | `manager` | the design dir |
 | `impl` | `software-engineer` | `code` | `auto` | instance |
 | `test` | `software-engineer` | `code` | `auto` | instance |
