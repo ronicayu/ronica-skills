@@ -192,6 +192,17 @@ every report, and on every wake (step 6).
      removes nothing. A `kept` line names what stayed and why; what stays is the operator's to decide.
      After a `kept` line about untracked files, delete only files your rerun
      created, then run `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id>`. A `kept` line that says `ignored files that may be data`, `used by docker` or `docker did not answer` is the operator's: tell them what it says. Never delete any other file a `kept` line names, stop a container, or change `[merge] disposable` yourself. Rerun a `close` that stopped.
+   - **PR manager.** When the project runs the merge queue through the `agentic-team:pr-manager`
+     agent (docs/merge.md, "A PR manager session"), `standing-orders.md` has no `MERGE:` line, so
+     `record` never merges; it records the pr-manager's merges at each drain. After a passing
+     `close`, send `ready PR #<n> task <id>` to the address in `.agentic-team/pr-manager.addr`;
+     before a fix or rebase round on a published request, send `fixing PR #<n>`. When a send fails,
+     append the line to `.agentic-team/to-pr-manager.log`. Read its messages (`merged`, `ci-failed`,
+     `conflict`, `stuck`) and `.agentic-team/pr-manager.log` at each drain: only the pr-manager's
+     `ci-failed` and `conflict` open a fix or rebase round. A `conflict` line from `record` (an
+     `after_rebase` check that failed on its rebase) is checked first, and the round starts only after
+     `fixing`. `pr-draft`, `pr-behind` and `ready-to-merge` from `record` are the queue's business:
+     never run `gh pr ready`, `close` to catch up, or merge around it.
 4. **Launch.** For each task `record` lists under `ready`, in the order it
    lists them (that is `tg ready` order: priority first, P0 to P3, then tasks
    without one; ties by id), while `slots` has

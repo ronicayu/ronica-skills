@@ -2,6 +2,12 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.0
+
+Upgrading from 0.32.0. Nothing changes unless a project starts the new agent.
+
+- **New agent `agentic-team:pr-manager`** (model `haiku`): an optional background session that runs the merge queue on GitHub. It queues only verified agentic-team requests, keeps one ready request at the head and the rest as drafts, readies the head before it rebases it, merges on green CI only the head it pinned (the verified head or its own catch-up of it), holds a failed request until the Manager sends `ready` again, tells working-job failures from summary-job and cleanup failures, cancels only draft `pull_request` runs, and reports `merged`, `ci-failed`, `conflict` and `stuck` to the Manager. It orders the queue by its own judgement and keeps its state in `.agentic-team/pr-queue.md`. Project rules go in `.claude/agentic-team/pr-manager.md`. The CI workflow needs `ready_for_review` in its trigger, heavy jobs that skip drafts, and a per-request concurrency group. Batching is not in the agent; docs/merge.md says how a project adds it with `run.py repoint`. No `run.py` change: `record` records its merges. See [A PR manager session](docs/merge.md#a-pr-manager-session).
+
 ## 0.32.0
 
 Upgrading from 0.31.1.
