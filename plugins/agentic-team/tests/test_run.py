@@ -14749,6 +14749,16 @@ class Issue130Test(Base):
             self.assertIn("agentic-team:dependency-check", fh.read())
 
 
+    def test_131_the_pr_manager_agent_ships_on_haiku(self):
+        base = os.path.dirname(HERE)
+        with open(os.path.join(base, "agents", "pr-manager.md"), encoding="utf-8") as fh:
+            front = fh.read().split("---\n")[1]
+        fields = dict(line.split(": ", 1) for line in front.strip().splitlines())
+        self.assertEqual(fields["name"], "pr-manager")
+        self.assertEqual(fields["model"], "haiku")
+        with open(os.path.join(base, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            self.assertIn("./agents/pr-manager.md", json.load(fh)["agents"])
+
 class AddTest(Base):
     """agentic-team 0.28.1: `run.py add` settles the dependencies of a new task when it creates the task."""
 

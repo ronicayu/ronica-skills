@@ -186,6 +186,37 @@ the operator's standing permission for `run.py` to push task branches to
    `#<n> (repointed from #<own>)`.
 7. `run.py close` posts the verdict on the request as one comment: the level, whether it closes the task, the verified head, the kind, the attempt, who filed it, and the evidence from that verify result (its `Ran:`, `Issues:` and `Follow-ups:` lines; for CI, `Run:` and `Conclusion:`; for an override, `Overrides:` and `Reason:`). A hidden marker is the comment's first line; a later verdict on the task edits that comment instead of adding one. A verdict that does not close the task is posted too, when a request exists; before any push there is none, and nothing is posted. A failed post is one `comment-failed` line with the next step, and `close` still exits 0. GitHub: `gh api` on the issue-comments resource. GitLab: `glab api` on the merge request notes.
 
+## A PR manager session
+
+A repository whose CI is costly can merge through a queue run by the `agentic-team:pr-manager`
+agent (model `haiku`), instead of `record` merging every clean request. GitHub only. The agent
+keeps one request ready at the head and every other queued request a draft, so one full CI run is
+spent at a time; it catches the head up, merges it when its CI is green and clean (pinned to the
+checked head), and sends `ci-failed` and `conflict` back to the Manager. It decides the order itself,
+from the task priorities, the Manager's wishes, the size of each change and its conflict history.
+It changes no code and no Taskgraph state; `record` records its merges as merges by someone else.
+
+To use it:
+
+1. Remove the `MERGE:` line from `standing-orders.md`, so `record` does not merge as well.
+   Set `[merge] draft = true`, so new requests open as drafts and run no full CI.
+2. Optional: write `.claude/agentic-team/pr-manager.md` (tracked) with the project's rules: which CI
+   jobs do the work and which only summarise, the merge method, order rules, batching, and anything
+   the queue learns. It wins over the agent's own text.
+3. Start it from the main checkout:
+   `claude --bg --agent agentic-team:pr-manager --permission-mode auto "/loop Run one pr-manager round."`.
+   `/loop` without an interval lets it choose when to wake. Give it `Bash(gh pr ready:*)`,
+   `Bash(gh pr merge:*)`, `Bash(gh pr update-branch:*)`, `Bash(gh run cancel:*)` and
+   `Bash(gh run rerun:*)` in the project's permission rules when the mode needs them.
+4. The Manager sends `ready PR #<n> task <id>` after a passing `close`, and `fixing PR #<n>` before a
+   round on a published request, to the address the agent writes to `.agentic-team/pr-manager.addr`.
+   The agent also treats a request as verified when the run.py verdict comment says the task is
+   closed. It reports to the Manager's socket in `.agentic-team/manager.addr`, and appends to
+   `.agentic-team/pr-manager.log` when that send fails.
+
+Its state is the queue file `.agentic-team/pr-queue.md`, GitHub and the project file, so a new session
+picks up where the last one stopped. To stop it, stop its session; nothing else needs undoing.
+
 **Stacked base that merged under other SHAs.** A task launched with `--base` on another request's branch holds that
 request's commits. When the request later merged by rebase or squash, the target holds its change but not its commits.
 Before `close` publishes (and before `launch` continues a retry in the same branch), `run.py` looks at the commits of
