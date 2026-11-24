@@ -2,6 +2,13 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.2
+
+Upgrading from 0.33.1. From the honest-router pr-manager trial.
+
+- **A worker never merges or opens a request.** A worker followed the repository's CLAUDE.md ("squash merge when CI is green"), ran `gh pr merge` before its verifier had filed PASS, and `close` then opened a second request for the same head. `agents/worker.md` now says up front that a worker or verifier never runs `git push`, `gh pr create|ready|merge|close|edit|comment`, `gh pr update-branch`, a `glab mr` write or `gh run rerun|cancel`, whatever the repository's own docs say.
+- **`close` and `verify` (ci mode) refuse to publish a head the target already holds.** Before the first publish of a task (no `pushed` and no `pr` meta), `run.py` fetches the target and proves the head is in it: the head is an ancestor of the target, or merging it into the target leaves the target's tree unchanged (a squash or rebase merge). A patch match on the top commit alone does not count. If the target holds the head, nothing is pushed and no request is opened; the refusal says `run.py merged <id> --by operator` records the merge (after `close` first, when the task has no verdict yet).
+
 ## 0.33.1
 
 Upgrading from 0.33.0. From the first pr-manager trial (honest-router).

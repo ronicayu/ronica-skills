@@ -7047,6 +7047,14 @@ def publish(run, task, branch, head, catch_up=False, stop=False):
     head = run.git("rev-parse", "--verify", f"{head}^{{commit}}").stdout.strip()
     head = restack(run, task, branch, head, then=f"run.py verify {tid}" if stop else None, stop=stop)
     pr_branch, pushed, pushed_now = meta.get("pr_branch") or f"task-{tid}", meta.get("pushed"), False
+    if not pushed and not meta.get("pr"):
+        merged, how = in_target(run, task, head, by_tree=True)
+        if merged:
+            then = (f"run.py merged {tid} --by operator records it" if awaiting(task) else
+                    f"run.py close {tid} --verdict <verdict> --ran <what you ran>, then run.py merged {tid} --by operator "
+                    f"records it")
+            raise Refused(f"{run.target(task)} already holds the change of {head[:7]} ({how}): merged by hand, landed "
+                          f"another way, or the diff is empty; {then}")
     if not pushed:
         ok, why = host.push(f"refs/heads/{branch}", pr_branch, "")
         if not ok:
@@ -7552,19 +7560,24 @@ def own_request_meta(task):
     return [meta_arg(k, v) for k, v in back.items() if v], [k for k, v in back.items() if not v] + list(REPOINT_FIELDS)
 
 
-def in_target(run, task):
+def in_target(run, task, sha=None, by_tree=False):
     """(True, how) when the task's verified commit is in its target branch, else (False, why). For a repointed task
     after the request it follows merged. First merged_into: the commit, or one with the same patch, is in the fetched
     target (a merge commit, or a rebase merge of a one-commit change; `pushed` is unset on a repointed task, so only
     the target counts). Else `git merge-tree --write-tree <target> <commit>`: when merging the commit into the target
     gives the target's own tree, the target holds the change already (a squash merge, or a rebase merge of several
     commits). A conflict, or a change the target does not have, is no proof. follow_request prints the answer and marks
-    the task merged either way."""
-    sha = str(task["meta"]["verdict_ref"])
+    the task merged either way. `sha` defaults to the verified commit; publish passes the head it is about to push, with
+    `by_tree`: only ancestry of the target or an unchanged target tree count, not the patch of the top commit alone
+    (`git cherry` sees one commit, so a partial overlap or a later revert would pass it)."""
+    sha = str(sha or task["meta"]["verdict_ref"])
     ref = run.target_ref(task)
     if not commit_of(run, sha):
         return False, f"{sha[:7]} is not in this clone"
-    if merged_into(run, task, sha):
+    if by_tree:
+        if run.git("merge-base", "--is-ancestor", sha, ref, check=False).returncode == 0:
+            return True, f"{sha[:7]} is in {ref}"
+    elif merged_into(run, task, sha):
         return True, f"{sha[:7]} is in {ref}"
     out = run.git("merge-tree", "--write-tree", ref, sha, check=False)
     if out.returncode not in (0, 1):

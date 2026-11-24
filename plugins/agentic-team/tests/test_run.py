@@ -895,11 +895,14 @@ class Base(unittest.TestCase):
                              capture_output=True, text=True)
         return out.stdout.strip() or None
 
-    def pr_task(self, files=("out.txt", "x\n"), **meta):
-        """A running task whose worker passed, in pr mode. Returns (task, worktree, head)."""
+    def pr_task(self, files=("out.txt", "x\n"), earlier=(), **meta):
+        """A running task whose worker passed, in pr mode. `earlier` are (name, text) commits made before `files`.
+        Returns (task, worktree, head)."""
         self.pr_config()
         task = self.running_task(base=json.dumps(self.git("rev-parse", "HEAD")), **meta)
         wt = self.task_wt(task)
+        for item in earlier:
+            self.wt_commit(wt, *item)
         wt, head = self.pass_report(task, wt=wt, head=self.wt_commit(wt, *files))
         self.agents(self.finished(f"task-{task}"))
         return task, wt, head
@@ -7230,6 +7233,75 @@ class PrTest(Base):
                 (create,) = [c for c in self.host_log() if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/merge_requests")]
                 titles = [a for a in create if a.startswith("title=")]
                 self.assertEqual(titles[0].startswith("title=Draft: "), draft)
+
+    CLOSE = ("--verdict", "test-verified", "--ran", "make test")
+
+    def requests_opened(self):
+        return (self.host_calls("pr", "create") if self.host == "github" else
+                [c for c in self.host_log() if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/merge_requests")])
+
+    def refused_first_publish(self, task, head):
+        out = self.run_cmd("close", str(task), *self.CLOSE)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn(f"main already holds the change of {head[:7]}", out.stderr)
+        self.assertIsNone(self.remote_sha())
+        self.assertEqual(self.requests_opened(), [])
+        meta = self.meta(task)
+        self.assertNotIn("pr", meta)
+        self.assertNotIn("pushed", meta)
+        return out.stderr
+
+    @both_hosts
+    def test_close_refuses_a_first_publish_of_a_head_that_the_target_already_holds(self):
+        task, wt, head = self.pr_task(files=("b.txt", "2\n"), earlier=[("a.txt", "1\n")])
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="a.txt", text="1\n")  # a squash merge by hand: both commits, new SHAs
+        self.advance_main(name="b.txt", text="2\n")
+        err = self.refused_first_publish(task, head)
+        self.assertIn(f"merged by hand, landed another way, or the diff is empty; run.py merged {task} --by operator records it", err)
+        self.ok("merged", str(task), "--by", "operator")
+        self.assertEqual(self.meta(task)["merged_by"], "operator")
+
+    @both_hosts
+    def test_a_second_close_refuses_the_same_way(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="out.txt", text="x\n")
+        first = self.refused_first_publish(task, head)
+        self.assertEqual(self.refused_first_publish(task, head), first)
+
+    @both_hosts
+    def test_a_patch_of_the_top_commit_alone_in_the_target_does_not_stop_the_publish(self):
+        task, wt, head = self.pr_task(files=("typo.txt", "t\n"), earlier=[("real.txt", "r\n")])
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="typo.txt", text="t\n")  # main has the typo patch, not the real change
+        self.one(self.events("close", str(task), *self.CLOSE), "published")
+        self.assertEqual(self.remote_sha(), head)
+
+    @both_hosts
+    def test_a_change_that_main_took_in_and_then_reverted_does_not_stop_the_publish(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="out.txt", text="x\n")
+        clone = os.path.join(self.dir, "clone")
+        self.git("rm", "-q", "out.txt", cwd=clone)
+        self.git("commit", "-q", "-m", "revert out.txt", cwd=clone)
+        self.git("push", "-q", "origin", "main", cwd=clone)
+        self.one(self.events("close", str(task), *self.CLOSE), "published")
+        self.assertEqual(self.remote_sha(), head)
+
+    @both_hosts
+    def test_verify_ci_refuses_the_same_way_and_says_to_close_first(self):
+        task, wt, head = self.pr_task(verify_mode=f"ci:{self.ci}")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="out.txt", text="x\n")
+        out = self.run_cmd("verify", str(task))
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn(f"main already holds the change of {head[:7]}", out.stderr)
+        self.assertIn(f"run.py close {task} --verdict", out.stderr)
+        self.assertIn(f"then run.py merged {task} --by operator", out.stderr)
+        self.assertIsNone(self.remote_sha())
+        self.assertEqual(self.requests_opened(), [])
 
     @both_hosts
     def test_80_close_pushes_and_opens_the_request_and_record_merges_it_under_the_merge_line(self):
