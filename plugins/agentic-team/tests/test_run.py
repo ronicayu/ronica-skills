@@ -14748,7 +14748,6 @@ class Issue130Test(Base):
         with open(os.path.join(base, "playbooks", "run.md"), encoding="utf-8") as fh:
             self.assertIn("agentic-team:dependency-check", fh.read())
 
-
     def test_131_the_pr_manager_agent_ships_on_haiku(self):
         base = os.path.dirname(HERE)
         with open(os.path.join(base, "agents", "pr-manager.md"), encoding="utf-8") as fh:

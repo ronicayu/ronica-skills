@@ -52,6 +52,7 @@ run `npm install -g pele` once, then
 | `agents/manager.md` | The Manager index |
 | `agents/worker.md` | The worker agent used for every task and verifier session |
 | `agents/dependency-check.md` | The read-only subagent the Manager starts before a launch |
+| `agents/pr-manager.md` | The optional merge-queue session (Haiku) for GitHub |
 | `playbooks/` | Step-by-step procedures the Manager follows |
 | `skills/principle-*/` | One principle each, hidden from automatic invocation |
 | `skills/manager/` | `/agentic-team:manager`, which makes a running session act as the Manager |
