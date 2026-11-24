@@ -197,7 +197,9 @@ every report, and on every wake (step 6).
      `record` never merges; it records the pr-manager's merges at each drain. After a passing
      `close`, send `ready PR #<n> task <id>` to the address in `.agentic-team/pr-manager.addr`;
      before a fix or rebase round on a published request, send `fixing PR #<n>`. When a send fails,
-     append the line to `.agentic-team/to-pr-manager.log`. Read its messages (`merged`, `ci-failed`,
+     append the line to `.agentic-team/to-pr-manager.log`; a failed send also means its session may
+     have ended: start a new one with the same command (it takes over from `.agentic-team/pr-queue.md`)
+     and tell the operator. Read its messages (`merged`, `ci-failed`,
      `conflict`, `stuck`) and `.agentic-team/pr-manager.log` at each drain: only the pr-manager's
      `ci-failed` and `conflict` open a fix or rebase round. A `conflict` line from `record` (an
      `after_rebase` check that failed on its rebase) is checked first, and the round starts only after

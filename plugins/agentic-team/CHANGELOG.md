@@ -2,6 +2,13 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.1
+
+Upgrading from 0.33.0. From the first pr-manager trial (honest-router).
+
+- **pr-manager judges only current runs.** A request is judged only by a CI run on its current head, made against the current target. A request that is `BEHIND`, or whose newest run started before its last update, has no result yet; the agent never orders, merges or reruns on such a stale run. In the trial it judged queued requests by runs on old heads until the project file said so.
+- **A pr-manager session can end on its own.** When the Manager's send to `.agentic-team/pr-manager.addr` fails, the Manager starts a new session with the same command and tells the operator; the new session takes the queue over from `.agentic-team/pr-queue.md`.
+
 ## 0.33.0
 
 Upgrading from 0.32.0. Nothing changes unless a project starts the new agent.
