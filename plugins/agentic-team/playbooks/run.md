@@ -184,7 +184,8 @@ every report, and on every wake (step 6).
      host reports it clean, and records a merge anyone did. Each recorded merge
      marks the task done. When the operator
      says a branch is merged and `record` cannot see it, run
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`. A task that waits for its merge refuses
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/run" merged <id> --by operator`. Run it too when a first publish was refused because
+     the target already holds the head (someone merged it by hand); a task with no verdict needs `close` first. A task that waits for its merge refuses
      `launch` and `verify`; when its request is closed for good, `abandon` drops it.
      After a merge, `run` removes the task's worktrees and sessions by itself, only when no session,
      process or Docker container uses them, the tree is clean, every ignored file is on the disposable

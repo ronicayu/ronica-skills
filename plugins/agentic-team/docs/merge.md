@@ -16,8 +16,10 @@ the operator's standing permission for `run.py` to push task branches to
    pushes `worktree-task-<id>` to the same `task-<id>`. Every push after the
    first carries a lease on the last pushed head (`--force-with-lease`), recorded
    as `pushed`. A remote branch that is not ours stops the first push.
-   A head that the fetched target already holds (merged by hand, outside `run.py`) stops the first publish too:
-   nothing is pushed and no request opens; `run.py merged <id> --by operator` records it.
+   A head that the fetched target already holds stops the first publish too, from `close` and from `verify` in ci mode:
+   the head is an ancestor of the target, or merging it leaves the target's tree unchanged (a patch match on the top
+   commit alone does not count). Nothing is pushed and no request opens; `run.py merged <id> --by operator` records
+   it (after `close`, when the task has no verdict yet).
    With `[merge] draft = true` the request opens as a draft (GitHub
    `gh pr create --draft`, GitLab a `Draft: ` title), so it starts no full
    CI run until someone marks it ready. `record` then reports `pr-draft`
