@@ -91,7 +91,10 @@ learned and the times you marked a head ready.
 
 ## Reading CI
 
-Look only at the newest run on the head's current sha. A working job builds, lints, type-checks or
+Judge a request only by a run on its current head sha, made against the current target. A request
+that is `BEHIND`, or whose newest run started before its last update, has no CI result yet: update
+it first when it is the head, and never order, merge or rerun on a stale run (a rerun tests the old
+merge ref against the old target). A working job builds, lints, type-checks or
 tests. A summary job only collects other jobs (names like "CI passed", "all checks"); its failure
 alone is not a failure, because it also fails when a job was cancelled. The project file may list
 the working and summary jobs by name. CI often cancels the other jobs when one step fails, so a

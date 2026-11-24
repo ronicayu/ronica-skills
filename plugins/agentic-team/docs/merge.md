@@ -233,7 +233,8 @@ sends the Manager `batch PR #<b> members #a #b`, and the Manager runs `run.py re
 for each member's task, so `record` completes them when the batch merges (item 6).
 
 Its state is the queue file `.agentic-team/pr-queue.md`, GitHub and the project file, so a new session
-picks up where the last one stopped. To stop it, stop its session; nothing else needs undoing.
+picks up where the last one stopped. A session can end on its own; when a send to its address fails,
+the Manager starts a new one with the same command. To stop it, stop its session; nothing else needs undoing.
 
 **Stacked base that merged under other SHAs.** A task launched with `--base` on another request's branch holds that
 request's commits. When the request later merged by rebase or squash, the target holds its change but not its commits.
