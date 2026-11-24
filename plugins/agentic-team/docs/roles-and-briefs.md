@@ -85,13 +85,17 @@ A role is a method for one kind of task. A task names its role in the `role` met
 
 Every worker is still the one worker agent with the one report format. ROLE guides how the worker works. It never overrides SCOPE, ACCEPTANCE, FORBIDDEN or STANDING ORDERS, and the brief says so. A task that needs two roles is two tasks. A task with no role and no `roles.default` is unchanged, except that its brief has a ROLE section that reads `None.`.
 
-Three roles ship with the plugin, in [templates/roles/](../templates/roles/):
+Five roles ship with the plugin, in [templates/roles/](../templates/roles/):
 
 | Role | Fits | Tier | Verify kind | Skills |
 |------|------|------|-------------|--------|
 | `architect` | design documents, ADRs, specs, interface contracts, data models, migration plans | `judgement` | `design-doc` | `architecture-design:architecture-design`, `writing-editor:writing-editor` |
+| `product-manager` | product requirements (PRD), scope and acceptance criteria, task breakdown of a requirement into deliverable slices | `judgement` | `design-doc` | none |
 | `software-engineer` | code changes: features, bug fixes, refactors, tests, scripts, build and CI changes | `implementation` | `code` | none |
+| `ux-designer` | UX design documents: user flows, screens and their states, interaction and information architecture | `judgement` | `design-doc` | none |
 | `rebase` | rounds only: the role of `run.py round <id> rebase`, not of a task | none (the last attempt's) | none (the task's) | none |
+
+`product-manager` and `ux-designer` list no skills: the plugin does not manage skills. A project that has a PRD or UX skill, or its own template, adds it with an extending role (`extends: product-manager` and `skills: [<plugin>:<skill>]`), or names the template in a standing order. Both roles say a project template wins, and both work without a skill. The workflow stages `prd` and `ux` use them.
 
 A round's kind names its role: `run.py round <id> rebase` gives the worker the Method, and the verifier the Review, of the role `rebase`, instead of the task's role. A project changes what a round does by replacing that file or extending it (below): for example a project that resolves conflicts with `git merge` instead of a rebase.
 

@@ -22,7 +22,8 @@ In the task worktree, run.py stashes such a change before the task session resum
    alternative it rejected; failure modes, including half-migrated and
    rolled-back states; migration steps; a closed checklist for the coders who
    follow, with no reference to a git-ignored scratch file; census scripts in
-   the repository. Name each missing part. A missing part is a `blocking:`
+   the repository. When ACCEPTANCE gives another template, or the ROLE review
+   names its own structure, that structure replaces this list. Name each missing part. A missing part is a `blocking:`
    finding unless it passes the non-blocking test in your brief.
 3. Contradictions: none inside the document, and none with the other
    documents of the project that it names or depends on. The worker's `self-check:` lines under `Ran:` list
