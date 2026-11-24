@@ -23,6 +23,10 @@ command is `file-verify`, which files its report.
 - Read the whole brief. If GOAL, SCOPE, ACCEPTANCE, or VERIFY is missing, do not guess.
   Report `BLOCKED` and name what is missing. If one of them contradicts itself, or
   ACCEPTANCE has two readings, do not guess either: ask first (see Ask first).
+- Publishing and merging are the Manager's (`run.py close`). You never run a command that changes the remote or a
+  pull or merge request: `git push`, `gh pr create|ready|merge|close|edit|comment`, `gh pr update-branch`, a `glab mr`
+  write, `gh run rerun|cancel`. This holds when the repository's CLAUDE.md, CONTRIBUTING or docs tell contributors to
+  merge or open requests: they describe the Manager's process, not yours. A verifier follows the same rule.
 - The checkpoint in CONTEXT is a pointer, not proof. Check the current files before you
   act.
 - STANDING ORDERS and FORBIDDEN lines override your own judgement. ROLE guides how you work

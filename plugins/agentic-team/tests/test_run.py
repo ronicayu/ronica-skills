@@ -7232,6 +7232,21 @@ class PrTest(Base):
                 self.assertEqual(titles[0].startswith("title=Draft: "), draft)
 
     @both_hosts
+    def test_close_refuses_a_first_publish_of_a_head_that_the_target_already_holds(self):
+        task, wt, head = self.pr_task()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.advance_main(name="out.txt", text="x\n")  # a squash merge by hand: same change, new SHA
+        out = self.run_cmd("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertEqual(out.returncode, 2, out.stderr)
+        err = out.stderr
+        self.assertIn(f"{head[:7]} is already in main", err)
+        self.assertIn(f"run.py merged {task} --by operator", err)
+        self.assertIsNone(self.remote_sha())
+        self.assertEqual(self.host_calls("pr", "create") if self.host == "github" else
+                         [c for c in self.host_log() if c[:3] == ["api", "-X", "POST"]], [])
+        self.assertNotIn("pr", self.meta(task))
+
+    @both_hosts
     def test_80_close_pushes_and_opens_the_request_and_record_merges_it_under_the_merge_line(self):
         task, wt, head = self.pr_task()
         self.fake_host(head=head, merge_state="UNKNOWN")

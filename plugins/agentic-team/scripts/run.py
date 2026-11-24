@@ -7047,6 +7047,11 @@ def publish(run, task, branch, head, catch_up=False, stop=False):
     head = run.git("rev-parse", "--verify", f"{head}^{{commit}}").stdout.strip()
     head = restack(run, task, branch, head, then=f"run.py verify {tid}" if stop else None, stop=stop)
     pr_branch, pushed, pushed_now = meta.get("pr_branch") or f"task-{tid}", meta.get("pushed"), False
+    if not pushed and not meta.get("pr"):
+        merged, how = in_target(run, task, head)
+        if merged:
+            raise Refused(f"{head[:7]} is already in {run.target(task)} ({how}): someone merged it outside run.py; "
+                          f"run.py merged {tid} --by operator records it")
     if not pushed:
         ok, why = host.push(f"refs/heads/{branch}", pr_branch, "")
         if not ok:
@@ -7552,15 +7557,15 @@ def own_request_meta(task):
     return [meta_arg(k, v) for k, v in back.items() if v], [k for k, v in back.items() if not v] + list(REPOINT_FIELDS)
 
 
-def in_target(run, task):
+def in_target(run, task, sha=None):
     """(True, how) when the task's verified commit is in its target branch, else (False, why). For a repointed task
     after the request it follows merged. First merged_into: the commit, or one with the same patch, is in the fetched
     target (a merge commit, or a rebase merge of a one-commit change; `pushed` is unset on a repointed task, so only
     the target counts). Else `git merge-tree --write-tree <target> <commit>`: when merging the commit into the target
     gives the target's own tree, the target holds the change already (a squash merge, or a rebase merge of several
     commits). A conflict, or a change the target does not have, is no proof. follow_request prints the answer and marks
-    the task merged either way."""
-    sha = str(task["meta"]["verdict_ref"])
+    the task merged either way. `sha` defaults to the verified commit; publish passes the head it is about to push."""
+    sha = str(sha or task["meta"]["verdict_ref"])
     ref = run.target_ref(task)
     if not commit_of(run, sha):
         return False, f"{sha[:7]} is not in this clone"
