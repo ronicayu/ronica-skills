@@ -3820,10 +3820,12 @@ class RunTest(Base):
     def test_82_waiting_for_falls_back_to_the_state(self):
         task = self.running_task()
         self.agents(self.row("task-1", status="idle", state="blocked"))
-        self.events("record")
+        stuck = self.one(self.events("record"), "stuck")
+        self.assertIn("no permission prompt recorded", stuck["next"])
+        self.assertIn("filed BLOCKED (blocked, no prompt)", stuck["detail"])
         body = self.stuck_row(task)["body"]
-        self.assertIn("Waiting for: blocked", body)
-        self.assertIn("stopped: waiting on blocked", body)
+        self.assertIn("Waiting for: no prompt recorded (state blocked, status idle)", body)
+        self.assertIn("stopped: waiting on blocked, no prompt", body)
 
     def test_83_a_failed_claude_logs_is_named_and_the_session_is_still_stopped(self):
         self.env["FAKE_CLAUDE_LOGS_FAIL"] = "1"
