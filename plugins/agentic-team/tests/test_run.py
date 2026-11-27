@@ -2122,6 +2122,20 @@ class RunTest(Base):
         self.tg("add", "Late dep", "--blocks", str(goal), env=manual)
         self.assertEqual([e["task"] for e in self.named(self.events("record"), "milestone-reopened")], [goal])
 
+    def test_28_record_reports_only_its_own_projects_settled_milestones(self):
+        manual = {**self.env, "TASKGRAPH_SETTLE": "manual"}
+
+        def other(*args):
+            out = subprocess.run([sys.executable, TG, "--project", "other", "--json", *args], capture_output=True, text=True, env=manual)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout)
+
+        dep = other("add", "Other dep")["id"]
+        other("add", "Other goal", "--type", "milestone", "--depends", str(dep))
+        other("done", str(dep))
+        self.assertEqual(self.named(self.events("record"), "milestone-done"), [])
+        self.assertEqual(self.tg("settle"), [])  # record's tg settle already settled the other project
+
     def test_30_verified_events(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")

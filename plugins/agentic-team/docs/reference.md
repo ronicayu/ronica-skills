@@ -549,8 +549,8 @@ its task is in [Lifecycle](lifecycle.md#how-runpy-matches-a-session-to-its-task)
 | `phase-mismatch` | The stored phase and the task's fields disagree; record leaves the task until the meta is fixed. |
 | `transition-error` | An event has no row in the phase transition table for the task's phase; record goes on and exits 1. |
 | `host-error` | The code host failed for this task; record goes on with the others and exits 1. |
-| `milestone-done` | `record` ran `tg settle`: a milestone or summary whose dependencies or children are all done was stored as done (on GitHub its issue closes). |
-| `milestone-reopened` | `record` ran `tg settle`: a milestone or summary that had been settled as done has an open dependency or child again and was reopened. |
+| `milestone-done` | `record` ran `tg settle`: a milestone or summary whose dependencies or children are all done was stored as done (on GitHub its issue closes, with a comment). |
+| `milestone-reopened` | `record` ran `tg settle`: a milestone or summary that settle had stored as done has open work again and was reopened. One that a person closed is never reopened. |
 | `tokens` | The tokens of the attempt's sessions, summed from the transcripts, or why none were found. |
 | `unmanaged` | Tasks in progress that run.py did not start. |
 | `decision` | An open decision task: its title, decider, due date and what it blocks. |

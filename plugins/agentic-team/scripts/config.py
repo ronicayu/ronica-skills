@@ -1005,7 +1005,10 @@ def taskgraph_version_problems():
         reason = (out.stderr.strip().splitlines() or [f"exit {out.returncode}"])[-1]
         return [f"taskgraph: could not run tg ({tg}): {reason}"]
     if "--summary" in out.stdout:
-        settle = subprocess.run([sys.executable, tg, "settle", "--help"], capture_output=True, text=True, timeout=30)
+        try:
+            settle = subprocess.run([sys.executable, tg, "settle", "--help"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return [f"taskgraph: could not run tg ({tg}): {exc}"]
         if settle.returncode == 0:
             return []
         return [f"taskgraph: {tg} is older than 1.23.0: it has no `tg settle`, so a milestone whose work is done is never "
