@@ -88,6 +88,19 @@ the operator's standing permission for `run.py` to push task branches to
    pushes over that rebase, with the lease set to the head it found: the
    rebase held only old content. A different change is refused as before.
    `[merge] after_rebase` (below) also runs on an accepted rebase.
+   Every push of a task branch runs from the task worktree
+   (`.claude/worktrees/task-<id>`), so a pre-push hook that keeps worktree-local
+   state, such as a stamp in `$(git rev-parse --git-dir)`, sees the same state
+   there as the worker did. When the worktree is missing the push runs from the
+   root. After a push that git reports as done, `run.py` reads the remote branch
+   with `git ls-remote`; a branch that is not at the pushed commit is
+   `push-failed` ("git exited 0 but ..."). A long pre-push hook can outlive the
+   SSH connection opened before it, and git then exits 0 with nothing pushed. To
+   keep the connection alive, set `GIT_SSH_COMMAND='ssh -o ServerAliveInterval=30
+   -o ServerAliveCountMax=40'` or `core.sshCommand` in the environment `run.py`
+   runs in; `run.py` does not set it. When a push fails but the remote branch
+   already holds the head being published, `run.py` accepts it: it records
+   `pushed` and says `<sha> is already on <remote>/<branch>`.
 5. **Round.** `run.py round <id> rebase` (#119) starts a new attempt of a task
    that waits for its merge and whose change conflicts with its target, on the
    same branch and the same request. It takes a task with

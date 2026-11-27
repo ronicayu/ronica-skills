@@ -118,17 +118,30 @@ class Host:
         except ValueError:
             raise HostError(f"{self.cli} {what} failed: output is not JSON")
 
-    def push(self, local_ref, branch, expect):
-        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist).
+    def push(self, local_ref, branch, expect, cwd=None):
+        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist). git runs in
+        `cwd` (a task worktree, so that worktree-local hook state applies), else in the root.
         Returns (ok, why). `why` is git's ref status line (it starts with `!`) when there is one, else the first
         other line, for example a pre-push hook's message. git's "To <url>", "hint:" and "error: failed to push
-        some refs" lines are used only when nothing else was said."""
-        out = self.call(["git", "-C", self.root, "push", self.remote, f"{local_ref}:refs/heads/{branch}",
+        some refs" lines are used only when nothing else was said. A push that git reports as done is read back
+        with ls-remote: a remote branch elsewhere than at `local_ref` is a failed push (a dropped connection during
+        a long pre-push hook makes git exit 0 with nothing pushed)."""
+        where = cwd or self.root
+        out = self.call(["git", "-C", where, "push", self.remote, f"{local_ref}:refs/heads/{branch}",
                          f"--force-with-lease=refs/heads/{branch}:{expect}"])
         lines = [line.strip() for line in out.stderr.splitlines() if line.strip()]
         said = [line for line in lines if not line.startswith(("To ", "hint:", "error: failed to push some refs"))]
         why = next((line for line in said if line.startswith("!")), said[0] if said else lines[0] if lines else "")
-        return out.returncode == 0, why
+        if out.returncode != 0:
+            return False, why
+        want = self.call(["git", "-C", where, "rev-parse", "--verify", f"{local_ref}^{{commit}}"]).stdout.strip()
+        seen = self.call(["git", "-C", where, "ls-remote", self.remote, f"refs/heads/{branch}"])
+        if want and seen.returncode == 0:
+            at = (seen.stdout.split() or [""])[0]
+            if at != want:
+                return False, (f"git exited 0 but {self.remote}/{branch} is at {at[:7] or 'nothing'}, not {want[:7]} "
+                               f"(a dropped connection during a long pre-push hook?)")
+        return True, why
 
     def delete_branch(self, branch):
         """Delete the remote branch. Returns (ok, first line git said)."""

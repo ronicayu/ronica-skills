@@ -2,6 +2,15 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.5
+
+Upgrading from 0.33.4. From the honest-router pr-manager trial (`run close` of a rebase round could not publish).
+
+- **Pushes of a task branch run in the task's worktree.** `Host.push` ran `git push` in the main checkout. A project's pre-push hook that keeps worktree-local state (a stamp in `$(git rev-parse --git-dir)`) never matched there, so its full check ran against the operator's uncommitted edits and refused the push. `close`, `verify --ci-ref`, a local catch-up rebase and `round --cancel` now push from `.claude/worktrees/task-<id>` when it is a worktree of this repository, else from the root.
+- **A push that git reports as done is read back.** When a long pre-push hook outlives the SSH connection, git exits 0 with nothing pushed. After a successful push `run.py` runs `git ls-remote` and treats a remote branch that is not at the pushed commit as a failed push: `push-failed ... git exited 0 but origin/task-1 is at <sha>, not <sha> (a dropped connection during a long pre-push hook?)`.
+- **A remote branch that already holds the head is accepted.** When the push with the lease fails and the remote branch is already at the head being published (pushed by hand from the worktree, or landed before the connection dropped), `run.py` records `pushed` and says `<sha> is already on origin/task-<id>`. It no longer reports `push-refused` ("someone else pushed") for a remote that sits at exactly its own commit, whether or not the head is the same change as the old `pushed`.
+- Docs: [merge.md](docs/merge.md) says where pushes run and how to keep SSH alive during a long hook.
+
 ## 0.33.4
 
 Upgrading from 0.33.3. Needs Taskgraph 1.23.0 or later (`config.py check` fails without `tg settle`); upgrade Taskgraph first. From the honest-router Manager: a milestone whose dependencies were all done stayed open on GitHub.

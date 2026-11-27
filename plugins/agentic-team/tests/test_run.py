@@ -9322,6 +9322,61 @@ class PrTest(Base):
         self.assertEqual(self.named(events, "push-refused"), [])
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
 
+    @both_hosts
+    def test_103_a_push_runs_in_the_task_worktree_so_its_hook_state_applies(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$(pwd -P)\" in */worktrees/task-1) exit 0;; esac\n"
+                     "echo 'pre-push: running the full check in the main checkout' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        pushed = self.one(events, "pushed")
+        self.assertEqual(self.named(events, "push-failed"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (self.remote_sha(), self.remote_sha()))
+        self.assertNotEqual(self.remote_sha(), head)
+        self.assertIn(self.remote_sha()[:7], pushed["detail"])
+
+    def fake_silent_push(self, code=0):
+        """A git first on PATH whose push exits `code` and pushes nothing: 0 is a dropped connection during a long hook."""
+        real = shutil.which("git")
+        fake = os.path.join(self.bin, "git")
+        with open(fake, "w") as fh:
+            fh.write(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = push ] && {{ echo "! [rejected] task-1 -> task-1 (stale info)" >&2; exit {code}; }}; done\nexec {real} "$@"\n')
+        os.chmod(fake, 0o755)
+
+    @both_hosts
+    def test_103_a_push_that_exits_0_and_leaves_the_remote_unchanged_is_push_failed(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        self.fake_silent_push()
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        failed = self.one(events, "push-failed")
+        self.assertIn(f"git said: git exited 0 but origin/task-1 is at {head[:7]}, not ", failed["detail"])
+        self.assertIn("(a dropped connection during a long pre-push hook?)", failed["detail"])
+        self.assertEqual(self.named(events, "push-refused"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+
+    @both_hosts
+    @both_hosts
+    def test_103_a_remote_branch_already_at_the_head_is_taken_as_pushed(self):
+        task, wt, head = self.published()
+        head2 = self.wt_commit(wt, "two.txt")  # a fix attempt: not the same change as the pushed head
+        self.tg("edit", str(task), "--meta", f'verdict_ref="{head2}"')
+        self.git("push", "-q", "origin", f"{head2}:refs/heads/task-1", cwd=wt)  # pushed by hand from the worktree
+        self.fake_silent_push(1)  # the push of close is refused, as a hook or a lease check refuses it
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.one(events, "resumed")
+        self.assertEqual(self.one(events, "pushed")["detail"], f"{head2[:7]} is already on origin/task-1")
+        self.assertEqual((self.named(events, "push-refused"), self.named(events, "push-failed")), ([], []))
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head2, head2))
+
     # --- operator notices (notify-queue)
 
     def queue(self):

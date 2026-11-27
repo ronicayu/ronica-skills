@@ -155,9 +155,20 @@ class GitHubTest(unittest.TestCase):
         for key, value in (("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1"), ("NO_COLOR", "1")):
             self.assertEqual(sh.calls[0]["env"][key], value)
         client.push("refs/heads/b", "task-1", "a" * 40)
-        self.assertEqual(sh.calls[1]["cmd"][-1], f"--force-with-lease=refs/heads/task-1:{'a' * 40}")
+        pushes = [c["cmd"] for c in sh.calls if "push" in c["cmd"]]
+        self.assertEqual(pushes[1][-1], f"--force-with-lease=refs/heads/task-1:{'a' * 40}")
         client, _ = gh((["push"], {"exit": 1, "stderr": "To origin\n ! [rejected] b -> task-1 (stale info)\n"}))
         self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "! [rejected] b -> task-1 (stale info)"))
+
+    def test_103_push_runs_in_the_given_directory_and_reads_the_remote_back(self):
+        want, other = "a" * 40, "b" * 40
+        client, sh = gh((["push"], {}), (["rev-parse"], ok(want + "\n")), (["ls-remote"], ok(f"{want}\trefs/heads/task-1\n")))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "", "/repo/wt"), (True, ""))
+        self.assertEqual(sh.calls[0]["cmd"][:3], ["git", "-C", "/repo/wt"])
+        client, _ = gh((["push"], {}), (["rev-parse"], ok(want + "\n")), (["ls-remote"], ok(f"{other}\trefs/heads/task-1\n")))
+        self.assertEqual(client.push("refs/heads/b", "task-1", ""),
+                         (False, f"git exited 0 but origin/task-1 is at {other[:7]}, not {want[:7]} "
+                                 "(a dropped connection during a long pre-push hook?)"))
 
     def test_103_push_names_the_hook_line_or_the_ref_status(self):
         hook = "pre-push: no recorded make test-affected pass for this tree"
