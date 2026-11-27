@@ -50,7 +50,7 @@ The type is stored as `meta.type`; no type means `task`, and `--type task` clear
 | Type | Meaning and metadata |
 |---|---|
 | `task` | Work to do. Metadata: `owner`, `estimate` (hours). |
-| `milestone` | A fixed point. It is complete when it has dependencies and all are done. Do not work on a milestone directly. |
+| `milestone` | A fixed point. It is complete when it has dependencies and all are done. Do not work on a milestone directly. When it is complete, `tg` stores it as done (see `settle` in the CLI reference), so on GitHub its issue closes. |
 | `decision` | A choice someone must make. Metadata: `decider`. |
 | `external` | Work outside the team's control. Metadata: `party`, `contact`, `chase` (next chase date). |
 | `objective` | A top-level aim that groups work. Metadata: `owner`. Do not schedule objectives. |

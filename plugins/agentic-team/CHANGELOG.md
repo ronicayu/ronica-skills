@@ -2,6 +2,12 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.4
+
+Upgrading from 0.33.3. Needs Taskgraph 1.23.0 or later (`config.py check` fails without `tg settle`); upgrade Taskgraph first. From the honest-router Manager: a milestone whose dependencies were all done stayed open on GitHub.
+
+- **`record` settles milestones.** Once per drain, after the merges it records, `record` runs `tg settle`. A milestone or summary whose dependencies or children are all done is stored as done (on GitHub its issue closes, with one comment that lists what completed it): one `milestone-done` line for each. One that has an open dependency again is reopened: `milestone-reopened`. When a milestone closes while open tasks of its project have no parent and block nothing, one `warn` line names them: such a task fed no milestone, so the milestone could finish without it. A failed `tg settle` is one `warn` line and never stops `record`. `run.py` runs its own `tg` calls with `TASKGRAPH_SETTLE=manual`, so `record` is the one place that settles and reports.
+
 ## 0.33.3
 
 Upgrading from 0.33.2. From the honest-router trial.

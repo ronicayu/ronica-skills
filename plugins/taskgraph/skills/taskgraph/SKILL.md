@@ -50,7 +50,7 @@ flowchart LR
 
 ## Read and present project status
 
-- Run `ready` to find work that can start now. Run `agenda` to find items that need attention. Run `path ID` to inspect upstream work and schedule outlook.
+- Run `ready` to find work that can start now. Run `agenda` to find items that need attention, including open tasks that feed no milestone. A milestone or summary is done when its dependencies or children are done; `tg` then stores it as done (and closes its GitHub issue) by itself. Run `settle` after a change made outside `tg`. Run `path ID` to inspect upstream work and schedule outlook.
 - Run `report --md` to create a written steering report. Add what the status means, what is being done, and what the reader needs to decide.
 - Run `graph` to create a local interactive view. Run `serve` for a live view. `serve` blocks, so run it in the background and give the user its URL.
 - To show a view without screenshots, run `export --svg OUT.svg [--view graph|lanes|timeline] [--goal ID] [--width PX] [--state LINK]`. It writes the view as an SVG with text kept as text, and needs Playwright or Chrome, Chromium or Edge. The Load view has no SVG.

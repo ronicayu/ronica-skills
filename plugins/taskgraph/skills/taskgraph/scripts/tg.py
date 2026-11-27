@@ -807,6 +807,73 @@ def set_status(store, conn, args, status):
     emit(args, data, f"#{args.id} {status}" + (f" (claimed by {holder})" if holder else ""))
 
 
+def feeds_nothing(tasks, scope):
+    """Open plain tasks of `scope` with no parent that block nothing, when the scope has a milestone or objective for them to feed."""
+    if not any(t["type"] in ("milestone", "objective") for t in scope):
+        return []
+    return [t for t in scope if t["type"] == "task" and not computed(t) and t["derived_status"] != "done" and t["parent"] is None and not t["blocks"]]
+
+
+def settle_reason(tasks, task):
+    kids = task["parts"] if is_summary(task) else []
+    names = lambda ids: ", ".join(f"#{i} {tasks[i]['title']}" for i in ids)
+    parts = ([f"all children are done: {names(kids)}"] if kids else []) + ([f"all dependencies are done: {names(task['waits_for'])}"] if task["waits_for"] else [])
+    return "Settled done by taskgraph: " + "; ".join(parts) + "."
+
+
+def settle(store, conn):
+    """Store the derived status of every milestone and summary: done when derived done, open again when it is no longer."""
+    tasks = load(conn)
+    todo = [(t, "done" if t["derived_status"] == "done" else "open") for t in tasks.values()
+            if computed(t) and (t["derived_status"] == "done") != (t["status"] == "done")]
+    if not todo:
+        return []
+    ts = now()
+    with store.write(conn):
+        for task, status in todo:
+            store.restate(conn, task["id"])
+            conn.execute("UPDATE tasks SET status=?, done_at=?, updated_at=? WHERE id=?", (status, ts if status == "done" else None, ts, task["id"]))
+    out = []
+    for task, status in todo:
+        item = {"id": task["id"], "title": task["title"], "type": task["type"], "action": "done" if status == "done" else "reopened"}
+        if status == "done":
+            try:
+                store.add_result(conn, task["id"], ResultInput("done", "settle", None, None, settle_reason(tasks, task)))
+            except (StoreError, sqlite3.Error) as e:
+                print(f"warning: could not comment on #{task['id']}: {e}", file=sys.stderr)
+            orphans = feeds_nothing(tasks, [t for t in tasks.values() if t["project"] == task["project"]])
+            if orphans and task["type"] == "milestone":
+                item["warning"] = f"#{task['id']} closed while open tasks feed no milestone: {', '.join('#' + str(t['id']) for t in orphans)}"
+        out.append(item)
+    return out
+
+
+def settle_lines(items):
+    lines = []
+    for i in items:
+        kind = i["type"] if i["type"] in ("milestone", "objective") else "summary"
+        lines.append(f"settled #{i['id']} done ({kind}: {i['title']})" if i["action"] == "done" else f"settled #{i['id']} reopened")
+        if i.get("warning"):
+            lines.append(f"warning: {i['warning']}")
+    return lines
+
+
+def cmd_settle(store, conn, args):
+    items = settle(store, conn)
+    emit(args, items, "\n".join(settle_lines(items)) or "nothing to settle")
+
+
+def auto_settle(store, conn, args):
+    # after a write command: the line goes to stderr under --json, so stdout stays one JSON document
+    try:
+        items = settle(store, conn)
+    except (Fail, StoreError, sqlite3.Error) as e:
+        print(f"warning: settle failed: {e}; run tg settle", file=sys.stderr)
+        return
+    for text in settle_lines(items):
+        print(text, file=sys.stderr if args.json else sys.stdout)
+
+
 def cmd_gate(store, conn, args):
     if args.clear and (args.label is not None or args.ref is not None or args.no_ref):
         raise Fail("--clear cannot be combined with --label, --ref or --no-ref")
@@ -1097,6 +1164,7 @@ def cmd_agenda(store, conn, args):
         "chase_due": sorted((t for t in items if t["chase_due"]), key=lambda t: (t["meta"]["chase"], t["id"])),
         "review_due": sorted((t for t in items if t["type"] == "risk" and t["due"] and t["due"] <= day.isoformat()), key=by_due),
         "missing_date": [t for t in items if t["type"] in ("decision", "external", "risk", "issue") and not t["due"]],
+        "feeds_nothing": [t for t in feeds_nothing(tasks, scoped(tasks, args)) if not args.type or t["type"] in args.type],
     }
     notes = {
         "late": lambda t: f"late {t['late_days']}d",
@@ -1106,8 +1174,9 @@ def cmd_agenda(store, conn, args):
         "chase_due": lambda t: f"chase {t['meta']['chase']}",
         "review_due": lambda t: "/".join(str(t["meta"][k]) for k in ("likelihood", "impact") if t["meta"].get(k)) or None,
         "missing_date": lambda t: None,
+        "feeds_nothing": lambda t: None,
     }
-    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date"}
+    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date", "feeds_nothing": "Feeds no milestone"}
     conflict_data, conflict_text = conflict_items(tasks, buckets["conflicts"])
     out = []
     for name, found in buckets.items():
@@ -1999,9 +2068,11 @@ def cmd_projects(store, conn, args):
     emit(args, rows, "\n".join(map(text, rows)))
 
 
-WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date", "gate")
+WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date", "gate", "settle")
+AUTO_SETTLE = ("add", "dep add", "dep rm", "done", "reopen", "edit", "rm")
 COMMANDS = {
     "add": cmd_add,
+    "settle": cmd_settle,
     "dep add": cmd_dep_add,
     "dep rm": cmd_dep_rm,
     "baseline set": cmd_baseline_set,
@@ -2154,6 +2225,8 @@ def build_parser():
     p.add_argument("--promised")
     p.add_argument("--clear", choices=("start", "due", "promised"), nargs="+", action="extend", default=[])
 
+    command("settle")
+
     p = command("agenda")
     p.add_argument("--within", type=int, default=14)
     p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
@@ -2247,6 +2320,8 @@ def main(argv=None):
         if hasattr(store, "ensure"):
             store.ensure(conn, named_ids(args))
         COMMANDS[key](store, conn, args)
+        if key in AUTO_SETTLE and mode == "write" and os.environ.get("TASKGRAPH_SETTLE") != "manual":
+            auto_settle(store, conn, args)
     except (Fail, StoreError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
