@@ -146,10 +146,13 @@ class GitHubTest(unittest.TestCase):
         client.create_pr("task-1", "main", "T", "body")
         self.assertNotIn("--draft", sh.calls[0]["cmd"])
 
+    NEW = "To origin\n*\tHEAD:refs/heads/task-1\t[new branch]\nDone\n"
+
     def test_67_push_builds_the_lease_and_the_environment(self):
-        client, sh = gh((["push"], {"stderr": "To origin\n"}))
+        client, sh = gh((["push"], {"stdout": self.NEW, "stderr": "To origin\n"}))
         self.assertEqual(client.push("refs/heads/worktree-task-1", "task-1", ""), (True, "To origin"))
-        self.assertEqual(sh.calls[0]["cmd"], ["git", "-C", "/repo", "push", "origin", "refs/heads/worktree-task-1:refs/heads/task-1",
+        self.assertEqual(sh.calls[0]["cmd"], ["git", "-C", "/repo", "push", "--porcelain", "origin",
+                                              "refs/heads/worktree-task-1:refs/heads/task-1",
                                               "--force-with-lease=refs/heads/task-1:"])
         self.assertEqual(sh.calls[0]["cwd"], "/repo")
         for key, value in (("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1"), ("NO_COLOR", "1")):
@@ -158,6 +161,26 @@ class GitHubTest(unittest.TestCase):
         self.assertEqual(sh.calls[1]["cmd"][-1], f"--force-with-lease=refs/heads/task-1:{'a' * 40}")
         client, _ = gh((["push"], {"exit": 1, "stderr": "To origin\n ! [rejected] b -> task-1 (stale info)\n"}))
         self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "! [rejected] b -> task-1 (stale info)"))
+        rejected = "To origin\n!\tHEAD:refs/heads/task-1\t[rejected] (stale info)\nDone\n"
+        client, _ = gh((["push"], {"exit": 1, "stdout": rejected, "stderr": "error: failed to push some refs to 'o'\n"}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "a"), (False, "! [rejected] (stale info)"))
+
+    def test_103_push_runs_in_the_given_directory(self):
+        client, sh = gh((["push"], {"stdout": self.NEW}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", "", "/repo/wt"), (True, ""))
+        self.assertEqual(sh.calls[0]["cmd"][:3], ["git", "-C", "/repo/wt"])
+
+    def test_103_a_push_without_a_ref_status_line_is_a_failure_even_when_git_exits_0(self):
+        client, _ = gh((["push"], {"stdout": "To origin\nDone\n"}))
+        self.assertEqual(client.push("refs/heads/b", "task-1", ""),
+                         (False, "git exited 0 but no ref status for task-1 (a dropped connection during a long "
+                                 "pre-push hook?)"))
+        other = "To origin\n*\tHEAD:refs/heads/other\t[new branch]\nDone\n"  # a line for another branch does not count
+        client, _ = gh((["push"], {"stdout": other}))
+        self.assertFalse(client.push("refs/heads/b", "task-1", "")[0])
+        up = "To origin\n=\tHEAD:refs/heads/task-1\t[up to date]\nDone\n"
+        client, _ = gh((["push"], {"stdout": up}))
+        self.assertTrue(client.push("refs/heads/b", "task-1", "")[0])
 
     def test_103_push_names_the_hook_line_or_the_ref_status(self):
         hook = "pre-push: no recorded make test-affected pass for this tree"

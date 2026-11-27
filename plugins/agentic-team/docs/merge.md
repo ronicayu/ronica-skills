@@ -88,6 +88,27 @@ the operator's standing permission for `run.py` to push task branches to
    pushes over that rebase, with the lease set to the head it found: the
    rebase held only old content. A different change is refused as before.
    `[merge] after_rebase` (below) also runs on an accepted rebase.
+   Every push of a task branch runs from the task worktree
+   (`.claude/worktrees/task-<id>`), so a pre-push hook that keeps worktree-local
+   state, such as a stamp in `$(git rev-parse --git-dir)`, sees the same state
+   there as the worker did. `run.py` uses the worktree only when all of these
+   hold: the folder is a worktree of this repository (its `--show-toplevel` is
+   the folder itself and it shares the repository's git common dir), its `HEAD`
+   is the commit being pushed, and `git status --porcelain
+   --untracked-files=no` is empty. Otherwise, for example when the directory is
+   missing or is only a plain folder inside the repository, the push runs from
+   the root. `run.py` pushes with `git push --porcelain` and counts the push as
+   done only when git exits 0 and prints a ref status line for the branch that is
+   not a rejection. git prints that line after the server acknowledged the ref,
+   so a push that git reports as done without one is `push-failed` ("git exited 0
+   but no ref status for ..."). A long pre-push hook can outlive the SSH
+   connection opened before it, and git then exits 0 with nothing pushed. To keep
+   the connection alive, set `GIT_SSH_COMMAND='ssh -o ServerAliveInterval=30
+   -o ServerAliveCountMax=40'` or `core.sshCommand` in the environment `run.py`
+   runs in; `run.py` does not set it. When a push fails but the remote branch
+   already holds the head being published, `run.py` accepts it: it records
+   `pushed` and says `<sha> is already on <remote>/<branch>`; `close` then reads
+   the request and goes on as after a push.
 5. **Round.** `run.py round <id> rebase` (#119) starts a new attempt of a task
    that waits for its merge and whose change conflicts with its target, on the
    same branch and the same request. It takes a task with

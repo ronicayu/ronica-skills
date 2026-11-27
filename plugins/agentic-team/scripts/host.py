@@ -118,17 +118,36 @@ class Host:
         except ValueError:
             raise HostError(f"{self.cli} {what} failed: output is not JSON")
 
-    def push(self, local_ref, branch, expect):
-        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist).
-        Returns (ok, why). `why` is git's ref status line (it starts with `!`) when there is one, else the first
-        other line, for example a pre-push hook's message. git's "To <url>", "hint:" and "error: failed to push
-        some refs" lines are used only when nothing else was said."""
-        out = self.call(["git", "-C", self.root, "push", self.remote, f"{local_ref}:refs/heads/{branch}",
-                         f"--force-with-lease=refs/heads/{branch}:{expect}"])
+    def push(self, local_ref, branch, expect, cwd=None):
+        """Push `local_ref` to the remote branch, only if it is at `expect` ("" means: must not exist). git runs in
+        `cwd` (a task worktree, so that worktree-local hook state applies), else in the root.
+        Returns (ok, why). The push is ok only when git exits 0 and `--porcelain` prints a ref status line for the
+        branch that is not a rejection: git prints it after the server acknowledged the ref, so a connection that
+        dropped during a long pre-push hook leaves none. `why` is git's ref status line (it starts with `!`) when
+        there is one, else the first other line, for example a pre-push hook's message. git's "To <url>", "hint:" and
+        "error: failed to push some refs" lines are used only when nothing else was said."""
+        out = self.call(["git", "-C", cwd or self.root, "push", "--porcelain", self.remote,
+                         f"{local_ref}:refs/heads/{branch}", f"--force-with-lease=refs/heads/{branch}:{expect}"])
+        status = None
+        rejected = []
+        for line in out.stdout.splitlines():
+            flag, _, rest = line.partition("\t")
+            ref, _, summary = rest.partition("\t")
+            if len(flag) != 1 or not ref.endswith(f":refs/heads/{branch}"):
+                continue
+            if flag == "!":
+                rejected.append(f"! {summary}")
+            else:
+                status = flag
         lines = [line.strip() for line in out.stderr.splitlines() if line.strip()]
         said = [line for line in lines if not line.startswith(("To ", "hint:", "error: failed to push some refs"))]
-        why = next((line for line in said if line.startswith("!")), said[0] if said else lines[0] if lines else "")
-        return out.returncode == 0, why
+        why = next((line for line in rejected + said if line.startswith("!")), said[0] if said else lines[0] if lines else "")
+        if out.returncode != 0:
+            return False, why
+        if status is None:
+            return False, (f"git exited 0 but no ref status for {branch} (a dropped connection during a long "
+                           f"pre-push hook?)")
+        return True, why
 
     def delete_branch(self, branch):
         """Delete the remote branch. Returns (ok, first line git said)."""

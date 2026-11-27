@@ -890,6 +890,28 @@ class Base(unittest.TestCase):
         """What a pr-mode command must leave alone: the root's branch, HEAD, and porcelain."""
         return (self.git("branch", "--show-current"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain"))
 
+    def fake_silent_push(self, code=0):
+        """A git first on PATH whose push exits `code` and pushes nothing: 0 is a dropped connection during a long hook."""
+        real = shutil.which("git")
+        fake = os.path.join(self.bin, "git")
+        with open(fake, "w") as fh:
+            fh.write(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = push ] && {{ echo "! [rejected] task-1 -> task-1 (stale info)" >&2; exit {code}; }}; done\nexec {real} "$@"\n')
+        os.chmod(fake, 0o755)
+
+
+    def log_push_dirs(self):
+        """A pre-push hook that appends the directory it runs in to a file; push_dirs() reads it."""
+        self.push_log = os.path.join(self.dir, "push-dirs")
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write(f"#!/bin/sh\npwd -P >> {self.push_log}\nexit 0\n")
+        os.chmod(hook, 0o755)
+
+
+    def push_dirs(self):
+        with open(self.push_log) as fh:
+            return fh.read().split()
+
     def remote_sha(self, branch="task-1"):
         out = subprocess.run(["git", "-C", self.origin, "rev-parse", "--verify", "-q", f"refs/heads/{branch}"],
                              capture_output=True, text=True)
@@ -9322,6 +9344,81 @@ class PrTest(Base):
         self.assertEqual(self.named(events, "push-refused"), [])
         self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
 
+    @both_hosts
+    def test_103_a_push_runs_in_the_task_worktree_so_its_hook_state_applies(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$(pwd -P)\" in */worktrees/task-1) exit 0;; esac\n"
+                     "echo 'pre-push: running the full check in the main checkout' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        pushed = self.one(events, "pushed")
+        self.assertEqual(self.named(events, "push-failed"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (self.remote_sha(), self.remote_sha()))
+        self.assertNotEqual(self.remote_sha(), head)
+        self.assertIn(self.remote_sha()[:7], pushed["detail"])
+
+    @both_hosts
+    def test_103_a_push_that_exits_0_and_leaves_the_remote_unchanged_is_push_failed(self):
+        task, wt, head = self.published()
+        self.local_catch_up()
+        self.advance_main()
+        self.fake_silent_push()
+        self.fake_host(head=head, merge_state="BEHIND")
+        events = self.events("close", str(task))
+        failed = self.one(events, "push-failed")
+        self.assertIn(f"git said: git exited 0 but no ref status for task-1 ", failed["detail"])
+        self.assertIn("(a dropped connection during a long pre-push hook?)", failed["detail"])
+        self.assertEqual(self.named(events, "push-refused"), [])
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head, head))
+
+    @both_hosts
+    def test_103_a_remote_branch_already_at_the_head_is_taken_as_pushed(self):
+        task, wt, head = self.published()
+        head2 = self.wt_commit(wt, "two.txt")  # a fix attempt: not the same change as the pushed head
+        self.tg("edit", str(task), "--meta", f'verdict_ref="{head2}"')
+        self.git("push", "-q", "origin", f"{head2}:refs/heads/task-1", cwd=wt)  # pushed by hand from the worktree
+        self.fake_silent_push(1)  # the push of close is refused, as a hook or a lease check refuses it
+        self.fake_host(head=head2, merge_state="UNKNOWN")
+        events = self.events("close", str(task))
+        self.one(events, "resumed")
+        self.assertEqual(self.one(events, "pushed")["detail"], f"{head2[:7]} is already on origin/task-1")
+        self.assertEqual((self.named(events, "push-refused"), self.named(events, "push-failed")), ([], []))
+        self.assertEqual((self.meta(task)["pushed"], self.remote_sha()), (head2, head2))
+        self.one(events, "pr-pending")  # the close read the request after accepting the push, and went on
+        self.one(events, "commented")
+
+    @both_hosts
+    def test_103_the_first_publish_pushes_from_the_task_worktree(self):
+        task, wt, head = self.pr_task()
+        self.log_push_dirs()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.ok("close", str(task), "--verdict", "test-verified", "--ran", "make test")
+        self.assertEqual([os.path.basename(d) for d in self.push_dirs()], ["task-1"])
+        self.assertEqual(os.path.realpath(self.push_dirs()[0]), os.path.realpath(wt))
+
+    @both_hosts
+    def test_103_a_ci_ref_is_pushed_from_the_task_worktree(self):
+        task, wt, head = self.pr_task()
+        self.log_push_dirs()
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.events("verify", str(task), "--ci-ref")
+        self.assertEqual([os.path.realpath(d) for d in self.push_dirs()], [os.path.realpath(wt)])
+
+    @both_hosts
+    def test_103_a_dirty_task_worktree_pushes_from_the_root(self):
+        task, wt, head = self.pr_task()
+        self.log_push_dirs()
+        with open(os.path.join(wt, "out.txt"), "a") as fh:  # an edit to a tracked file after the verdict
+            fh.write("more\n")
+        self.fake_host(head=head, merge_state="UNKNOWN")
+        self.events("verify", str(task), "--ci-ref")
+        self.assertEqual([os.path.realpath(d) for d in self.push_dirs()], [os.path.realpath(self.root)])
+
     # --- operator notices (notify-queue)
 
     def queue(self):
@@ -13399,6 +13496,29 @@ class RoundTest(Base):
         self.assertEqual(self.remote_sha(), head)
         self.assertEqual(self.meta(task)["pushed"], head)
 
+    def test_119_cancel_pushes_the_verified_head_back_from_the_task_worktree(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.git("push", "-q", "-f", "origin", f"{new}:refs/heads/task-1")
+        self.tg("edit", str(task), "--meta", f"pushed={new}")
+        self.fake_host(head=new, merge_state="CLEAN")
+        self.log_push_dirs()
+        self.ok("round", str(task), "--cancel")
+        self.assertEqual([os.path.realpath(d) for d in self.push_dirs()], [os.path.realpath(wt)])
+
+    def test_119_cancel_takes_a_remote_that_already_holds_the_verified_head(self):
+        task, wt, head, onto = self.waiting()
+        self.started(task)
+        new = self.resolve(wt, onto)
+        self.tg("edit", str(task), "--meta", f"pushed={new}")  # the remote is at head, the meta says the round pushed
+        self.fake_host(head=head, merge_state="CLEAN")
+        self.fake_silent_push(1)
+        events = self.events("round", str(task), "--cancel")
+        self.assertEqual(self.one(events, "pushed")["detail"], f"{head[:7]} is already on origin/task-1")
+        self.assertEqual(self.named(events, "push-refused") + self.named(events, "push-failed"), [])
+        self.assertEqual(self.meta(task)["pushed"], head)
+
     def test_140_round_cancel_deletes_the_ci_ref(self):
         task, wt, head, onto = self.waiting()
         self.started(task)
@@ -15599,6 +15719,66 @@ class NotifyTest(Base):
             "Decisions waiting: 2 (#9 Pick one by 2026-12-01; #10 Pick two no deadline)"]))
         empty = {"done": [], "in_flight": [], "decisions": []}
         self.assertEqual(runner.digest_text("d", empty), "Daily digest d\nMerged or done in the last day: 0\nIn flight: 0\nDecisions waiting: 0")
+
+
+class PushCwdTest(unittest.TestCase):
+    """push_cwd: the task worktree only when it is a clean worktree of this repository at the commit being pushed."""
+
+    def setUp(self):
+        import run as runner
+        self.runner = runner
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "repo")
+        os.makedirs(self.root)
+        self.sh("init", "-q", "-b", "main")
+        self.sh("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                "commit", "-q", "--allow-empty", "-m", "a")
+        with open(os.path.join(self.root, "f.txt"), "w") as fh:
+            fh.write("x\n")
+        self.sh("add", "f.txt")
+        self.sh("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "b")
+        self.head = self.sh("rev-parse", "HEAD").strip()
+        self.wt = os.path.join(self.root, ".claude", "worktrees", "task-1")
+        self.sh("worktree", "add", "-q", "-b", "worktree-task-1", self.wt)
+        tests = self
+
+        class Run:
+            root = tests.root
+
+            @staticmethod
+            def git(*cmd, cwd=None, check=True):
+                return subprocess.run(["git", "-C", cwd or tests.root, *cmd], capture_output=True, text=True)
+
+        self.run_ = Run
+
+    def sh(self, *cmd):
+        return subprocess.run(["git", "-C", self.root, *cmd], capture_output=True, text=True, check=True).stdout
+
+    def test_a_clean_worktree_at_the_commit_is_used(self):
+        self.assertEqual(self.runner.push_cwd(self.run_, 1, self.head), self.wt)
+
+    def test_a_dirty_worktree_is_not_used(self):
+        with open(os.path.join(self.wt, "f.txt"), "a") as fh:
+            fh.write("more\n")
+        self.assertIsNone(self.runner.push_cwd(self.run_, 1, self.head))
+
+    def test_an_untracked_file_does_not_matter(self):
+        with open(os.path.join(self.wt, "new.txt"), "w") as fh:
+            fh.write("x\n")
+        self.assertEqual(self.runner.push_cwd(self.run_, 1, self.head), self.wt)
+
+    def test_a_worktree_at_another_commit_is_not_used(self):
+        self.assertIsNone(self.runner.push_cwd(self.run_, 1, "0" * 40))
+
+    def test_a_folder_that_is_not_a_worktree_is_not_used(self):
+        shutil.rmtree(self.wt)
+        os.makedirs(self.wt)  # a plain folder inside the repository: git would report the root as its top level
+        self.assertIsNone(self.runner.push_cwd(self.run_, 1, self.head))
+
+    def test_a_missing_worktree_is_not_used(self):
+        self.assertIsNone(self.runner.push_cwd(self.run_, 2, self.head))
 
 
 class TransitionTest(unittest.TestCase):
