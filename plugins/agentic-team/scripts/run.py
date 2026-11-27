@@ -405,8 +405,10 @@ class Run:
     # --- tools
 
     def tg(self, *cmd, input=None):
+        # TASKGRAPH_SETTLE=manual: this tg does not settle after its write; record settles once per drain (settle_milestones) and
+        # reports what it closed. The Manager's own direct tg writes still settle automatically.
         out = sh([sys.executable, self.tg_path, "--db", self.db, "--project", self.project, "--json", *cmd],
-                 cwd=self.root, input=input)
+                 cwd=self.root, input=input, env={"TASKGRAPH_SETTLE": "manual"})
         if out.returncode != 0:
             raise Refused(f"tg {' '.join(cmd[:2])} failed: {out.stderr.strip()}", 1)
         return json.loads(out.stdout or "null")
@@ -5778,6 +5780,26 @@ def record_lock(run, stack, task):
         return False
 
 
+def settle_milestones(run):
+    """`tg settle`: store the derived status of milestones and summaries, one event for each change of this project (a
+    change in another project that the settle made is not this project's line). A failure is one `warn` line; it never
+    stops record."""
+    try:
+        items = run.tg("settle") or []
+    except Refused as exc:
+        run.emit("warn", None, None, None, f"{exc}; milestones are not settled (Taskgraph 1.23.0 or later has tg settle)")
+        return
+    for item in items:
+        if item.get("project") != run.project:
+            continue
+        if item["action"] == "done":
+            run.emit("milestone-done", item["id"], None, None, f'{item["type"]} "{item["title"]}" is done: {item.get("reason") or "its work is done"}')
+        else:
+            run.emit("milestone-reopened", item["id"], None, None, f'{item["type"]} "{item["title"]}" has open work again')
+        if item.get("warning"):
+            run.emit("warn", item["id"], None, None, item["warning"])
+
+
 def cmd_record(run, args):
     snap = Snapshot(run)
     unmanaged = []
@@ -5815,6 +5837,7 @@ def cmd_record(run, args):
     for task in sorted(snap.in_progress + snap.closed, key=lambda t: t["id"]):
         if task["status"] != "done":
             fill_usage(run, task)
+    settle_milestones(run)
     approve_due(run, snap)
     for task in snap.in_progress:
         if note := orphan_note(run, task):

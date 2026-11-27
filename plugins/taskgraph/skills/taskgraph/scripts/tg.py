@@ -807,6 +807,135 @@ def set_status(store, conn, args, status):
     emit(args, data, f"#{args.id} {status}" + (f" (claimed by {holder})" if holder else ""))
 
 
+def feeds_nothing(tasks, scope):
+    """Open tasks of one project with no parent that block nothing, when the project has a milestone or objective for
+    them to feed. A summary counts: a whole epic that feeds nothing."""
+    if not any(t["type"] in ("milestone", "objective") for t in scope):
+        return []
+    return [t for t in scope if t["type"] == "task" and t["derived_status"] != "done" and t["parent"] is None and not t["blocks"]]
+
+
+def feeds_nothing_by_project(tasks, scope):
+    found = []
+    for project in sorted({t["project"] for t in scope}):
+        found += feeds_nothing(tasks, [t for t in scope if t["project"] == project])
+    return found
+
+
+SETTLED = "settled"  # meta key: the time settle stored this task as done; only a marked task is reopened by settle
+LIST_MAX = 10
+
+
+def settle_plan(tasks):
+    """[(task, "done" | "open" | "unmark")]. A milestone closes only when its own dependencies exist and are all done (it
+    must not close because a parent's dependencies are). A task reopens only when settle closed it: a task that a person
+    closed, or that was done before it gained children, stays done."""
+    todo = []
+    for t in tasks.values():
+        marked = SETTLED in t["meta"]
+        if not computed(t):
+            if marked:
+                todo.append((t, "unmark"))
+        elif t["derived_status"] == "done" and t["status"] != "done":
+            if t["type"] != "milestone" or (t["depends_on"] and all(tasks[d]["derived_status"] == "done" for d in t["depends_on"])):
+                todo.append((t, "done"))
+        elif t["derived_status"] != "done" and t["status"] == "done" and marked:
+            todo.append((t, "open"))
+    return todo
+
+
+def settle_reason(tasks, task):
+    kids = task["parts"] if is_summary(task) else []
+    names = lambda ids: ", ".join(f"#{i} {tasks[i]['title']}" for i in ids)
+    parts = ([f"all children are done: {names(kids)}"] if kids else []) + ([f"all dependencies are done: {names(task['waits_for'])}"] if task["waits_for"] else [])
+    return "; ".join(parts)
+
+
+def settle_item(tasks, task, status):
+    item = {"id": task["id"], "project": task["project"], "title": task["title"], "type": task["type"], "action": "done" if status == "done" else "reopened"}
+    if status == "done":
+        item["reason"] = settle_reason(tasks, task)
+    return item
+
+
+def attach_warnings(tasks, items):
+    # one warning for each project that closed a milestone, on its first closed milestone
+    for project in dict.fromkeys(i["project"] for i in items):
+        closed = [i for i in items if i["project"] == project and i["action"] == "done" and i["type"] == "milestone"]
+        orphans = feeds_nothing(tasks, [t for t in tasks.values() if t["project"] == project]) if closed else []
+        if orphans:
+            shown = ", ".join("#" + str(t["id"]) for t in orphans[:LIST_MAX]) + (f" … and {len(orphans) - LIST_MAX} more; see tg agenda" if len(orphans) > LIST_MAX else "")
+            closed[0]["warning"] = f"{', '.join('#' + str(i['id']) for i in closed)} closed while open tasks feed no milestone: {shown}"
+
+
+def settle(store, conn, dry_run=False):
+    """Store the derived status of milestones and summaries: done when derived done, open again when settle closed it
+    and it is no longer. With dry_run, return what would change and write nothing."""
+    tasks = load(conn)
+    if not settle_plan(tasks):
+        return []
+    if dry_run:
+        items = [settle_item(tasks, t, s) for t, s in settle_plan(tasks) if s != "unmark"]
+        attach_warnings(tasks, items)
+        return items
+    ts = now()
+    with store.write(conn):
+        tasks = load(conn)  # read inside the write: a change that another tg made while this one waited is not overwritten
+        todo = settle_plan(tasks)
+        for task, status in todo:
+            meta = {k: v for k, v in task["meta"].items() if k != SETTLED}
+            if status == "done":
+                meta[SETTLED] = ts
+            store.restate(conn, task["id"])
+            if status == "unmark":
+                conn.execute("UPDATE tasks SET meta=? WHERE id=?", (json.dumps(meta), task["id"]))
+            else:
+                conn.execute("UPDATE tasks SET status=?, done_at=?, meta=?, updated_at=? WHERE id=?",
+                             (status, ts if status == "done" else None, json.dumps(meta), ts, task["id"]))
+    items = []
+    for task, status in todo:
+        if status == "unmark":
+            continue
+        item = settle_item(tasks, task, status)
+        items.append(item)
+        last = conn.execute("SELECT kind FROM results WHERE task_id=? ORDER BY id DESC LIMIT 1", (task["id"],)).fetchone()
+        if status == "done" and not (last and last["kind"] == "settle"):  # a task that settles again and again gets one comment
+            try:
+                store.add_result(conn, task["id"], ResultInput("done", "settle", None, None, f"Settled done by taskgraph: {item['reason']}."))
+            except (StoreError, sqlite3.Error) as e:
+                print(f"warning: could not comment on #{task['id']}: {e}", file=sys.stderr)
+    attach_warnings(tasks, items)
+    return items
+
+
+def settle_lines(items, project, dry_run=False):
+    lines = []
+    verb = "would settle" if dry_run else "settled"
+    for i in items:
+        where = f"; project {i['project']}" if i["project"] != project else ""
+        kind = i["type"] if i["type"] in ("milestone", "objective") else "summary"
+        lines.append(f"{verb} #{i['id']} done ({kind}: {i['title']}{where})" if i["action"] == "done" else f"{verb} #{i['id']} reopened" + (f" (project {i['project']})" if where else ""))
+        if i.get("warning"):
+            lines.append(f"warning: {i['warning']}")
+    return lines
+
+
+def cmd_settle(store, conn, args):
+    items = settle(store, conn, args.dry_run)
+    emit(args, items, "\n".join(settle_lines(items, args.project, args.dry_run)) or "nothing to settle")
+
+
+def auto_settle(store, conn, args):
+    # after a write command: the line goes to stderr under --json, so stdout stays one JSON document
+    try:
+        items = settle(store, conn)
+    except (Fail, StoreError, sqlite3.Error) as e:
+        print(f"warning: settle failed: {e}; run tg settle", file=sys.stderr)
+        return
+    for text in settle_lines(items, args.project):
+        print(text, file=sys.stderr if args.json else sys.stdout)
+
+
 def cmd_gate(store, conn, args):
     if args.clear and (args.label is not None or args.ref is not None or args.no_ref):
         raise Fail("--clear cannot be combined with --label, --ref or --no-ref")
@@ -1097,6 +1226,7 @@ def cmd_agenda(store, conn, args):
         "chase_due": sorted((t for t in items if t["chase_due"]), key=lambda t: (t["meta"]["chase"], t["id"])),
         "review_due": sorted((t for t in items if t["type"] == "risk" and t["due"] and t["due"] <= day.isoformat()), key=by_due),
         "missing_date": [t for t in items if t["type"] in ("decision", "external", "risk", "issue") and not t["due"]],
+        "feeds_nothing": [t for t in feeds_nothing_by_project(tasks, scoped(tasks, args)) if not args.type or t["type"] in args.type],
     }
     notes = {
         "late": lambda t: f"late {t['late_days']}d",
@@ -1106,8 +1236,9 @@ def cmd_agenda(store, conn, args):
         "chase_due": lambda t: f"chase {t['meta']['chase']}",
         "review_due": lambda t: "/".join(str(t["meta"][k]) for k in ("likelihood", "impact") if t["meta"].get(k)) or None,
         "missing_date": lambda t: None,
+        "feeds_nothing": lambda t: None,
     }
-    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date"}
+    headings = {"late": "Late", "at_risk": "At risk", "late_start": "Should have started", "conflicts": "Conflicts", "due_soon": f"Due in {args.within} days", "chase_due": "Chase due", "review_due": "Risk review due", "missing_date": "Missing date", "feeds_nothing": "Feeds no milestone"}
     conflict_data, conflict_text = conflict_items(tasks, buckets["conflicts"])
     out = []
     for name, found in buckets.items():
@@ -1999,9 +2130,11 @@ def cmd_projects(store, conn, args):
     emit(args, rows, "\n".join(map(text, rows)))
 
 
-WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date", "gate")
+WRITES = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm", "date", "gate", "settle")
+AUTO_SETTLE = ("add", "dep add", "dep rm", "start", "done", "reopen", "edit", "rm")
 COMMANDS = {
     "add": cmd_add,
+    "settle": cmd_settle,
     "dep add": cmd_dep_add,
     "dep rm": cmd_dep_rm,
     "baseline set": cmd_baseline_set,
@@ -2154,6 +2287,9 @@ def build_parser():
     p.add_argument("--promised")
     p.add_argument("--clear", choices=("start", "due", "promised"), nargs="+", action="extend", default=[])
 
+    p = command("settle")
+    p.add_argument("--dry-run", action="store_true", help="print what would change and write nothing")
+
     p = command("agenda")
     p.add_argument("--within", type=int, default=14)
     p.add_argument("--type", choices=TYPES, nargs="+", action="extend")
@@ -2247,6 +2383,8 @@ def main(argv=None):
         if hasattr(store, "ensure"):
             store.ensure(conn, named_ids(args))
         COMMANDS[key](store, conn, args)
+        if key in AUTO_SETTLE and mode == "write" and os.environ.get("TASKGRAPH_SETTLE") != "manual":
+            auto_settle(store, conn, args)
     except (Fail, StoreError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

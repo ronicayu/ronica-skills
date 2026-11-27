@@ -987,7 +987,7 @@ def taskgraph_warnings(config):
 
 def taskgraph_version_problems():
     """A problem when the installed Taskgraph is older than 1.22.0: its `tg result add` has no --summary, so every
-    worker and verifier report would fail with "unrecognized arguments". Nothing when tg.py cannot be found: run.py
+    worker and verifier report would fail with "unrecognized arguments"; or older than 1.23.0: it has no `tg settle`. Nothing when tg.py cannot be found: run.py
     names that itself."""
     env = os.environ.get("TASKGRAPH_TG")
     if env and os.path.isfile(env):
@@ -1005,7 +1005,15 @@ def taskgraph_version_problems():
         reason = (out.stderr.strip().splitlines() or [f"exit {out.returncode}"])[-1]
         return [f"taskgraph: could not run tg ({tg}): {reason}"]
     if "--summary" in out.stdout:
-        return []
+        try:
+            settle = subprocess.run([sys.executable, tg, "settle", "--help"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return [f"taskgraph: could not run tg ({tg}): {exc}"]
+        if settle.returncode == 0:
+            return []
+        return [f"taskgraph: {tg} is older than 1.23.0: it has no `tg settle`, so a milestone whose work is done is never "
+                f"closed. Upgrade Taskgraph: `claude plugin update taskgraph@ronica-skills` (every machine on a project, and "
+                f"before agentic-team)"]
     return [f"taskgraph: {tg} is older than 1.22.0: `tg result add` has no --summary, so every report would fail. "
             f"Upgrade Taskgraph: `claude plugin update taskgraph@ronica-skills` (every machine on a project, and "
             f"before agentic-team)"]

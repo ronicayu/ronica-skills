@@ -617,6 +617,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("is older than 1.22.0", out)
         self.assertIn("Upgrade Taskgraph", out)
+        mid = os.path.join(self.root, "tg-mid.py")
+        with open(mid, "w") as fh:
+            fh.write("import sys\nif 'settle' in sys.argv:\n    sys.exit(2)\nprint('usage: tg result add [-h] [--summary SUMMARY]')\n")
+        with unittest.mock.patch.dict(os.environ, {"TASKGRAPH_TG": mid}):
+            code, out, err = self.run_cli("check")
+        self.assertEqual(code, 2)
+        self.assertIn("is older than 1.23.0", out)
         new = os.path.join(self.root, "tg-new.py")
         with open(new, "w") as fh:
             fh.write("print('usage: tg result add [-h] [--summary SUMMARY]')\n")

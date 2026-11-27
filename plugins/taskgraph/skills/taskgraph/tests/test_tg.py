@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from fake_gh import Fake
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tg.py"
 
 
@@ -1011,7 +1013,7 @@ def test_agenda_buckets(tg):
     done = add(tg, "finished", "--due", "2026-10-01")
     tg("done", str(done))
     data = tg("agenda")
-    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "review_due", "missing_date"}
+    assert set(data) == {"late", "at_risk", "late_start", "conflicts", "due_soon", "chase_due", "review_due", "missing_date", "feeds_nothing"}
     assert ids(data["late"]) == [late_big, late_small]
     assert ids(data["due_soon"]) == [soon]
     assert ids(data["chase_due"]) == [ext]
@@ -1116,7 +1118,7 @@ def test_export_shape_and_scope(tg, raw, tmp_path):
     keys = {"id", "project", "title", "status", "notes", "meta", "parent", "depends_on", "created_at", "updated_at", "done_at"}
     assert all(set(t) == keys for t in data["tasks"])
     by_id = {t["id"]: t for t in data["tasks"]}
-    assert by_id[p]["notes"] == "why" and by_id[p]["meta"] == {"owner": "x"}
+    assert by_id[p]["notes"] == "why" and {k: v for k, v in by_id[p]["meta"].items() if k != "settled"} == {"owner": "x"}  # P settled done with C
     assert by_id[c]["parent"] == p and by_id[c]["status"] == "done" and by_id[c]["done_at"]
     assert by_id[d]["depends_on"] == [c]
     assert len(json.loads(raw("--project", "demo", "export", "--all-projects").stdout)["tasks"]) == 4
@@ -2277,3 +2279,183 @@ def test_done_twice_keeps_updated_at(tg):
     first = tg("done", str(a))
     again = tg("done", str(a))
     assert again["updated_at"] == first["updated_at"] and again["done_at"] == first["done_at"]
+
+
+def github_issue(number):
+    # the fake GitHub issue behind task `number`; None on the SQLite backend
+    path = os.environ.get("FAKE_GH_STATE")
+    return Fake(path).state()["issues"][str(number)] if path else None
+
+
+def milestone(tg, title, *deps):
+    return tg("add", title, "--type", "milestone", *(["--depends", *map(str, deps)] if deps else []))["id"]
+
+
+def test_done_on_last_dependency_settles_milestone(tg, raw):
+    a, b = add(tg, "A"), add(tg, "B")
+    m = milestone(tg, "M", a, b)
+    p = raw("--project", "demo", "done", str(a))
+    assert p.stdout.strip() == f"#{a} done" and p.stderr == ""
+    assert tg("show", str(m))["status"] != "done"
+    p = raw("--project", "demo", "done", str(b))
+    assert p.stdout.splitlines() == [f"#{b} done", f"settled #{m} done (milestone: M)"]
+    shown = tg("show", str(m))
+    assert shown["status"] == "done" and shown["done_at"]
+    results = tg("result", "ls", str(m))
+    assert [r["kind"] for r in results] == ["settle"]
+    assert f"#{a} A" in results[0]["body"] and f"#{b} B" in results[0]["body"]
+    issue = github_issue(m)
+    if issue:
+        assert issue["state"] == "closed"
+
+
+def test_settle_json_output_stays_one_document(raw):
+    raw("--project", "demo", "add", "A")
+    raw("--project", "demo", "add", "M", "--type", "milestone", "--depends", "1")
+    p = raw("--project", "demo", "--json", "done", "1")
+    assert json.loads(p.stdout)["id"] == 1
+    assert p.stderr.strip() == "settled #2 done (milestone: M)"
+
+
+def test_milestone_chain_settles_fully(tg):
+    a = add(tg, "A")
+    m1 = milestone(tg, "M1", a)
+    m2 = milestone(tg, "M2", m1)
+    tg("done", str(a))
+    for i in (m1, m2):
+        assert tg("show", str(i))["status"] == "done"
+    assert tg("settle") == []
+
+
+def test_new_open_dependency_reopens_settled_milestone(tg, raw):
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    tg("done", str(a))
+    assert tg("show", str(m))["status"] == "done"
+    b = add(tg, "B")
+    p = raw("--project", "demo", "dep", "add", str(m), str(b))
+    assert f"settled #{m} reopened" in p.stdout
+    shown = tg("show", str(m))
+    assert shown["status"] == "open" and shown["done_at"] is None and shown["derived_status"] == "blocked"
+    issue = github_issue(m)
+    if issue:
+        assert issue["state"] == "open"
+
+
+def test_summary_settles_from_children(tg):
+    p = add(tg, "P")
+    a = add(tg, "A", "--parent", str(p))
+    b = add(tg, "B", "--parent", str(p))
+    tg("done", str(a))
+    assert tg("show", str(p))["status"] != "done"
+    tg("done", str(b))
+    assert tg("show", str(p))["status"] == "done"
+    assert "all children are done" in tg("result", "ls", str(p))[0]["body"]
+    tg("reopen", str(b))
+    assert tg("show", str(p))["status"] == "open"
+
+
+def test_settle_command_idempotent_and_refusal_kept(tg, raw, fail):
+    assert raw("--project", "demo", "settle").stdout.strip() == "nothing to settle"
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    assert f"status of #{m} is derived from its dependencies" in fail("done", str(m)).stderr
+    tg("done", str(a))
+    assert tg("settle") == []
+    assert len(tg("result", "ls", str(m))) == 1
+
+
+def test_agenda_feeds_no_milestone(tg, raw):
+    orphan = add(tg, "orphan")
+    assert ids(tg("agenda")["feeds_nothing"]) == []  # no milestone or objective in the project
+    feeder = add(tg, "feeder")
+    milestone(tg, "M", feeder)
+    child_parent = add(tg, "P")
+    add(tg, "child", "--parent", str(child_parent))
+    data = tg("agenda")
+    assert ids(data["feeds_nothing"]) == [orphan, child_parent]  # a whole epic that feeds nothing counts; its child, which has a parent, does not
+    assert "Feeds no milestone\n  #" + str(orphan) in raw("--project", "demo", "agenda").stdout
+
+
+def test_settle_warns_when_open_tasks_feed_no_milestone(tg, raw):
+    a = add(tg, "A")
+    orphan = add(tg, "orphan")
+    m = milestone(tg, "M", a)
+    p = raw("--project", "demo", "done", str(a))
+    assert p.stdout.splitlines()[-1] == f"warning: #{m} closed while open tasks feed no milestone: #{orphan}"
+
+
+def test_task_that_gains_a_child_and_loses_it_stays_done(tg):
+    a = add(tg, "A")
+    tg("done", str(a))
+    child = add(tg, "child", "--parent", str(a))
+    assert tg("show", str(a))["status"] == "done"  # derived: open child; settle does not reopen a task it did not close
+    tg("rm", str(child))
+    shown = tg("show", str(a))
+    assert shown["status"] == "done" and shown["derived_status"] == "done"
+    assert tg("result", "ls", str(a)) == []
+
+
+def test_start_on_a_done_dependency_reopens_a_settled_milestone(tg):
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    tg("done", str(a))
+    assert tg("show", str(m))["status"] == "done"
+    tg("start", str(a))
+    assert tg("show", str(m))["status"] == "open"
+
+
+def test_milestone_under_a_parent_with_done_dependencies_stays_open(tg):
+    dep = add(tg, "dep")
+    parent = add(tg, "P", "--depends", str(dep))
+    tg("done", str(dep))
+    m = tg("add", "M", "--type", "milestone", "--parent", str(parent))["id"]
+    assert tg("show", str(m))["status"] != "done"
+    assert tg("settle") == []
+
+
+def test_done_reopen_done_leaves_one_settle_comment(tg):
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    tg("done", str(a))
+    tg("reopen", str(a))
+    assert tg("show", str(m))["status"] == "open"
+    tg("done", str(a))
+    assert tg("show", str(m))["status"] == "done"
+    assert [r["kind"] for r in tg("result", "ls", str(m))] == ["settle"]
+
+
+@pytest.mark.sqlite_only("writes the stored status of a milestone directly in the local database")
+def test_milestone_done_without_marker_is_not_reopened(tg, db):
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (m,))
+    assert tg("settle") == []
+    assert tg("show", str(m))["status"] == "done"
+    tg("add", "B", "--blocks", str(m))
+    assert tg("show", str(m))["status"] == "done"
+
+
+def test_settle_dry_run_writes_nothing(tg, raw):
+    a = add(tg, "A")
+    m = milestone(tg, "M", a)
+    manual = dict(os.environ, TASKGRAPH_SETTLE="manual")  # the write itself must not settle, so settle is due
+    assert raw("--project", "demo", "done", str(a), env=manual).returncode == 0
+    assert tg("show", str(m))["status"] == "open"
+    out = raw("--project", "demo", "settle", "--dry-run")
+    assert out.stdout.strip() == f"would settle #{m} done (milestone: M)"
+    assert tg("show", str(m))["status"] == "open" and tg("result", "ls", str(m)) == []
+    assert raw("--project", "demo", "settle").stdout.strip() == f"settled #{m} done (milestone: M)"
+
+
+@pytest.mark.sqlite_only("a GitHub store holds one project")
+def test_agenda_all_projects_applies_the_rule_per_project(raw):
+    def run(project, *args):
+        p = raw("--project", project, "--json", *args)
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)
+    run("one", "add", "M", "--type", "milestone")
+    orphan = run("one", "add", "orphan")["id"]
+    run("two", "add", "plain task")
+    assert [t["id"] for t in run("one", "agenda", "--all-projects")["feeds_nothing"]] == [orphan]

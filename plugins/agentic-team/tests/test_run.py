@@ -2104,6 +2104,38 @@ class RunTest(Base):
         filed = [r for r in self.results(task) if r["kind"] == "verify"]
         self.assertEqual([(r["status"], r["author"]) for r in filed], [("BLOCKED", "manager")])
 
+    def test_28_record_settles_a_milestone_and_warns_of_a_task_that_feeds_nothing(self):
+        manual = {**self.env, "TASKGRAPH_SETTLE": "manual"}
+        dep = self.tg("add", "Dep")["id"]
+        orphan = self.tg("add", "Stray task")["id"]
+        goal = self.tg("add", "Goal", "--type", "milestone", "--depends", str(dep))["id"]
+        self.tg("done", str(dep), env=manual)
+        self.assertNotEqual(self.tg("show", str(goal))["status"], "done")
+        events = self.events("record")
+        done = self.one(events, "milestone-done")
+        self.assertEqual(done["task"], goal)
+        self.assertIn('milestone "Goal"', done["detail"])
+        warn = [e for e in self.named(events, "warn") if e["task"] == goal]
+        self.assertEqual([e["detail"] for e in warn], [f"#{goal} closed while open tasks feed no milestone: #{orphan}"])
+        self.assertEqual(self.tg("show", str(goal))["status"], "done")
+        self.assertEqual(self.named(self.events("record"), "milestone-done"), [])
+        self.tg("add", "Late dep", "--blocks", str(goal), env=manual)
+        self.assertEqual([e["task"] for e in self.named(self.events("record"), "milestone-reopened")], [goal])
+
+    def test_28_record_reports_only_its_own_projects_settled_milestones(self):
+        manual = {**self.env, "TASKGRAPH_SETTLE": "manual"}
+
+        def other(*args):
+            out = subprocess.run([sys.executable, TG, "--project", "other", "--json", *args], capture_output=True, text=True, env=manual)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout)
+
+        dep = other("add", "Other dep")["id"]
+        other("add", "Other goal", "--type", "milestone", "--depends", str(dep))
+        other("done", str(dep))
+        self.assertEqual(self.named(self.events("record"), "milestone-done"), [])
+        self.assertEqual(self.tg("settle"), [])  # record's tg settle already settled the other project
+
     def test_30_verified_events(self):
         task = self.running_task()
         self.add_result(task, "PASS", "Task: 1\nStatus: PASS\n")
