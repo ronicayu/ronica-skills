@@ -339,17 +339,27 @@ def task_worktree(run, tid):
     return os.path.join(run.root, ".claude", "worktrees", f"task-{tid}")
 
 
-def push_cwd(run, tid):
-    """Where a push of a task branch runs: the task's worktree when it is a worktree of this repository, so that
-    worktree-local hook state (a stamp in its git dir) applies; else None, the root."""
+def push_cwd(run, tid, commit):
+    """Where a push of a task branch runs: the task's worktree, so that worktree-local hook state (a stamp in its git
+    dir) applies, when it is a worktree of this repository, is at `commit` (the commit being pushed) and has no change
+    to tracked files. Else None, the root."""
     wt = task_worktree(run, tid)
     if not os.path.isdir(wt):
         return None
-    args = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    here, there = run.git(*args, check=False), run.git(*args, cwd=wt, check=False)
-    same = (here.returncode == 0 and there.returncode == 0
-            and os.path.realpath(here.stdout.strip()) == os.path.realpath(there.stdout.strip()))
-    return wt if same else None
+    common = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    top, there, here = (run.git("rev-parse", "--show-toplevel", cwd=wt, check=False), run.git(*common, cwd=wt, check=False),
+                        run.git(*common, check=False))
+    if 0 != top.returncode + there.returncode + here.returncode:
+        return None
+    if os.path.realpath(top.stdout.strip()) != os.path.realpath(wt):
+        return None
+    if os.path.realpath(there.stdout.strip()) != os.path.realpath(here.stdout.strip()):
+        return None
+    if run.git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip() != commit:
+        return None
+    if run.git("status", "--porcelain", "--untracked-files=no", cwd=wt, check=False).stdout.strip():
+        return None
+    return wt
 
 
 def task_branch(tid):
@@ -4095,7 +4105,7 @@ def push_ci_ref(run, task, attempt, head, dry_run=False):
         raise Refused(f"git ls-remote {remote} failed: {first_line(seen.stderr)}", 1)
     old = (seen.stdout.split() or [""])[0]
     if old != head:
-        ok, why = run.host().push(head, name, old, push_cwd(run, tid))
+        ok, why = run.host().push(head, name, old, push_cwd(run, tid, head))
         if not ok:
             raise Refused(f"push of {head[:7]} to {remote}/{name} failed: {why}; fix the cause, then run.py verify "
                           f"{tid} --again --ci-ref", 1)
@@ -7104,7 +7114,7 @@ def publish(run, task, branch, head, catch_up=False, stop=False):
             raise Refused(f"{run.target(task)} already holds the change of {head[:7]} ({how}): merged by hand, landed "
                           f"another way, or the diff is empty; {then}")
     if not pushed:
-        ok, why = host.push(f"refs/heads/{branch}", pr_branch, "", push_cwd(run, tid))
+        ok, why = host.push(f"refs/heads/{branch}", pr_branch, "", push_cwd(run, tid, head))
         if not ok:
             seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False).stdout.split()
             if not seen:
@@ -7118,7 +7128,7 @@ def publish(run, task, branch, head, catch_up=False, stop=False):
     elif pushed != head:
         if not rebase_checked(run, task, branch, head, pushed):
             return False
-        ok, why = host.push(f"refs/heads/{branch}", pr_branch, pushed, push_cwd(run, tid))
+        ok, why = host.push(f"refs/heads/{branch}", pr_branch, pushed, push_cwd(run, tid, head))
         if not ok:
             seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False)
             if seen.returncode != 0:
@@ -7126,9 +7136,10 @@ def publish(run, task, branch, head, catch_up=False, stop=False):
             if not seen.stdout.split():
                 raise Refused(f"remote branch {remote}/{pr_branch} is gone (the host may delete it after a merge or a close); "
                               f"unset the pr, pr_branch and pushed meta of #{tid} to publish again")
-            if not push_over_foreign(run, task, branch, head, pushed, why):
+            result = push_over_foreign(run, task, branch, head, pushed, why)
+            if not result:
                 return False
-            pushed_now = meta["pushed"] == head
+            pushed_now = result == "pushed"  # "already": the host may show the head, but this close still reads the request
         else:
             run.set_meta(task, pushed=head)
             run.emit("pushed", tid, attempt, None, f"{head[:7]} to {remote}/{pr_branch}", "run.py record")
@@ -7442,19 +7453,19 @@ def accept_foreign(run, task, branch, new):
 
 def already_pushed(run, task, head):
     """The remote branch already holds `head` (an earlier push got there, or a push was reported as failed after it
-    landed): record it as pushed. Returns "pushed"."""
+    landed): record it as pushed. Returns "already"."""
     remote, pr_branch = run.config["merge"]["remote"], task["meta"].get("pr_branch") or f"task-{task['id']}"
     run.set_meta(task, pushed=head)
     run.emit("pushed", task["id"], wanted_attempt(task) or 1, None, f"{head[:7]} is already on {remote}/{pr_branch}",
              "run.py record")
-    return "pushed"
+    return "already"
 
 
 def push_over_foreign(run, task, branch, head, pushed, why):
     """The push of `head` over `pushed` failed and the remote branch exists. When it moved to a rebase of the same
     change by someone else: if `head` carries that change too, take their head (accept_foreign); else push `head`
-    again with the lease at theirs. Returns "taken", "pushed", or "" when run.py stopped (push_refused or a failed
-    after_rebase said why)."""
+    again with the lease at theirs. Returns "already" (the remote branch holds `head`), "taken", "pushed", or ""
+    when run.py stopped (push_refused or a failed after_rebase said why)."""
     meta, remote = task["meta"], run.config["merge"]["remote"]
     pr_branch = meta.get("pr_branch") or f"task-{task['id']}"
     seen = run.git("ls-remote", remote, f"refs/heads/{pr_branch}", check=False)
@@ -7464,7 +7475,7 @@ def push_over_foreign(run, task, branch, head, pushed, why):
     if at and at != pushed and foreign_rebase_of(run, task, at):
         if same_change(run, task, pushed, head)[0]:
             return accept_foreign(run, task, branch, at)
-        ok, why = run.host().push(f"refs/heads/{branch}", pr_branch, at, push_cwd(run, task["id"]))
+        ok, why = run.host().push(f"refs/heads/{branch}", pr_branch, at, push_cwd(run, task["id"], head))
         if ok:
             run.set_meta(task, pushed=head)
             run.emit("pushed", task["id"], wanted_attempt(task) or 1, None,
@@ -7513,7 +7524,7 @@ def rebase_branch(run, task, branch, head, p):
         return
     run.set_meta(task, verdict_ref=new)
     run.emit("rebased", tid, attempt, None, f"onto {remote}/{target} at {new[:7]}; same change as {head[:7]}")
-    ok, why = host.push(f"refs/heads/{branch}", meta["pr_branch"], meta["pushed"], push_cwd(run, tid))
+    ok, why = host.push(f"refs/heads/{branch}", meta["pr_branch"], meta["pushed"], push_cwd(run, tid, new))
     if not ok:
         push_over_foreign(run, task, branch, new, meta["pushed"], why)
         return
@@ -8044,7 +8055,7 @@ def cancel_round(run, args):
     fields = {"verdict": verdict, "verdict_ref": start}
     pushed = str(meta.get("pushed") or "")
     if run.pr_mode and pushed and pushed != start:  # a CI verify of the round pushed its head: the request gets start back
-        ok, why = run.host().push(f"refs/heads/{branch}", meta.get("pr_branch") or f"task-{tid}", pushed, push_cwd(run, tid))
+        ok, why = run.host().push(f"refs/heads/{branch}", meta.get("pr_branch") or f"task-{tid}", pushed, push_cwd(run, tid, start))
         if ok:
             run.emit("pushed", tid, attempt, None, f"{start[:7]} back to {run.config['merge']['remote']}/"
                      f"{meta.get('pr_branch') or f'task-{tid}'} (the round had pushed {pushed[:7]})")
