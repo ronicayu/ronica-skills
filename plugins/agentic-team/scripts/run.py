@@ -187,6 +187,10 @@ PROMPT_HINT = ("The session asked permission for a step it could not do alone; t
                "(claude logs {sid} if the row has none). Remove the need for it: add a standing order, narrow the "
                "brief or SCOPE, keep the step for the Manager's integration list, or set verify_mode=ci:<workflow> "
                "when the check needs the runner. Then {cmd}.")
+NO_PROMPT_HINT = ("The session showed state blocked with no permission prompt recorded, so no tool step was refused; "
+                  "its last output in the BLOCKED row shows what it was doing (for example a CLI update check or a login "
+                  "that stalled). Fix that on this machine if it repeats; the next attempt continues from its commits. "
+                  "Then {cmd}.")
 PINNED_HINT = (" The session ran on the pinned model id {model}; a pinned id can drop auto mode to manual prompts. "
                "Use an alias such as sonnet.")
 MODEL_LINE = re.compile(r"(?m)^Model:\s*(.*?)\s*$")
@@ -5037,9 +5041,15 @@ def last_output(run, sid, profile=None):
     return text.splitlines() or ["(no output)"]
 
 
+def stuck_hint(session, cmd):
+    """The next step for a stuck session: a permission prompt (waitingFor set) or a blocked state with none."""
+    return (PROMPT_HINT if session.waiting else NO_PROMPT_HINT).format(sid=session.sid, cmd=cmd)
+
+
 def file_stuck(run, tid, attempt, kind, session, label, model=None):
-    reason = session.waiting or session.state
-    waiting_for = json.dumps(session.waiting) if session.waiting else session.state
+    reason = session.waiting or f"{session.state}, no prompt"
+    waiting_for = json.dumps(session.waiting) if session.waiting else \
+        f"no prompt recorded (state {session.state}, status {session.status or 'none'})"
     tail = last_output(run, session.sid, session.profile)  # before the stop: the evidence is lost afterwards
     stop_session(run, session.sid, profile=session.profile)
     run.add_result(tid, kind, attempt, "manager", "BLOCKED",
@@ -5047,6 +5057,8 @@ def file_stuck(run, tid, attempt, kind, session, label, model=None):
                    f"{label} {session.sid} stopped: waiting on {reason}\n"
                    f"Waiting for: {waiting_for}\nModel: {model or 'unknown'}\nLast output:\n"
                    + "\n".join(f"    {line}" for line in tail))
+    if not session.waiting:
+        return reason
     return "permission prompt" if "prompt" in str(reason).lower() else f"waiting on {reason}"
 
 
@@ -5468,7 +5480,7 @@ def record_in_progress(run, snap, task, unmanaged):
                 model = session_model(task, s.sid)
                 reason = file_stuck(run, tid, attempt, "verify", s, "Verifier", model)
                 run.emit("stuck", tid, attempt, s.sid, f"stopped verifier {s.sid}{on_profile(s)}; filed verify BLOCKED ({reason})",
-                         PROMPT_HINT.format(sid=s.sid, cmd=f"run.py verify {tid} --again") + pinned_hint(model))
+                         stuck_hint(s, f"run.py verify {tid} --again") + pinned_hint(model))
             else:
                 held = True
                 run.emit("verifying", tid, attempt, s.sid, f"session {s.sid} ({s.name}, {s.status}{on_profile(s)})")
@@ -5529,7 +5541,7 @@ def record_in_progress(run, snap, task, unmanaged):
             carry_thread(run, task, attempt)
             transition(run, task, "stopped")
             run.emit("stuck", tid, attempt, s.sid, f"stopped {s.sid}{on_profile(s)}; filed BLOCKED ({reason})",
-                     PROMPT_HINT.format(sid=s.sid, cmd=retry_next(tid, attempt, "stuck", task=task)) + pinned_hint(model))
+                     stuck_hint(s, retry_next(tid, attempt, "stuck", task=task)) + pinned_hint(model))
         elif busy:
             run.emit("running", tid, attempt, busy[0].sid, f"session {busy[0].sid} ({busy[0].name}{on_profile(busy[0])})")
         elif unknown:

@@ -2,6 +2,12 @@
 
 Each entry says what a version changes and, where it needs one, how to upgrade from the version before it. The newest version is first. For the current behaviour see the [README](README.md) and [docs/](docs/).
 
+## 0.33.3
+
+Upgrading from 0.33.2. From the honest-router trial.
+
+- **A session stuck without a permission prompt is no longer reported as one.** When `claude agents` shows a session as `blocked` with no `waitingFor`, no tool step was refused (in the trial the CLI was looping on "Checking for updates…"). `record` still stops it and files BLOCKED, but the row now says `Waiting for: no prompt recorded (state blocked, status <status>)`, the `stuck` line says `(blocked, no prompt)`, and the next step says to look at the last output and fix the cause on the machine, instead of telling you to remove a permission need. A real prompt keeps the old wording.
+
 ## 0.33.2
 
 Upgrading from 0.33.1. From the honest-router pr-manager trial.
